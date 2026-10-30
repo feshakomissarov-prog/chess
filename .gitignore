@@ -1,0 +1,23 @@
+# Локальные настройки и секреты
+.env
+.env.*
+!.env.example
+
+# Python
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+
+# Node.js
+node_modules/
+
+# Личные партии, локальные базы и результаты анализа
+local-data/
+*.sqlite
+*.sqlite3
+*.db
+
+# Файлы операционной системы
+.DS_Store
+Thumbs.db
