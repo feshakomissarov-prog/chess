@@ -31,14 +31,14 @@ Windows-приложение Chess Coach (Python, PySide6) — персонал�
 
 **Актуальное единое ТЗ:** [M3_M4_DATA_ARCHIVE_ANALYTICS_PUZZLES.md](specs/M3_M4_DATA_ARCHIVE_ANALYTICS_PUZZLES.md) · [эпик #6](https://github.com/feshakomissarov-prog/chess/issues/6). **Большое ТЗ с несколькими самостоятельными PR, голос пока отложен.**
 
-**Состояние P0:** [draft PR #8](https://github.com/feshakomissarov-prog/chess/pull/8), head \`f4c22807d96f7c753a6e110c37f703d251032174\`, base \`main\`, **не слит**. Код PR #8: исправлены ручные стрелки, безопасный \`--offline\`, SQLite close, ввод только после валидного gameFull, изоляция QSettings, окно «Активные партии» и Windows CI. **Windows Python 3.12.10 CI подтверждён 108 passed**. Codex сообщил о видимом окне с \`python.exe -m chess_coach --offline\`, но ручной тест владельца и запуск ярлыка \`pythonw.exe\` не подтверждены; не утверждать реальный Lichess E2E. Новых блокирующих дефектов статическим ревью текущего PR не выявлено; решение о merge — за владельцем.
+**Состояние P0:** [draft PR #8](https://github.com/feshakomissarov-prog/chess/pull/8), head `f4c22807d96f7c753a6e110c37f703d251032174`, base `main`, **не слит**. Код PR #8: исправлены ручные стрелки, безопасный `--offline`, SQLite close, ввод только после валидного gameFull, изоляция QSettings, окно «Активные партии» и Windows CI. **Windows Python 3.12.10 CI подтверждён 108 passed**. Codex сообщил о видимом окне с `python.exe -m chess_coach --offline`, но ручной тест владельца и запуск ярлыка `pythonw.exe` не подтверждены; не утверждать реальный Lichess E2E. Новых блокирующих дефектов статическим ревью текущего PR не выявлено; решение о merge — за владельцем.
 
 **Новые приоритеты:**
-1. **Stage 1, M3:** эволюция существующей SQLite без потери \`games\`: accounts, отдельные строки \`game_moves\`, \`game_positions\`, редактируемые \`game_notes\`, версионированные revisions для takeback, миграция старых PGN, библиотека.
+1. **Stage 1, M3:** эволюция существующей SQLite без потери `games`: accounts, отдельные строки `game_moves`, `game_positions`, редактируемые `game_notes`, версионированные revisions для takeback, миграция старых PGN, библиотека.
 2. **Stage 2, M3:** полный первый NDJSON импорт завершённых Lichess-партий с checkpoint/resume, затем incremental only; активные партии уже есть в P0, не реализовывать повторно.
 3. **Stage 3, M4:** оценки Lichess при наличии и локальный Stockfish после игры, кэшированные analysis runs, график по каждому ply, ошибки и фазы партии.
 4. **Stage 4, M4:** отдельный экран сводной статистики (W/D/L, swing оценки, неточности/ошибки/зевки по дебюту/миттельшпилю/эндшпилю, контроль, период, coverage).
-5. **Stage 5, M4:** **личные задачи Lichess**, \`GET /api/puzzle/activity\` (OAuth \`puzzle:read\`, NDJSON \`before/since/max\`) и \`GET /api/puzzle/dashboard/{days}\`: отдельные \`puzzles\`/\`puzzle_attempts\`/\`puzzle_sync_state\`, история и статистика.
+5. **Stage 5, M4:** **личные задачи Lichess**, `GET /api/puzzle/activity` (OAuth `puzzle:read`, NDJSON `before/since/max`) и `GET /api/puzzle/dashboard/{days}`: отдельные `puzzles`/`puzzle_attempts`/`puzzle_sync_state`, история и статистика.
 6. **Позднее M5:** микрофон/последовательность нарисованных вариантов, связь с позицией и временем, воспроизведение; [историческое голосовое ТЗ](specs/M3_M4_ARCHIVE_ANALYSIS_VOICE_THOUGHTS.md) остаётся основой только для этого этапа. Данные об отдельном текстовом комментарии и стабильном position uid подготовить в M3.
 7. **M6:** ИИ-тренер после локальной аналитики и размышлений, отдельное согласование.
 
