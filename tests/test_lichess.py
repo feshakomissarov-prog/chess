@@ -17,6 +17,8 @@ from chess_coach.lichess.repository import GameRepository
 from chess_coach.lichess.session import LichessGameSession
 from chess_coach.lichess.service import LichessService
 
+LICHESS_MIN_MS = 1_356_998_400_070
+
 
 class FakeTransport:
     def __init__(self, responses=None, lines=None, stream_error=None):
@@ -285,6 +287,20 @@ def test_lichess_service_reports_429_without_starting_retry_worker(monkeypatch):
     assert len(errors) == 1
 
 
+def test_restore_is_single_flight_until_the_current_attempt_finishes(monkeypatch):
+    class TokenStore:
+        def get(self): return "token"
+    service = LichessService(client=object(), token_store=TokenStore())
+    workers = []
+    monkeypatch.setattr(service, "_thread", lambda target, name: workers.append((target, name)))
+    service.restore()
+    service.restore()
+    assert len(workers) == 1
+    workers[0][0]()
+    service.restore()
+    assert len(workers) == 2
+
+
 def test_game_stream_start_is_deduplicated_per_game(monkeypatch):
     class TokenStore:
         def get(self):
@@ -508,10 +524,10 @@ def test_m3_migration_preserves_legacy_game_creates_revision_and_backup(tmp_path
     assert row["line_revision"] == 1
     assert row["import_error"] is None
     with repo._connection() as migrated:
-        assert migrated.execute("PRAGMA user_version").fetchone()[0] == 4
+        assert migrated.execute("PRAGMA user_version").fetchone()[0] == 5
         assert migrated.execute("SELECT COUNT(*) FROM game_positions").fetchone()[0] == 3
         assert migrated.execute("SELECT san FROM game_moves ORDER BY ply").fetchall()[0][0] == "e4"
-    backup = sqlite3.connect(str(path) + ".pre-m3-v4.bak")
+    backup = sqlite3.connect(str(path) + ".pre-m3-v5.bak")
     try:
         assert backup.execute("PRAGMA user_version").fetchone()[0] == 0
         assert backup.execute("SELECT pgn FROM games WHERE game_id='legacy'").fetchone()[0] == legacy_pgn
@@ -641,6 +657,7 @@ def test_archive_endpoint_streams_json_page_with_cursor_parameters():
     assert "/api/games/user/My%20User?" in url
     assert "since=123" in url and "max=50" in url and "pgnInJson=true" in url
     assert "evals=true" in url and "accuracy=true" in url
+    assert "division=true" in url and "finished=true" in url and "ongoing=false" in url
     assert headers["Authorization"] == "Bearer token"
 
 
@@ -652,7 +669,7 @@ def test_archive_sync_resumes_backfill_deduplicates_and_advances_checkpoint(tmp_
         pgns[f"g{index}"] = {
             "id": f"g{index}", "pgn": f'[Event "Archive"]\n[Site "https://lichess.org/g{index}"]\n'
             f'[Date "2025.01.0{index}"]\n[White "Me"]\n[Black "Friend"]\n'
-            f'[Result "*"]\n\n{moves}\n', "lastMoveAt": index * 1000,
+            f'[Result "*"]\n\n{moves}\n', "lastMoveAt": LICHESS_MIN_MS + index * 1000,
             "rated": False, "variant": "standard",
         }
 
@@ -660,10 +677,10 @@ def test_archive_sync_resumes_backfill_deduplicates_and_advances_checkpoint(tmp_
         def __init__(self):
             self.requests = []
         def stream_user_games(self, token, username, stop_event, *, since=None,
-                              before=None, max_games=1000):
-            self.requests.append((since, before, max_games))
-            if before is not None:
-                candidates = [r for r in pgns.values() if r["lastMoveAt"] < before]
+                              until_ms=None, max_games=1000):
+            self.requests.append((since, until_ms, max_games))
+            if until_ms is not None:
+                candidates = [r for r in pgns.values() if r["lastMoveAt"] <= until_ms]
                 yield from sorted(candidates, key=lambda r: r["lastMoveAt"], reverse=True)[:max_games]
             else:
                 return
@@ -678,7 +695,7 @@ def test_archive_sync_resumes_backfill_deduplicates_and_advances_checkpoint(tmp_
     state = repo.archive_sync_state(account)
     assert state["backfill_complete"] == 1
     assert state["imported_count"] == 3
-    assert state["backfill_before"] == 999
+    assert state["backfill_before"] == LICHESS_MIN_MS + 1001
     # Incremental query is bounded by the persisted time cursor, not a second full scan.
     assert client.requests[-1][0] is not None
     assert sync.run("Me", "fake-token", stop, full=False, page_size=2) == 0
@@ -738,6 +755,20 @@ def test_completed_analyzer_rejects_live_game_before_engine_start(tmp_path):
             "live", tmp_path / "stockfish.exe")
 
 
+def test_completed_game_is_blocked_while_another_human_game_is_live(tmp_path):
+    from chess_coach.lichess.analysis import CompletedGameAnalyzer
+    repo = GameRepository(tmp_path / "fair-play-global.sqlite3")
+    repo.save_snapshot("finished-a", "startpos", "e2e4", "white", "Friend",
+                       False, "3+2", "finished", "white")
+    repo.save_snapshot("live-b", "startpos", "d2d4", "white", "Human",
+                       False, "3+2", "playing")
+    engine = tmp_path / "stockfish.exe"
+    engine.write_text("fake", encoding="utf-8")
+    analyzer = CompletedGameAnalyzer(repo, lambda _path: pytest.fail("engine must not launch"))
+    with pytest.raises(ValueError, match="онлайн-партии"):
+        analyzer.analyze("finished-a", engine, active_human_game_ids={"live-b"})
+
+
 def test_archive_import_keeps_lichess_pgn_evaluations_as_separate_source(tmp_path):
     repo = GameRepository(tmp_path / "lichess-eval.sqlite3")
     repo.import_archive_record("Me", {
@@ -770,11 +801,13 @@ def test_statistics_use_move_denominators_partial_coverage_and_keep_accuracy_sep
 
     repo = GameRepository(tmp_path / "stats.sqlite3")
     games = [
-        ("w", "white", "white"), ("d", None, "black"), ("l", "white", "black")
+        ("w", "white", "white", "finished"),
+        ("d", None, "black", "draw"),
+        ("l", "white", "black", "finished"),
     ]
-    for game_id, winner, color in games:
+    for game_id, winner, color, status in games:
         repo.save_snapshot(game_id, "startpos", "e2e4 e7e5", color, "Opponent",
-                           False, "180+2", "finished", winner)
+                           False, "180+2", status, winner)
     with repo._connection() as db:
         db.execute("UPDATE games SET lichess_accuracy_white=90,lichess_accuracy_black=80 "
                    "WHERE game_id='w'")
@@ -812,6 +845,52 @@ def test_statistics_use_move_denominators_partial_coverage_and_keep_accuracy_sep
                                          "rating": 1500, "game_id": "w"}]
     filtered = StatisticsService(repo).summary(rating_min=1400, rating_max=1600, opening="C20")
     assert filtered["games"] == 1
+
+
+def test_statistics_use_account_color_and_do_not_count_unknown_finish_as_draw(tmp_path):
+    from chess_coach.lichess.statistics import StatisticsService
+    repo = GameRepository(tmp_path / "stats-accounts.sqlite3")
+    pgn = '[Event "Archive"]\n[White "Alice"]\n[Black "Bob"]\n[Result "0-1"]\n\n1. e4 0-1\n'
+    record = {"id": "shared", "pgn": pgn, "players": {
+        "white": {"rating": 1500}, "black": {"rating": 1800}}, "rated": True}
+    repo.import_archive_record("Alice", record, checkpoint_ms=None, backfill=False)
+    repo.import_archive_record("Bob", record, checkpoint_ms=None, backfill=False)
+    repo.save_snapshot("unknown", "startpos", "e2e4", "white", "Unknown",
+                       False, "-", "unknownFinish", None)
+    bob = repo.ensure_archive_account("Bob")
+    with repo._connection() as db:
+        rows = db.execute("SELECT account_id,color,player_rating FROM account_games WHERE game_id='shared'").fetchall()
+        assert {r["color"] for r in rows} == {"white", "black"}
+        assert {r["player_rating"] for r in rows} == {1500, 1800}
+    assert repo.get_game("shared")["color"] == "white"
+    summary = StatisticsService(repo).summary(account_id=bob)
+    assert (summary["wins"], summary["losses"], summary["draws"]) == (1, 0, 0)
+    assert summary["account_scope"] == "selected account"
+    all_games = StatisticsService(repo).summary()
+    assert all_games["unknown_or_aborted"] == 1
+    assert all_games["account_scope"].startswith("mixed")
+
+
+def test_statistics_choose_one_run_when_finished_at_ties(tmp_path):
+    from chess_coach.lichess.statistics import StatisticsService
+    repo = GameRepository(tmp_path / "stats-run-tie.sqlite3")
+    repo.save_snapshot("g", "startpos", "e2e4", "white", "Friend", False, "-", "finished", "white")
+    line = repo.current_line("g")
+    run_ids = []
+    for loss in (50, 250):
+        run_ids.append(repo.save_analysis("g", line_revision=1, line_hash=line["line_hash"],
+            source="stockfish", engine_name="Fake", engine_version="1", parameters={"nodes": loss},
+            assessments=[{"ply": 1, "white_cp": loss}], classifications=[
+                {"ply": 1, "mover": "white", "eval_loss_cp": loss,
+                 "label": "mistake" if loss == 50 else "blunder", "phase": "unknown",
+                 "algorithm_version": "test"}]))
+    with repo._connection() as db:
+        db.execute("UPDATE analysis_runs SET finished_at='same-time' WHERE run_id IN (?,?)", run_ids)
+    summary = StatisticsService(repo).summary(analysis_source="stockfish")
+    latest = max(run_ids)
+    expected = 250 if latest == run_ids[1] else 50
+    assert summary["own_assessed_moves"] == 1
+    assert summary["avg_cpl_cp"] == expected
 
 
 def test_puzzle_activity_oauth_scope_and_activity_endpoint_are_explicit():
@@ -877,11 +956,11 @@ def test_puzzle_sync_backfills_repeated_puzzle_ids_and_empty_archive(tmp_path):
     from chess_coach.lichess.puzzles import PuzzleActivitySync
 
     items = [
-        {"date": 500, "win": True, "puzzle": {"id": "same", "fen": chess.STARTING_FEN,
+        {"date": LICHESS_MIN_MS + 500, "win": True, "puzzle": {"id": "same", "fen": chess.STARTING_FEN,
          "solution": ["e2e4"], "themes": ["fork"], "rating": 1500, "plays": 10}},
-        {"date": 500, "win": False, "puzzle": {"id": "same", "fen": chess.STARTING_FEN,
+        {"date": LICHESS_MIN_MS + 500, "win": False, "puzzle": {"id": "same", "fen": chess.STARTING_FEN,
          "solution": ["e2e4"], "themes": ["fork"], "rating": 1500, "plays": 10}},
-        {"date": 400, "win": True, "puzzle": {"id": "other", "fen": chess.STARTING_FEN,
+        {"date": LICHESS_MIN_MS + 400, "win": True, "puzzle": {"id": "other", "fen": chess.STARTING_FEN,
          "solution": ["d2d4"], "themes": ["pin"], "rating": 1600, "plays": 20}},
     ]
     class FakePuzzleClient:
@@ -911,19 +990,272 @@ def test_puzzle_incremental_sync_pages_more_than_one_page(tmp_path):
     records = [{"date": date, "win": date % 2 == 0,
                 "puzzle": {"id": f"p{date}", "fen": chess.STARTING_FEN,
                            "solution": ["e2e4"], "themes": [], "rating": 1000, "plays": 1}}
-               for date in (100, 200, 300)]
+               for date in (LICHESS_MIN_MS + 100, LICHESS_MIN_MS + 200, LICHESS_MIN_MS + 300)]
     class Client:
         def stream_puzzle_activity(self, token, stop, *, since=None, before=None, max_items=1000):
-            if since is None:
+            if before is None:
                 return iter(())
-            return iter(sorted((record for record in records if record["date"] > since),
-                               key=lambda record: record["date"])[:max_items])
+            return iter(sorted((record for record in records if record["date"] < before),
+                               key=lambda record: record["date"], reverse=True)[:max_items])
     repo = GameRepository(tmp_path / "puzzle-incremental.sqlite3")
     account_id = repo.ensure_archive_account("Me")
     repo.finish_puzzle_backfill(account_id)
     assert PuzzleActivitySync(Client(), repo).run(
         "Me", "token", threading.Event(), page_size=2) == 3
     assert repo.puzzle_statistics(account_id)["attempts"] == 3
+
+
+def test_archive_games_endpoint_uses_until_and_rejects_before_parameter():
+    class StrictTransport(FakeTransport):
+        def stream(self, method, url, headers, body, timeout, stop_event):
+            query = parse_qs(urlparse(url).query)
+            allowed = {"max", "sort", "pgnInJson", "clocks", "evals", "accuracy",
+                       "opening", "division", "finished", "ongoing", "since", "until"}
+            assert not (set(query) - allowed)
+            assert "before" not in query
+            self.calls.append((method, url, headers, body))
+            yield b'{"id":"g1","pgn":"1. e4 *"}\n'
+    fake = StrictTransport()
+    list(LichessClient(fake, base_url="https://lichess.test").stream_user_games(
+        "token", "Me", threading.Event(), until_ms=1234))
+    query = parse_qs(urlparse(fake.calls[0][1]).query)
+    assert query["until"] == ["1234"] and query["sort"] == ["dateDesc"]
+    assert query["division"] == ["true"] and query["finished"] == ["true"]
+    assert query["ongoing"] == ["false"]
+
+
+def test_archive_2501_games_paginates_three_pages_and_keeps_raw_pgn(tmp_path):
+    from chess_coach.lichess.archive import ArchiveSync
+
+    total = 2501
+    records = [{"id": f"g{i}", "createdAt": LICHESS_MIN_MS + i, "lastMoveAt": LICHESS_MIN_MS + i,
+                "pgn": f'[Event "Archive"]\n[White "Me"]\n[Black "Friend"]\n'
+                       f'[Result "*"]\n\n1. e4 {{ [%clk 0:05:00] [%eval 0.25] }} *\n'}
+               for i in range(1, total + 1)]
+    class Client:
+        def __init__(self): self.page_sizes = []
+        def stream_user_games(self, token, username, stop, *, since=None, until_ms=None, max_games=1000):
+            self.page_sizes.append((since, until_ms, max_games))
+            matches = [r for r in records
+                       if (since is None or r["createdAt"] >= since)
+                       and (until_ms is None or r["createdAt"] <= until_ms)]
+            matches.sort(key=lambda r: r["createdAt"], reverse=since is None)
+            yield from matches[:max_games]
+    class MemoryRepository:
+        def __init__(self):
+            self.state = {"backfill_complete": 0, "backfill_before": None, "incremental_since": None}
+            self.items = {}
+        def ensure_archive_account(self, _username): return "lichess:me"
+        def archive_sync_state(self, _account): return dict(self.state)
+        def import_archive_record(self, username, record, *, checkpoint_ms, backfill):
+            self.items[record["id"]] = record
+            if backfill and checkpoint_ms is not None:
+                self.state["backfill_before"] = checkpoint_ms
+            return record["id"]
+        def finish_archive_backfill(self, _account):
+            self.state.update(backfill_complete=1, incremental_since=int(time.time() * 1000))
+        def finish_archive_incremental(self, _account, cursor):
+            self.state["incremental_since"] = cursor
+        def list_games(self, completed_only=False): return list(self.items.values())
+        def export_pgn(self, game_id): return self.items[game_id]["pgn"]
+    repo = MemoryRepository()
+    client = Client()
+    imported = ArchiveSync(client, repo).run("Me", "fake", threading.Event(),
+                                              full=True, page_size=1000)
+    assert imported == total
+    assert len(repo.list_games(completed_only=False)) == total
+    assert len([p for p in client.page_sizes if p[2] == 1000 and p[1] is not None]) == 3
+    assert repo.export_pgn("g1").find("[%clk 0:05:00]") >= 0
+    assert repo.export_pgn("g1").find("[%eval 0.25]") >= 0
+    assert len(repo.items) == total
+
+
+def test_archive_drains_large_same_timestamp_boundary_without_losing_records():
+    from chess_coach.lichess.archive import ArchiveSync
+    total = 1005
+    records = [{"id": f"same-{i}", "createdAt": LICHESS_MIN_MS + 5000, "lastMoveAt": LICHESS_MIN_MS + 5000,
+                "pgn": f'[Event "Archive"]\n[White "Me"]\n[Black "F"]\n[Result "*"]\n\n1. e4 *\n'}
+               for i in range(total)]
+    class Client:
+        def stream_user_games(self, token, username, stop, *, since=None, until_ms=None, max_games=1000):
+            selected = [r for r in records
+                        if (since is None or r["createdAt"] >= since)
+                        and (until_ms is None or r["createdAt"] <= until_ms)]
+            return iter(selected[:max_games])
+    class Repository:
+        def __init__(self):
+            self.state = {"backfill_complete": 0, "backfill_before": None,
+                          "incremental_since": None}
+            self.ids = set()
+        def ensure_archive_account(self, _): return "a"
+        def archive_sync_state(self, _): return dict(self.state)
+        def import_archive_record(self, _user, record, *, checkpoint_ms, backfill):
+            self.ids.add(record["id"])
+            self.state["backfill_before"] = checkpoint_ms
+        def finish_archive_backfill(self, _):
+            self.state.update(backfill_complete=1, incremental_since=int(time.time()*1000))
+        def finish_archive_incremental(self, _, cursor): self.state["incremental_since"] = cursor
+        def record_archive_error(self, _, error): self.state["last_error"] = error
+    repo = Repository()
+    assert ArchiveSync(Client(), repo).run("Me", "fake", threading.Event(),
+                                            full=True, page_size=1000) == total
+    assert len(repo.ids) == total
+    assert repo.state["backfill_complete"] == 1
+
+
+def test_archive_429_on_page_two_keeps_checkpoint_and_recovers_on_retry(tmp_path):
+    from chess_coach.lichess.archive import ArchiveSync
+    records = [{"id": f"g{i}", "createdAt": LICHESS_MIN_MS + i * 1000,
+                "lastMoveAt": LICHESS_MIN_MS + i * 1000,
+                "pgn": f'[Event "Archive"]\n[White "Me"]\n[Black "F"]\n[Result "*"]\n\n1. e4 *\n'}
+               for i in range(1, 4)]
+    class Client:
+        fail_once = True
+        calls = 0
+        def stream_user_games(self, token, username, stop, *, since=None, until_ms=None, max_games=1000):
+            if since is None and max_games == 2:
+                self.calls += 1
+                if self.calls == 2 and self.fail_once:
+                    self.fail_once = False
+                    raise RateLimitError(60)
+            selected = [r for r in records
+                        if (since is None or r["createdAt"] >= since)
+                        and (until_ms is None or r["createdAt"] <= until_ms)]
+            selected.sort(key=lambda r: r["createdAt"], reverse=since is None)
+            return iter(selected[:max_games])
+    repo = GameRepository(tmp_path / "archive-429.sqlite3")
+    client = Client()
+    sync = ArchiveSync(client, repo)
+    with pytest.raises(RateLimitError):
+        sync.run("Me", "fake", threading.Event(), full=True, page_size=2)
+    account = repo.ensure_archive_account("Me")
+    state = repo.archive_sync_state(account)
+    assert state["backfill_complete"] == 0 and state["last_error"]
+    assert len(repo.list_games(completed_only=False)) == 2
+    assert sync.run("Me", "fake", threading.Event(), full=True, page_size=2) >= 1
+    assert len(repo.list_games(completed_only=False)) == 3
+    assert repo.archive_sync_state(account)["backfill_complete"] == 1
+
+
+def test_async_archive_import_waits_for_atomic_writer_and_failure_keeps_cursor(tmp_path, monkeypatch):
+    repo = GameRepository(tmp_path / "archive-atomic.sqlite3", async_writes=True)
+    account = repo.ensure_archive_account("Me")
+    record = {"id": "async-new", "createdAt": 1234, "pgn":
+              '[Event "Archive"]\n[White "Me"]\n[Black "Friend"]\n[Result "*"]\n\n'
+              '1. e4 { [%clk 0:05:00] [%eval 0.25] } *\n'}
+    release = threading.Event()
+    started = threading.Event()
+    original = repo._save_snapshot_sync
+    def slow(*args, **kwargs):
+        started.set()
+        assert release.wait(5)
+        return original(*args, **kwargs)
+    monkeypatch.setattr(repo, "_save_snapshot_sync", slow)
+    done = threading.Event()
+    errors = []
+    def import_one():
+        try:
+            repo.import_archive_record("Me", record, checkpoint_ms=1234, backfill=True)
+        except Exception as exc:
+            errors.append(exc)
+        finally:
+            done.set()
+    worker = threading.Thread(target=import_one)
+    worker.start()
+    assert started.wait(2)
+    assert not done.is_set()
+    with repo._connection() as db:
+        assert db.execute("SELECT 1 FROM games WHERE game_id='async-new'").fetchone() is None
+    release.set()
+    worker.join(5)
+    assert not errors and done.is_set()
+    assert repo.get_game("async-new")["raw_pgn"].find("[%eval 0.25]") >= 0
+    assert repo.export_pgn("async-new").find("[%clk 0:05:00]") >= 0
+    with repo._connection() as db:
+        assert db.execute("SELECT COUNT(*) FROM account_games WHERE game_id='async-new'").fetchone()[0] == 1
+    assert repo.archive_sync_state(account)["backfill_before"] == 1235
+
+    def fail(*args, **kwargs):
+        raise sqlite3.OperationalError("simulated disk write failure")
+    monkeypatch.setattr(repo, "_save_snapshot_sync", fail)
+    failing = {**record, "id": "must-not-commit"}
+    with pytest.raises(sqlite3.OperationalError, match="simulated"):
+        repo.import_archive_record("Me", failing, checkpoint_ms=9999, backfill=True)
+    assert repo.get_game("must-not-commit") is None
+    assert repo.archive_sync_state(account)["backfill_before"] == 1235
+    repo.shutdown()
+
+
+def test_puzzle_sync_handles_2501_descending_attempts_and_restarts_after_page_two(tmp_path):
+    from chess_coach.lichess.puzzles import PuzzleActivitySync
+
+    records = [{"date": LICHESS_MIN_MS + i, "win": i % 2 == 0,
+                "puzzle": {"id": f"p{i % 17}", "fen": chess.STARTING_FEN,
+                           "solution": ["e2e4"], "themes": ["fork"], "rating": 1200, "plays": i}}
+               for i in range(1, 2502)]
+    class Client:
+        def __init__(self): self.full_pages = 0; self.cancel_page_two = True
+        def stream_puzzle_activity(self, token, stop, *, since=None, before=None, max_items=1000):
+            if before is None: return iter(())
+            if max_items == 1000:
+                self.full_pages += 1
+                if self.cancel_page_two and self.full_pages == 2:
+                    stop.set()
+                    return iter(())
+            items = [r for r in records if (before is None or r["date"] < before)
+                     and (since is None or r["date"] >= since)]
+            return iter(sorted(items, key=lambda r: r["date"], reverse=True)[:max_items])
+    class MemoryRepository:
+        def __init__(self):
+            self.state = {"backfill_complete": 0, "backfill_before": None,
+                          "incremental_since": None, "incremental_before": None,
+                          "incremental_target": None}
+            self.attempts = {}
+        def ensure_archive_account(self, _username): return "lichess:me"
+        def puzzle_sync_state(self, _account): return dict(self.state)
+        def import_puzzle_activity(self, _username, record, *, backfill=False, _return_inserted=False):
+            uid = hashlib.sha256(json.dumps(record, sort_keys=True, separators=(",", ":"),
+                                            ensure_ascii=False).encode()).hexdigest()
+            inserted = uid not in self.attempts
+            self.attempts[uid] = record
+            if backfill: self.state["backfill_before"] = int(record["date"]) + 1
+            return (uid, inserted) if _return_inserted else uid
+        def finish_puzzle_backfill(self, _account):
+            self.state.update(backfill_complete=1,
+                              incremental_since=max((r["date"] for r in self.attempts.values()), default=0))
+        def set_puzzle_incremental_progress(self, _account, before, target):
+            self.state.update(incremental_before=before, incremental_target=target)
+        def finish_puzzle_incremental(self, _account, cursor):
+            self.state.update(incremental_since=cursor, incremental_before=None, incremental_target=None)
+        def puzzle_statistics(self, _account): return {"attempts": len(self.attempts)}
+        def puzzle_history(self, _account, limit=100, offset=0):
+            return list(self.attempts.values())[offset:offset + limit]
+    repo = MemoryRepository()
+    client = Client()
+    sync = PuzzleActivitySync(client, repo)
+    stop = threading.Event()
+    assert sync.run("Me", "fake", stop, page_size=1000) == 1000
+    account = repo.ensure_archive_account("Me")
+    assert repo.puzzle_sync_state(account)["backfill_complete"] == 0
+    assert repo.puzzle_statistics(account)["attempts"] == 1000
+    stop.clear(); client.cancel_page_two = False
+    assert sync.run("Me", "fake", stop, page_size=1000) == 1501
+    assert repo.puzzle_statistics(account)["attempts"] == 2501
+    assert len(repo.puzzle_history(account, limit=500)) == 500
+    assert repo.puzzle_sync_state(account)["backfill_complete"] == 1
+
+
+def test_archive_unsupported_variant_preserves_pgn_without_fake_standard_line(tmp_path):
+    repo = GameRepository(tmp_path / "variant.sqlite3", async_writes=True)
+    pgn = '[Event "Variant"]\n[Variant "Crazyhouse"]\n[White "Me"]\n[Black "Friend"]\n[Result "*"]\n\n1. e4 *\n'
+    repo.import_archive_record("Me", {"id": "variant", "variant": "crazyhouse", "pgn": pgn},
+                               checkpoint_ms=42, backfill=True)
+    game = repo.get_game("variant")
+    assert game["variant"] == "crazyhouse"
+    assert "analysis disabled" in game["import_error"]
+    assert game["raw_pgn"] == pgn and repo.export_pgn("variant") == pgn
+    assert game["initial_fen"] == "" and repo.current_line("variant") is None
+    repo.shutdown()
 
 
 def test_premove_is_an_intent_and_revalidated_after_opponent_move(tmp_path):

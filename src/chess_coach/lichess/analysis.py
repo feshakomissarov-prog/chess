@@ -34,7 +34,7 @@ class CompletedGameAnalyzer:
                 active_human_game_ids: set[str] | None = None,
                 progress: Callable[[int, int], None] | None = None,
                 stop_event: threading.Event | None = None) -> dict:
-        if active_human_game_ids and game_id in active_human_game_ids:
+        if active_human_game_ids:
             raise ValueError("Нельзя запускать движок во время онлайн-партии с человеком.")
         game = self.repository.get_game(game_id)
         if not game:

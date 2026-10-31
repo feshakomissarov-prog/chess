@@ -949,3 +949,30 @@ def test_fifty_clock_events_on_200_ply_history_keep_history_rows_and_refresh_und
     assert not removed
     assert window.moves.count() == 200
     assert elapsed < 3.0
+
+
+def test_429_restore_retry_button_waits_for_cooldown_and_uses_saved_token(qtbot, tmp_path, monkeypatch):
+    window = MainWindow(QSettings(str(tmp_path / "429-retry.ini"), QSettings.Format.IniFormat),
+                        offline_mode=True)
+    qtbot.addWidget(window)
+    class Service:
+        token = "saved-token"
+        def __init__(self): self.restore_calls = 0
+        def restore(self): self.restore_calls += 1
+        def close(self): pass
+    service = Service()
+    window.lichess = service
+    window.offline_mode = False
+    window._lichess_connected = False
+    timers = []
+    monkeypatch.setattr("chess_coach.window.QTimer.singleShot",
+                        lambda milliseconds, callback: timers.append((milliseconds, callback)))
+    window._lichess_status("Ограничение Lichess (429): повторная попытка не раньше чем через 75 с")
+    assert not window.connect_button.isEnabled()
+    assert timers[0][0] == 75_000
+    timers[0][1]()
+    assert window.connect_button.isEnabled()
+    assert window.connect_button.text() == "Повторить подключение"
+    window.connect_lichess()
+    assert service.restore_calls == 1
+    assert not window.connect_button.isEnabled()

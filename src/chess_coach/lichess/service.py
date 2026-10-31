@@ -48,6 +48,8 @@ class LichessService(QObject):
         self._game_stops: dict[str, threading.Event] = {}
         self._final_sync_game_ids: set[str] = set()
         self._event_lock = threading.Lock()
+        self._restore_lock = threading.Lock()
+        self._restore_running = False
         self._event_stream_started = False
         self.username: str | None = None
         self.puzzle_username: str | None = None
@@ -159,6 +161,11 @@ class LichessService(QObject):
         thread.start()
 
     def restore(self) -> None:
+        with self._restore_lock:
+            if self._restore_running:
+                return
+            self._restore_running = True
+        self.status_changed.emit("Проверяем подключение…")
         def work():
             try:
                 token = self.token_store.get()
@@ -181,6 +188,9 @@ class LichessService(QObject):
                     )
                 else:
                     self.status_changed.emit("Ошибка подключения")
+            finally:
+                with self._restore_lock:
+                    self._restore_running = False
         self._thread(work, "chess-coach-restore-auth")
 
     def fetch_active_games(self) -> None:

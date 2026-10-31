@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Iterator
 from contextlib import contextmanager
+from typing import Callable
 import hashlib
 import json
 import sqlite3
@@ -17,7 +18,7 @@ import chess
 import chess.pgn
 
 
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 DEFAULT_PAGE_SIZE = 100
 MAX_PAGE_SIZE = 500
 
@@ -31,6 +32,7 @@ class GameRepository:
         self._write_lock = threading.Lock()
         self._pending_writes: dict[str, Future] = {}
         self._write_errors: dict[str, str] = {}
+        self._archive_account_cache: dict[str, str] = {}
         self._initialize()
 
     def _connect(self) -> sqlite3.Connection:
@@ -202,7 +204,8 @@ class GameRepository:
                 CREATE TABLE IF NOT EXISTS puzzle_sync_state (
                     account_id TEXT PRIMARY KEY REFERENCES accounts(account_id) ON DELETE CASCADE,
                     backfill_before INTEGER, backfill_complete INTEGER NOT NULL DEFAULT 0,
-                    incremental_since INTEGER, last_success_at TEXT, imported_count INTEGER NOT NULL DEFAULT 0,
+                    incremental_since INTEGER, incremental_before INTEGER, incremental_target INTEGER,
+                    last_success_at TEXT, imported_count INTEGER NOT NULL DEFAULT 0,
                     last_error TEXT, updated_at TEXT NOT NULL
                 );
                 CREATE TABLE IF NOT EXISTS puzzle_dashboard_snapshots (
@@ -219,6 +222,15 @@ class GameRepository:
             for statement in schema_sql.split(";"):
                 if statement.strip():
                     db.execute(statement)
+            account_game_columns = {row[1] for row in db.execute("PRAGMA table_info(account_games)")}
+            for name, definition in (("color", "TEXT"), ("player_rating", "INTEGER"),
+                                     ("opponent_rating", "INTEGER")):
+                if name not in account_game_columns:
+                    db.execute(f"ALTER TABLE account_games ADD COLUMN {name} {definition}")
+            puzzle_state_columns = {row[1] for row in db.execute("PRAGMA table_info(puzzle_sync_state)")}
+            for name in ("incremental_before", "incremental_target"):
+                if name not in puzzle_state_columns:
+                    db.execute(f"ALTER TABLE puzzle_sync_state ADD COLUMN {name} INTEGER")
             # Backfill old rows exactly once, retaining bad raw PGN/moves for repair.
             for row in db.execute("SELECT * FROM games WHERE game_id NOT IN "
                                   "(SELECT game_id FROM game_revisions)").fetchall():
@@ -261,16 +273,20 @@ class GameRepository:
                             opponent: str, rated: bool, clock: str, status: str,
                             winner: str | None = None, *, white_player: str | None = None,
                             black_player: str | None = None, started_at: str | None = None,
-                            final_sync_pending: bool = False) -> None:
+                            final_sync_pending: bool = False,
+                            transaction_hook: Callable[[sqlite3.Connection, int, str], None] | None = None,
+                            preserve_existing_color: bool = False) -> None:
         board = chess.Board() if initial_fen == "startpos" else chess.Board(initial_fen)
         for uci in moves.split():
             board.push_uci(uci)
         game = chess.pgn.Game.from_board(board)
         game.headers["Event"] = "Lichess rated" if rated else "Lichess casual"
         game.headers["Site"] = f"https://lichess.org/{game_id}"
-        with self._connection() as db:
-            previous = db.execute("SELECT white_player, black_player, started_at FROM games "
-                                  "WHERE game_id=?", (game_id,)).fetchone()
+        previous = None
+        if not (white_player and black_player and started_at):
+            with self._connection() as db:
+                previous = db.execute("SELECT white_player, black_player, started_at FROM games "
+                                      "WHERE game_id=?", (game_id,)).fetchone()
         if previous:
             white_player = white_player or previous["white_player"]
             black_player = black_player or previous["black_player"]
@@ -300,9 +316,10 @@ class GameRepository:
                 final_sync_pending, source, source_game_id, variant
             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'lichess', ?, 'standard')
                 ON CONFLICT(game_id) DO UPDATE SET initial_fen=excluded.initial_fen,
-                moves=excluded.moves, color=excluded.color, opponent=excluded.opponent,
+                moves=excluded.moves, opponent=excluded.opponent,
                 rated=excluded.rated, clock=excluded.clock, status=excluded.status,
                 winner=excluded.winner, updated_at=excluded.updated_at, pgn=excluded.pgn,
+                color=CASE WHEN ? THEN games.color ELSE excluded.color END,
                 white_player=excluded.white_player, black_player=excluded.black_player,
                 started_at=excluded.started_at,
                 final_sync_pending=excluded.final_sync_pending,
@@ -310,7 +327,8 @@ class GameRepository:
                 variant=excluded.variant""",
                 (game_id, initial_fen, moves, color, opponent, int(rated), clock, status,
                  winner, datetime.now(timezone.utc).isoformat(), pgn, white_player,
-                 black_player, started_at, int(final_sync_pending), game_id))
+                 black_player, started_at, int(final_sync_pending), game_id,
+                 int(preserve_existing_color)))
             current = db.execute("SELECT line_revision, line_hash FROM game_revisions "
                                  "WHERE game_id=? AND is_current=1", (game_id,)).fetchone()
             line_hash = _line_hash(initial_fen, moves)
@@ -325,6 +343,8 @@ class GameRepository:
                            (pgn, game_id, revision))
             db.execute("UPDATE games SET line_revision=?, import_error=NULL WHERE game_id=?",
                        (revision, game_id))
+            if transaction_hook is not None:
+                transaction_hook(db, revision, line_hash)
 
     @staticmethod
     def _write_revision(db: sqlite3.Connection, row: dict, revision: int,
@@ -511,6 +531,8 @@ class GameRepository:
         if not normalized:
             raise ValueError("Lichess username is required")
         account_id = f"lichess:{normalized}"
+        if normalized in self._archive_account_cache:
+            return account_id
         with self._connection() as db:
             db.execute("INSERT INTO accounts(account_id,provider,username,created_at) "
                        "VALUES (?,'lichess',?,?) ON CONFLICT(account_id) DO UPDATE SET "
@@ -518,6 +540,7 @@ class GameRepository:
                        datetime.now(timezone.utc).isoformat()))
             db.execute("INSERT OR IGNORE INTO archive_sync_state(account_id,updated_at) "
                        "VALUES (?,?)", (account_id, datetime.now(timezone.utc).isoformat()))
+        self._archive_account_cache[normalized] = account_id
         return account_id
 
     def archive_sync_state(self, account_id: str) -> dict:
@@ -539,8 +562,11 @@ class GameRepository:
         if parsed is None or parsed.errors:
             raise ValueError("Lichess export contains an invalid PGN")
         variant = str(record.get("variant") or parsed.headers.get("Variant") or "standard").lower()
-        if variant not in {"standard", "chess960"}:
-            raise ValueError(f"Unsupported variant: {variant}")
+        if variant != "standard":
+            # Keep non-standard games searchable/exportable without pretending their
+            # move rules or initial position are standard chess.
+            return self._import_unsupported_archive_record(username, record, parsed, variant,
+                                                             raw_pgn, checkpoint_ms, backfill)
         initial_fen = parsed.headers.get("FEN", "startpos")
         uci_moves = []
         for move in parsed.mainline_moves():
@@ -553,14 +579,18 @@ class GameRepository:
         opponent = black if is_white else white
         result = parsed.headers.get("Result", "*")
         winner = "white" if result == "1-0" else "black" if result == "0-1" else None
-        status = "finished" if result in {"1-0", "0-1", "1/2-1/2"} else "playing"
+        status = ("draw" if result == "1/2-1/2" else "finished"
+                  if result in {"1-0", "0-1"} else "unknownFinish")
         clock = parsed.headers.get("TimeControl", "-")
         started_at = parsed.headers.get("UTCDate") or parsed.headers.get("Date")
         if started_at and len(started_at) == 10 and started_at[4] == ".":
             started_at = started_at.replace(".", "-") + "T00:00:00+00:00"
-        self.save_snapshot(game_id, initial_fen, moves, player_color, opponent,
-                           bool(record.get("rated", False)), clock, status, winner,
-                           white_player=white, black_player=black, started_at=started_at)
+        if not started_at and record.get("createdAt") is not None:
+            try:
+                started_at = datetime.fromtimestamp(int(record["createdAt"]) / 1000,
+                    timezone.utc).isoformat()
+            except (TypeError, ValueError, OverflowError, OSError):
+                started_at = None
         lichess_assessments = []
         for ply, node in enumerate(parsed.mainline(), start=1):
             evaluation = node.eval()
@@ -578,7 +608,13 @@ class GameRepository:
         opening = record.get("opening") if isinstance(record.get("opening"), dict) else {}
         account_id = self.ensure_archive_account(username)
         imported_at = datetime.now(timezone.utc).isoformat()
-        with self._connection() as db:
+        phase = record.get("division")
+        middle_start = end_start = None
+        if isinstance(phase, dict):
+            middle_start = _phase_ply(phase.get("middle"))
+            end_start = _phase_ply(phase.get("end"))
+
+        def commit_archive(db: sqlite3.Connection, revision: int, line_hash: str) -> None:
             db.execute("UPDATE games SET source='lichess_archive', source_game_id=?, variant=?, "
                        "raw_checksum=?, raw_pgn=?, last_move_at=?, lichess_accuracy_white=?, "
                        "lichess_accuracy_black=?,white_rating=?,black_rating=?,opening_eco=?, "
@@ -587,51 +623,121 @@ class GameRepository:
                         (record.get("accuracy") or {}).get("white"),
                         (record.get("accuracy") or {}).get("black"), white_data.get("rating"),
                         black_data.get("rating"), opening.get("eco"), opening.get("name"), game_id))
-            db.execute("INSERT INTO account_games(account_id,game_id,remote_id,imported_at) "
-                       "VALUES (?,?,?,?) ON CONFLICT(account_id,game_id) DO UPDATE SET "
-                       "remote_id=excluded.remote_id, imported_at=excluded.imported_at",
-                       (account_id, game_id, game_id, imported_at))
-        if lichess_assessments:
-            line = self.current_line(game_id)
-            if line and not self.find_analysis_cache(game_id, int(line["line_revision"]),
-                    line["line_hash"], "lichess-pgn", None, {"format": "pgn-eval-v1"}):
-                self.save_analysis(game_id, line_revision=int(line["line_revision"]),
-                    line_hash=line["line_hash"], source="lichess-pgn", engine_name="Lichess",
-                    engine_version=None, parameters={"format": "pgn-eval-v1"},
-                    assessments=lichess_assessments, classifications=[])
-        phase = record.get("division")
-        if isinstance(phase, dict):
-            middle = phase.get("middle")
-            end = phase.get("end")
-            middle_start = _phase_ply(middle)
-            end_start = _phase_ply(end)
+            player_rating = white_data.get("rating") if player_color == "white" else black_data.get("rating")
+            opponent_rating = black_data.get("rating") if player_color == "white" else white_data.get("rating")
+            db.execute("INSERT INTO account_games(account_id,game_id,remote_id,imported_at,color,player_rating,opponent_rating) "
+                       "VALUES (?,?,?,?,?,?,?) ON CONFLICT(account_id,game_id) DO UPDATE SET "
+                       "remote_id=excluded.remote_id, imported_at=excluded.imported_at,color=excluded.color,"
+                       "player_rating=excluded.player_rating,opponent_rating=excluded.opponent_rating",
+                       (account_id, game_id, game_id, imported_at, player_color, player_rating, opponent_rating))
+            if lichess_assessments:
+                existing = db.execute("SELECT 1 FROM analysis_runs WHERE game_id=? AND line_revision=? "
+                                      "AND line_hash=? AND source='lichess-pgn' AND status='complete' "
+                                      "LIMIT 1", (game_id, revision, line_hash)).fetchone()
+                if not existing:
+                    run_id = uuid.uuid4().hex
+                    now = datetime.now(timezone.utc).isoformat()
+                    db.execute("INSERT INTO analysis_runs VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+                               (run_id, game_id, revision, line_hash, "lichess-pgn", "Lichess", None,
+                                json.dumps({"format": "pgn-eval-v1"}, sort_keys=True), now, now,
+                                "complete", None))
+                    db.executemany("INSERT INTO position_assessments VALUES (?,?,?,?,?,?,?,?,?)",
+                                   [(run_id, game_id, revision, item["ply"], item["white_cp"],
+                                     item["mate_white"], item["depth"], None, "")
+                                    for item in lichess_assessments])
             if middle_start is not None or end_start is not None:
-                line = self.current_line(game_id)
-                with self._connection() as db:
-                    db.execute("INSERT INTO game_phase_boundaries VALUES (?,?,?,?,?,?) "
-                               "ON CONFLICT(game_id,line_revision) DO UPDATE SET "
-                               "middle_start_ply=excluded.middle_start_ply, "
-                               "end_start_ply=excluded.end_start_ply,source=excluded.source, "
-                               "method_version=excluded.method_version",
-                               (game_id, int(line["line_revision"]), middle_start, end_start,
-                                "lichess", "lichess-division-v1"))
-        if checkpoint_ms is not None:
-            column = "backfill_before" if backfill else "incremental_since"
-            with self._connection() as db:
-                db.execute(f"UPDATE archive_sync_state SET {column}=?, imported_count="
-                           "imported_count+1,last_success_at=?,last_error=NULL,updated_at=? "
-                           "WHERE account_id=?",
-                           (checkpoint_ms, imported_at, imported_at, account_id))
-                db.execute("UPDATE archive_sync_state SET incremental_since=MAX("
-                           "COALESCE(incremental_since,0),?) WHERE account_id=?",
-                           (checkpoint_ms + (1 if backfill else 0), account_id))
+                db.execute("INSERT INTO game_phase_boundaries VALUES (?,?,?,?,?,?) "
+                           "ON CONFLICT(game_id,line_revision) DO UPDATE SET "
+                           "middle_start_ply=excluded.middle_start_ply,end_start_ply=excluded.end_start_ply,"
+                           "source=excluded.source,method_version=excluded.method_version",
+                           (game_id, revision, middle_start, end_start, "lichess", "lichess-division-v1"))
+            if checkpoint_ms is not None:
+                column = "backfill_before" if backfill else None
+                if column:
+                    db.execute("UPDATE archive_sync_state SET backfill_before=?,imported_count=imported_count+1,"
+                               "last_success_at=?,last_error=NULL,updated_at=? WHERE account_id=?",
+                               (checkpoint_ms + 1, imported_at, imported_at, account_id))
+                else:
+                    db.execute("UPDATE archive_sync_state SET imported_count=imported_count+1,"
+                               "last_success_at=?,last_error=NULL,updated_at=? WHERE account_id=?",
+                               (imported_at, imported_at, account_id))
+
+        args = (game_id, initial_fen, moves, player_color, opponent,
+                bool(record.get("rated", False)), clock, status, winner)
+        kwargs = {"white_player": white, "black_player": black, "started_at": started_at,
+                  "transaction_hook": commit_archive, "preserve_existing_color": True}
+        if self._writer is not None:
+            # Archive workers wait for the durable single-writer transaction before
+            # requesting the next NDJSON record/checkpoint.
+            self._writer.submit(self._save_snapshot_sync, *args, **kwargs).result()
+        else:
+            self._save_snapshot_sync(*args, **kwargs)
+        return game_id
+
+    def _import_unsupported_archive_record(self, username: str, record: dict, parsed,
+                                           variant: str, raw_pgn: str,
+                                           checkpoint_ms: int | None, backfill: bool) -> str:
+        if self._writer is not None:
+            return self._writer.submit(self._import_unsupported_archive_record_sync,
+                username, record, parsed, variant, raw_pgn, checkpoint_ms, backfill).result()
+        return self._import_unsupported_archive_record_sync(
+            username, record, parsed, variant, raw_pgn, checkpoint_ms, backfill)
+
+    def _import_unsupported_archive_record_sync(self, username: str, record: dict, parsed,
+                                                variant: str, raw_pgn: str,
+                                                checkpoint_ms: int | None, backfill: bool) -> str:
+        game_id = str(record.get("id") or "").strip()
+        account_id = self.ensure_archive_account(username)
+        white, black = parsed.headers.get("White", "?"), parsed.headers.get("Black", "?")
+        color = "white" if white.casefold() == username.casefold() else "black"
+        opponent = black if color == "white" else white
+        result = parsed.headers.get("Result", "*")
+        winner = "white" if result == "1-0" else "black" if result == "0-1" else None
+        now = datetime.now(timezone.utc).isoformat()
+        raw_hash = hashlib.sha256(raw_pgn.encode("utf-8")).hexdigest()
+        players = record.get("players") if isinstance(record.get("players"), dict) else {}
+        white_rating = (players.get("white") or {}).get("rating") if isinstance(players.get("white"), dict) else None
+        black_rating = (players.get("black") or {}).get("rating") if isinstance(players.get("black"), dict) else None
+        with self._connection() as db:
+            db.execute("INSERT INTO games(game_id,initial_fen,moves,color,opponent,rated,clock,status,winner,"
+                       "updated_at,pgn,white_player,black_player,source,source_game_id,variant,import_error,"
+                       "raw_checksum,raw_pgn,last_move_at,white_rating,black_rating) "
+                       "VALUES(?, '', '', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'lichess_archive', ?, ?, ?, ?, ?, ?, ?, ?) "
+                       "ON CONFLICT(game_id) DO UPDATE SET source='lichess_archive',source_game_id=excluded.source_game_id,"
+                       "variant=excluded.variant,import_error=excluded.import_error,raw_checksum=excluded.raw_checksum,"
+                       "raw_pgn=excluded.raw_pgn,last_move_at=excluded.last_move_at",
+                       (game_id, color, opponent, int(bool(record.get("rated", False))),
+                        parsed.headers.get("TimeControl", "-"),
+                        "draw" if result == "1/2-1/2" else "finished" if winner else "unknownFinish",
+                        winner, now, raw_pgn, white, black,
+                        game_id, variant, f"Unsupported variant: {variant}; analysis disabled", raw_hash,
+                        raw_pgn, record.get("lastMoveAt"), white_rating, black_rating))
+            db.execute("INSERT INTO account_games(account_id,game_id,remote_id,imported_at,color,player_rating,opponent_rating) "
+                       "VALUES (?,?,?,?,?,?,?) ON CONFLICT(account_id,game_id) DO UPDATE SET color=excluded.color,"
+                       "player_rating=excluded.player_rating,opponent_rating=excluded.opponent_rating,imported_at=excluded.imported_at",
+                       (account_id, game_id, game_id, now, color,
+                        white_rating if color == "white" else black_rating,
+                        black_rating if color == "white" else white_rating))
+            if checkpoint_ms is not None and backfill:
+                db.execute("UPDATE archive_sync_state SET backfill_before=?,imported_count=imported_count+1,"
+                           "last_success_at=?,last_error=NULL,updated_at=? WHERE account_id=?",
+                           (checkpoint_ms + 1, now, now, account_id))
         return game_id
 
     def finish_archive_backfill(self, account_id: str) -> None:
         now = datetime.now(timezone.utc).isoformat()
+        high_water = int(datetime.now(timezone.utc).timestamp() * 1000)
         with self._connection() as db:
-            db.execute("UPDATE archive_sync_state SET backfill_complete=1,last_success_at=?, "
-                       "last_error=NULL,updated_at=? WHERE account_id=?", (now, now, account_id))
+            db.execute("UPDATE archive_sync_state SET backfill_complete=1,incremental_since=MAX("
+                       "COALESCE(incremental_since,0),?),last_success_at=?,last_error=NULL,updated_at=? "
+                       "WHERE account_id=?", (high_water, now, now, account_id))
+
+    def finish_archive_incremental(self, account_id: str, cursor_ms: int) -> None:
+        now = datetime.now(timezone.utc).isoformat()
+        with self._connection() as db:
+            db.execute("UPDATE archive_sync_state SET incremental_since=MAX(COALESCE(incremental_since,0),?), "
+                       "last_success_at=?,last_error=NULL,updated_at=? WHERE account_id=?",
+                       (int(cursor_ms), now, now, account_id))
 
     def record_archive_error(self, account_id: str, error: str) -> None:
         with self._connection() as db:
@@ -705,12 +811,13 @@ class GameRepository:
             return "opening"
         if end is not None and ply >= end:
             return "endgame"
-        if middle is not None or end is not None:
+        if middle is not None and end is not None and middle <= ply < end:
             return "middlegame"
         return "unknown"
 
     def import_puzzle_activity(self, username: str, record: dict, *,
-                               backfill: bool = False) -> str:
+                               backfill: bool = False,
+                               _return_inserted: bool = False) -> str | tuple[str, bool]:
         puzzle = record.get("puzzle")
         if not isinstance(puzzle, dict):
             raise ValueError("Puzzle activity entry has no puzzle object")
@@ -740,19 +847,23 @@ class GameRepository:
                                    int(bool(record.get("win"))), "lichess", stable, now)).rowcount
             db.execute("INSERT OR IGNORE INTO puzzle_sync_state(account_id,updated_at) VALUES (?,?)",
                        (account_id, now))
-            state = db.execute("SELECT incremental_since FROM puzzle_sync_state WHERE account_id=?",
-                               (account_id,)).fetchone()
-            cursor = max(int(state[0] or 0), attempt_date)
             if backfill:
-                db.execute("UPDATE puzzle_sync_state SET incremental_since=?,backfill_before=?, "
+                db.execute("UPDATE puzzle_sync_state SET backfill_before=?, "
                            "imported_count=imported_count+?,last_success_at=?,last_error=NULL, "
                            "updated_at=? WHERE account_id=?",
-                           (cursor, max(0, attempt_date - 1), int(bool(inserted)), now, now, account_id))
+                           (attempt_date + 1, int(bool(inserted)), now, now, account_id))
             else:
-                db.execute("UPDATE puzzle_sync_state SET incremental_since=?,imported_count="
-                           "imported_count+?,last_success_at=?,last_error=NULL,updated_at=? WHERE account_id=?",
-                           (cursor, int(bool(inserted)), now, now, account_id))
-        return attempt_uid
+                db.execute("UPDATE puzzle_sync_state SET imported_count=imported_count+?,"
+                           "last_error=NULL,updated_at=? WHERE account_id=?",
+                           (int(bool(inserted)), now, account_id))
+        return (attempt_uid, bool(inserted)) if _return_inserted else attempt_uid
+
+    def has_puzzle_attempt(self, username: str, record: dict) -> bool:
+        stable = json.dumps(record, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+        attempt_uid = hashlib.sha256(f"lichess:{username.casefold()}:{stable}".encode()).hexdigest()
+        with self._connection() as db:
+            return bool(db.execute("SELECT 1 FROM puzzle_attempts WHERE attempt_uid=?",
+                                   (attempt_uid,)).fetchone())
 
     def puzzle_sync_state(self, account_id: str) -> dict:
         with self._connection() as db:
@@ -763,8 +874,32 @@ class GameRepository:
     def finish_puzzle_backfill(self, account_id: str) -> None:
         now = datetime.now(timezone.utc).isoformat()
         with self._connection() as db:
-            db.execute("UPDATE puzzle_sync_state SET backfill_complete=1,last_success_at=?, "
-                       "last_error=NULL,updated_at=? WHERE account_id=?", (now, now, account_id))
+            db.execute("UPDATE puzzle_sync_state SET backfill_complete=1,incremental_since=MAX("
+                       "COALESCE(incremental_since,0),COALESCE((SELECT MAX(attempt_date_ms) FROM "
+                       "puzzle_attempts WHERE account_id=?),0)),last_success_at=?, "
+                       "last_error=NULL,updated_at=? WHERE account_id=?", (account_id, now, now, account_id))
+
+    def set_puzzle_incremental_progress(self, account_id: str, before_ms: int, target_ms: int) -> None:
+        with self._connection() as db:
+            db.execute("UPDATE puzzle_sync_state SET incremental_before=?,incremental_target=?,updated_at=? "
+                       "WHERE account_id=?", (int(before_ms), int(target_ms),
+                       datetime.now(timezone.utc).isoformat(), account_id))
+
+    def finish_puzzle_incremental(self, account_id: str, cursor_ms: int) -> None:
+        now = datetime.now(timezone.utc).isoformat()
+        with self._connection() as db:
+            db.execute("UPDATE puzzle_sync_state SET incremental_since=MAX(COALESCE(incremental_since,0),?),"
+                       "incremental_before=NULL,incremental_target=NULL,last_success_at=?,last_error=NULL,"
+                       "updated_at=? WHERE account_id=?",
+                       (int(cursor_ms), now, now, account_id))
+
+    def record_puzzle_error(self, account_id: str, error: str) -> None:
+        now = datetime.now(timezone.utc).isoformat()
+        with self._connection() as db:
+            db.execute("INSERT OR IGNORE INTO puzzle_sync_state(account_id,updated_at) VALUES (?,?)",
+                       (account_id, now))
+            db.execute("UPDATE puzzle_sync_state SET last_error=?,updated_at=? WHERE account_id=?",
+                       (error[:500], now, account_id))
 
     def puzzle_history(self, account_id: str, *, limit: int = 100, offset: int = 0) -> list[dict]:
         limit = min(MAX_PAGE_SIZE, max(1, int(limit)))
@@ -826,7 +961,7 @@ class GameRepository:
 
     def export_pgn(self, game_id: str) -> str | None:
         game = self.get_game(game_id)
-        return game["pgn"] if game else None
+        return (game.get("raw_pgn") or game["pgn"]) if game else None
 
 
 def _pgn_date(started_at: str | None) -> str:

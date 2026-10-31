@@ -234,7 +234,7 @@ class LichessClient:
         return [game for game in games if isinstance(game, dict) and game.get("gameId")]
 
     def stream_user_games(self, token: str, username: str, stop_event: threading.Event,
-                          *, since: int | None = None, before: int | None = None,
+                          *, since: int | None = None, until_ms: int | None = None,
                           max_games: int = 1000) -> Iterator[dict]:
         """Stream a bounded export page; callers persist each record before checkpointing."""
         if not 1 <= max_games <= 10_000:
@@ -242,12 +242,13 @@ class LichessClient:
         query: dict[str, object] = {
             "max": max_games, "sort": "dateAsc" if since is not None else "dateDesc",
             "pgnInJson": "true", "clocks": "true", "evals": "true",
-            "accuracy": "true", "opening": "true",
+            "accuracy": "true", "opening": "true", "division": "true",
+            "finished": "true", "ongoing": "false",
         }
         if since is not None:
             query["since"] = since
-        if before is not None:
-            query["before"] = before
+        if until_ms is not None:
+            query["until"] = until_ms
         path = f"/api/games/user/{quote(username, safe='')}?{urlencode(query)}"
         yield from self.stream_ndjson(path, token, stop_event)
 

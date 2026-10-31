@@ -746,8 +746,10 @@ class MainWindow(QMainWindow):
         error_rate = ("н/д" if data["own_error_rate_per_100"] is None else
                       f"{data['own_error_rate_per_100']} на 100 оценённых ходов")
         accuracy = data["lichess_accuracy"]
-        text = (f"Завершённые партии: {data['games']}\n"
+        text = (f"Срез: {data['account_scope']}\n"
+                f"Завершённые партии: {data['games']}\n"
                 f"Победы / ничьи / поражения: {data['wins']} / {data['draws']} / {data['losses']}\n"
+                f"Неизвестный результат / прерваны: {data['unknown_or_aborted']}\n"
                 f"Покрытие локальной оценки: {coverage}\n"
                 f"Ошибки своих ходов: {error_rate}\n"
                 f"Средняя потеря CP по оценённым своим ходам: {data['avg_cpl_cp'] if data['avg_cpl_cp'] is not None else 'н/д'}\n"
@@ -1094,6 +1096,11 @@ class MainWindow(QMainWindow):
         if not self.lichess:
             QMessageBox.warning(self, "Lichess", "Windows Credential Manager недоступен. Установите зависимости проекта.")
             return
+        if getattr(self, "_restore_retry_ready", False) and self.lichess.token:
+            self._restore_retry_ready = False
+            self.connect_button.setEnabled(False)
+            self.lichess.restore()
+            return
         self.lichess.connect_account()
 
     def disconnect_lichess(self) -> None:
@@ -1172,7 +1179,24 @@ class MainWindow(QMainWindow):
             for button in (self.friend_link_button, self.username_button, self.ai_button):
                 button.setVisible(False)
             self.active_games_button.setEnabled(False)
-        self.connect_button.setEnabled(status in {"Не подключено", "Ошибка подключения"})
+        retry_status = status.startswith("Ограничение Lichess (429)")
+        if status == "Проверяем подключение…":
+            self.connect_button.setEnabled(False)
+        elif retry_status:
+            self.connect_button.setEnabled(False)
+            self._restore_retry_ready = False
+            import re
+            match = re.search(r"через (\d+) с", status)
+            delay = max(1, int(match.group(1))) if match else 60
+            QTimer.singleShot(delay * 1000, self._enable_restore_retry)
+        elif status in {"Не подключено", "Ошибка подключения"}:
+            self._restore_retry_ready = False
+            self.connect_button.setText("Подключить Lichess")
+            self.connect_button.setEnabled(True)
+        elif status.startswith("Подключено"):
+            self._restore_retry_ready = False
+            self.connect_button.setText("Подключить Lichess")
+            self.connect_button.setEnabled(False)
         self.disconnect_button.setEnabled(connected)
         for button in (self.friend_link_button, self.username_button, self.ai_button):
             button.setEnabled(connected)
@@ -1181,6 +1205,13 @@ class MainWindow(QMainWindow):
         self.active_games_button.setEnabled(connected)
         if status.startswith("Ограничение Lichess"):
             self.home_status.setText(status + ". Автоматические запросы приостановлены.")
+
+    def _enable_restore_retry(self) -> None:
+        if (self.lichess and self.lichess.token and not self._lichess_connected
+                and not self.offline_mode):
+            self._restore_retry_ready = True
+            self.connect_button.setText("Повторить подключение")
+            self.connect_button.setEnabled(True)
 
     def _lichess_authenticated(self, username: str) -> None:
         self._lichess_connected = True
@@ -1490,6 +1521,9 @@ class MainWindow(QMainWindow):
                 else:
                     self.refresh(f"Позиция обновлена с Lichess, но локальная запись не удалась: {exc}")
             return
+        if (session.status in {"started", "playing"} and not session.is_ai_opponent
+                and getattr(self, "_analysis_stop", None) is not None):
+            self._analysis_stop.set()
         had_premove = session.premove is not None
         current_moves = tuple(session.moves.split())
         takeback_confirmed = (len(current_moves) < len(previous_moves)
@@ -1837,6 +1871,7 @@ class MainWindow(QMainWindow):
         dialog.show()
         self._analysis_dialog = dialog
         stop = threading.Event()
+        self._analysis_stop = stop
         dialog.canceled.connect(stop.set)
         active_human_ids = {session.game_id for session in self.online_sessions.values()
                             if session.status in {"started", "playing"}
@@ -1860,6 +1895,7 @@ class MainWindow(QMainWindow):
             self._analysis_dialog.setValue(done)
 
     def _analysis_finished(self, game_id: str, result: object) -> None:
+        self._analysis_stop = None
         if getattr(self, "_analysis_dialog", None):
             self._analysis_dialog.close()
             self._analysis_dialog = None

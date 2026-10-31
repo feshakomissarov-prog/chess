@@ -20,8 +20,10 @@ class StatisticsService:
         clauses: list[str] = ["g.status NOT IN ('created','started','started_soon','playing')"]
         params: list[object] = []
         join = ""
+        select = "g.*"
         if account_id:
             join = " JOIN account_games ag ON ag.game_id=g.game_id "
+            select = "g.*,ag.color AS account_color,ag.player_rating AS account_player_rating"
             clauses.append("ag.account_id=?")
             params.append(account_id)
         if since:
@@ -40,13 +42,15 @@ class StatisticsService:
             clauses.append("g.source=?")
             params.append(game_source)
         if side in {"white", "black"}:
-            clauses.append("g.color=?")
+            clauses.append(("ag.color" if account_id else "g.color") + "=?")
             params.append(side)
         if rating_min is not None:
-            clauses.append("(CASE g.color WHEN 'white' THEN g.white_rating ELSE g.black_rating END)>=?")
+            clauses.append(("ag.player_rating" if account_id else
+                            "CASE g.color WHEN 'white' THEN g.white_rating ELSE g.black_rating END")+">=?")
             params.append(rating_min)
         if rating_max is not None:
-            clauses.append("(CASE g.color WHEN 'white' THEN g.white_rating ELSE g.black_rating END)<=?")
+            clauses.append(("ag.player_rating" if account_id else
+                            "CASE g.color WHEN 'white' THEN g.white_rating ELSE g.black_rating END")+"<=?")
             params.append(rating_max)
         if opening:
             clauses.append("(g.opening_name LIKE ? OR g.opening_eco LIKE ?)")
@@ -54,12 +58,15 @@ class StatisticsService:
         where = " AND ".join(clauses)
         with self.repository._connection() as db:
             games = [dict(row) for row in db.execute(
-                f"SELECT DISTINCT g.* FROM games g{join} WHERE {where}", params)]
+                f"SELECT DISTINCT {select} FROM games g{join} WHERE {where}", params)]
             ids = [game["game_id"] for game in games]
             result = {"filters": {"since": since, "until": until, "opponent": opponent,
                                    "clock": clock, "game_source": game_source,
                                    "analysis_source": analysis_source},
+                      "account_scope": "selected account" if account_id else
+                                       "mixed accounts / local color fallback",
                       "games": len(games), "wins": 0, "losses": 0, "draws": 0,
+                      "unknown_or_aborted": 0,
                       "confirmed_moves": 0, "evaluated_moves": 0,
                       "move_coverage_percent": None, "own_assessed_moves": 0,
                       "own_error_rate_per_100": None, "avg_cpl_cp": None,
@@ -67,14 +74,21 @@ class StatisticsService:
                       "analysis_coverage": 0.0, "classifications_by_phase": {}}
             result["rating_trend"] = []
             for game in games:
-                me = game["color"]
-                if game["winner"] is None and game["status"] not in {"playing", "started"}:
+                me = game.get("account_color") or game["color"]
+                draw_status = game["status"] in {
+                    "draw", "stalemate", "repetition", "50moves", "insufficientMaterial",
+                } or '[Result "1/2-1/2"]' in game.get("pgn", "")
+                aborted = game["status"] in {"aborted", "noStart", "unknownFinish", "cheat"}
+                if draw_status:
                     result["draws"] += 1
                 elif game["winner"] == me:
                     result["wins"] += 1
                 elif game["winner"]:
                     result["losses"] += 1
-                rating = game["white_rating"] if game["color"] == "white" else game["black_rating"]
+                else:
+                    result["unknown_or_aborted"] += 1
+                rating = (game.get("account_player_rating") if account_id else
+                          game["white_rating"] if me == "white" else game["black_rating"])
                 if rating is not None:
                     result["rating_trend"].append({
                         "date": game["started_at"] or game["updated_at"],
@@ -84,6 +98,8 @@ class StatisticsService:
             if not ids:
                 return result
             marks = ",".join("?" for _ in ids)
+            account_join = " LEFT JOIN account_games ag ON ag.game_id=g.game_id AND ag.account_id=?" if account_id else ""
+            account_color_expr = "COALESCE(ag.color,g.color)" if account_id else "g.color"
             move_rows = db.execute(
                 f"SELECT gm.game_id,gm.ply,gm.mover,g.color FROM game_moves gm "
                 f"JOIN game_revisions gr ON gr.game_id=gm.game_id AND gr.line_revision=gm.line_revision "
@@ -94,31 +110,33 @@ class StatisticsService:
             source_params = [analysis_source] if analysis_source else []
             classifications = db.execute(
                 f"""WITH latest AS (
-                    SELECT ar.game_id,ar.line_revision,MAX(ar.finished_at) AS finished_at
+                    SELECT ar.game_id,ar.line_revision,ar.run_id,
+                           ROW_NUMBER() OVER (PARTITION BY ar.game_id,ar.line_revision
+                                              ORDER BY ar.finished_at DESC,ar.run_id DESC) AS rank
                     FROM analysis_runs ar JOIN games g ON g.game_id=ar.game_id
                     JOIN game_revisions gr ON gr.game_id=ar.game_id AND gr.line_revision=ar.line_revision
                     WHERE g.game_id IN ({marks}) AND gr.is_current=1 AND ar.status='complete'
-                    {latest_source_clause} GROUP BY ar.game_id,ar.line_revision
+                    {latest_source_clause}
                 )
-                SELECT mc.*,g.color AS my_color FROM latest l
-                JOIN analysis_runs ar ON ar.game_id=l.game_id AND ar.line_revision=l.line_revision
-                    AND ar.finished_at=l.finished_at
+                SELECT mc.*,{account_color_expr} AS my_color FROM latest l
+                JOIN analysis_runs ar ON ar.run_id=l.run_id AND l.rank=1
                 JOIN move_classifications mc ON mc.run_id=ar.run_id
-                JOIN games g ON g.game_id=mc.game_id
+                JOIN games g ON g.game_id=mc.game_id{account_join}
                 WHERE mc.ply>0 ORDER BY mc.game_id,mc.ply""",
-                [*ids, *source_params]).fetchall()
+                [*ids, *source_params, *([account_id] if account_id else [])]).fetchall()
             assessed = [row for row in classifications if row["eval_loss_cp"] is not None]
             evaluated = db.execute(
                 f"""WITH latest AS (
-                    SELECT ar.game_id,ar.line_revision,MAX(ar.finished_at) AS finished_at
+                    SELECT ar.game_id,ar.line_revision,ar.run_id,
+                           ROW_NUMBER() OVER (PARTITION BY ar.game_id,ar.line_revision
+                                              ORDER BY ar.finished_at DESC,ar.run_id DESC) AS rank
                     FROM analysis_runs ar JOIN games g ON g.game_id=ar.game_id
                     JOIN game_revisions gr ON gr.game_id=ar.game_id AND gr.line_revision=ar.line_revision
                     WHERE g.game_id IN ({marks}) AND gr.is_current=1 AND ar.status='complete'
-                    {latest_source_clause} GROUP BY ar.game_id,ar.line_revision
+                    {latest_source_clause}
                 )
                 SELECT DISTINCT pa.game_id,pa.ply FROM latest l
-                JOIN analysis_runs ar ON ar.game_id=l.game_id AND ar.line_revision=l.line_revision
-                    AND ar.finished_at=l.finished_at
+                JOIN analysis_runs ar ON ar.run_id=l.run_id AND l.rank=1
                 JOIN position_assessments pa ON pa.run_id=ar.run_id
                 WHERE pa.ply>0 AND (pa.white_cp IS NOT NULL OR pa.mate_white IS NOT NULL)""",
                 [*ids, *source_params]).fetchall()
