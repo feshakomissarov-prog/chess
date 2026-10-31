@@ -1,14 +1,33 @@
 import chess
+import time
+import pytest
 from PySide6.QtCore import QPoint, QSettings, Qt
 
 from chess_coach.board_view import BoardView
 from chess_coach.window import MainWindow, SettingsDialog
+from chess_coach.lichess.session import LichessGameSession
+from chess_coach.lichess.repository import GameRepository
+
+
+@pytest.fixture(autouse=True)
+def avoid_background_auth_restore(monkeypatch):
+    # Window tests exercise presentation and event handling, not stored credentials.
+    monkeypatch.setattr("chess_coach.lichess.service.LichessService.restore", lambda self: None)
+
+
+def select_online(window, session):
+    window.online_sessions[session.game_id] = session
+    window.online_session = session
+    window._selected_live_game_id = session.game_id
+    window._screen_mode = "online"
+    window.screen_stack.setCurrentWidget(window.game_page)
 
 
 def test_main_window_smoke_and_game_controller_integration(qtbot, tmp_path) -> None:
     settings = QSettings(str(tmp_path / "app.ini"), QSettings.Format.IniFormat)
     window = MainWindow(settings)
     qtbot.addWidget(window)
+    window.start_local_game()
     window.show()
     assert isinstance(window.board, BoardView)
     assert "Не подключено" in window.connection.text()
@@ -125,3 +144,565 @@ def test_new_game_clears_premove_after_confirmation(qtbot, tmp_path, monkeypatch
     assert window.controller.ply == 0
     assert window.controller.premove is None
     assert window.board._queued_premove is None
+
+
+@pytest.mark.parametrize("gesture", ["click", "drag"])
+def test_online_premove_is_available_on_opponent_turn_and_sent_once_after_state(
+    qtbot, tmp_path, monkeypatch, gesture
+) -> None:
+    from PySide6.QtCore import QPoint
+
+    window = MainWindow(QSettings(str(tmp_path / f"{gesture}.ini"), QSettings.Format.IniFormat))
+    qtbot.addWidget(window)
+    calls = []
+    monkeypatch.setattr(window.lichess, "send_move", lambda game_id, uci, request_id: calls.append(
+        (game_id, uci, request_id)
+    ))
+    session = LichessGameSession(gesture, GameRepository(tmp_path / f"{gesture}.sqlite3"))
+    session.color = chess.WHITE
+    session.apply_event({"type": "gameFull", "initialFen": "startpos",
+                         "state": {"moves": "e2e4", "status": "started"}})
+    select_online(window, session)
+    window.online_view_ply = None
+    window.show()
+    window._refresh_online()
+    assert window.board._interaction_enabled  # permits premove gestures during opponent turn
+    assert not session.is_my_turn
+
+    rect = window.board._get_board_rect()
+    side = rect.width() / 8
+    def center(square):
+        row, col = window.board._renderer.get_visual_coordinates(square, window.board._flipped)
+        return QPoint(int(rect.x() + (col + .5) * side), int(rect.y() + (row + .5) * side))
+    start, end = center(chess.G1), center(chess.F3)
+    window.board.show()
+    if gesture == "click":
+        qtbot.mouseClick(window.board, Qt.MouseButton.LeftButton, pos=start)
+        qtbot.mouseClick(window.board, Qt.MouseButton.LeftButton, pos=end)
+    else:
+        qtbot.mousePress(window.board, Qt.MouseButton.LeftButton, pos=start)
+        qtbot.mouseMove(window.board, end, delay=20)
+        qtbot.mouseRelease(window.board, Qt.MouseButton.LeftButton, pos=end)
+    assert session.premove == chess.Move.from_uci("g1f3")
+    assert session.moves == "e2e4"  # queue does not mutate confirmed history
+    assert window.cancel_premove_button.isVisible()
+    qtbot.mouseClick(window.cancel_premove_button, Qt.MouseButton.LeftButton)
+    # Restore the intent after also verifying explicit UI cancellation.
+    assert session.premove is None
+    assert session.queue_premove(chess.Move.from_uci("g1f3"))
+    window._refresh_online()
+    window._lichess_game_event(gesture, {"type": "gameState", "moves": "e2e4 e7e5",
+                                         "status": "started"})
+    assert calls == [(gesture, "g1f3", session.pending_request_id)]
+    window._lichess_game_event(gesture, {"type": "gameState", "moves": "e2e4 e7e5",
+                                         "status": "started"})
+    assert len(calls) == 1  # repeated state must not submit the same premove again
+
+
+def test_online_premove_is_discarded_when_server_position_makes_it_illegal(qtbot, tmp_path, monkeypatch):
+    window = MainWindow(QSettings(str(tmp_path / "illegal.ini"), QSettings.Format.IniFormat))
+    qtbot.addWidget(window)
+    calls = []
+    monkeypatch.setattr(window.lichess, "send_move", lambda *args: calls.append(args))
+    session = LichessGameSession("illegal", GameRepository(tmp_path / "illegal.sqlite3"))
+    session.color = chess.WHITE
+    fen = "4k3/8/8/2b5/8/8/8/4K1N1 b - - 0 1"
+    session.apply_event({"type": "gameFull", "initialFen": fen,
+                         "state": {"moves": "", "status": "started"}})
+    select_online(window, session)
+    window.show()
+    window._refresh_online()
+    assert session.queue_premove(chess.Move.from_uci("g1f3"))
+    window._lichess_game_event("illegal", {"type": "gameState", "moves": "c5f2",
+                                             "status": "started"})
+    assert session.premove is None
+    assert not calls
+
+
+def test_online_pending_move_is_rendered_optimistically_without_persisting_until_confirmation(
+    qtbot, tmp_path, monkeypatch
+):
+    window = MainWindow(QSettings(str(tmp_path / "optimistic-ui.ini"), QSettings.Format.IniFormat))
+    qtbot.addWidget(window)
+    calls = []
+    monkeypatch.setattr(window.lichess, "send_move", lambda *args: calls.append(args))
+    session = LichessGameSession("optimistic-ui", GameRepository(tmp_path / "optimistic-ui.sqlite3"))
+    session.color = chess.WHITE
+    session.apply_event({"type": "gameFull", "initialFen": "startpos",
+                         "state": {"moves": "", "status": "started"}})
+    select_online(window, session)
+    window.online_view_ply = None
+    window.show()
+
+    window.on_move_intent(chess.Move.from_uci("e2e4"))
+    assert window.board._board.piece_at(chess.E4) == chess.Piece(chess.PAWN, chess.WHITE)
+    assert window.board._board.piece_at(chess.E2) is None
+    assert session.board.piece_at(chess.E2) == chess.Piece(chess.PAWN, chess.WHITE)
+    assert session.moves == ""
+    assert session.repository.get_game(session.game_id)["moves"] == ""
+    assert window.moves.count() == 0  # the move is not yet confirmed SAN history
+    assert "подтвержд" in window.game_status.text()
+
+    window._lichess_game_event(session.game_id, {"type": "gameState", "moves": "e2e4",
+                                                  "status": "started"})
+    assert session.pending_uci is None
+    assert window.board._board.fen() == session.board.fen()
+    assert session.moves == "e2e4"
+    assert session.repository.get_game(session.game_id)["moves"] == "e2e4"
+    assert window.moves.count() == 1
+    assert len(calls) == 1
+
+
+def test_takeback_offer_ui_accept_and_server_rewind_refresh_history_and_pgn(qtbot, tmp_path, monkeypatch):
+    window = MainWindow(QSettings(str(tmp_path / "takeback-ui.ini"), QSettings.Format.IniFormat))
+    qtbot.addWidget(window)
+    requests = []
+    monkeypatch.setattr(window.lichess, "takeback", lambda game_id, action, request_id:
+                        requests.append((game_id, action, request_id)))
+    session = LichessGameSession("takeback-ui", GameRepository(tmp_path / "takeback-ui.sqlite3"))
+    session.color = chess.WHITE
+    line = "e2e4 e7e5 g1f3 b8c6"
+    session.apply_event({"type": "gameFull", "initialFen": "startpos",
+                         "state": {"moves": line, "status": "started"}})
+    select_online(window, session)
+    window.online_view_ply = None
+    window.show()
+    window._lichess_game_event(session.game_id, {"type": "gameState", "moves": line,
+                                                  "btakeback": True, "status": "started"})
+    assert session.takeback_requested_by_opponent
+    assert window.accept_takeback_button.isVisible()
+    assert "Соперник предлагает вернуть ход" in window.game_status.text()
+
+    confirmed_before = session.board.fen()
+    qtbot.mouseClick(window.accept_takeback_button, Qt.MouseButton.LeftButton)
+    assert requests[0][1] == "accept"
+    assert session.board.fen() == confirmed_before
+    assert session.moves == line
+    assert session.takeback_accept_pending
+    window._lichess_takeback_completed(session.game_id, requests[0][2], 0)
+    window._lichess_game_event(session.game_id, {"type": "gameState", "moves": "e2e4 e7e5",
+                                                  "status": "started"})
+    assert session.moves == "e2e4 e7e5"
+    assert session.board.ply() == 2
+    assert window.moves.count() == 2
+    assert window.board._board.fen() == session.board.fen()
+    assert not window.accept_takeback_button.isVisible()
+    assert session.repository.get_game(session.game_id)["moves"] == "e2e4 e7e5"
+    pgn = session.repository.export_pgn(session.game_id)
+    assert "Nf3" not in pgn and "Nc6" not in pgn
+
+
+def test_home_game_result_review_home_and_new_game_flow(qtbot, tmp_path):
+    window = MainWindow(QSettings(str(tmp_path / "flow.ini"), QSettings.Format.IniFormat))
+    qtbot.addWidget(window)
+    window.show()
+    assert window.screen_stack.currentWidget() is window.home_page
+
+    window._awaiting_game_start = True
+    window._lichess_event({"type": "gameStart", "game": {
+        "gameId": "flow-game", "color": "white", "opponent": {"username": "AI"}
+    }})
+    assert window.screen_stack.currentWidget() is window.game_page
+    assert window._screen_mode == "online"
+    session = window.online_session
+    assert session is not None
+    window._lichess_game_event("flow-game", {
+        "type": "gameFull", "initialFen": "startpos", "rated": False,
+        "state": {"moves": "e2e4 e7e5", "status": "started"},
+        "white": {"name": "Coach"}, "black": {"name": "AI"},
+    })
+    window.show_home()
+    assert window.screen_stack.currentWidget() is window.home_page
+    assert window.online_session is session and session.status == "started"
+    assert window.resume_game_button.isVisible()
+    window.resume_current_game()
+    assert window.screen_stack.currentWidget() is window.game_page
+    window._lichess_event({"type": "gameFinish", "game": {
+        "gameId": "flow-game", "status": {"name": "mate"}, "winner": "white"
+    }})
+    assert window.screen_stack.currentWidget() is window.result_page
+    assert "Победа" in window.result_summary.text()
+    assert "ожидаем подтверждённую финальную историю" in window.result_saved_label.text()
+    assert not window.resign_button.isVisible()
+    assert window.game_repository.get_game("flow-game")["status"] == "mate"
+
+    qtbot.mouseClick(window.result_review_button, Qt.MouseButton.LeftButton)
+    assert window._screen_mode == "review"
+    assert window.screen_stack.currentWidget() is window.game_page
+    assert not window.board._interaction_enabled
+    assert not window.resign_button.isVisible()
+    window.leave_online_game()
+    assert window.screen_stack.currentWidget() is window.home_page
+    window.start_local_game()
+    assert window.screen_stack.currentWidget() is window.game_page
+    assert window._screen_mode == "local"
+    assert window.controller.ply == 0
+
+
+def test_online_history_position_stays_selected_until_explicit_live_navigation(qtbot, tmp_path):
+    window = MainWindow(QSettings(str(tmp_path / "history-stays.ini"), QSettings.Format.IniFormat))
+    qtbot.addWidget(window)
+    session = LichessGameSession("history-stays", GameRepository(tmp_path / "history-stays.sqlite3"))
+    session.color = chess.WHITE
+    session.apply_event({"type": "gameFull", "initialFen": "startpos",
+                         "state": {"moves": "e2e4 e7e5", "status": "started"}})
+    select_online(window, session)
+    window.show()
+    window.navigate_to(1)
+    assert window.online_view_ply == 1
+    window._lichess_game_event(session.game_id, {
+        "type": "gameState", "moves": "e2e4 e7e5 g1f3 b8c6", "status": "started"
+    })
+    assert window.online_view_ply == 1
+    assert window.board._board.ply() == 1
+    assert session.board.ply() == 4
+    window.navigate_live()
+    assert window.online_view_ply is None
+    assert window.board._board.ply() == 4
+
+
+def test_events_from_other_games_do_not_switch_review_or_result(qtbot, tmp_path):
+    window = MainWindow(QSettings(str(tmp_path / "parallel.ini"), QSettings.Format.IniFormat))
+    qtbot.addWidget(window)
+    a = LichessGameSession("game-a", GameRepository(tmp_path / "parallel.sqlite3"))
+    a.color = chess.WHITE
+    a.apply_event({"type": "gameFull", "initialFen": "startpos",
+                   "state": {"moves": "e2e4", "status": "started"}})
+    select_online(window, a)
+    window.show()
+    window.navigate_to(0)
+    selected_ply = window.online_view_ply
+    window._lichess_event({"type": "gameStart", "game": {
+        "gameId": "game-b", "color": "black", "opponent": {"username": "Other"}
+    }})
+    window._lichess_game_event("game-b", {
+        "type": "gameFull", "initialFen": "startpos",
+        "state": {"moves": "d2d4", "status": "started"}
+    })
+    window._lichess_event({"type": "gameFinish", "game": {
+        "gameId": "game-b", "status": {"name": "resign"}, "winner": "white"
+    }})
+    assert window.online_session is a
+    assert window._selected_live_game_id == "game-a"
+    assert window.online_view_ply == selected_ply
+    assert window._screen_mode == "online"
+    assert a.status == "started"
+    assert window.online_sessions["game-b"].status == "resign"
+
+
+def test_background_game_finish_cannot_replace_selected_result(qtbot, tmp_path):
+    window = MainWindow(QSettings(str(tmp_path / "parallel-result.ini"), QSettings.Format.IniFormat))
+    qtbot.addWidget(window)
+    a = LichessGameSession("result-a", GameRepository(tmp_path / "parallel-result.sqlite3"))
+    a.color = chess.WHITE
+    a.apply_event({"type": "gameFull", "initialFen": "startpos",
+                   "state": {"moves": "e2e4", "status": "started"}})
+    select_online(window, a)
+    window._lichess_event({"type": "gameFinish", "game": {
+        "gameId": "result-a", "status": {"name": "mate"}, "winner": "white"
+    }})
+    assert window._screen_mode == "result"
+    result_text = window.result_summary.text()
+    window._lichess_event({"type": "gameStart", "game": {
+        "gameId": "result-b", "color": "black", "opponent": {"username": "Other"}
+    }})
+    window._lichess_event({"type": "gameFinish", "game": {
+        "gameId": "result-b", "status": {"name": "resign"}, "winner": "white"
+    }})
+    assert window._screen_mode == "result"
+    assert window.online_session is a
+    assert window.result_summary.text() == result_text
+
+
+def test_late_active_game_state_cannot_reopen_finished_session_or_overwrite_result(qtbot, tmp_path):
+    window = MainWindow(QSettings(str(tmp_path / "finish-order.ini"), QSettings.Format.IniFormat))
+    qtbot.addWidget(window)
+    session = LichessGameSession("finish-order", GameRepository(tmp_path / "finish-order.sqlite3"))
+    session.color = chess.WHITE
+    session.apply_event({"type": "gameFull", "initialFen": "startpos",
+                         "state": {"moves": "e2e4", "status": "started"}})
+    select_online(window, session)
+    window._lichess_event({"type": "gameFinish", "game": {
+        "gameId": session.game_id, "status": {"name": "mate"}, "winner": "white"
+    }})
+    saved_before = session.repository.get_game(session.game_id)
+    window._lichess_game_event(session.game_id, {
+        "type": "gameState", "moves": "e2e4 e7e5", "status": "started"
+    })
+    saved_after = session.repository.get_game(session.game_id)
+    assert window._screen_mode == "result"
+    assert session.status == "mate"
+    assert session.moves == "e2e4"
+    assert saved_after["status"] == saved_before["status"] == "mate"
+    assert saved_after["moves"] == saved_before["moves"] == "e2e4"
+
+
+def test_game_finished_while_home_updates_resume_action_without_switching_screen(qtbot, tmp_path):
+    window = MainWindow(QSettings(str(tmp_path / "home-finish.ini"), QSettings.Format.IniFormat))
+    qtbot.addWidget(window)
+    window.show()
+    session = LichessGameSession("home-finish", GameRepository(tmp_path / "home-finish.sqlite3"))
+    session.color = chess.WHITE
+    session.apply_event({"type": "gameFull", "initialFen": "startpos",
+                         "state": {"moves": "e2e4", "status": "started"}})
+    select_online(window, session)
+    window.show_home()
+    assert window.resume_game_button.isVisible()
+    window._lichess_event({"type": "gameFinish", "game": {
+        "gameId": session.game_id, "status": {"name": "resign"}, "winner": "black"
+    }})
+    assert window.screen_stack.currentWidget() is window.home_page
+    assert window._screen_mode == "home"
+    assert session.status == "resign"
+    assert not window.resume_game_button.isVisible()
+
+
+def test_game_finish_for_selected_review_does_not_replace_review(qtbot, tmp_path):
+    window = MainWindow(QSettings(str(tmp_path / "review-not-stolen.ini"), QSettings.Format.IniFormat))
+    qtbot.addWidget(window)
+    live = LichessGameSession("review-id", GameRepository(tmp_path / "review-not-stolen.sqlite3"))
+    live.color = chess.WHITE
+    live.apply_event({"type": "gameFull", "initialFen": "startpos",
+                      "state": {"moves": "e2e4", "status": "started"}})
+    window.online_sessions[live.game_id] = live
+    saved = {"game_id": live.game_id, "initial_fen": "startpos", "moves": "d2d4",
+             "color": "black", "opponent": "Archive", "status": "mate",
+             "winner": "black", "clock": "-"}
+    window._open_saved_game(saved)
+    review = window.online_session
+    window._lichess_game_event(live.game_id, {
+        "type": "gameState", "moves": "e2e4 e7e5", "status": "started"
+    })
+    assert window._screen_mode == "review"
+    assert window.online_session is review
+    assert window.online_session.moves == "d2d4"
+    assert live.moves == "e2e4 e7e5"
+
+
+def test_finish_before_final_state_keeps_result_screen_then_updates_saved_pgn(qtbot, tmp_path, monkeypatch):
+    window = MainWindow(QSettings(str(tmp_path / "finish-late-ply.ini"), QSettings.Format.IniFormat))
+    qtbot.addWidget(window)
+    session = LichessGameSession("finish-late-ply", window.game_repository)
+    session.color = chess.WHITE
+    session.apply_event({"type": "gameFull", "initialFen": "startpos",
+                         "state": {"moves": "f2f3 e7e5 g2g4", "status": "started"}})
+    window.lichess.start_game = lambda game_id: None
+    window.lichess.mark_game_finished = lambda game_id: None
+    select_online(window, session)
+    window._lichess_event({"type": "gameFinish", "game": {
+        "gameId": session.game_id, "status": {"name": "mate"}, "winner": "black"
+    }})
+    assert window._screen_mode == "result"
+    assert session.final_sync_pending
+    assert "ожидаем подтверждённую финальную историю" in window.result_saved_label.text()
+
+    window._lichess_game_event(session.game_id, {
+        "type": "gameState", "moves": "f2f3 e7e5 g2g4 d8h4", "status": "mate", "winner": "black"
+    })
+    assert window._screen_mode == "result"
+    assert window.online_session is session
+    assert not session.final_sync_pending
+    assert "Партия сохранена локально" in window.result_saved_label.text()
+    assert "Qh4#" in session.repository.export_pgn(session.game_id)
+
+
+def test_authentication_resumes_pending_final_sync_without_screen_takeover(qtbot, tmp_path, monkeypatch):
+    window = MainWindow(QSettings(str(tmp_path / "resume-final-sync.ini"), QSettings.Format.IniFormat))
+    qtbot.addWidget(window)
+    session = LichessGameSession("resume-final", window.game_repository)
+    session.color = chess.BLACK
+    session.apply_event({"type": "gameFull", "initialFen": "startpos",
+                         "state": {"moves": "e2e4", "status": "started"}})
+    session.finish("resign", "white")
+    started = []
+    marked = []
+    monkeypatch.setattr(window.lichess, "start_game", lambda game_id: started.append(game_id))
+    monkeypatch.setattr(window.lichess, "mark_game_finished", lambda game_id: marked.append(game_id))
+
+    window._lichess_authenticated("Owner")
+
+    assert "resume-final" in started
+    assert "resume-final" in marked
+    assert window._screen_mode == "home"
+    assert window.online_sessions["resume-final"].final_sync_pending
+
+
+def test_takeback_button_is_clear_for_ai_and_sends_one_yes_request(qtbot, tmp_path, monkeypatch):
+    window = MainWindow(QSettings(str(tmp_path / "ai-takeback.ini"), QSettings.Format.IniFormat))
+    qtbot.addWidget(window)
+    session = LichessGameSession("ai-takeback", window.game_repository)
+    session.opponent = "Lichess AI level 4"
+    session.color = chess.WHITE
+    session.apply_event({"type": "gameFull", "initialFen": "startpos",
+                         "state": {"moves": "e2e4 e7e5", "status": "started"}})
+    select_online(window, session)
+    requests = []
+    monkeypatch.setattr(window.lichess, "takeback", lambda *args: requests.append(args))
+    window.refresh()
+    assert window.takeback_button.text() == "Вернуть ход"
+    assert "Lichess AI" in window.takeback_button.toolTip()
+
+    window.request_takeback()
+
+    assert len(requests) == 1
+    assert requests[0][0:2] == (session.game_id, "offer")
+    assert session.moves == "e2e4 e7e5"  # request never rewinds local server state
+    assert session.takeback_requested_by_me
+    window._lichess_takeback_completed(session.game_id, requests[0][2], 0)
+    assert "Lichess AI" in window.game_status.text()
+
+
+@pytest.mark.parametrize(
+    ("status", "expected"),
+    [
+        (400, "отклонил запрос возврата хода (400)"),
+        (429, "ограничил запросы (429)"),
+    ],
+)
+def test_ai_takeback_errors_never_rewind_server_position(qtbot, tmp_path, monkeypatch, status, expected):
+    window = MainWindow(QSettings(str(tmp_path / f"ai-takeback-{status}.ini"), QSettings.Format.IniFormat))
+    qtbot.addWidget(window)
+    session = LichessGameSession(f"ai-takeback-{status}", window.game_repository)
+    session.opponent = "Lichess AI level 4"
+    session.color = chess.WHITE
+    session.apply_event({"type": "gameFull", "initialFen": "startpos",
+                         "state": {"moves": "e2e4 e7e5", "status": "started"}})
+    select_online(window, session)
+    request_ids = []
+    monkeypatch.setattr(window.lichess, "takeback", lambda *args: request_ids.append(args[2]))
+
+    window.request_takeback()
+    assert len(request_ids) == 1
+    window._lichess_takeback_completed(session.game_id, request_ids[0], status)
+
+    assert session.moves == "e2e4 e7e5"
+    assert expected in window.game_status.text()
+
+
+def test_human_takeback_button_remains_an_offer_and_429_is_explicit(qtbot, tmp_path, monkeypatch):
+    window = MainWindow(QSettings(str(tmp_path / "human-takeback.ini"), QSettings.Format.IniFormat))
+    qtbot.addWidget(window)
+    session = LichessGameSession("human-takeback", window.game_repository)
+    session.opponent = "Friend"
+    session.color = chess.WHITE
+    session.apply_event({"type": "gameFull", "initialFen": "startpos",
+                         "state": {"moves": "e2e4", "status": "started"}})
+    select_online(window, session)
+    window.refresh()
+    assert window.takeback_button.text() == "Предложить вернуть ход"
+    monkeypatch.setattr(window.lichess, "takeback", lambda *args: None)
+    window.request_takeback()
+    window._lichess_takeback_completed(session.game_id, session.takeback_request_id, 429)
+    assert "429" in window.game_status.text()
+    assert session.moves == "e2e4"
+
+
+def test_cancel_premove_does_not_undo_a_move_already_submitted_to_lichess(qtbot, tmp_path):
+    window = MainWindow(QSettings(str(tmp_path / "sent-premove.ini"), QSettings.Format.IniFormat))
+    qtbot.addWidget(window)
+    session = LichessGameSession("sent-premove", window.game_repository)
+    session.color = chess.WHITE
+    session.apply_event({"type": "gameFull", "initialFen": "startpos",
+                         "state": {"moves": "e2e4", "status": "started"}})
+    assert session.queue_premove(chess.Move.from_uci("g1f3"))
+    session.apply_event({"type": "gameState", "moves": "e2e4 e7e5", "status": "started"})
+    submitted = session.take_ready_premove()
+    assert submitted == chess.Move.from_uci("g1f3")
+    assert session.begin_submission(submitted)
+    sent_request_id = session.pending_request_id
+    window.online_session = session
+
+    window.cancel_premove()
+
+    assert session.pending_uci == "g1f3"
+    assert session.pending_request_id == sent_request_id
+
+
+def test_offline_undo_button_is_separate_from_premove_cancel(qtbot, tmp_path):
+    window = MainWindow(QSettings(str(tmp_path / "offline-undo.ini"), QSettings.Format.IniFormat))
+    qtbot.addWidget(window)
+    window.show()
+    window.start_local_game()
+    assert window.controller.apply_move_intent(chess.Move.from_uci("e2e4"))
+    window.refresh()
+    assert window.undo_local_button.isVisible()
+    assert window.undo_local_button.text() == "Отменить последний ход"
+
+    window.undo_local_button.click()
+
+    assert window.controller.ply == 0
+    assert "отменён" in window.game_status.text()
+
+
+def test_premove_setting_is_persisted_and_disabling_clears_queued_move(qtbot, tmp_path):
+    settings = QSettings(str(tmp_path / "premove-setting.ini"), QSettings.Format.IniFormat)
+    dialog = SettingsDialog(settings)
+    assert dialog.allow_premoves.isChecked()
+    dialog.allow_premoves.setChecked(False)
+    dialog.save(settings)
+    assert not settings.value("allow_premoves", True, type=bool)
+
+    window = MainWindow(settings)
+    qtbot.addWidget(window)
+    window.start_local_game()
+    assert window.controller.apply_move_intent(chess.Move.from_uci("e2e4"))
+    assert window.controller.queue_premove(chess.Move.from_uci("g1f3"))
+    window.board.set_premove(chess.Move.from_uci("g1f3"), chess.WHITE)
+    window.refresh()
+    assert window.controller.premove is None
+    assert window.board._queued_premove is None
+
+
+def test_online_history_refresh_is_incremental_and_handles_takeback(qtbot, tmp_path):
+    window = MainWindow(QSettings(str(tmp_path / "incremental-history.ini"), QSettings.Format.IniFormat))
+    qtbot.addWidget(window)
+    session = LichessGameSession("incremental-history", window.game_repository)
+    line = "e2e4 e7e5 g1f3 b8c6 f1b5"
+    session.apply_event({"type": "gameFull", "initialFen": "startpos",
+                         "state": {"moves": line, "status": "started"}})
+    select_online(window, session)
+    window.refresh()
+    removed = []
+    window.moves.model().rowsRemoved.connect(lambda *args: removed.append(args))
+
+    window._lichess_game_event(session.game_id, {
+        "type": "gameState", "moves": line, "status": "started", "wtime": 1000, "btime": 1000
+    })
+    assert not removed
+    assert window.moves.count() == 5
+
+    window._lichess_game_event(session.game_id, {
+        "type": "gameState", "moves": line + " a7a6", "status": "started"
+    })
+    assert not removed
+    assert window.moves.count() == 6
+
+    window._lichess_game_event(session.game_id, {
+        "type": "gameFull", "initialFen": "startpos",
+        "state": {"moves": "e2e4 e7e5 g1f3 b8c6", "status": "started"}
+    })
+    assert removed
+    assert window.moves.count() == 4
+
+
+def test_fifty_clock_events_on_200_ply_history_keep_history_rows_and_refresh_under_budget(qtbot, tmp_path):
+    window = MainWindow(QSettings(str(tmp_path / "long-history-refresh.ini"), QSettings.Format.IniFormat))
+    qtbot.addWidget(window)
+    line = " ".join(["g1f3", "g8f6", "f3g1", "f6g8"] * 50)
+    session = LichessGameSession("long-history-refresh", window.game_repository)
+    session.apply_event({"type": "gameFull", "initialFen": "startpos",
+                         "state": {"moves": line, "status": "started"}})
+    select_online(window, session)
+    window.refresh()
+    removed = []
+    window.moves.model().rowsRemoved.connect(lambda *args: removed.append(args))
+    started = time.perf_counter()
+    for tick in range(50):
+        window._lichess_game_event(session.game_id, {
+            "type": "gameState", "moves": line, "status": "started",
+            "wtime": 200_000 - tick, "btime": 200_000 - tick,
+        })
+    elapsed = time.perf_counter() - started
+    assert not removed
+    assert window.moves.count() == 200
+    assert elapsed < 3.0

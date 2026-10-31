@@ -101,3 +101,19 @@ def test_new_game_clears_moves_history_and_premove() -> None:
     assert game.premove is None
     assert game.viewing_live_position
     assert game.board == chess.Board()
+
+
+def test_local_undo_removes_one_confirmed_ply_and_clears_queued_premove() -> None:
+    game = GameController(chess.WHITE)
+    assert game.apply_move_intent(chess.Move.from_uci("e2e4"))
+    assert game.apply_move_intent(chess.Move.from_uci("e7e5"))
+    game.premove = chess.Move.from_uci("g1f3")
+
+    assert game.undo_last_move()
+    assert game.ply == 1
+    assert game.board.peek() == chess.Move.from_uci("e2e4")
+    assert game.premove is None
+    assert game.viewing_live_position
+    assert game.undo_last_move()
+    assert game.ply == 0
+    assert not game.undo_last_move()

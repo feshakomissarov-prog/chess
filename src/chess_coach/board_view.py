@@ -8,6 +8,7 @@ from typing import Optional
 import chess
 from chess_widgets import BoardWidget
 from PySide6.QtCore import QPointF, Qt, Signal
+from PySide6.QtGui import QGuiApplication
 from PySide6.QtGui import QColor, QFocusEvent, QMouseEvent, QPainter, QPen, QPolygonF
 from PySide6.QtWidgets import QInputDialog
 
@@ -30,6 +31,7 @@ class BoardView(BoardWidget):
         self._show_last_move = True
         self._annotations_enabled = True
         self._interaction_enabled = True
+        self._premove_allowed = True
         self._annotation_arrows: set[tuple[int, int]] = set()
         self._annotation_squares: set[int] = set()
         self._right_start: Optional[int] = None
@@ -41,37 +43,64 @@ class BoardView(BoardWidget):
         self._premove_selected: Optional[int] = None
         self._premove_drag_start: Optional[int] = None
         self._premove_drag_active = False
+        self._premove_dragging = False
+        self._premove_press_pos: Optional[QPointF] = None
+        self._premove_target: Optional[int] = None
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
 
     def set_position(self, board: chess.Board) -> None:
         """Replace render snapshot after the controller accepts an event."""
+        # chess-widgets resets selection and renderer state on set_board(). Keep
+        # the existing widget board for clock/status-only refreshes.
+        unchanged = (board.fen() == self._board.fen()
+                     and board.move_stack == self._board.move_stack
+                     and board.chess960 == self._board.chess960)
+        if unchanged:
+            return
+        self._cancel_premove_gesture(clear_selection=True)
         self._queued_premove = None
-        self._premove_selected = None
         super().set_board(board.copy(stack=True))
 
     def set_premove(self, move: Optional[chess.Move], color: chess.Color) -> None:
+        if self._queued_premove == move and self._premove_color == color:
+            return
         self._queued_premove = move
         self._premove_color = color
-        self._premove_selected = None
         self.update()
 
     def set_interaction_enabled(self, enabled: bool) -> None:
         self._interaction_enabled = enabled
         if not enabled:
             self._clear_selection()
+            self._cancel_premove_gesture(clear_selection=True)
 
     def set_show_legal_moves(self, enabled: bool) -> None:
+        if self._show_legal_moves == enabled:
+            return
         self._show_legal_moves = enabled
         self.update()
 
     def set_show_last_move(self, enabled: bool) -> None:
+        if self._show_last_move == enabled:
+            return
         self._show_last_move = enabled
         self.update()
 
     def set_annotations_enabled(self, enabled: bool) -> None:
+        if self._annotations_enabled == enabled:
+            return
         self._annotations_enabled = enabled
         if not enabled:
             self.clear_annotations()
+        self.update()
+
+    def set_premove_allowed(self, enabled: bool) -> None:
+        if self._premove_allowed == enabled:
+            return
+        self._premove_allowed = enabled
+        if not enabled:
+            self._cancel_premove_gesture(clear_selection=True)
+            self._queued_premove = None
         self.update()
 
     def clear_annotations(self) -> None:
@@ -153,6 +182,11 @@ class BoardView(BoardWidget):
                 QColor(75, 95, 165, 100),
                 self._flipped,
             )
+        if self._premove_dragging and self._premove_target is not None:
+            self._renderer.highlight_square(
+                painter, self._get_board_rect(), self._premove_target,
+                QColor(60, 140, 220, 115), self._flipped,
+            )
 
     def mousePressEvent(self, event: QMouseEvent) -> None:  # noqa: N802 - Qt API
         if event.button() == Qt.MouseButton.RightButton:
@@ -181,11 +215,19 @@ class BoardView(BoardWidget):
             self._right_dragged = self._right_end != self._right_start
             self.update()
             return
-        if self._premove_drag_active:
-            self._drag_pos = event.position()
-            self._premove_drag_active = True
-            self.update()
-            return
+        if self._premove_drag_active and self._premove_press_pos is not None:
+            dx = event.position().x() - self._premove_press_pos.x()
+            dy = event.position().y() - self._premove_press_pos.y()
+            if (not self._premove_dragging
+                    and dx * dx + dy * dy >= QGuiApplication.styleHints().startDragDistance() ** 2):
+                self._premove_dragging = True
+                self._is_dragging = True
+                self._dragged_square = self._premove_drag_start
+            if self._premove_dragging:
+                self._drag_pos = event.position()
+                self._premove_target = self._pos_to_square(event.position())
+                self.update()
+                return
         super().mouseMoveEvent(event)
 
     def mouseReleaseEvent(self, event: QMouseEvent) -> None:  # noqa: N802 - Qt API
@@ -216,13 +258,16 @@ class BoardView(BoardWidget):
         if self._premove_drag_active:
             start = self._premove_drag_start
             end = self._pos_to_square(event.position())
-            self._premove_drag_active = False
-            self._premove_drag_start = None
-            self._dragged_square = None
-            self.unsetCursor()
-            if start is not None and end is not None and start != end:
+            dragged = self._premove_dragging
+            self._cancel_premove_gesture(clear_selection=dragged)
+            if start is not None and end is not None and end != start:
                 self._emit_premove(start, end)
+            elif dragged:
+                self.update()
+            elif end is not None:
+                self._finish_premove_click(event.position())
             else:
+                self._premove_selected = None
                 self.update()
             return
         if self._is_premove_turn():
@@ -238,10 +283,7 @@ class BoardView(BoardWidget):
         if event.key() == Qt.Key.Key_Escape:
             self._clear_selection()
             self._queued_premove = None
-            self._premove_selected = None
-            self._premove_drag_active = False
-            self._premove_drag_start = None
-            self.unsetCursor()
+            self._cancel_premove_gesture(clear_selection=True)
             self.cancel_premove_requested.emit()
             self.update()
             event.accept()
@@ -250,55 +292,80 @@ class BoardView(BoardWidget):
 
     def focusOutEvent(self, event: QFocusEvent) -> None:  # noqa: N802 - Qt API
         self._clear_selection()
-        self._premove_selected = None
-        self._premove_drag_active = False
-        self._premove_drag_start = None
-        self.unsetCursor()
+        self._cancel_premove_gesture(clear_selection=True)
         super().focusOutEvent(event)
 
     def _is_premove_turn(self) -> bool:
-        return self._board.turn != self._premove_color and not self._board.is_game_over()
+        return (self._premove_allowed and self._board.turn != self._premove_color
+                and not self._board.is_game_over())
 
     def _start_premove_gesture(self, pos: QPointF) -> None:
         square = self._pos_to_square(pos)
         piece = self._board.piece_at(square) if square is not None else None
-        if piece is not None and piece.color == self._premove_color:
+        selected = self._premove_selected
+        if (piece is not None and piece.color == self._premove_color
+                and square is not None and square != selected):
             self._premove_selected = square
             self._premove_drag_start = square
-            self._dragged_square = square
-            self._drag_pos = pos
-            self._premove_drag_active = True
-            self.setCursor(Qt.CursorShape.BlankCursor)
-            self.update()
-        elif self._premove_selected is not None and square is not None:
-            self._emit_premove(self._premove_selected, square)
+        elif selected is not None and square is not None and square != selected:
+            self._premove_drag_start = selected
+        elif piece is not None and piece.color == self._premove_color:
+            self._premove_selected = square
+            self._premove_drag_start = square
         else:
-            self._premove_selected = None
-            self.update()
+            self._premove_drag_start = selected
+        if self._premove_drag_start is not None:
+            self._premove_press_pos = pos
+            self._premove_target = square
+            self._premove_drag_active = True
+        self.update()
 
     def _finish_premove_click(self, pos: QPointF) -> None:
         square = self._pos_to_square(pos)
         start = self._premove_selected
-        self.unsetCursor()
-        self._dragged_square = None
         if start is not None and square is not None and square != start:
             self._emit_premove(start, square)
-        else:
-            self._premove_drag_active = False
+        elif square is None:
+            self._premove_selected = None
             self.update()
 
     def _emit_premove(self, start: int, end: int) -> None:
         self._premove_drag_active = False
+        self._premove_dragging = False
+        self._premove_drag_start = None
         self._premove_selected = None
+        self._is_dragging = False
         self._dragged_square = None
-        self.unsetCursor()
+        self._premove_press_pos = None
+        self._premove_target = None
         piece = self._board.piece_at(start)
         promotion = None
         if piece and piece.piece_type == chess.PAWN:
             target_rank = chess.square_rank(end)
             if target_rank in (0, 7):
-                promotion = chess.QUEEN
+                labels = ["Ферзь", "Ладья", "Слон", "Конь"]
+                choices = [chess.QUEEN, chess.ROOK, chess.BISHOP, chess.KNIGHT]
+                selected, accepted = QInputDialog.getItem(
+                    self, "Превращение предхода", "Выберите фигуру:", labels, 0, False
+                )
+                if not accepted:
+                    self.update()
+                    return
+                promotion = choices[labels.index(selected)]
         self.premove_intent.emit(chess.Move(start, end, promotion=promotion))
+        self.update()
+
+    def _cancel_premove_gesture(self, clear_selection: bool) -> None:
+        self._premove_drag_active = False
+        self._premove_dragging = False
+        self._premove_drag_start = None
+        self._premove_press_pos = None
+        self._premove_target = None
+        self._is_dragging = False
+        self._dragged_square = None
+        self.unsetCursor()
+        if clear_selection:
+            self._premove_selected = None
         self.update()
 
     def _square_center(self, square: int) -> QPointF:

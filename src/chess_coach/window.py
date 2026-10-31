@@ -3,10 +3,14 @@
 from __future__ import annotations
 
 import chess
-from PySide6.QtCore import QSettings, Qt
+import time
+import os
+from pathlib import Path
+from PySide6.QtCore import QSettings, Qt, QStandardPaths, QTimer
 from PySide6.QtGui import QKeySequence, QShortcut
 from PySide6.QtWidgets import (
     QCheckBox,
+    QApplication,
     QComboBox,
     QDialog,
     QDialogButtonBox,
@@ -17,14 +21,57 @@ from PySide6.QtWidgets import (
     QListWidgetItem,
     QMainWindow,
     QMessageBox,
+    QInputDialog,
+    QFileDialog,
+    QLineEdit,
     QPushButton,
     QSplitter,
+    QStackedWidget,
     QVBoxLayout,
     QWidget,
 )
 
 from .board_view import BoardView
 from .controller import GameController
+from .lichess.auth import CredentialStorageError, WindowsCredentialStore
+from .lichess.repository import GameRepository
+from .lichess.service import LichessService
+from .lichess.session import LichessGameSession
+
+
+class OnlineGameDialog(QDialog):
+    def __init__(self, title: str, include_level: bool = False, parent=None) -> None:
+        super().__init__(parent)
+        self.setWindowTitle(title)
+        form = QVBoxLayout(self)
+        self.color = QComboBox()
+        self.color.addItem("Случайный", "random")
+        self.color.addItem("Белыми", "white")
+        self.color.addItem("Чёрными", "black")
+        form.addWidget(QLabel("Ваш цвет"))
+        form.addWidget(self.color)
+        self.clock = QComboBox()
+        self.clock.addItem("Без часов", (None, 0))
+        self.clock.addItem("3 + 2", (180, 2))
+        self.clock.addItem("10 + 0", (600, 0))
+        self.clock.addItem("15 + 10", (900, 10))
+        form.addWidget(QLabel("Контроль времени"))
+        form.addWidget(self.clock)
+        self.rated = QCheckBox("Рейтинговая партия (изменит рейтинг)")
+        if not include_level:
+            form.addWidget(self.rated)
+        self.level = QComboBox()
+        for level in range(1, 9):
+            self.level.addItem(f"Lichess AI · уровень {level}", level)
+        if include_level:
+            form.addWidget(self.level)
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        form.addWidget(buttons)
+
+    def selection(self):
+        return self.color.currentData(), *self.clock.currentData(), self.level.currentData(), self.rated.isChecked()
 
 
 class SettingsDialog(QDialog):
@@ -52,6 +99,9 @@ class SettingsDialog(QDialog):
         self.annotations = QCheckBox("Включить ручные стрелки и выделения")
         self.annotations.setChecked(settings.value("annotations_enabled", True, type=bool))
         layout.addWidget(self.annotations)
+        self.allow_premoves = QCheckBox("Разрешить предходы")
+        self.allow_premoves.setChecked(settings.value("allow_premoves", True, type=bool))
+        layout.addWidget(self.allow_premoves)
         buttons = QDialogButtonBox(
             QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
         )
@@ -65,11 +115,12 @@ class SettingsDialog(QDialog):
         settings.setValue("show_legal_moves", self.legal.isChecked())
         settings.setValue("show_last_move", self.last.isChecked())
         settings.setValue("annotations_enabled", self.annotations.isChecked())
+        settings.setValue("allow_premoves", self.allow_premoves.isChecked())
         settings.sync()
 
 
 class MainWindow(QMainWindow):
-    def __init__(self, settings: QSettings | None = None) -> None:
+    def __init__(self, settings: QSettings | None = None, *, asynchronous_storage: bool = False) -> None:
         super().__init__()
         self.settings = (
             settings
@@ -78,6 +129,24 @@ class MainWindow(QMainWindow):
         )
         color = self.settings.value("player_color", chess.WHITE, type=int)
         self.controller = GameController(chess.Color(color))
+        data_root = Path(QStandardPaths.writableLocation(QStandardPaths.StandardLocation.AppDataLocation))
+        data_root.mkdir(parents=True, exist_ok=True)
+        self.game_repository = GameRepository(data_root / "games.sqlite3", async_writes=asynchronous_storage)
+        self._online_history_game_id: str | None = None
+        self._online_history_moves: tuple[chess.Move, ...] = ()
+        self._online_history_position: chess.Board | None = None
+        try:
+            self.lichess = LichessService(token_store=WindowsCredentialStore(), parent=self)
+        except CredentialStorageError:
+            self.lichess = None
+        self.online_sessions: dict[str, LichessGameSession] = {}
+        self.online_session: LichessGameSession | None = None
+        self.online_view_ply: int | None = None
+        self._screen_mode = "home"
+        self._awaiting_game_start = False
+        self._selected_live_game_id: str | None = None
+        self._review_session: LichessGameSession | None = None
+        self._lichess_connected = False
         self.setWindowTitle("Chess Coach")
         self.setMinimumSize(1040, 680)
         self.resize(1360, 860)
@@ -93,8 +162,25 @@ class MainWindow(QMainWindow):
             " border-radius: 6px; padding: 5px; }"
         )
         self._build_ui()
+        self.show_home()
+        self.clock_timer = QTimer(self)
+        self.clock_timer.timeout.connect(self._update_clock)
+        self.clock_timer.start(250)
         self.escape_shortcut = QShortcut(QKeySequence(Qt.Key.Key_Escape), self)
         self.escape_shortcut.activated.connect(self.cancel_premove)
+        if self.lichess:
+            self.lichess.status_changed.connect(self._lichess_status)
+            self.lichess.authenticated.connect(self._lichess_authenticated)
+            self.lichess.error.connect(self._lichess_error)
+            self.lichess.move_failed.connect(self._lichess_move_failed)
+            self.lichess.takeback_action_completed.connect(self._lichess_takeback_completed)
+            self.lichess.event_received.connect(self._lichess_event)
+            self.lichess.game_event_received.connect(self._lichess_game_event)
+            self.lichess.challenge_ready.connect(self._challenge_ready)
+            self.lichess.challenge_status_changed.connect(self._challenge_status)
+            self.lichess.invitation_cancelled.connect(self._invitation_cancelled)
+            if os.environ.get("CHESS_COACH_OFFLINE_TEST") != "1":
+                self.lichess.restore()
         self.refresh()
 
     def _build_ui(self) -> None:
@@ -109,18 +195,36 @@ class MainWindow(QMainWindow):
         header.addSpacing(24)
         for label in ("Играть", "Мои партии", "Анализ", "Тренировки"):
             button = QPushButton(label)
-            button.setEnabled(label == "Играть")
-            if label != "Играть":
+            if label == "Играть":
+                button.clicked.connect(self.show_home)
+            elif label == "Мои партии":
+                button.clicked.connect(self.show_saved_games)
+            else:
+                button.setEnabled(False)
                 button.setToolTip("Будет добавлено позже")
             header.addWidget(button)
         header.addStretch(1)
-        self.connection = QLabel("●  Не подключено (будет добавлено позже)")
+        self.connection = QLabel("●  Не подключено")
         self.connection.setStyleSheet("color: #77766f;")
         header.addWidget(self.connection)
+        self.connect_button = QPushButton("Подключить Lichess")
+        self.connect_button.clicked.connect(self.connect_lichess)
+        header.addWidget(self.connect_button)
+        self.disconnect_button = QPushButton("Отключить")
+        self.disconnect_button.setEnabled(False)
+        self.disconnect_button.clicked.connect(self.disconnect_lichess)
+        header.addWidget(self.disconnect_button)
         self.settings_button = QPushButton("Настройки")
         self.settings_button.clicked.connect(self.open_settings)
         header.addWidget(self.settings_button)
         outer.addLayout(header)
+
+        self.screen_title = QLabel("Главная")
+        self.screen_title.setStyleSheet("font-size: 18px; font-weight: 700; padding: 2px 4px;")
+        outer.addWidget(self.screen_title)
+        self.screen_stack = QStackedWidget()
+        self.home_page = self._build_home_page()
+        self.screen_stack.addWidget(self.home_page)
 
         splitter = QSplitter(Qt.Orientation.Horizontal)
         splitter.setChildrenCollapsible(False)
@@ -128,18 +232,19 @@ class MainWindow(QMainWindow):
         board_layout = QVBoxLayout(board_column)
         board_layout.setContentsMargins(0, 0, 8, 0)
         board_layout.setSpacing(8)
-        opponent = QLabel("Соперник  ·  локальная партия")
-        opponent.setStyleSheet("font-size: 15px; font-weight: 600; padding: 2px 4px;")
-        board_layout.addWidget(opponent)
+        self.opponent_label = QLabel("Соперник  ·  локальная партия")
+        self.opponent_label.setStyleSheet("font-size: 15px; font-weight: 600; padding: 2px 4px;")
+        board_layout.addWidget(self.opponent_label)
         self.board = BoardView(self.controller.board)
+        self.board.setMinimumSize(440, 440)
         self.board.set_premove(self.controller.premove, self.controller.player_color)
         self.board.move_intent.connect(self.on_move_intent)
         self.board.premove_intent.connect(self.on_premove_intent)
         self.board.cancel_premove_requested.connect(self.cancel_premove)
         board_layout.addWidget(self.board, 1, Qt.AlignmentFlag.AlignCenter)
-        you = QLabel("Вы  ·  офлайн")
-        you.setStyleSheet("font-size: 15px; font-weight: 600; padding: 2px 4px;")
-        board_layout.addWidget(you)
+        self.you_label = QLabel("Вы  ·  офлайн")
+        self.you_label.setStyleSheet("font-size: 15px; font-weight: 600; padding: 2px 4px;")
+        board_layout.addWidget(self.you_label)
         splitter.addWidget(board_column)
 
         side = QWidget()
@@ -157,6 +262,57 @@ class MainWindow(QMainWindow):
         self.game_status.setStyleSheet("color: #77766f;")
         status_layout.addWidget(self.game_status)
         side_layout.addWidget(status_card)
+        self.clock_label = QLabel("Без часов")
+        self.clock_label.setStyleSheet("font-size: 18px; font-weight: 700;")
+        side_layout.addWidget(self.clock_label)
+        self.friend_link_button = QPushButton("С другом по ссылке")
+        self.friend_link_button.clicked.connect(self.open_friend_game)
+        self.username_button = QPushButton("Вызвать игрока Lichess")
+        self.username_button.clicked.connect(self.challenge_username)
+        self.ai_button = QPushButton("Играть против Lichess AI")
+        self.ai_button.clicked.connect(self.play_ai)
+        self.resign_button = QPushButton("Сдаться")
+        self.resign_button.clicked.connect(self.resign_online)
+        self.draw_button = QPushButton("Предложить ничью")
+        self.draw_button.clicked.connect(self.handle_draw)
+        self.decline_draw_button = QPushButton("Отклонить ничью")
+        self.decline_draw_button.clicked.connect(lambda: self.lichess.draw(self.online_session.game_id, False) if self.online_session else None)
+        self.decline_draw_button.setVisible(False)
+        self.takeback_button = QPushButton("Предложить вернуть ход")
+        self.takeback_button.setToolTip("Запросить возврат через Lichess и дождаться подтверждённой сервером позиции.")
+        self.takeback_button.clicked.connect(self.request_takeback)
+        self.accept_takeback_button = QPushButton("Принять возврат хода")
+        self.accept_takeback_button.clicked.connect(lambda: self.answer_takeback(True))
+        self.decline_takeback_button = QPushButton("Отклонить возврат хода")
+        self.decline_takeback_button.clicked.connect(lambda: self.answer_takeback(False))
+        self.accept_takeback_button.setVisible(False)
+        self.decline_takeback_button.setVisible(False)
+        self.claim_draw_button = QPushButton("Заявить ничью по правилу")
+        self.claim_draw_button.clicked.connect(lambda: self.lichess.claim_draw(self.online_session.game_id) if self.online_session else None)
+        self.leave_game_button = QPushButton("Закрыть просмотр партии")
+        self.leave_game_button.clicked.connect(self.leave_online_game)
+        for button in (self.friend_link_button, self.username_button, self.ai_button, self.resign_button, self.draw_button, self.decline_draw_button, self.takeback_button, self.accept_takeback_button, self.decline_takeback_button, self.claim_draw_button, self.leave_game_button):
+            button.setEnabled(False)
+            button.setVisible(False)
+            side_layout.addWidget(button)
+        self.undo_local_button = QPushButton("Отменить последний ход")
+        self.undo_local_button.setToolTip("Отменяет последний подтверждённый ход локальной партии. Для Lichess используется «Вернуть ход».")
+        self.undo_local_button.clicked.connect(self.undo_local_last_move)
+        self.undo_local_button.setVisible(False)
+        side_layout.addWidget(self.undo_local_button)
+        self.games_button = QPushButton("Завершённые партии")
+        self.games_button.clicked.connect(self.show_saved_games)
+        side_layout.addWidget(self.games_button)
+        self.cancel_challenge_button = QPushButton("Отменить ожидающий вызов")
+        self.cancel_challenge_button.clicked.connect(self.lichess.cancel_username_challenge if self.lichess else lambda: None)
+        self.cancel_challenge_button.setEnabled(False)
+        self.cancel_challenge_button.setVisible(False)
+        side_layout.addWidget(self.cancel_challenge_button)
+        self.cancel_invitation_button = QPushButton("Отменить приглашение по ссылке")
+        self.cancel_invitation_button.clicked.connect(self.cancel_friend_invitation)
+        self.cancel_invitation_button.setEnabled(False)
+        self.cancel_invitation_button.setVisible(False)
+        side_layout.addWidget(self.cancel_invitation_button)
 
         moves_title = QLabel("ХОДЫ")
         moves_title.setStyleSheet("font-size: 11px; font-weight: 700; color: #77766f;")
@@ -212,35 +368,87 @@ class MainWindow(QMainWindow):
         splitter.setStretchFactor(0, 13)
         splitter.setStretchFactor(1, 7)
         splitter.setSizes([850, 450])
-        outer.addWidget(splitter, 1)
+        self.game_page = splitter
+        self.screen_stack.addWidget(self.game_page)
+        self.result_page = self._build_result_page()
+        self.screen_stack.addWidget(self.result_page)
+        self.screen_stack.setCurrentWidget(self.home_page)
+        outer.addWidget(self.screen_stack, 1)
         self.setCentralWidget(root)
 
+    def _build_home_page(self) -> QWidget:
+        page = QWidget()
+        layout = QVBoxLayout(page)
+        layout.addWidget(QLabel("Создать или открыть партию"))
+        self.home_status = QLabel("Выберите режим игры. Анализ и тренировки появятся позже.")
+        self.home_status.setWordWrap(True)
+        layout.addWidget(self.home_status)
+        self.home_ai_button = QPushButton("Играть против Lichess AI")
+        self.home_ai_button.clicked.connect(self.play_ai)
+        self.home_friend_button = QPushButton("Играть с другом по ссылке")
+        self.home_friend_button.clicked.connect(self.open_friend_game)
+        self.home_username_button = QPushButton("Вызвать игрока Lichess")
+        self.home_username_button.clicked.connect(self.challenge_username)
+        self.home_local_button = QPushButton("Локальная доска")
+        self.home_local_button.clicked.connect(self.start_local_game)
+        self.home_games_button = QPushButton("Завершённые партии")
+        self.home_games_button.clicked.connect(self.show_saved_games)
+        self.home_settings_button = QPushButton("Настройки")
+        self.home_settings_button.clicked.connect(self.open_settings)
+        self.resume_game_button = QPushButton("Вернуться в текущую партию")
+        self.resume_game_button.clicked.connect(self.resume_current_game)
+        for button in (self.home_ai_button, self.home_friend_button,
+                       self.home_username_button, self.home_local_button,
+                       self.home_games_button, self.home_settings_button,
+                       self.resume_game_button):
+            layout.addWidget(button)
+        layout.addStretch(1)
+        return page
+
+    def _build_result_page(self) -> QWidget:
+        page = QWidget()
+        layout = QVBoxLayout(page)
+        self.result_summary = QLabel("Партия завершена")
+        self.result_summary.setWordWrap(True)
+        layout.addWidget(self.result_summary)
+        self.result_saved_label = QLabel()
+        layout.addWidget(self.result_saved_label)
+        self.result_review_button = QPushButton("Просмотреть партию")
+        self.result_review_button.clicked.connect(self.review_finished_game)
+        self.result_export_button = QPushButton("Экспорт PGN")
+        self.result_export_button.clicked.connect(self.export_current_pgn)
+        self.result_new_button = QPushButton("Новая партия")
+        self.result_new_button.clicked.connect(self.show_home)
+        self.result_home_button = QPushButton("Главная")
+        self.result_home_button.clicked.connect(self.show_home)
+        for button in (self.result_review_button, self.result_export_button,
+                       self.result_new_button, self.result_home_button):
+            layout.addWidget(button)
+        layout.addStretch(1)
+        return page
+
     def refresh(self, message: str | None = None) -> None:
+        if self.online_session is not None:
+            self.undo_local_button.setVisible(False)
+            self._refresh_online(message)
+            return
+        for button in (self.takeback_button, self.accept_takeback_button,
+                       self.decline_takeback_button):
+            button.setVisible(False)
         snapshot = self.controller.snapshot()
+        local_game_visible = self.screen_stack.currentWidget() is self.game_page
+        self.undo_local_button.setVisible(local_game_visible and self.controller.ply > 0)
+        self.undo_local_button.setEnabled(local_game_visible and self.controller.ply > 0)
         self.board.set_position(snapshot.board)
         self.board.set_interaction_enabled(snapshot.live)
-        self.board.set_premove(self.controller.premove, self.controller.player_color)
         self._apply_preferences()
-        self.moves.clear()
-        position = self.controller.board.root()
+        self.board.set_premove(self.controller.premove, self.controller.player_color)
         viewed_ply = (
             self.controller.ply
             if self.controller.view_ply is None
             else self.controller.view_ply
         )
-        viewed_item = None
-        for ply, move in enumerate(self.controller.board.move_stack, start=1):
-            number = (ply + 1) // 2
-            prefix = f"{number}. " if ply % 2 else f"{number}... "
-            item = QListWidgetItem(prefix + position.san(move))
-            item.setData(Qt.ItemDataRole.UserRole, ply)
-            self.moves.addItem(item)
-            position.push(move)
-            if ply == viewed_ply:
-                viewed_item = item
-        if viewed_item is not None:
-            self.moves.setCurrentItem(viewed_item)
-            self.moves.scrollToItem(viewed_item)
+        self._sync_online_history(self.controller.board, "__local__", viewed_ply)
         if self.controller.view_ply == 0:
             self.history_label.setText("Начальная позиция")
         elif not snapshot.live:
@@ -282,6 +490,111 @@ class MainWindow(QMainWindow):
         else:
             self.game_status.setText("Локальная тренировочная доска")
 
+    def show_home(self) -> None:
+        self._screen_mode = "home"
+        self.screen_title.setText("Главная")
+        self.screen_stack.setCurrentWidget(self.home_page)
+        active_id = self._selected_live_game_id
+        active = self.online_sessions.get(active_id) if active_id else None
+        if active and active.status in {"started", "playing"}:
+            self.resume_game_button.setVisible(True)
+            self.home_status.setText(f"Идёт партия против {active.opponent}. Её можно продолжить позже.")
+        else:
+            self.resume_game_button.setVisible(False)
+            self.home_status.setText("Выберите режим игры. Анализ и тренировки появятся позже.")
+        for button in (self.home_ai_button, self.home_friend_button, self.home_username_button):
+            button.setEnabled(self._lichess_connected)
+
+    def start_local_game(self) -> None:
+        self.online_session = None
+        self._review_session = None
+        self.controller.new_game()
+        self.board.clear_annotations()
+        self._screen_mode = "local"
+        self.screen_title.setText("Локальная партия")
+        self.screen_stack.setCurrentWidget(self.game_page)
+        self.refresh("Новая локальная партия.")
+
+    def resume_current_game(self) -> None:
+        game_id = self._selected_live_game_id
+        session = self.online_sessions.get(game_id) if game_id else None
+        if not session:
+            return
+        self.online_session = session
+        self._review_session = None
+        self.online_view_ply = None
+        self._screen_mode = "online"
+        self.screen_title.setText("Активная партия")
+        self.screen_stack.setCurrentWidget(self.game_page)
+        self.refresh("Возврат к текущей партии.")
+
+    def _show_result(self, session: LichessGameSession, saved: bool, detail: str | None = None) -> None:
+        self._screen_mode = "result"
+        self.screen_title.setText("Партия завершена")
+        outcome = _result_label(session.color, session.winner, session.status)
+        self.result_summary.setText(
+            f"{outcome}\nСоперник: {session.opponent}\nСтатус Lichess: {session.status}"
+        )
+        write_pending = self.game_repository.has_pending_write(session.game_id)
+        stored = (None if write_pending or session.final_sync_pending
+                  else self.game_repository.get_game(session.game_id))
+        if session.final_sync_pending:
+            saved = False
+            saved_label = "Результат получен; ожидаем подтверждённую финальную историю от Lichess."
+        elif write_pending:
+            saved = False
+            saved_label = "Финальная история подтверждена; сохраняем партию локально…"
+            QTimer.singleShot(80, lambda game_id=session.game_id: self._poll_result_write(game_id))
+        else:
+            saved = bool(saved and stored and stored["moves"] == session.moves
+                         and stored["status"] == session.status
+                         and not stored.get("final_sync_pending", 0))
+            saved_label = ("Партия сохранена локально." if saved else
+                           f"Не удалось подтвердить сохранение локальной партии: {detail or self.game_repository.write_error(session.game_id) or 'ошибка записи'}")
+        self.result_saved_label.setText(
+            saved_label
+        )
+        self.result_saved_label.setStyleSheet("color: #39704a;" if saved else "color: #9b3434;")
+        self.result_review_button.setEnabled(bool(session.moves))
+        self.result_export_button.setEnabled(
+            not session.final_sync_pending and not write_pending
+            and bool(self.game_repository.export_pgn(session.game_id))
+        )
+        self.screen_stack.setCurrentWidget(self.result_page)
+
+    def _poll_result_write(self, game_id: str) -> None:
+        session = self.online_sessions.get(game_id)
+        if (not session or session.final_sync_pending or self._screen_mode != "result"
+                or game_id != self._selected_live_game_id):
+            return
+        if self.game_repository.has_pending_write(game_id):
+            QTimer.singleShot(80, lambda: self._poll_result_write(game_id))
+            return
+        self._show_result(session, True)
+
+    def review_finished_game(self) -> None:
+        session = self.online_session
+        if not session or session.status in {"started", "playing", "created"}:
+            return
+        self._review_session = session
+        self._screen_mode = "review"
+        self.screen_title.setText("Просмотр завершённой партии")
+        self.online_view_ply = None
+        self.screen_stack.setCurrentWidget(self.game_page)
+        self.refresh("Просмотр сохранённой партии (только чтение).")
+
+    def export_current_pgn(self) -> None:
+        session = self.online_session
+        if not session:
+            return
+        pgn = self.game_repository.export_pgn(session.game_id)
+        if not pgn:
+            QMessageBox.information(self, "Экспорт PGN", "Для этой партии пока нет сохранённого PGN.")
+            return
+        path, _ = QFileDialog.getSaveFileName(self, "Экспорт PGN", f"{session.game_id}.pgn", "PGN (*.pgn)")
+        if path:
+            Path(path).write_text(pgn + "\n", encoding="utf-8")
+
     def _apply_preferences(self) -> None:
         self.board.set_flipped(self.settings.value("board_flipped", False, type=bool))
         self.board.set_show_legal_moves(self.settings.value("show_legal_moves", True, type=bool))
@@ -289,22 +602,56 @@ class MainWindow(QMainWindow):
         self.board.set_annotations_enabled(
             self.settings.value("annotations_enabled", True, type=bool)
         )
+        allow_premoves = self.settings.value("allow_premoves", True, type=bool)
+        self.board.set_premove_allowed(allow_premoves)
+        if not allow_premoves:
+            self.controller.cancel_premove()
+            if self.online_session:
+                self.online_session.premove = None
 
     def on_move_intent(self, move: chess.Move) -> None:
+        if self.online_session is not None:
+            session = self.online_session
+            if self.online_view_ply is not None or not session.begin_submission(move):
+                self.refresh("Ход недоступен: проверьте актуальную позицию.")
+                return
+            self.lichess.send_move(session.game_id, move.uci(), session.pending_request_id)
+            self.refresh(f"Отправляем ход {move.uci()}; ожидаем подтверждения Lichess.")
+            return
         if self.controller.apply_move_intent(move):
             self.refresh("Ход записан в локальную партию.")
         else:
             self.refresh("Ход не выполнен: позиция не изменилась.")
 
     def on_premove_intent(self, move: chess.Move) -> None:
+        if self.online_session is not None:
+            if self.online_session.queue_premove(move):
+                self.board.set_premove(move, self.online_session.color)
+                self.refresh("Предход записан и будет проверен после хода соперника.")
+            else:
+                self.refresh("Предход не принят в текущей позиции.")
+            return
         if self.controller.queue_premove(move):
             self.refresh("Предход поставлен. Он будет проверен после хода соперника.")
         else:
             self.refresh("Предход не принят в текущем состоянии.")
 
     def cancel_premove(self) -> None:
+        if self.online_session is not None:
+            self.online_session.premove = None
+            self.board.set_premove(None, self.online_session.color)
+            self.refresh("Предход отменён.")
+            return
         self.controller.cancel_premove()
         self.refresh("Предход отменён.")
+
+    def undo_local_last_move(self) -> None:
+        if self.online_session is not None:
+            return
+        if self.controller.undo_last_move():
+            self.refresh("Последний ход локальной партии отменён.")
+        else:
+            self.refresh("В локальной партии пока нет хода для отмены.")
 
     def apply_opponent_move(self) -> None:
         raw = self.opponent_move.currentData()
@@ -315,18 +662,39 @@ class MainWindow(QMainWindow):
         self.refresh(message)
 
     def on_move_selected(self, item: QListWidgetItem) -> None:
+        if self.online_session is not None:
+            ply = int(item.data(Qt.ItemDataRole.UserRole))
+            self.online_view_ply = None if ply >= len(self.online_session.board.move_stack) else ply
+            self.refresh()
+            return
         self.controller.go_to(int(item.data(Qt.ItemDataRole.UserRole)))
         self.refresh()
 
     def navigate_to(self, ply: int) -> None:
+        if self.online_session is not None:
+            self.online_view_ply = None if ply >= len(self.online_session.board.move_stack) else ply
+            self.refresh()
+            return
         self.controller.go_to(ply)
         self.refresh()
 
     def navigate_by(self, delta: int) -> None:
+        if self.online_session is not None:
+            maximum = len(self.online_session.board.move_stack)
+            current = maximum if self.online_view_ply is None else self.online_view_ply
+            self.online_view_ply = max(0, min(maximum, current + delta))
+            if self.online_view_ply == maximum:
+                self.online_view_ply = None
+            self.refresh()
+            return
         self.controller.step_view(delta)
         self.refresh()
 
     def navigate_live(self) -> None:
+        if self.online_session is not None:
+            self.online_view_ply = None
+            self.refresh()
+            return
         self.controller.go_live()
         self.refresh()
 
@@ -337,6 +705,12 @@ class MainWindow(QMainWindow):
         self.board.set_flipped(flipped)
 
     def new_game(self) -> None:
+        if self.online_session is not None:
+            QMessageBox.information(
+                self, "Онлайн-партия",
+                "Чтобы вернуться к локальной доске, дождитесь завершения текущей онлайн-партии.",
+            )
+            return
         if self.controller.ply:
             answer = QMessageBox.question(
                 self,
@@ -357,4 +731,629 @@ class MainWindow(QMainWindow):
             dialog.save(self.settings)
             new_color = chess.Color(int(self.settings.value("player_color", chess.WHITE)))
             self.controller.player_color = new_color
+            if not self.settings.value("allow_premoves", True, type=bool):
+                self.cancel_premove()
             self.refresh("Настройки сохранены.")
+
+    def connect_lichess(self) -> None:
+        if not self.lichess:
+            QMessageBox.warning(self, "Lichess", "Windows Credential Manager недоступен. Установите зависимости проекта.")
+            return
+        self.lichess.connect_account()
+
+    def disconnect_lichess(self) -> None:
+        if self.lichess:
+            self.lichess.disconnect_account()
+
+    def _lichess_status(self, status: str) -> None:
+        self.connection.setText("●  " + status)
+        connected = (status.startswith("Подключено") or status.startswith("Переподключение")
+                     or status.startswith("Ограничение Lichess"))
+        if status == "Не подключено":
+            self._lichess_connected = False
+            for button in (self.friend_link_button, self.username_button, self.ai_button):
+                button.setVisible(False)
+        self.connect_button.setEnabled(status in {"Не подключено", "Ошибка подключения"})
+        self.disconnect_button.setEnabled(connected)
+        for button in (self.friend_link_button, self.username_button, self.ai_button):
+            button.setEnabled(connected)
+        for button in (self.home_ai_button, self.home_friend_button, self.home_username_button):
+            button.setEnabled(connected)
+        if status.startswith("Ограничение Lichess"):
+            self.home_status.setText(status + ". Автоматические запросы приостановлены.")
+
+    def _lichess_authenticated(self, username: str) -> None:
+        self._lichess_connected = True
+        self.connection.setText(f"●  Подключено: {username}")
+        self.connect_button.setEnabled(False)
+        self.disconnect_button.setEnabled(True)
+        for button in (self.friend_link_button, self.username_button, self.ai_button):
+            button.setEnabled(True)
+            button.setVisible(self.online_session is None)
+        for button in (self.home_ai_button, self.home_friend_button, self.home_username_button):
+            button.setEnabled(True)
+        self._resume_pending_final_syncs()
+
+    def _resume_pending_final_syncs(self) -> None:
+        """Resume persisted terminal games without taking over the visible screen."""
+        for row in self.game_repository.list_pending_final_sync():
+            game_id = row["game_id"]
+            session = self.online_sessions.get(game_id)
+            if session is None:
+                session = LichessGameSession(game_id, self.game_repository)
+                session.initial_fen = row["initial_fen"]
+                session.moves = row["moves"]
+                session.color = chess.WHITE if row["color"] == "white" else chess.BLACK
+                session.opponent = row["opponent"]
+                session.rated = bool(row["rated"])
+                session.clock_control = row["clock"]
+                session.status = row["status"]
+                session.winner = row["winner"]
+                session.white_player = row["white_player"]
+                session.black_player = row["black_player"]
+                session.started_at = row["started_at"]
+                session.final_sync_pending = True
+                session._rebuild_board()
+                self.online_sessions[game_id] = session
+            self.lichess.mark_game_finished(game_id)
+            self.lichess.start_game(game_id)
+
+    def _lichess_error(self, message: str) -> None:
+        self._awaiting_game_start = False
+        self.cancel_challenge_button.setEnabled(False)
+        self.cancel_challenge_button.setVisible(False)
+        if getattr(self, "_open_challenge_id", None):
+            self.cancel_invitation_button.setEnabled(True)
+        self.game_status.setText(message)
+        QMessageBox.warning(self, "Lichess", message)
+        self.refresh(message)
+
+    def _lichess_move_failed(self, game_id: str, uci: str, request_id: str, status: int) -> None:
+        session = self.online_sessions.get(game_id)
+        definitive = status in {400, 401, 403, 404, 429}
+        if not session or session.pending_uci != uci or not session.fail_submission(
+                request_id, definitive=definitive):
+            return
+        message = {
+            400: "Lichess отклонил ход (400). Проверьте позицию и попробуйте снова.",
+            401: "Lichess отклонил ход (401). Переподключите аккаунт.",
+            403: "Lichess запретил ход (403). Проверьте состояние партии.",
+            404: "Партия больше не найдена.",
+            429: "Lichess временно ограничил запросы (429). Попробуйте позже.",
+        }.get(status, "Не удалось отправить ход; результат запроса неизвестен.")
+        if status not in {400, 401, 403, 404, 429}:
+            self.game_status.setText(f"Ход {uci}: {message}")
+            return
+        self.refresh(message)
+
+    def request_takeback(self) -> None:
+        self._start_takeback_action("offer")
+
+    def answer_takeback(self, accept: bool) -> None:
+        self._start_takeback_action("accept" if accept else "decline")
+
+    def _start_takeback_action(self, action: str) -> None:
+        session = self.online_session
+        if not session or not self.lichess:
+            return
+        request_id = session.begin_takeback_action(action)
+        if not request_id:
+            self.refresh("Возврат хода сейчас недоступен: дождитесь синхронизации партии.")
+            return
+        messages = {
+            "offer": ("Запрашиваем возврат хода у Lichess AI…" if session.is_ai_opponent
+                      else "Отправляем предложение вернуть ход…"),
+            "accept": "Принимаем предложение; ждём подтверждения позиции Lichess…",
+            "decline": "Отправляем отказ от возврата хода…",
+        }
+        self.refresh(messages[action])
+        self.lichess.takeback(session.game_id, action, request_id)
+
+    def _lichess_takeback_completed(self, game_id: str, request_id: str, status: int) -> None:
+        session = self.online_sessions.get(game_id)
+        if not session:
+            return
+        action = session.takeback_action_pending
+        if not session.finish_takeback_action(request_id, status):
+            return
+        if status == 0:
+            messages = {
+                "offer": ("Запрос отправлен; ожидаем подтверждённую позицию Lichess AI…"
+                          if session.is_ai_opponent else
+                          "Предложение возврата отправлено; ждём ответа соперника."),
+                "accept": "Предложение принято; ждём обновления позиции от Lichess…",
+                "decline": "Отказ отправлен; ждём подтверждения от Lichess…",
+            }
+            message = messages.get(action, "Запрос возврата отправлен; ждём Lichess.")
+        else:
+            message = {
+                400: "Lichess отклонил запрос возврата хода (400). Позиция не изменена.",
+                403: "Lichess запретил возврат хода (403). Позиция не изменена.",
+                404: "Партия не найдена; позиция не изменена.",
+                429: "Lichess временно ограничил запросы (429). Позиция не изменена; дождитесь окончания паузы перед новым действием.",
+            }.get(status, "Не удалось отправить запрос возврата хода. Позиция не изменена.")
+        self.refresh(message)
+
+    def open_friend_game(self) -> None:
+        dialog = OnlineGameDialog("Партия с другом по ссылке", parent=self)
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+        color, limit, increment, _, rated = dialog.selection()
+        self._awaiting_game_start = True
+        self.game_status.setText("Создаём вызов и присоединяем вас…")
+        self.home_status.setText("Создаём вызов и присоединяем вас…")
+        self.lichess.open_friend_game(color, limit, increment, rated)
+
+    def challenge_username(self) -> None:
+        username, ok = QInputDialog.getText(self, "Вызов игрока", "Имя пользователя Lichess:")
+        if not ok or not username.strip():
+            return
+        dialog = OnlineGameDialog("Контроль времени", parent=self)
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+        color, limit, increment, _, rated = dialog.selection()
+        self._awaiting_game_start = True
+        self.game_status.setText(f"Ожидаем ответ от {username.strip()}…")
+        self.home_status.setText(f"Ожидаем ответ от {username.strip()}…")
+        self.lichess.challenge_username(username.strip(), color, limit, increment, rated)
+
+    def play_ai(self) -> None:
+        dialog = OnlineGameDialog("Игра против Lichess AI", include_level=True, parent=self)
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+        color, limit, increment, level, _ = dialog.selection()
+        self._awaiting_game_start = True
+        self.game_status.setText("Создаём партию против Lichess AI…")
+        self.home_status.setText("Создаём партию против Lichess AI…")
+        self.lichess.create_ai_game(level, color, limit, increment)
+
+    def _challenge_ready(self, result: dict) -> None:
+        url = result.get("friendUrl")
+        if not url:
+            self.game_status.setText("Вызов отправлен; ждём ответ Lichess…")
+            return
+        self._open_challenge_id = result.get("id")
+        active_game = self.online_session and self.online_session.status in {"started", "playing"}
+        self.cancel_invitation_button.setEnabled(bool(self._open_challenge_id) and not active_game)
+        self.cancel_invitation_button.setVisible(bool(self._open_challenge_id) and not active_game)
+        for button in (self.friend_link_button, self.username_button, self.ai_button):
+            button.setVisible(False)
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Приглашение готово")
+        layout = QVBoxLayout(dialog)
+        layout.addWidget(QLabel("Вы подключились к партии. Отправьте другу ссылку:"))
+        link = QLineEdit(url)
+        link.setReadOnly(True)
+        layout.addWidget(link)
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
+        copy = QPushButton("Скопировать ссылку")
+        buttons.addButton(copy, QDialogButtonBox.ButtonRole.ActionRole)
+        copy.clicked.connect(lambda: QApplication.clipboard().setText(url))
+        buttons.rejected.connect(dialog.reject)
+        buttons.accepted.connect(dialog.accept)
+        layout.addWidget(buttons)
+        dialog.exec()
+        self.game_status.setText("Ожидаем, пока друг подключится через браузер…")
+
+    def _challenge_status(self, message: str, can_cancel: bool) -> None:
+        if not can_cancel and any(word in message.casefold() for word in ("отклонил", "отменён", "отменено", "завершено")):
+            self._awaiting_game_start = False
+        self.game_status.setText(message)
+        self.cancel_challenge_button.setEnabled(can_cancel)
+        self.cancel_challenge_button.setVisible(can_cancel)
+
+    def cancel_friend_invitation(self) -> None:
+        if not getattr(self, "_open_challenge_id", None):
+            return
+        if QMessageBox.question(self, "Отменить приглашение", "Отменить приглашение по ссылке?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel,
+                QMessageBox.StandardButton.Cancel) != QMessageBox.StandardButton.Yes:
+            return
+        self.lichess.cancel_open_invitation(self._open_challenge_id)
+        self.cancel_invitation_button.setEnabled(False)
+        self.game_status.setText("Отменяем приглашение…")
+
+    def _invitation_cancelled(self, challenge_id: str) -> None:
+        if challenge_id == getattr(self, "_open_challenge_id", None):
+            self._awaiting_game_start = False
+            self._open_challenge_id = None
+            self.cancel_invitation_button.setVisible(False)
+            for button in (self.friend_link_button, self.username_button, self.ai_button):
+                button.setVisible(self._lichess_connected and self.online_session is None)
+            self.game_status.setText("Приглашение отменено.")
+
+    def _lichess_event(self, event: dict) -> None:
+        kind = event.get("type")
+        if kind == "gameStart":
+            self._open_challenge_id = None
+            self.cancel_invitation_button.setEnabled(False)
+            self.cancel_invitation_button.setVisible(False)
+            game = event.get("game", {})
+            game_id = game.get("gameId")
+            if not game_id:
+                return
+            previous = self.online_sessions.get(game_id)
+            session = previous or LichessGameSession(game_id, self.game_repository)
+            color = game.get("color")
+            if color in {"white", "black"}:
+                session.color = chess.WHITE if color == "white" else chess.BLACK
+            session.status = "started"
+            opponent = game.get("opponent", {})
+            session.opponent = opponent.get("username", "Соперник")
+            self.online_sessions[game_id] = session
+            if self._awaiting_game_start and previous is None:
+                self._awaiting_game_start = False
+                self._selected_live_game_id = game_id
+                self.online_session = session
+                self._review_session = None
+                self.online_view_ply = None
+                self._screen_mode = "online"
+                self.screen_title.setText("Активная партия")
+                self.screen_stack.setCurrentWidget(self.game_page)
+                self.refresh(f"Партия началась против {session.opponent}.")
+        elif kind == "gameFinish":
+            game_id = event.get("game", {}).get("gameId")
+            if game_id in self.online_sessions:
+                game = event.get("game", {})
+                game_status = game.get("status", {})
+                status = game_status.get("name", "unknownFinish") if isinstance(game_status, dict) else str(game_status)
+                session = self.online_sessions[game_id]
+                error = None
+                if session.status in {"started", "playing", "created"}:
+                    try:
+                        session.finish(status, game.get("winner"))
+                    except Exception as exc:
+                        error = str(exc)
+                        session.status = status
+                        session.winner = game.get("winner")
+                if session.final_sync_pending:
+                    self.lichess.mark_game_finished(game_id)
+                    self.lichess.start_game(game_id)
+                if (game_id == self._selected_live_game_id
+                        and self.online_session is session
+                        and self._screen_mode == "online"):
+                    self._show_result(session, error is None, error)
+                elif game_id == self._selected_live_game_id and self._screen_mode == "home":
+                    self.show_home()
+                    if error:
+                        self.home_status.setText(
+                            f"Партия завершена, локальная запись не подтверждена: {error}"
+                        )
+        elif kind == "challenge":
+            if self._screen_mode == "home":
+                self.home_status.setText("Получено или обновлено приглашение Lichess.")
+
+    def _lichess_game_event(self, game_id: str, event: dict) -> None:
+        session = self.online_sessions.get(game_id)
+        if session is None:
+            session = LichessGameSession(game_id, self.game_repository)
+            self.online_sessions[game_id] = session
+        # Finish is terminal. A buffered or reordered active state must never
+        # reopen the session or overwrite the saved result.
+        if (session.status not in {"created", "started", "playing"}
+                and not session.final_sync_pending
+                and event.get("type") in {"gameState", "gameFull"}):
+            return
+        if event.get("type") == "gameFull":
+            username = (self.lichess.username or "").casefold()
+            white = event.get("white", {})
+            black = event.get("black", {})
+            if username and white.get("name", "").casefold() == username:
+                session.configure_players(white, black, "white")
+            elif username and black.get("name", "").casefold() == username:
+                session.configure_players(white, black, "black")
+            elif event.get("color") in {"white", "black"}:
+                session.configure_players(white, black, event["color"])
+        if event.get("type") == "opponentGone":
+            if (game_id == self._selected_live_game_id and self.online_session is session
+                    and self._screen_mode == "online"):
+                self.refresh("Соперник временно отключился; ждём переподключения.")
+            return
+        previous_moves = tuple(session.moves.split())
+        previous_view_ply = self.online_view_ply if (
+            game_id == self._selected_live_game_id and self.online_session is session
+        ) else None
+        try:
+            session.apply_event(event)
+        except (ValueError, chess.InvalidMoveError, chess.IllegalMoveError) as exc:
+            self._lichess_error(f"Не удалось синхронизировать позицию Lichess: {exc}")
+            return
+        except Exception as exc:
+            if (game_id == self._selected_live_game_id and self.online_session is session
+                    and self._screen_mode == "online"):
+                if session.status not in {"started", "playing", "created"}:
+                    self._show_result(session, False, str(exc))
+                else:
+                    self.refresh(f"Позиция обновлена с Lichess, но локальная запись не удалась: {exc}")
+            return
+        had_premove = session.premove is not None
+        current_moves = tuple(session.moves.split())
+        takeback_confirmed = (len(current_moves) < len(previous_moves)
+                              and previous_moves[:len(current_moves)] == current_moves)
+        is_selected_live = (
+            game_id == self._selected_live_game_id
+            and self.online_session is session
+            and self._screen_mode == "online"
+        )
+        if is_selected_live:
+            if previous_view_ply is not None:
+                self.online_view_ply = min(previous_view_ply, len(session.board.move_stack))
+                if self.online_view_ply == len(session.board.move_stack):
+                    self.online_view_ply = None
+            if session.status not in {"started", "playing", "created"}:
+                self._show_result(session, True)
+            else:
+                message = "Возврат хода подтверждён Lichess." if takeback_confirmed else None
+                if previous_view_ply is not None and takeback_confirmed:
+                    message = "Возврат подтверждён; просмотр ограничен новой историей."
+                self.refresh(message)
+        elif (game_id == self._selected_live_game_id and self.online_session is session
+              and self._screen_mode == "result" and not session.final_sync_pending):
+            # The terminal result screen stays open while its saved history is reconciled.
+            self._show_result(session, True)
+        elif (game_id == self._selected_live_game_id and self._screen_mode == "home"
+              and session.status not in {"started", "playing", "created"}):
+            self.show_home()
+        premove = session.take_ready_premove()
+        if premove and session.begin_submission(premove):
+            self.lichess.send_move(game_id, premove.uci(), session.pending_request_id)
+            if is_selected_live:
+                self.refresh(f"Предход {premove.uci()} отправлен; ожидаем подтверждения Lichess.")
+        elif had_premove and session.premove is None:
+            if is_selected_live:
+                self.refresh("Предход не стал легальным и снят.")
+
+    def _refresh_online(self, message: str | None = None) -> None:
+        session = self.online_session
+        board = session.board
+        render_board = session.render_board
+        ply = len(board.move_stack) if self.online_view_ply is None else min(self.online_view_ply, len(board.move_stack))
+        display_source = render_board if self.online_view_ply is None else board
+        live = self.online_view_ply is None or ply == len(board.move_stack)
+        if live:
+            # render_board is disposable; BoardView copies it when installing.
+            shown = display_source
+        else:
+            shown = board.root()
+            for move in board.move_stack[:ply]:
+                shown.push(move)
+        self.board.set_position(shown)
+        active = session.status in {"started", "playing"} and self._screen_mode != "review"
+        self.board.set_interaction_enabled(live and active and not session.input_locked)
+        self._apply_preferences()
+        self.board.set_premove(session.premove, session.color)
+        self.opponent_label.setText(f"Соперник  ·  {session.opponent}")
+        self.you_label.setText("Вы  ·  " + ("белыми" if session.color == chess.WHITE else "чёрными"))
+        self.turn_label.setText(("Ваш ход" if session.is_my_turn else "Ход соперника") + (" · история" if not live else ""))
+        if message:
+            self.game_status.setText(message)
+        elif session.pending_uci:
+            self.game_status.setText(f"Ход {session.pending_uci} отправлен; ожидаем подтверждения Lichess…")
+        elif session.takeback_requested_by_opponent:
+            self.game_status.setText("Соперник предлагает вернуть ход.")
+        elif session.takeback_accept_pending:
+            self.game_status.setText("Возврат принят; ожидаем подтверждения позиции Lichess…")
+        elif session.takeback_decline_pending:
+            self.game_status.setText("Отказ отправлен; ожидаем обновления состояния партии…")
+        elif session.takeback_requested_by_me:
+            self.game_status.setText(
+                "Запрос возврата отправлен; ждём обновления позиции Lichess AI."
+                if session.is_ai_opponent else
+                "Предложение возврата отправлено; ждём ответа соперника."
+            )
+        else:
+            self.game_status.setText(f"Lichess · {session.status}")
+        self._sync_online_history(board, session.game_id, ply)
+        self._update_clock()
+        self.history_label.setText("Актуальная позиция" if live else f"Просмотр хода {ply} из {len(board.move_stack)}")
+        self.resign_button.setEnabled(session.status in {"started", "playing"})
+        self.resign_button.setVisible(session.status in {"started", "playing"})
+        self.draw_button.setEnabled(session.status in {"started", "playing"})
+        self.draw_button.setVisible(session.status in {"started", "playing"})
+        self.draw_button.setText("Принять ничью" if session.draw_offered_by_opponent else "Предложить ничью")
+        self.decline_draw_button.setVisible(session.draw_offered_by_opponent)
+        self.decline_draw_button.setEnabled(session.draw_offered_by_opponent)
+        self.takeback_button.setVisible(active)
+        self.takeback_button.setText(
+            "Ожидаем ответа на возврат…" if session.takeback_requested_by_me
+            else "Вернуть ход" if session.is_ai_opponent else "Предложить вернуть ход"
+        )
+        self.takeback_button.setToolTip(
+            "Запросить серверный возврат у Lichess AI. После ответа доска изменится только по подтверждённому состоянию."
+            if session.is_ai_opponent else
+            "Предложить сопернику возврат хода через Lichess. Это не отмена ожидающего предхода."
+        )
+        self.undo_local_button.setVisible(False)
+        self.takeback_button.setEnabled(
+            active and bool(session.moves) and not session.input_locked
+        )
+        show_takeback = session.takeback_requested_by_opponent
+        self.accept_takeback_button.setVisible(show_takeback)
+        self.decline_takeback_button.setVisible(show_takeback)
+        response_enabled = (show_takeback and not session.pending_uci
+                            and not session.takeback_action_pending
+                            and not session.takeback_accept_pending
+                            and not session.takeback_decline_pending)
+        self.accept_takeback_button.setEnabled(response_enabled)
+        self.decline_takeback_button.setEnabled(response_enabled)
+        self.claim_draw_button.setEnabled(session.status in {"started", "playing"} and session.board.can_claim_draw())
+        self.claim_draw_button.setVisible(session.status in {"started", "playing"} and session.board.can_claim_draw())
+        self.leave_game_button.setEnabled(session.status not in {"started", "playing", "created"})
+        self.leave_game_button.setVisible(session.status not in {"started", "playing", "created"})
+        self.leave_game_button.setText("Главная")
+        self.new_game_button.setEnabled(False)
+        for button in (self.friend_link_button, self.username_button, self.ai_button):
+            button.setVisible(False)
+        self.cancel_premove_button.setEnabled(session.premove is not None)
+        self.cancel_premove_button.setVisible(session.premove is not None)
+        self.premove_label.setVisible(session.premove is not None)
+        if session.premove:
+            self.premove_label.setText(f"Предход: {session.premove.uci()} · ожидание подтверждения хода соперника.")
+        for widget in (self.opponent_move, self.apply_opponent_button):
+            widget.setVisible(False)
+
+    def _sync_online_history(self, board: chess.Board, game_id: str, selected_ply: int) -> None:
+        """Append SAN rows for new plies; rebuild only on a new/divergent line."""
+        moves = tuple(board.move_stack)
+        previous = self._online_history_moves
+        incremental = (
+            self._online_history_game_id == game_id
+            and len(moves) >= len(previous)
+            and moves[:len(previous)] == previous
+            and self._online_history_position is not None
+        )
+        unchanged = incremental and moves == previous
+        scroll = self.moves.verticalScrollBar().value()
+        self.moves.blockSignals(True)
+        try:
+            if not incremental:
+                self.moves.clear()
+                position = board.root()
+                start_ply = 0
+            elif not unchanged:
+                position = self._online_history_position.copy(stack=True)
+                start_ply = len(previous)
+            else:
+                position = None
+                start_ply = len(moves)
+            if position is not None:
+                for index in range(start_ply, len(moves)):
+                    move = moves[index]
+                    ply = index + 1
+                    prefix = f"{(ply + 1) // 2}. " if ply % 2 else f"{(ply + 1) // 2}... "
+                    item = QListWidgetItem(prefix + position.san(move))
+                    item.setData(Qt.ItemDataRole.UserRole, ply)
+                    self.moves.addItem(item)
+                    position.push(move)
+            desired_ply = min(selected_ply, len(moves))
+            current = self.moves.currentItem()
+            if current is None or current.data(Qt.ItemDataRole.UserRole) != desired_ply:
+                selected = next((self.moves.item(i) for i in range(self.moves.count())
+                                 if self.moves.item(i).data(Qt.ItemDataRole.UserRole) == desired_ply), None)
+                if selected:
+                    self.moves.setCurrentItem(selected)
+                elif desired_ply == 0:
+                    self.moves.setCurrentRow(-1)
+            self._online_history_game_id = game_id
+            self._online_history_moves = moves
+            if not unchanged:
+                self._online_history_position = board.copy(stack=True)
+        finally:
+            self.moves.blockSignals(False)
+        self.moves.verticalScrollBar().setValue(scroll)
+
+    def _update_clock(self) -> None:
+        session = self.online_session
+        if session and self._screen_mode == "online":
+            write_error = self.game_repository.write_error(session.game_id)
+            if write_error:
+                self.game_status.setText(f"Ошибка сохранения локальной партии: {write_error}")
+        if not session or session.white_ms is None or session.black_ms is None:
+            self.clock_label.setText(
+                f"Контроль {session.clock_control}" if session and session.clock_control != "-" else "Без часов"
+            )
+            return
+        elapsed = (max(0, int((time.monotonic() - session._last_clock_at) * 1000))
+                   if session.status in {"started", "playing"} else 0)
+        white = max(0, session.white_ms - (elapsed if session.board.turn == chess.WHITE else 0))
+        black = max(0, session.black_ms - (elapsed if session.board.turn == chess.BLACK else 0))
+        self.clock_label.setText(f"Белые {white // 60000:02}:{white // 1000 % 60:02}   Чёрные {black // 60000:02}:{black // 1000 % 60:02}")
+
+    def resign_online(self) -> None:
+        session = self.online_session
+        if not session:
+            return
+        action = "Прервать партию" if not session.board.move_stack else "Сдаться"
+        if QMessageBox.question(self, "Завершить партию", f"{action} в текущей партии?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel,
+                QMessageBox.StandardButton.Cancel) != QMessageBox.StandardButton.Yes:
+            return
+        if session.board.move_stack:
+            self.lichess.resign(session.game_id)
+        else:
+            self.lichess.abort(session.game_id)
+
+    def handle_draw(self) -> None:
+        session = self.online_session
+        if not session:
+            return
+        if session.draw_offered_by_opponent:
+            if QMessageBox.question(self, "Ничья", "Принять предложение ничьей?",
+                    QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel,
+                    QMessageBox.StandardButton.Cancel) == QMessageBox.StandardButton.Yes:
+                self.lichess.draw(session.game_id, True)
+        else:
+            self.lichess.draw(session.game_id, True)
+
+    def show_saved_games(self) -> None:
+        games = self.game_repository.list_games()
+        if not games:
+            QMessageBox.information(self, "Партии", "Сохранённых завершённых партий пока нет.")
+            return
+        labels = [f"{g['opponent']} · {g['status']} · {g['updated_at'][:10]}" for g in games]
+        selected, ok = QInputDialog.getItem(self, "Завершённые партии", "Открыть партию:", labels, 0, False)
+        if not ok:
+            return
+        game = games[labels.index(selected)]
+        pgn = self.game_repository.export_pgn(game["game_id"])
+        choice = QMessageBox(self)
+        choice.setWindowTitle("Сохранённая партия")
+        choice.setText(f"{game['opponent']} · {game['status']}")
+        open_button = choice.addButton("Открыть", QMessageBox.ButtonRole.AcceptRole)
+        export_button = choice.addButton("Экспорт PGN", QMessageBox.ButtonRole.ActionRole)
+        choice.addButton("Отмена", QMessageBox.ButtonRole.RejectRole)
+        choice.exec()
+        if choice.clickedButton() == open_button:
+            self._open_saved_game(game)
+        elif choice.clickedButton() == export_button and pgn:
+            path, _ = QFileDialog.getSaveFileName(self, "Экспорт PGN", f"{game['game_id']}.pgn", "PGN (*.pgn)")
+            if path:
+                Path(path).write_text(pgn + "\n", encoding="utf-8")
+
+    def _open_saved_game(self, game: dict) -> None:
+        session = LichessGameSession(game["game_id"], self.game_repository)
+        session.initial_fen = game["initial_fen"]
+        session.moves = game["moves"]
+        session.color = chess.WHITE if game["color"] == "white" else chess.BLACK
+        session.opponent = game["opponent"]
+        session.status = game["status"]
+        session.winner = game["winner"]
+        session.clock_control = game["clock"]
+        session._rebuild_board()
+        self.online_session = session
+        self._review_session = session
+        self.online_view_ply = None
+        self._screen_mode = "review"
+        self.screen_title.setText("Просмотр сохранённой партии")
+        self.screen_stack.setCurrentWidget(self.game_page)
+        self.refresh("Открыта локально сохранённая партия (только просмотр).")
+
+    def leave_online_game(self) -> None:
+        if self._screen_mode == "review":
+            self.online_session = None
+            self._review_session = None
+            self.online_view_ply = None
+            self.show_home()
+            return
+        if not self.online_session:
+            return
+        session = self.online_session
+        if session.status in {"started", "playing"}:
+            self.show_home()
+            return
+        self.show_home()
+
+    def closeEvent(self, event) -> None:
+        if self.lichess:
+            self.lichess.close()
+        self.game_repository.shutdown()
+        super().closeEvent(event)
+
+
+def _result_label(color: chess.Color, winner: str | None, status: str) -> str:
+    if winner not in {"white", "black"}:
+        if status in {"draw", "stalemate", "repetition", "50moves", "insufficientMaterial"}:
+            return "Ничья"
+        return "Партия прервана"
+    won = (winner == "white") == color
+    return "Победа" if won else "Поражение"
