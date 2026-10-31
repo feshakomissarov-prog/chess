@@ -1,6 +1,7 @@
 import base64
 import hashlib
 import json
+import sqlite3
 import threading
 import time
 from urllib.request import urlopen
@@ -8,6 +9,7 @@ from urllib.parse import parse_qs, urlparse
 
 import chess
 import chess.pgn
+import pytest
 
 from chess_coach.lichess.api import HttpResponse, LichessClient, LichessError, RateLimitError
 from chess_coach.lichess.auth import OAuthCallbackServer, create_authorization_request
@@ -418,6 +420,65 @@ def test_game_stream_rebuilds_confirmed_state_and_saves_pgn(tmp_path):
     # Duplicate stream payload is idempotent in SQLite.
     session.apply_event(state)
     assert len(repo.list_games(completed_only=False)) == 1
+
+
+def test_repository_closes_every_connection_including_exception_and_async_writer(
+    tmp_path, monkeypatch
+):
+    import chess_coach.lichess.repository as repository_module
+
+    real_connect = sqlite3.connect
+    connections = []
+
+    class TrackedConnection:
+        def __init__(self, connection):
+            self.connection = connection
+            self.closed = False
+
+        def __setattr__(self, name, value):
+            if name in {"connection", "closed"}:
+                object.__setattr__(self, name, value)
+            else:
+                setattr(self.connection, name, value)
+
+        def __getattr__(self, name):
+            return getattr(self.connection, name)
+
+        def __enter__(self):
+            self.connection.__enter__()
+            return self
+
+        def __exit__(self, exc_type, exc_value, traceback):
+            return self.connection.__exit__(exc_type, exc_value, traceback)
+
+        def close(self):
+            self.closed = True
+            self.connection.close()
+
+    def tracked_connect(*args, **kwargs):
+        connection = TrackedConnection(real_connect(*args, **kwargs))
+        connections.append(connection)
+        return connection
+
+    monkeypatch.setattr(repository_module.sqlite3, "connect", tracked_connect)
+    path = tmp_path / "connections.sqlite3"
+    repository = GameRepository(path, async_writes=True)
+    repository.save_snapshot("tracked", "startpos", "e2e4", "white", "Opponent",
+                             False, "180+2", "started")
+    repository.wait_for_writes()
+    repository.list_games(completed_only=False)
+    repository.get_game("tracked")
+    repository.list_pending_final_sync()
+    with pytest.raises(sqlite3.OperationalError, match="no such table"):
+        with repository._connection() as db:
+            db.execute("SELECT * FROM missing_table")
+
+    assert connections
+    assert all(connection.closed for connection in connections)
+    repository.shutdown()
+    renamed = path.with_name("connections-renamed.sqlite3")
+    path.rename(renamed)
+    renamed.unlink()
 
 
 def test_premove_is_an_intent_and_revalidated_after_opponent_move(tmp_path):

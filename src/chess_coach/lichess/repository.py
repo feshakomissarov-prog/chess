@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterator
+from contextlib import contextmanager
 import sqlite3
 from concurrent.futures import Future, ThreadPoolExecutor
 from datetime import datetime, timezone
@@ -28,8 +30,18 @@ class GameRepository:
         db.row_factory = sqlite3.Row
         return db
 
+    @contextmanager
+    def _connection(self) -> Iterator[sqlite3.Connection]:
+        """Commit/rollback the transaction and always release its file handle."""
+        db = self._connect()
+        try:
+            with db:
+                yield db
+        finally:
+            db.close()
+
     def _initialize(self) -> None:
-        with self._connect() as db:
+        with self._connection() as db:
             db.execute("""CREATE TABLE IF NOT EXISTS games (
                 game_id TEXT PRIMARY KEY, initial_fen TEXT NOT NULL, moves TEXT NOT NULL,
                 color TEXT NOT NULL, opponent TEXT NOT NULL, rated INTEGER NOT NULL,
@@ -82,7 +94,7 @@ class GameRepository:
         game = chess.pgn.Game.from_board(board)
         game.headers["Event"] = "Lichess rated" if rated else "Lichess casual"
         game.headers["Site"] = f"https://lichess.org/{game_id}"
-        with self._connect() as db:
+        with self._connection() as db:
             previous = db.execute(
                 "SELECT white_player, black_player, started_at FROM games WHERE game_id=?",
                 (game_id,),
@@ -109,7 +121,7 @@ class GameRepository:
                                        "insufficientMaterial",
                                    } else "*")
         pgn = str(game)
-        with self._connect() as db:
+        with self._connection() as db:
             db.execute("""INSERT INTO games (
                 game_id, initial_fen, moves, color, opponent, rated, clock, status,
                 winner, updated_at, pgn, white_player, black_player, started_at,
@@ -169,7 +181,7 @@ class GameRepository:
 
     def list_games(self, completed_only: bool = True) -> list[dict]:
         self._wait_before_read()
-        with self._connect() as db:
+        with self._connection() as db:
             query = "SELECT * FROM games"
             if completed_only:
                 query += " WHERE status NOT IN ('created', 'started', 'started_soon', 'playing')"
@@ -178,13 +190,13 @@ class GameRepository:
 
     def get_game(self, game_id: str) -> dict | None:
         self._wait_before_read(game_id)
-        with self._connect() as db:
+        with self._connection() as db:
             row = db.execute("SELECT * FROM games WHERE game_id=?", (game_id,)).fetchone()
             return dict(row) if row else None
 
     def list_pending_final_sync(self) -> list[dict]:
         self._wait_before_read()
-        with self._connect() as db:
+        with self._connection() as db:
             return [dict(row) for row in db.execute(
                 "SELECT * FROM games WHERE final_sync_pending=1 ORDER BY updated_at"
             )]

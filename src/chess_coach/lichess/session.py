@@ -51,6 +51,9 @@ class LichessGameSession:
         self.rated = False
         self.winner = None
         self.final_sync_pending = False
+        # A newly opened game is not playable until its stream supplies and we
+        # validate a complete authoritative gameFull snapshot.
+        self.awaiting_authoritative_snapshot = True
         self.draw_offered_by_opponent = False
         self.takeback_requested_by_opponent = False
         self.takeback_requested_by_me = False
@@ -71,7 +74,9 @@ class LichessGameSession:
 
     @property
     def is_my_turn(self) -> bool:
-        return self.board.turn == self.color and self.status in {"started", "playing"}
+        return (not self.awaiting_authoritative_snapshot
+                and self.board.turn == self.color
+                and self.status in {"started", "playing"})
 
     @property
     def is_ai_opponent(self) -> bool:
@@ -80,7 +85,8 @@ class LichessGameSession:
 
     @property
     def input_locked(self) -> bool:
-        return bool(self.pending_uci or self.takeback_action_pending
+        return bool(self.awaiting_authoritative_snapshot
+                    or self.pending_uci or self.takeback_action_pending
                     or self.takeback_requested_by_me
                     or self.takeback_requested_by_opponent
                     or self.takeback_accept_pending or self.takeback_decline_pending)
@@ -102,6 +108,13 @@ class LichessGameSession:
         kind = event.get("type")
         if kind not in {"gameState", "gameFull"}:
             return self.snapshot()
+        if kind == "gameFull":
+            state = event.get("state")
+            initial_fen = event.get("initialFen")
+            if (not isinstance(state, dict) or not isinstance(state.get("moves"), str)
+                    or not isinstance(state.get("status"), str)
+                    or not isinstance(initial_fen, str) or not initial_fen):
+                raise ValueError("Lichess не прислал полный начальный снимок партии.")
         incoming_fen = event.get("initialFen", self.initial_fen) if kind == "gameFull" else self.initial_fen
         if self.moves and incoming_fen != self.initial_fen:
             return self.snapshot()
@@ -186,6 +199,8 @@ class LichessGameSession:
                 self.takeback_request_id = None
                 self._takeback_anchor = ()
             self._rebuild_board()
+            if kind == "gameFull":
+                self.awaiting_authoritative_snapshot = False
             if self.pending_uci and self._pending_ply is not None:
                 if (len(incoming_moves) >= self._pending_ply
                         and incoming_moves[:len(self._pending_prefix)] == self._pending_prefix
@@ -254,6 +269,8 @@ class LichessGameSession:
         self.white_inc = state.get("winc", self.white_inc)
         self.black_inc = state.get("binc", self.black_inc)
         self.board = board
+        if kind == "gameFull":
+            self.awaiting_authoritative_snapshot = False
         self.final_sync_pending = False
         self._clear_pending()
         self.premove = None
@@ -307,6 +324,7 @@ class LichessGameSession:
         if action not in {"offer", "accept", "decline"}:
             return None
         if (self.status not in {"started", "playing"} or self.pending_uci
+                or self.awaiting_authoritative_snapshot
                 or self.takeback_action_pending):
             return None
         if action == "accept" and self.takeback_accept_pending:

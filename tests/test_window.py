@@ -73,10 +73,12 @@ def test_explicit_offline_window_never_constructs_or_uses_lichess_credentials(qt
 
     monkeypatch.setattr("chess_coach.window.WindowsCredentialStore", forbidden)
     monkeypatch.setattr("chess_coach.window.LichessService", forbidden)
-    window = MainWindow(
-        QSettings(str(tmp_path / "offline.ini"), QSettings.Format.IniFormat),
-        offline_mode=True,
-    )
+    live_settings_path = tmp_path / "user-settings.ini"
+    live_settings = QSettings(str(live_settings_path), QSettings.Format.IniFormat)
+    live_settings.setValue("board_flipped", True)
+    live_settings.sync()
+    original_settings = live_settings_path.read_bytes()
+    window = MainWindow(live_settings, offline_mode=True)
     qtbot.addWidget(window)
 
     assert window.lichess is None
@@ -85,10 +87,20 @@ def test_explicit_offline_window_never_constructs_or_uses_lichess_credentials(qt
     assert not window.home_ai_button.isVisible()
     offline_dir = Path(window.game_repository.path).parent
     assert offline_dir.name.startswith("chess-coach-offline-")
+    assert window.settings is not live_settings
+    assert Path(window.settings.fileName()).parent == offline_dir
+    assert window.controller.ply == 0
+    assert window.screen_stack.currentWidget() is window.home_page
     assert not (tmp_path / "games.sqlite3").exists()
+    window.settings.setValue("board_flipped", False)
+    window.settings.sync()
+    live_settings.sync()
+    assert live_settings.value("board_flipped", type=bool) is True
+    assert live_settings_path.read_bytes() == original_settings
     window.start_local_game()
     assert window.controller.ply == 0
     window.close()
+    assert not offline_dir.exists()
 
 
 def test_active_games_dialog_shows_server_confirmed_turn_and_game_type(qtbot):
@@ -139,6 +151,67 @@ def test_open_active_game_clears_old_premove_and_background_events_do_not_submit
         "type": "gameState", "moves": "e2e4 e7e5", "status": "started"
     })
     assert sent == []
+
+
+def test_active_game_blocks_all_actions_until_valid_game_full(qtbot, tmp_path, monkeypatch):
+    window = MainWindow(QSettings(str(tmp_path / "active-sync.ini"), QSettings.Format.IniFormat))
+    qtbot.addWidget(window)
+    started = []
+    sent = []
+    takebacks = []
+    monkeypatch.setattr(window.lichess, "start_game", started.append)
+    monkeypatch.setattr(window.lichess, "send_move", lambda *args: sent.append(args))
+    monkeypatch.setattr(window.lichess, "takeback", lambda *args: takebacks.append(args))
+
+    window.open_active_game({
+        "gameId": "twenty-ply-game", "color": "black", "speed": "rapid",
+        "opponent": {"username": "Opponent"},
+    })
+    session = window.online_session
+    assert session is not None and session.awaiting_authoritative_snapshot
+    assert started == ["twenty-ply-game"]
+    assert not window.board._interaction_enabled
+    assert not window.takeback_button.isEnabled()
+
+    window.on_move_intent(chess.Move.from_uci("e7e5"))
+    window.on_premove_intent(chess.Move.from_uci("g8f6"))
+    window.request_takeback()
+    assert sent == []
+    assert takebacks == []
+    assert session.pending_uci is None
+    assert session.premove is None
+    assert session.takeback_action_pending is None
+
+    window._lichess_status("Ограничение Lichess 429; запросы приостановлены")
+    assert session.awaiting_authoritative_snapshot
+    assert not window.board._interaction_enabled
+    with pytest.raises(ValueError, match="полный начальный снимок"):
+        session.apply_event({"type": "gameFull", "initialFen": "startpos"})
+    assert session.awaiting_authoritative_snapshot
+
+    moves = (
+        "e2e4 e7e5 g1f3 b8c6 f1b5 a7a6 b5a4 g8f6 e1g1 f8e7 "
+        "f1e1 b7b5 a4b3 d7d6 c2c3 e8g8 h2h3 c8b7 d2d4 c6a5"
+    )
+    window._lichess_game_event("twenty-ply-game", {
+        "type": "gameFull", "initialFen": "startpos",
+        "state": {"moves": moves, "status": "started"},
+    })
+
+    assert len(session.board.move_stack) == 20
+    assert session.color == chess.BLACK
+    assert session.board.turn == chess.WHITE
+    assert not session.awaiting_authoritative_snapshot
+    assert window.board._board.fen() == session.board.fen()
+    assert window.board._interaction_enabled
+
+    window._lichess_game_event("twenty-ply-game", {
+        "type": "gameState", "moves": moves + " b3c2", "status": "started",
+    })
+    assert len(session.board.move_stack) == 21
+    assert session.board.turn == chess.BLACK
+    window.on_move_intent(chess.Move.from_uci("e5d4"))
+    assert len(sent) == 1 and sent[0][1] == "e5d4"
 
 
 def test_confirmed_local_move_and_undo_clear_manual_marks_with_old_position_context(qtbot, tmp_path):

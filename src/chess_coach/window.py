@@ -201,23 +201,22 @@ class MainWindow(QMainWindow):
     ) -> None:
         super().__init__()
         self.offline_mode = offline_mode
-        self.settings = (
-            settings
-            if settings is not None
-            else QSettings("ChessCoach", "ChessCoach")
-        )
-        color = self.settings.value("player_color", chess.WHITE, type=int)
-        self.controller = GameController(chess.Color(color))
         self._offline_data_dir: tempfile.TemporaryDirectory | None = None
         if offline_mode:
-            # Smoke runs must not open, migrate, or write the owner's game DB.
+            # Smoke runs must not read or write the owner's settings or game DB.
             self._offline_data_dir = tempfile.TemporaryDirectory(prefix="chess-coach-offline-")
             data_root = Path(self._offline_data_dir.name)
+            self.settings = QSettings(
+                str(data_root / "settings.ini"), QSettings.Format.IniFormat
+            )
         else:
+            self.settings = settings if settings is not None else QSettings("ChessCoach", "ChessCoach")
             data_root = Path(QStandardPaths.writableLocation(
                 QStandardPaths.StandardLocation.AppDataLocation
             ))
             data_root.mkdir(parents=True, exist_ok=True)
+        color = self.settings.value("player_color", chess.WHITE, type=int)
+        self.controller = GameController(chess.Color(color))
         self.game_repository = GameRepository(data_root / "games.sqlite3", async_writes=asynchronous_storage)
         self._online_history_game_id: str | None = None
         self._online_history_moves: tuple[chess.Move, ...] = ()
@@ -1314,15 +1313,23 @@ class MainWindow(QMainWindow):
                 shown.push(move)
         self.board.set_position(shown)
         self.board.set_annotation_context(session.game_id, shown)
-        active = session.status in {"started", "playing"} and self._screen_mode != "review"
+        active = (session.status in {"started", "playing"}
+                  and self._screen_mode != "review"
+                  and not session.awaiting_authoritative_snapshot)
         self.board.set_interaction_enabled(live and active and not session.input_locked)
         self._apply_preferences()
         self.board.set_premove(session.premove, session.color)
         self.opponent_label.setText(f"Соперник  ·  {session.opponent}")
         self.you_label.setText("Вы  ·  " + ("белыми" if session.color == chess.WHITE else "чёрными"))
-        self.turn_label.setText(("Ваш ход" if session.is_my_turn else "Ход соперника") + (" · история" if not live else ""))
+        turn = ("Синхронизация позиции…" if session.awaiting_authoritative_snapshot
+                else "Ваш ход" if session.is_my_turn else "Ход соперника")
+        self.turn_label.setText(turn + (" · история" if not live else ""))
         if message:
             self.game_status.setText(message)
+        elif session.awaiting_authoritative_snapshot:
+            self.game_status.setText(
+                "Ожидаем первичную подтверждённую позицию Lichess; действия партии заблокированы."
+            )
         elif session.pending_uci:
             self.game_status.setText(f"Ход {session.pending_uci} отправлен; ожидаем подтверждения Lichess…")
         elif session.takeback_requested_by_opponent:
@@ -1342,10 +1349,10 @@ class MainWindow(QMainWindow):
         self._sync_online_history(board, session.game_id, ply)
         self._update_clock()
         self.history_label.setText("Актуальная позиция" if live else f"Просмотр хода {ply} из {len(board.move_stack)}")
-        self.resign_button.setEnabled(session.status in {"started", "playing"})
-        self.resign_button.setVisible(session.status in {"started", "playing"})
-        self.draw_button.setEnabled(session.status in {"started", "playing"})
-        self.draw_button.setVisible(session.status in {"started", "playing"})
+        self.resign_button.setEnabled(active)
+        self.resign_button.setVisible(active)
+        self.draw_button.setEnabled(active)
+        self.draw_button.setVisible(active)
         self.draw_button.setText("Принять ничью" if session.draw_offered_by_opponent else "Предложить ничью")
         self.decline_draw_button.setVisible(session.draw_offered_by_opponent)
         self.decline_draw_button.setEnabled(session.draw_offered_by_opponent)
@@ -1363,7 +1370,8 @@ class MainWindow(QMainWindow):
         self.takeback_button.setEnabled(
             active and bool(session.moves) and not session.input_locked
         )
-        show_takeback = session.takeback_requested_by_opponent
+        show_takeback = (session.takeback_requested_by_opponent
+                         and not session.awaiting_authoritative_snapshot)
         self.accept_takeback_button.setVisible(show_takeback)
         self.decline_takeback_button.setVisible(show_takeback)
         response_enabled = (show_takeback and not session.pending_uci
@@ -1372,8 +1380,8 @@ class MainWindow(QMainWindow):
                             and not session.takeback_decline_pending)
         self.accept_takeback_button.setEnabled(response_enabled)
         self.decline_takeback_button.setEnabled(response_enabled)
-        self.claim_draw_button.setEnabled(session.status in {"started", "playing"} and session.board.can_claim_draw())
-        self.claim_draw_button.setVisible(session.status in {"started", "playing"} and session.board.can_claim_draw())
+        self.claim_draw_button.setEnabled(active and session.board.can_claim_draw())
+        self.claim_draw_button.setVisible(active and session.board.can_claim_draw())
         self.leave_game_button.setEnabled(session.status not in {"started", "playing", "created"})
         self.leave_game_button.setVisible(session.status not in {"started", "playing", "created"})
         self.leave_game_button.setText("Главная")
@@ -1544,6 +1552,9 @@ class MainWindow(QMainWindow):
         if self.lichess:
             self.lichess.close()
         self.game_repository.shutdown()
+        if self._offline_data_dir is not None:
+            self._offline_data_dir.cleanup()
+            self._offline_data_dir = None
         super().closeEvent(event)
 
 
