@@ -314,6 +314,7 @@ class MainWindow(QMainWindow):
         self._analysis_thread: threading.Thread | None = None
         self._analysis_dialog: QProgressDialog | None = None
         self._shutdown_requested = False
+        self._shutdown_read_only = False
         self._analysis_shutdown_deadline: float | None = None
         self.analysis_progress.connect(self._analysis_progress)
         self.analysis_finished.connect(self._analysis_finished)
@@ -2132,9 +2133,16 @@ class MainWindow(QMainWindow):
                 self._close_retry_scheduled = False
                 self._close_retry_timer.stop()
                 self.setEnabled(True)
+                self._shutdown_read_only = True
+                self.setWindowTitle("Chess Coach — ожидание завершения Stockfish")
                 self.home_status.setText(
-                    "Stockfish не завершился за отведённое время. Приложение оставлено открытым; "
-                    "можно подождать и повторить закрытие.")
+                    "Stockfish не остановился за 10 секунд. Приложение ожидает завершения анализа; "
+                    "действия отключены. После завершения нажмите X, чтобы закрыть окно.")
+                # The service has already entered its close path. Keep the shell
+                # available for the window's close control, but make the app's
+                # controls clearly unavailable until the user retries closing.
+                if self.centralWidget() is not None:
+                    self.centralWidget().setEnabled(False)
                 return
             if not self._close_retry_scheduled:
                 self._close_retry_scheduled = True

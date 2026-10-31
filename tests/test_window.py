@@ -1135,7 +1135,7 @@ def test_window_close_cancels_analysis_and_waits_for_engine_quit_before_sqlite(
     assert shutdown_order[:2] == ["engine.quit", "sqlite.shutdown"]
 
 
-def test_analysis_shutdown_timeout_keeps_window_open_without_killing_worker(
+def test_analysis_shutdown_timeout_enters_read_only_then_repeated_close_finishes(
         qtbot, tmp_path, monkeypatch):
     window = MainWindow(QSettings(str(tmp_path / "close-analysis-timeout.ini"),
                                   QSettings.Format.IniFormat), offline_mode=True)
@@ -1152,19 +1152,41 @@ def test_analysis_shutdown_timeout_keeps_window_open_without_killing_worker(
     window._analysis_thread = worker
     monkeypatch.setattr("chess_coach.window.time.monotonic", lambda: clock[0])
     window._close_retry_timer.stop()
-    first = QCloseEvent()
-    window.closeEvent(first)
-    assert not first.isAccepted()
+
+    class Service:
+        def __init__(self): self.close_calls = 0
+        def close(self, timeout=1.0):
+            self.close_calls += 1
+            # Simulate the service already being in its graceful close path.
+            return self.close_calls >= 3
+
+    service = Service()
+    window.lichess = service
+    shutdowns = []
+    repository_shutdown = window.game_repository.shutdown
+    def tracked_shutdown():
+        shutdowns.append("sqlite.shutdown")
+        repository_shutdown()
+    monkeypatch.setattr(window.game_repository, "shutdown", tracked_shutdown)
+
+    assert window.close() is False
     assert stop.is_set()
+    assert not shutdowns
     window._close_retry_timer.stop()
 
     clock[0] += 11.0
-    timed_out = QCloseEvent()
-    window.closeEvent(timed_out)
-    assert not timed_out.isAccepted()
+    assert window.close() is False
+    assert not window._close_retry_scheduled
     assert window.isEnabled()
-    assert "Stockfish не завершился" in window.home_status.text()
+    assert window._shutdown_read_only
+    assert not window.centralWidget().isEnabled()
+    assert not window.settings_button.isEnabled()
+    assert "действия отключены" in window.home_status.text()
+    assert "ожидание завершения Stockfish" in window.windowTitle()
     assert worker.is_alive()  # No forced process kill or hidden worker detachment.
-    window._close_retry_timer.stop()
+
+    # The analyzer later stops. A new close attempt completes service and DB shutdown.
     worker.alive = False
-    window._analysis_thread = None
+    assert window.close() is True
+    assert service.close_calls == 3
+    assert shutdowns == ["sqlite.shutdown"]
