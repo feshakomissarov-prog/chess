@@ -8,6 +8,12 @@ from chess_coach.lichess.session import LichessGameSession
 from chess_coach.lichess.repository import GameRepository
 
 
+@pytest.fixture(autouse=True)
+def avoid_background_auth_restore(monkeypatch):
+    # Window tests exercise presentation and event handling, not stored credentials.
+    monkeypatch.setattr("chess_coach.lichess.service.LichessService.restore", lambda self: None)
+
+
 def test_main_window_smoke_and_game_controller_integration(qtbot, tmp_path) -> None:
     settings = QSettings(str(tmp_path / "app.ini"), QSettings.Format.IniFormat)
     window = MainWindow(settings)
@@ -203,3 +209,78 @@ def test_online_premove_is_discarded_when_server_position_makes_it_illegal(qtbot
                                              "status": "started"})
     assert session.premove is None
     assert not calls
+
+
+def test_online_pending_move_is_rendered_optimistically_without_persisting_until_confirmation(
+    qtbot, tmp_path, monkeypatch
+):
+    window = MainWindow(QSettings(str(tmp_path / "optimistic-ui.ini"), QSettings.Format.IniFormat))
+    qtbot.addWidget(window)
+    calls = []
+    monkeypatch.setattr(window.lichess, "send_move", lambda *args: calls.append(args))
+    session = LichessGameSession("optimistic-ui", GameRepository(tmp_path / "optimistic-ui.sqlite3"))
+    session.color = chess.WHITE
+    session.apply_event({"type": "gameFull", "initialFen": "startpos",
+                         "state": {"moves": "", "status": "started"}})
+    window.online_sessions[session.game_id] = session
+    window.online_session = session
+    window.online_view_ply = None
+    window.show()
+
+    window.on_move_intent(chess.Move.from_uci("e2e4"))
+    assert window.board._board.piece_at(chess.E4) == chess.Piece(chess.PAWN, chess.WHITE)
+    assert window.board._board.piece_at(chess.E2) is None
+    assert session.board.piece_at(chess.E2) == chess.Piece(chess.PAWN, chess.WHITE)
+    assert session.moves == ""
+    assert session.repository.get_game(session.game_id)["moves"] == ""
+    assert window.moves.count() == 0  # the move is not yet confirmed SAN history
+    assert "подтвержд" in window.game_status.text()
+
+    window._lichess_game_event(session.game_id, {"type": "gameState", "moves": "e2e4",
+                                                  "status": "started"})
+    assert session.pending_uci is None
+    assert window.board._board.fen() == session.board.fen()
+    assert session.moves == "e2e4"
+    assert session.repository.get_game(session.game_id)["moves"] == "e2e4"
+    assert window.moves.count() == 1
+    assert len(calls) == 1
+
+
+def test_takeback_offer_ui_accept_and_server_rewind_refresh_history_and_pgn(qtbot, tmp_path, monkeypatch):
+    window = MainWindow(QSettings(str(tmp_path / "takeback-ui.ini"), QSettings.Format.IniFormat))
+    qtbot.addWidget(window)
+    requests = []
+    monkeypatch.setattr(window.lichess, "takeback", lambda game_id, action, request_id:
+                        requests.append((game_id, action, request_id)))
+    session = LichessGameSession("takeback-ui", GameRepository(tmp_path / "takeback-ui.sqlite3"))
+    session.color = chess.WHITE
+    line = "e2e4 e7e5 g1f3 b8c6"
+    session.apply_event({"type": "gameFull", "initialFen": "startpos",
+                         "state": {"moves": line, "status": "started"}})
+    window.online_sessions[session.game_id] = session
+    window.online_session = session
+    window.online_view_ply = None
+    window.show()
+    window._lichess_game_event(session.game_id, {"type": "gameState", "moves": line,
+                                                  "btakeback": True, "status": "started"})
+    assert session.takeback_requested_by_opponent
+    assert window.accept_takeback_button.isVisible()
+    assert "Соперник предлагает вернуть ход" in window.game_status.text()
+
+    confirmed_before = session.board.fen()
+    qtbot.mouseClick(window.accept_takeback_button, Qt.MouseButton.LeftButton)
+    assert requests[0][1] == "accept"
+    assert session.board.fen() == confirmed_before
+    assert session.moves == line
+    assert session.takeback_accept_pending
+    window._lichess_takeback_completed(session.game_id, requests[0][2], 0)
+    window._lichess_game_event(session.game_id, {"type": "gameState", "moves": "e2e4 e7e5",
+                                                  "status": "started"})
+    assert session.moves == "e2e4 e7e5"
+    assert session.board.ply() == 2
+    assert window.moves.count() == 2
+    assert window.board._board.fen() == session.board.fen()
+    assert not window.accept_takeback_button.isVisible()
+    assert session.repository.get_game(session.game_id)["moves"] == "e2e4 e7e5"
+    pgn = session.repository.export_pgn(session.game_id)
+    assert "Nf3" not in pgn and "Nc6" not in pgn

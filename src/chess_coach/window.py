@@ -159,6 +159,7 @@ class MainWindow(QMainWindow):
             self.lichess.authenticated.connect(self._lichess_authenticated)
             self.lichess.error.connect(self._lichess_error)
             self.lichess.move_failed.connect(self._lichess_move_failed)
+            self.lichess.takeback_action_completed.connect(self._lichess_takeback_completed)
             self.lichess.event_received.connect(self._lichess_event)
             self.lichess.game_event_received.connect(self._lichess_game_event)
             self.lichess.challenge_ready.connect(self._challenge_ready)
@@ -251,11 +252,19 @@ class MainWindow(QMainWindow):
         self.decline_draw_button = QPushButton("Отклонить ничью")
         self.decline_draw_button.clicked.connect(lambda: self.lichess.draw(self.online_session.game_id, False) if self.online_session else None)
         self.decline_draw_button.setVisible(False)
+        self.takeback_button = QPushButton("Предложить вернуть ход")
+        self.takeback_button.clicked.connect(self.request_takeback)
+        self.accept_takeback_button = QPushButton("Принять возврат хода")
+        self.accept_takeback_button.clicked.connect(lambda: self.answer_takeback(True))
+        self.decline_takeback_button = QPushButton("Отклонить возврат хода")
+        self.decline_takeback_button.clicked.connect(lambda: self.answer_takeback(False))
+        self.accept_takeback_button.setVisible(False)
+        self.decline_takeback_button.setVisible(False)
         self.claim_draw_button = QPushButton("Заявить ничью по правилу")
         self.claim_draw_button.clicked.connect(lambda: self.lichess.claim_draw(self.online_session.game_id) if self.online_session else None)
         self.leave_game_button = QPushButton("Закрыть просмотр партии")
         self.leave_game_button.clicked.connect(self.leave_online_game)
-        for button in (self.friend_link_button, self.username_button, self.ai_button, self.resign_button, self.draw_button, self.decline_draw_button, self.claim_draw_button, self.leave_game_button):
+        for button in (self.friend_link_button, self.username_button, self.ai_button, self.resign_button, self.draw_button, self.decline_draw_button, self.takeback_button, self.accept_takeback_button, self.decline_takeback_button, self.claim_draw_button, self.leave_game_button):
             button.setEnabled(False)
             button.setVisible(False)
             side_layout.addWidget(button)
@@ -334,6 +343,9 @@ class MainWindow(QMainWindow):
         if self.online_session is not None:
             self._refresh_online(message)
             return
+        for button in (self.takeback_button, self.accept_takeback_button,
+                       self.decline_takeback_button):
+            button.setVisible(False)
         snapshot = self.controller.snapshot()
         self.board.set_position(snapshot.board)
         self.board.set_interaction_enabled(snapshot.live)
@@ -415,7 +427,7 @@ class MainWindow(QMainWindow):
                 self.refresh("Ход недоступен: проверьте актуальную позицию.")
                 return
             self.lichess.send_move(session.game_id, move.uci(), session.pending_request_id)
-            self.refresh("Ход отправлен; ожидаем подтверждение Lichess.")
+            self.refresh(f"Отправляем ход {move.uci()}; ожидаем подтверждения Lichess.")
             return
         if self.controller.apply_move_intent(move):
             self.refresh("Ход записан в локальную партию.")
@@ -582,6 +594,50 @@ class MainWindow(QMainWindow):
             return
         self.refresh(message)
 
+    def request_takeback(self) -> None:
+        self._start_takeback_action("offer")
+
+    def answer_takeback(self, accept: bool) -> None:
+        self._start_takeback_action("accept" if accept else "decline")
+
+    def _start_takeback_action(self, action: str) -> None:
+        session = self.online_session
+        if not session or not self.lichess:
+            return
+        request_id = session.begin_takeback_action(action)
+        if not request_id:
+            self.refresh("Возврат хода сейчас недоступен: дождитесь синхронизации партии.")
+            return
+        messages = {
+            "offer": "Отправляем предложение вернуть ход…",
+            "accept": "Принимаем предложение; ждём подтверждения позиции Lichess…",
+            "decline": "Отправляем отказ от возврата хода…",
+        }
+        self.refresh(messages[action])
+        self.lichess.takeback(session.game_id, action, request_id)
+
+    def _lichess_takeback_completed(self, game_id: str, request_id: str, status: int) -> None:
+        session = self.online_sessions.get(game_id)
+        if not session:
+            return
+        action = session.takeback_action_pending
+        if not session.finish_takeback_action(request_id, status):
+            return
+        if status == 0:
+            messages = {
+                "offer": "Предложение возврата отправлено; ждём ответа соперника.",
+                "accept": "Предложение принято; ждём обновления позиции от Lichess…",
+                "decline": "Отказ отправлен; ждём подтверждения от Lichess…",
+            }
+            message = messages.get(action, "Запрос возврата отправлен; ждём Lichess.")
+        else:
+            message = {
+                400: "Lichess отклонил запрос возврата хода (400). Позиция не изменена.",
+                403: "Lichess запретил возврат хода (403). Позиция не изменена.",
+                404: "Партия не найдена; позиция не изменена.",
+            }.get(status, "Не удалось отправить запрос возврата хода. Позиция не изменена.")
+        self.refresh(message)
+
     def open_friend_game(self) -> None:
         dialog = OnlineGameDialog("Партия с другом по ссылке", parent=self)
         if dialog.exec() != QDialog.DialogCode.Accepted:
@@ -711,6 +767,7 @@ class MainWindow(QMainWindow):
         if event.get("type") == "opponentGone":
             self.refresh("Соперник временно отключился; ждём переподключения.")
             return
+        previous_moves = tuple(session.moves.split())
         try:
             session.apply_event(event)
         except (ValueError, chess.InvalidMoveError, chess.IllegalMoveError) as exc:
@@ -719,26 +776,31 @@ class MainWindow(QMainWindow):
         self.online_session = session
         self.online_view_ply = None
         had_premove = session.premove is not None
-        self.refresh()
+        current_moves = tuple(session.moves.split())
+        takeback_confirmed = (len(current_moves) < len(previous_moves)
+                              and previous_moves[:len(current_moves)] == current_moves)
+        self.refresh("Возврат хода подтверждён Lichess." if takeback_confirmed else None)
         premove = session.take_ready_premove()
         if premove and session.begin_submission(premove):
             self.lichess.send_move(game_id, premove.uci(), session.pending_request_id)
-            self.refresh("Предход проверен и отправлен; ожидаем подтверждение Lichess.")
+            self.refresh(f"Предход {premove.uci()} отправлен; ожидаем подтверждения Lichess.")
         elif had_premove and session.premove is None:
             self.refresh("Предход не стал легальным и снят.")
 
     def _refresh_online(self, message: str | None = None) -> None:
         session = self.online_session
         board = session.board
+        render_board = session.render_board
         ply = len(board.move_stack) if self.online_view_ply is None else min(self.online_view_ply, len(board.move_stack))
-        shown = board.copy(stack=True)
+        display_source = render_board if self.online_view_ply is None else board
+        shown = display_source.copy(stack=True)
         shown = shown.root()
-        for move in board.move_stack[:ply]:
+        for move in display_source.move_stack[:(len(display_source.move_stack) if self.online_view_ply is None else ply)]:
             shown.push(move)
         live = self.online_view_ply is None or ply == len(board.move_stack)
         self.board.set_position(shown)
         active = session.status in {"started", "playing"}
-        self.board.set_interaction_enabled(live and active and session.pending_uci is None)
+        self.board.set_interaction_enabled(live and active and not session.input_locked)
         self.board.set_premove(session.premove, session.color)
         self._apply_preferences()
         self.opponent_label.setText(f"Соперник  ·  {session.opponent}")
@@ -747,7 +809,15 @@ class MainWindow(QMainWindow):
         if message:
             self.game_status.setText(message)
         elif session.pending_uci:
-            self.game_status.setText(f"Ожидаем подтверждения хода {session.pending_uci} от Lichess…")
+            self.game_status.setText(f"Ход {session.pending_uci} отправлен; ожидаем подтверждения Lichess…")
+        elif session.takeback_requested_by_opponent:
+            self.game_status.setText("Соперник предлагает вернуть ход.")
+        elif session.takeback_accept_pending:
+            self.game_status.setText("Возврат принят; ожидаем подтверждения позиции Lichess…")
+        elif session.takeback_decline_pending:
+            self.game_status.setText("Отказ отправлен; ожидаем обновления состояния партии…")
+        elif session.takeback_requested_by_me:
+            self.game_status.setText("Предложение возврата отправлено; ждём ответа соперника.")
         else:
             self.game_status.setText(f"Lichess · {session.status}")
         self.moves.clear()
@@ -772,6 +842,23 @@ class MainWindow(QMainWindow):
         self.draw_button.setText("Принять ничью" if session.draw_offered_by_opponent else "Предложить ничью")
         self.decline_draw_button.setVisible(session.draw_offered_by_opponent)
         self.decline_draw_button.setEnabled(session.draw_offered_by_opponent)
+        self.takeback_button.setVisible(active)
+        self.takeback_button.setText(
+            "Ожидаем ответа на возврат…" if session.takeback_requested_by_me
+            else "Предложить вернуть ход"
+        )
+        self.takeback_button.setEnabled(
+            active and bool(session.moves) and not session.input_locked
+        )
+        show_takeback = session.takeback_requested_by_opponent
+        self.accept_takeback_button.setVisible(show_takeback)
+        self.decline_takeback_button.setVisible(show_takeback)
+        response_enabled = (show_takeback and not session.pending_uci
+                            and not session.takeback_action_pending
+                            and not session.takeback_accept_pending
+                            and not session.takeback_decline_pending)
+        self.accept_takeback_button.setEnabled(response_enabled)
+        self.decline_takeback_button.setEnabled(response_enabled)
         self.claim_draw_button.setEnabled(session.status in {"started", "playing"} and session.board.can_claim_draw())
         self.claim_draw_button.setVisible(session.status in {"started", "playing"} and session.board.can_claim_draw())
         self.leave_game_button.setEnabled(session.status not in {"started", "playing", "created"})

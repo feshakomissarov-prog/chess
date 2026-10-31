@@ -332,6 +332,10 @@ class LichessClient:
     def claim_victory(self, token: str, game_id: str) -> dict:
         return self._json_call("POST", f"/api/board/game/{game_id}/claim-victory", token=token)
 
+    def handle_takeback(self, token: str, game_id: str, accept: bool) -> dict:
+        value = "yes" if accept else "no"
+        return self._json_call("POST", f"/api/board/game/{game_id}/takeback/{value}", token=token)
+
     def stream_ndjson(
         self,
         path: str,

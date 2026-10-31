@@ -130,16 +130,20 @@ def test_username_challenge_uses_keepalive_ndjson_stream():
 
 
 def test_move_draw_resign_and_abort_use_documented_board_api_routes():
-    fake = FakeTransport([response(200, {"ok": True}) for _ in range(4)])
+    fake = FakeTransport([response(200, {"ok": True}) for _ in range(6)])
     client = LichessClient(fake)
     client.send_move("token", "game1234", "e2e4")
     client.handle_draw("token", "game1234", True)
     client.resign("token", "game1234")
     client.abort("token", "game1234")
+    client.handle_takeback("token", "game1234", True)
+    client.handle_takeback("token", "game1234", False)
     assert fake.calls[0][1].endswith("/api/board/game/game1234/move/e2e4")
     assert fake.calls[1][1].endswith("/api/board/game/game1234/draw/yes")
     assert fake.calls[2][1].endswith("/api/board/game/game1234/resign")
     assert fake.calls[3][1].endswith("/api/board/game/game1234/abort")
+    assert fake.calls[4][1].endswith("/api/board/game/game1234/takeback/yes")
+    assert fake.calls[5][1].endswith("/api/board/game/game1234/takeback/no")
 
 
 def test_api_errors_and_429_cooldown(monkeypatch):
@@ -237,6 +241,204 @@ def test_online_move_is_pending_until_stream_confirmation(tmp_path):
     session.apply_event({"type": "gameState", "moves": "e2e4", "status": "started"})
     assert session.pending_uci is None
     assert session.board.move_stack == [move]
+
+
+def test_pending_move_has_render_only_position_until_server_confirmation(tmp_path):
+    session = LichessGameSession("optimistic", GameRepository(tmp_path / "optimistic.sqlite3"))
+    session.color = chess.WHITE
+    session.apply_event({"type": "gameFull", "initialFen": "startpos",
+                         "state": {"moves": "", "status": "started"}})
+    move = chess.Move.from_uci("e2e4")
+    assert session.begin_submission(move)
+    assert session.board.piece_at(chess.E2) == chess.Piece(chess.PAWN, chess.WHITE)
+    assert session.board.piece_at(chess.E4) is None
+    assert session.render_board.piece_at(chess.E2) is None
+    assert session.render_board.piece_at(chess.E4) == chess.Piece(chess.PAWN, chess.WHITE)
+    assert session.moves == ""
+    assert repo_moves(session.repository, "optimistic") == ""
+    session.apply_event({"type": "gameState", "moves": "e2e4", "status": "started"})
+    assert session.pending_uci is None
+    assert session.board.fen() == session.render_board.fen()
+    assert repo_moves(session.repository, "optimistic") == "e2e4"
+
+
+def repo_moves(repository, game_id):
+    return repository.get_game(game_id)["moves"]
+
+
+def test_definitive_rejection_removes_render_only_move_but_timeout_keeps_it(tmp_path):
+    session = LichessGameSession("optimistic-failure", GameRepository(tmp_path / "optimistic-failure.sqlite3"))
+    session.color = chess.WHITE
+    session.apply_event({"type": "gameFull", "initialFen": "startpos",
+                         "state": {"moves": "", "status": "started"}})
+    assert session.begin_submission(chess.Move.from_uci("e2e4"))
+    request_id = session.pending_request_id
+    assert not session.fail_submission(request_id, definitive=False)
+    assert session.render_board.piece_at(chess.E4) == chess.Piece(chess.PAWN, chess.WHITE)
+    assert session.fail_submission(request_id, definitive=True)
+    assert session.render_board.piece_at(chess.E2) == chess.Piece(chess.PAWN, chess.WHITE)
+    assert repo_moves(session.repository, "optimistic-failure") == ""
+
+
+def test_incoming_takeback_flag_is_visible_but_does_not_itself_rewind(tmp_path):
+    session = LichessGameSession("offer", GameRepository(tmp_path / "offer.sqlite3"))
+    session.color = chess.WHITE
+    line = "e2e4 e7e5 g1f3 b8c6"
+    session.apply_event({"type": "gameFull", "initialFen": "startpos",
+                         "state": {"moves": line, "status": "started"}})
+    # A delayed shorter state containing only an offer flag is not an acceptance.
+    session.apply_event({"type": "gameState", "moves": "e2e4 e7e5",
+                         "btakeback": True, "status": "started"})
+    assert session.moves == line
+    assert session.takeback_requested_by_opponent
+    assert session.board.ply() == 4
+    request_id = session.begin_takeback_action("accept")
+    assert request_id
+    assert session.finish_takeback_action(request_id, 0)
+    session.apply_event({"type": "gameState", "moves": "e2e4 e7e5",
+                         "wtime": 170000, "btime": 175000, "status": "started"})
+    assert session.moves == "e2e4 e7e5"
+    assert session.board.ply() == 2
+    assert not session.takeback_requested_by_opponent
+
+
+def test_takeback_flags_are_mapped_to_the_opponent_color(tmp_path):
+    white = LichessGameSession("white-offer", GameRepository(tmp_path / "white.sqlite3"))
+    white.color = chess.WHITE
+    black = LichessGameSession("black-offer", GameRepository(tmp_path / "black.sqlite3"))
+    black.color = chess.BLACK
+    for session, flag in ((white, "btakeback"), (black, "wtakeback")):
+        session.apply_event({"type": "gameFull", "initialFen": "startpos",
+                             "state": {"moves": "e2e4", "status": "started"}})
+        session.apply_event({"type": "gameState", "moves": "e2e4", flag: True,
+                             "status": "started"})
+        assert session.takeback_requested_by_opponent
+        clear = {"type": "gameState", "moves": "e2e4", "status": "started"}
+        session.apply_event(clear)
+        assert not session.takeback_requested_by_opponent
+
+
+def test_accepted_takeback_rebuilds_board_pgn_and_database_from_shorter_history(tmp_path):
+    repo = GameRepository(tmp_path / "takeback.sqlite3")
+    session = LichessGameSession("takeback123", repo)
+    session.configure_players({"name": "WhitePlayer"}, {"name": "BlackPlayer"}, "white")
+    session.apply_event({
+        "type": "gameFull", "initialFen": "startpos", "rated": False,
+        "createdAt": 1793404800000, "clock": {"initial": 180000, "increment": 2000},
+        "state": {"moves": "e2e4 e7e5 g1f3 b8c6", "wtime": 170000,
+                  "btime": 175000, "status": "started"},
+    })
+    before_pgn = repo.export_pgn("takeback123")
+    assert "2. Nf3 Nc6" in before_pgn
+    session.apply_event({"type": "gameState", "moves": "e2e4 e7e5 g1f3 b8c6",
+                         "btakeback": True, "status": "started"})
+    request_id = session.begin_takeback_action("accept")
+    assert request_id
+    assert session.begin_submission(chess.Move.from_uci("e2e4")) is False
+    assert session.finish_takeback_action(request_id, 0)
+    session.apply_event({"type": "gameState", "moves": "e2e4 e7e5",
+                         "wtime": 178000, "btime": 179000, "status": "started"})
+    row = repo.get_game("takeback123")
+    pgn = chess.pgn.read_game(__import__("io").StringIO(row["pgn"]))
+    assert row["moves"] == "e2e4 e7e5"
+    assert session.board.ply() == 2
+    assert [move.uci() for move in pgn.mainline_moves()] == ["e2e4", "e7e5"]
+    assert pgn.headers["White"] == "WhitePlayer"
+    assert pgn.headers["Black"] == "BlackPlayer"
+    assert pgn.headers["Date"] == "2026.10.31"
+    assert "Nf3" not in row["pgn"] and "Nc6" not in row["pgn"]
+
+
+def test_accepted_takeback_clears_premove_tied_to_superseded_turn(tmp_path):
+    session = LichessGameSession("takeback-premove", GameRepository(tmp_path / "takeback-premove.sqlite3"))
+    session.color = chess.BLACK
+    line = "e2e4 e7e5 g1f3 b8c6"
+    session.apply_event({"type": "gameFull", "initialFen": "startpos",
+                         "state": {"moves": line, "status": "started"}})
+    move = chess.Move.from_uci("g8f6")
+    assert session.queue_premove(move)
+    session.apply_event({"type": "gameState", "moves": line, "wtakeback": True,
+                         "status": "started"})
+    request_id = session.begin_takeback_action("accept")
+    assert request_id
+    session.finish_takeback_action(request_id, 0)
+    session.apply_event({"type": "gameState", "moves": "e2e4 e7e5", "status": "started"})
+    assert session.premove is None
+    assert session.take_ready_premove() is None
+
+
+def test_fresh_game_full_after_reconnect_can_authoritatively_shorten_line(tmp_path):
+    session = LichessGameSession("reconnect-takeback", GameRepository(tmp_path / "reconnect.sqlite3"))
+    session.apply_event({"type": "gameFull", "initialFen": "startpos",
+                         "state": {"moves": "e2e4 e7e5 g1f3", "status": "started"}})
+    session.apply_event({"type": "gameFull", "initialFen": "startpos",
+                        "state": {"moves": "e2e4 e7e5", "status": "started"}})
+    assert session.moves == "e2e4 e7e5"
+    assert session.board.ply() == 2
+
+
+def test_own_takeback_offer_is_pending_until_the_server_rewinds(tmp_path):
+    session = LichessGameSession("own-takeback", GameRepository(tmp_path / "own-takeback.sqlite3"))
+    session.color = chess.WHITE
+    session.apply_event({"type": "gameFull", "initialFen": "startpos",
+                         "state": {"moves": "e2e4 e7e5", "status": "started"}})
+    request_id = session.begin_takeback_action("offer")
+    assert request_id and session.takeback_requested_by_me and session.input_locked
+    assert session.finish_takeback_action(request_id, 0)
+    session.apply_event({"type": "gameState", "moves": "e2e4 e7e5",
+                         "wtakeback": True, "status": "started"})
+    assert session.takeback_requested_by_me
+    assert session.moves == "e2e4 e7e5"
+    session.apply_event({"type": "gameState", "moves": "e2e4", "status": "started"})
+    assert session.moves == "e2e4"
+    assert not session.input_locked
+
+
+def test_takeback_decline_and_server_error_do_not_rewind_board(tmp_path):
+    session = LichessGameSession("decline-takeback", GameRepository(tmp_path / "decline-takeback.sqlite3"))
+    session.color = chess.WHITE
+    line = "e2e4 e7e5"
+    session.apply_event({"type": "gameFull", "initialFen": "startpos",
+                         "state": {"moves": line, "status": "started"}})
+    session.apply_event({"type": "gameState", "moves": line, "btakeback": True,
+                         "status": "started"})
+    original_fen = session.board.fen()
+    request_id = session.begin_takeback_action("decline")
+    assert request_id
+    assert session.finish_takeback_action(request_id, 0)
+    assert session.board.fen() == original_fen
+    session.apply_event({"type": "gameState", "moves": line, "status": "started"})
+    assert not session.takeback_requested_by_opponent
+    assert not session.input_locked
+
+    second_id = session.begin_takeback_action("offer")
+    assert second_id
+    assert session.finish_takeback_action(second_id, 403)
+    assert session.board.fen() == original_fen
+    assert session.moves == line
+    assert not session.takeback_requested_by_me
+
+
+def test_pending_move_serializes_takeback_response_until_move_state_arrives(tmp_path):
+    session = LichessGameSession("pending-takeback", GameRepository(tmp_path / "pending-takeback.sqlite3"))
+    session.color = chess.WHITE
+    line = "e2e4 e7e5"
+    session.apply_event({"type": "gameFull", "initialFen": "startpos",
+                         "state": {"moves": line, "status": "started"}})
+    move = chess.Move.from_uci("g1f3")
+    assert session.begin_submission(move)
+    pending_id = session.pending_request_id
+    session.apply_event({"type": "gameState", "moves": line, "btakeback": True,
+                         "status": "started"})
+    assert session.takeback_requested_by_opponent
+    assert session.begin_takeback_action("accept") is None
+    assert not session.queue_premove(chess.Move.from_uci("b1c3"))
+    session.apply_event({"type": "gameState", "moves": line + " g1f3",
+                         "btakeback": True, "status": "started"})
+    assert session.pending_uci is None
+    assert session.pending_request_id is None
+    assert pending_id
+    assert session.begin_takeback_action("accept")
 
 
 def test_pending_move_confirmation_uses_expected_ply_not_old_repeated_uci(tmp_path):

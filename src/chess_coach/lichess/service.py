@@ -22,6 +22,7 @@ class LichessService(QObject):
     invitation_cancelled = Signal(str)
     error = Signal(str)
     move_failed = Signal(str, str, str, int)
+    takeback_action_completed = Signal(str, str, int)
     authenticated = Signal(str)
 
     def __init__(self, client: LichessClient | None = None, token_store=None, parent=None):
@@ -345,6 +346,22 @@ class LichessService(QObject):
 
     def claim_victory(self, game_id: str):
         self._action(lambda token: self.client.claim_victory(token, game_id))
+
+    def takeback(self, game_id: str, action: str, request_id: str):
+        accept = action != "decline"
+
+        def work():
+            status = 0
+            try:
+                token = self.token_store.get()
+                if not token:
+                    raise LichessError("Аккаунт Lichess не подключён.")
+                self.client.handle_takeback(token, game_id, accept)
+            except Exception as exc:
+                status = exc.status if isinstance(exc, LichessError) and exc.status else -1
+            self.takeback_action_completed.emit(game_id, request_id, status)
+
+        self._thread(work, "chess-coach-takeback")
 
     def _action(self, action):
         def work():
