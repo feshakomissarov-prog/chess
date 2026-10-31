@@ -651,16 +651,14 @@ class GameRepository:
                            "middle_start_ply=excluded.middle_start_ply,end_start_ply=excluded.end_start_ply,"
                            "source=excluded.source,method_version=excluded.method_version",
                            (game_id, revision, middle_start, end_start, "lichess", "lichess-division-v1"))
-            if checkpoint_ms is not None:
-                column = "backfill_before" if backfill else None
-                if column:
-                    db.execute("UPDATE archive_sync_state SET backfill_before=?,imported_count=imported_count+1,"
-                               "last_success_at=?,last_error=NULL,updated_at=? WHERE account_id=?",
-                               (checkpoint_ms + 1, imported_at, imported_at, account_id))
-                else:
-                    db.execute("UPDATE archive_sync_state SET imported_count=imported_count+1,"
-                               "last_success_at=?,last_error=NULL,updated_at=? WHERE account_id=?",
-                               (imported_at, imported_at, account_id))
+            if backfill and checkpoint_ms is not None:
+                db.execute("UPDATE archive_sync_state SET backfill_before=?,imported_count=imported_count+1,"
+                           "last_success_at=?,last_error=NULL,updated_at=? WHERE account_id=?",
+                           (checkpoint_ms + 1, imported_at, imported_at, account_id))
+            else:
+                db.execute("UPDATE archive_sync_state SET imported_count=imported_count+1,"
+                           "last_success_at=?,last_error=NULL,updated_at=? WHERE account_id=?",
+                           (imported_at, imported_at, account_id))
 
         args = (game_id, initial_fen, moves, player_color, opponent,
                 bool(record.get("rated", False)), clock, status, winner)
@@ -718,10 +716,14 @@ class GameRepository:
                        (account_id, game_id, game_id, now, color,
                         white_rating if color == "white" else black_rating,
                         black_rating if color == "white" else white_rating))
-            if checkpoint_ms is not None and backfill:
+            if backfill and checkpoint_ms is not None:
                 db.execute("UPDATE archive_sync_state SET backfill_before=?,imported_count=imported_count+1,"
                            "last_success_at=?,last_error=NULL,updated_at=? WHERE account_id=?",
                            (checkpoint_ms + 1, now, now, account_id))
+            else:
+                db.execute("UPDATE archive_sync_state SET imported_count=imported_count+1,"
+                           "last_success_at=?,last_error=NULL,updated_at=? WHERE account_id=?",
+                           (now, now, account_id))
         return game_id
 
     def finish_archive_backfill(self, account_id: str) -> None:
