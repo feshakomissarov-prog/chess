@@ -282,6 +282,48 @@ def test_event_stream_429_waits_before_retry_and_does_not_spin(monkeypatch):
     assert any(message.startswith("Ограничение Lichess (429)") for message in statuses)
 
 
+def test_finished_game_stream_interrupt_has_bounded_retry_and_keeps_sync_pending(monkeypatch):
+    class TokenStore:
+        def get(self):
+            return "fake-token"
+
+    class Client:
+        def __init__(self):
+            self.calls = 0
+
+        def stream_game(self, token, game_id, stop_event):
+            self.calls += 1
+            raise LichessError("offline disconnect")
+            yield  # pragma: no cover
+
+    class WaitControl:
+        def __init__(self):
+            self.waits = []
+
+        def is_set(self):
+            return False
+
+        def wait(self, seconds):
+            self.waits.append(seconds)
+            return False
+
+    client = Client()
+    service = LichessService(client=client, token_store=TokenStore())
+    control = WaitControl()
+    service._connection_stop = control
+    statuses = []
+    service.status_changed.connect(statuses.append)
+    service.mark_game_finished("disconnected-final")
+    monkeypatch.setattr(service, "_thread", lambda target, name: target())
+
+    service.start_game("disconnected-final", "fake-token")
+
+    assert client.calls == 2
+    assert control.waits == [1]
+    assert any("Финальная синхронизация" in status for status in statuses)
+    assert "disconnected-final" in service._final_sync_game_ids
+
+
 def test_game_stream_rebuilds_confirmed_state_and_saves_pgn(tmp_path):
     repo = GameRepository(tmp_path / "games.sqlite3")
     session = LichessGameSession("abc123", repo)
@@ -629,6 +671,11 @@ def test_pgn_keeps_real_players_and_original_game_date_on_resave(tmp_path):
     assert parsed.headers["Black"] == "Lichess AI level 1"
     assert parsed.headers["Date"] == "2026.10.31"
     assert parsed.headers["TimeControl"] == "180+2"
+    assert parsed.headers["Result"] == "*"
+    assert repo.get_game("pgn123")["final_sync_pending"] == 1
+    session.apply_event({"type": "gameState", "moves": "e2e4 e7e5", "status": "mate", "winner": "white"})
+    original = repo.export_pgn("pgn123")
+    parsed = chess.pgn.read_game(__import__("io").StringIO(original))
     assert parsed.headers["Result"] == "1-0"
     repo.save_snapshot("pgn123", "startpos", "e2e4 e7e5", "white", "Lichess AI level 1",
                        False, "180+2", "mate", "white")
@@ -657,3 +704,61 @@ def test_special_moves_are_accepted_from_authoritative_uci_stream(tmp_path):
         assert move in session.board.legal_moves
         session.apply_event({"type": "gameState", "moves": uci, "status": "started"})
         assert session.board.peek() == move
+
+
+def test_finish_before_terminal_state_persists_pending_then_syncs_final_ply(tmp_path):
+    repo = GameRepository(tmp_path / "finish-before-state.sqlite3")
+    session = LichessGameSession("finish-before-state", repo)
+    session.color = chess.WHITE
+    session.apply_event({"type": "gameFull", "initialFen": "startpos",
+                         "state": {"moves": "f2f3 e7e5 g2g4", "status": "started"}})
+    session.finish("mate", "black")
+    pending = repo.get_game(session.game_id)
+    assert session.status == "mate" and session.final_sync_pending
+    assert pending["moves"] == "f2f3 e7e5 g2g4"
+    assert pending["final_sync_pending"] == 1
+    assert '[Result "*"]' in pending["pgn"]
+
+    final_line = "f2f3 e7e5 g2g4 d8h4"
+    final = {"type": "gameState", "moves": final_line, "status": "mate", "winner": "black"}
+    session.apply_event(final)
+    saved = repo.get_game(session.game_id)
+    assert session.status == "mate" and not session.final_sync_pending
+    assert session.moves == final_line and len(session.board.move_stack) == 4
+    assert saved["moves"] == final_line and saved["final_sync_pending"] == 0
+    assert '[Result "0-1"]' in saved["pgn"] and "Qh4#" in saved["pgn"]
+
+
+def test_terminal_state_before_finish_is_idempotent_on_duplicate_events(tmp_path):
+    repo = GameRepository(tmp_path / "state-before-finish.sqlite3")
+    session = LichessGameSession("state-before-finish", repo)
+    line = "f2f3 e7e5 g2g4 d8h4"
+    terminal = {"type": "gameState", "moves": line, "status": "mate", "winner": "black"}
+    session.apply_event(terminal)
+    session.finish("mate", "black")
+    session.apply_event(terminal)
+    saved = repo.get_game(session.game_id)
+    assert session.status == "mate" and not session.final_sync_pending
+    assert session.moves == line and len(session.board.move_stack) == 4
+    assert saved["final_sync_pending"] == 0 and saved["moves"] == line
+
+
+def test_delayed_final_state_survives_stale_truncated_and_duplicate_events(tmp_path):
+    repo = GameRepository(tmp_path / "delayed-final.sqlite3")
+    session = LichessGameSession("delayed-final", repo)
+    prefix = "f2f3 e7e5 g2g4"
+    session.apply_event({"type": "gameFull", "initialFen": "startpos",
+                         "state": {"moves": prefix, "status": "started"}})
+    session.finish("mate", "black")
+    session.apply_event({"type": "gameState", "moves": prefix, "status": "started"})
+    session.apply_event({"type": "gameState", "moves": "f2f3 e7e5", "status": "mate", "winner": "black"})
+    assert session.final_sync_pending and session.status == "mate" and session.moves == prefix
+
+    final_line = prefix + " d8h4"
+    final = {"type": "gameState", "moves": final_line, "status": "mate", "winner": "black"}
+    session.apply_event(final)
+    session.apply_event(final)
+    saved = repo.get_game(session.game_id)
+    assert not session.final_sync_pending
+    assert session.status == "mate" and session.moves == final_line
+    assert saved["moves"] == final_line and len(session.board.move_stack) == 4

@@ -33,6 +33,7 @@ class LichessService(QObject):
         self._connection_stop = threading.Event()
         self._threads: list[threading.Thread] = []
         self._game_stops: dict[str, threading.Event] = {}
+        self._final_sync_game_ids: set[str] = set()
         self._event_lock = threading.Lock()
         self._event_stream_started = False
         self.username: str | None = None
@@ -182,6 +183,7 @@ class LichessService(QObject):
 
         def work():
             delay = 1
+            final_attempts = 0
             try:
                 while not self._stop.is_set() and not connection_stop.is_set() and not stop.is_set():
                     try:
@@ -190,13 +192,25 @@ class LichessService(QObject):
                                 break
                             delay = 1
                             self.game_event_received.emit(game_id, event)
-                            if event.get("type") == "gameFull" and event.get("state", {}).get("status") not in {"started", "created"}:
+                            state = event.get("state", event)
+                            is_terminal = event.get("type") in {"gameFull", "gameState"} and state.get("status") not in {None, "started", "created", "started_soon", "playing"}
+                            if is_terminal:
+                                with self._event_lock:
+                                    self._final_sync_game_ids.discard(game_id)
+                            if event.get("type") == "gameFull" and is_terminal:
                                 stop.set()
-                            if event.get("type") == "gameState" and event.get("status") not in {"started", "created"}:
+                            if event.get("type") == "gameState" and is_terminal:
                                 stop.set()
                         if not self._stop.is_set() and not connection_stop.is_set() and not stop.is_set():
                             raise LichessError("Поток партии завершился.")
                     except RateLimitError as exc:
+                        with self._event_lock:
+                            final_sync = game_id in self._final_sync_game_ids
+                        if final_sync and final_attempts >= 1:
+                            self.status_changed.emit(f"Финальная синхронизация партии {game_id} ожидает повторного подключения.")
+                            break
+                        if final_sync:
+                            final_attempts += 1
                         self.status_changed.emit(
                             f"Ограничение Lichess (429): синхронизация партии через {max(60, exc.retry_after)} с"
                         )
@@ -207,6 +221,13 @@ class LichessService(QObject):
                             connection_stop.set()
                             self.error.emit(str(exc))
                             break
+                        with self._event_lock:
+                            final_sync = game_id in self._final_sync_game_ids
+                        if final_sync and final_attempts >= 1:
+                            self.status_changed.emit(f"Финальная синхронизация партии {game_id} ожидает повторного подключения.")
+                            break
+                        if final_sync:
+                            final_attempts += 1
                         self.status_changed.emit("Потеряно соединение с партией; синхронизация…")
                         connection_stop.wait(delay)
                         delay = min(delay * 2, 30)
@@ -215,6 +236,11 @@ class LichessService(QObject):
                     if self._game_stops.get(game_id) is stop:
                         self._game_stops.pop(game_id, None)
         self._thread(work, f"chess-coach-game-{game_id}")
+
+    def mark_game_finished(self, game_id: str) -> None:
+        """Allow a bounded stream resync to fetch the final authoritative line."""
+        with self._event_lock:
+            self._final_sync_game_ids.add(game_id)
 
     def open_friend_game(self, color: str, clock_limit: int | None, increment: int = 0, rated: bool = False):
         return self._challenge(lambda token: self._create_open(token, color, clock_limit, increment, rated))

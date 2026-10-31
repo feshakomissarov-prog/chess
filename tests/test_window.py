@@ -321,7 +321,7 @@ def test_home_game_result_review_home_and_new_game_flow(qtbot, tmp_path):
     }})
     assert window.screen_stack.currentWidget() is window.result_page
     assert "Победа" in window.result_summary.text()
-    assert "сохранена локально" in window.result_saved_label.text()
+    assert "ожидаем подтверждённую финальную историю" in window.result_saved_label.text()
     assert not window.resign_button.isVisible()
     assert window.game_repository.get_game("flow-game")["status"] == "mate"
 
@@ -476,3 +476,51 @@ def test_game_finish_for_selected_review_does_not_replace_review(qtbot, tmp_path
     assert window.online_session is review
     assert window.online_session.moves == "d2d4"
     assert live.moves == "e2e4 e7e5"
+
+
+def test_finish_before_final_state_keeps_result_screen_then_updates_saved_pgn(qtbot, tmp_path, monkeypatch):
+    window = MainWindow(QSettings(str(tmp_path / "finish-late-ply.ini"), QSettings.Format.IniFormat))
+    qtbot.addWidget(window)
+    session = LichessGameSession("finish-late-ply", window.game_repository)
+    session.color = chess.WHITE
+    session.apply_event({"type": "gameFull", "initialFen": "startpos",
+                         "state": {"moves": "f2f3 e7e5 g2g4", "status": "started"}})
+    window.lichess.start_game = lambda game_id: None
+    window.lichess.mark_game_finished = lambda game_id: None
+    select_online(window, session)
+    window._lichess_event({"type": "gameFinish", "game": {
+        "gameId": session.game_id, "status": {"name": "mate"}, "winner": "black"
+    }})
+    assert window._screen_mode == "result"
+    assert session.final_sync_pending
+    assert "ожидаем подтверждённую финальную историю" in window.result_saved_label.text()
+
+    window._lichess_game_event(session.game_id, {
+        "type": "gameState", "moves": "f2f3 e7e5 g2g4 d8h4", "status": "mate", "winner": "black"
+    })
+    assert window._screen_mode == "result"
+    assert window.online_session is session
+    assert not session.final_sync_pending
+    assert "Партия сохранена локально" in window.result_saved_label.text()
+    assert "Qh4#" in session.repository.export_pgn(session.game_id)
+
+
+def test_authentication_resumes_pending_final_sync_without_screen_takeover(qtbot, tmp_path, monkeypatch):
+    window = MainWindow(QSettings(str(tmp_path / "resume-final-sync.ini"), QSettings.Format.IniFormat))
+    qtbot.addWidget(window)
+    session = LichessGameSession("resume-final", window.game_repository)
+    session.color = chess.BLACK
+    session.apply_event({"type": "gameFull", "initialFen": "startpos",
+                         "state": {"moves": "e2e4", "status": "started"}})
+    session.finish("resign", "white")
+    started = []
+    marked = []
+    monkeypatch.setattr(window.lichess, "start_game", lambda game_id: started.append(game_id))
+    monkeypatch.setattr(window.lichess, "mark_game_finished", lambda game_id: marked.append(game_id))
+
+    window._lichess_authenticated("Owner")
+
+    assert "resume-final" in started
+    assert "resume-final" in marked
+    assert window._screen_mode == "home"
+    assert window.online_sessions["resume-final"].final_sync_pending

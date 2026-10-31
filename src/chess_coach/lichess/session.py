@@ -50,6 +50,7 @@ class LichessGameSession:
         self.clock_control = "-"
         self.rated = False
         self.winner = None
+        self.final_sync_pending = False
         self.draw_offered_by_opponent = False
         self.takeback_requested_by_opponent = False
         self.takeback_requested_by_me = False
@@ -101,6 +102,11 @@ class LichessGameSession:
         state = event.get("state", event)
         incoming_moves = tuple(state.get("moves", self.moves).split())
         confirmed_moves = tuple(self.moves.split())
+        if self.final_sync_pending:
+            return self._apply_final_sync_event(event, kind, state, incoming_fen,
+                                                incoming_moves, confirmed_moves)
+        if self.status not in {"created", "started", "playing", "started_soon"}:
+            return self.snapshot()
         own_takeback_key = "wtakeback" if self.color == chess.WHITE else "btakeback"
         opponent_takeback_key = "btakeback" if self.color == chess.WHITE else "wtakeback"
         own_takeback_flag = bool(state.get(own_takeback_key, False))
@@ -126,20 +132,7 @@ class LichessGameSession:
         elif confirmed_moves and not is_extension:
             return self.snapshot()
         if kind == "gameFull":
-            self.initial_fen = incoming_fen
-            self.rated = bool(event.get("rated", False))
-            created_at = event.get("createdAt") or event.get("created_at")
-            if created_at and not self.started_at:
-                try:
-                    self.started_at = time.strftime("%Y.%m.%d", time.gmtime(int(created_at) / 1000))
-                except (TypeError, ValueError, OverflowError):
-                    self.started_at = str(created_at)[:10].replace("-", ".")
-            clock = event.get("clock") or {}
-            self.clock_initial = int(clock.get("initial", 0) or 0)
-            self.white_inc = int(clock.get("increment", 0) or 0)
-            self.black_inc = self.white_inc
-            self.clock_control = (f"{self.clock_initial // 1000}+{self.white_inc // 1000}"
-                                  if self.clock_initial else "-")
+            self._apply_game_full_metadata(event, incoming_fen)
         if kind in {"gameState", "gameFull"}:
             self.status = state.get("status", self.status)
             self.moves = " ".join(incoming_moves)
@@ -213,6 +206,54 @@ class LichessGameSession:
         self.board = chess.Board() if self.initial_fen == "startpos" else chess.Board(self.initial_fen)
         for uci in self.moves.split():
             self.board.push_uci(uci)
+
+    def _apply_game_full_metadata(self, event: dict, incoming_fen: str) -> None:
+        self.initial_fen = incoming_fen
+        self.rated = bool(event.get("rated", False))
+        created_at = event.get("createdAt") or event.get("created_at")
+        if created_at and not self.started_at:
+            try:
+                self.started_at = time.strftime("%Y.%m.%d", time.gmtime(int(created_at) / 1000))
+            except (TypeError, ValueError, OverflowError):
+                self.started_at = str(created_at)[:10].replace("-", ".")
+        clock = event.get("clock") or {}
+        self.clock_initial = int(clock.get("initial", 0) or 0)
+        self.white_inc = int(clock.get("increment", 0) or 0)
+        self.black_inc = self.white_inc
+        self.clock_control = (f"{self.clock_initial // 1000}+{self.white_inc // 1000}"
+                              if self.clock_initial else "-")
+
+    def _apply_final_sync_event(self, event: dict, kind: str, state: dict,
+                                incoming_fen: str, incoming_moves: tuple[str, ...],
+                                confirmed_moves: tuple[str, ...]) -> GameSnapshot:
+        """Accept only a terminal, monotonic server snapshot after gameFinish."""
+        incoming_status = state.get("status")
+        if incoming_status in {None, "created", "started", "started_soon", "playing"}:
+            return self.snapshot()
+        if (len(incoming_moves) < len(confirmed_moves)
+                or incoming_moves[:len(confirmed_moves)] != confirmed_moves):
+            return self.snapshot()
+        board = chess.Board() if incoming_fen == "startpos" else chess.Board(incoming_fen)
+        for uci in incoming_moves:
+            board.push_uci(uci)
+        if kind == "gameFull":
+            self._apply_game_full_metadata(event, incoming_fen)
+        self.initial_fen = incoming_fen
+        self.moves = " ".join(incoming_moves)
+        self.status = str(incoming_status)
+        if "winner" in state:
+            self.winner = state.get("winner")
+        self.white_ms = state.get("wtime", self.white_ms)
+        self.black_ms = state.get("btime", self.black_ms)
+        self.white_inc = state.get("winc", self.white_inc)
+        self.black_inc = state.get("binc", self.black_inc)
+        self.board = board
+        self.final_sync_pending = False
+        self._clear_pending()
+        self.premove = None
+        self._last_clock_at = time.monotonic()
+        self._save()
+        return self.snapshot()
 
     def begin_submission(self, move: chess.Move) -> bool:
         if self.input_locked or not self.is_my_turn or move not in self.board.legal_moves:
@@ -301,8 +342,14 @@ class LichessGameSession:
         return True
 
     def finish(self, status: str, winner: str | None = None) -> None:
+        if self.status not in {"created", "started", "playing", "started_soon"}:
+            return
         self.status = status
-        self.winner = winner
+        if winner is not None:
+            self.winner = winner
+        self.final_sync_pending = True
+        self._clear_pending()
+        self.premove = None
         self._save()
 
     def snapshot(self) -> GameSnapshot:
@@ -316,4 +363,4 @@ class LichessGameSession:
             "white" if self.color == chess.WHITE else "black", self.opponent,
             self.rated, self.clock_control, self.status, self.winner,
             white_player=self.white_player, black_player=self.black_player,
-            started_at=self.started_at)
+            started_at=self.started_at, final_sync_pending=self.final_sync_pending)

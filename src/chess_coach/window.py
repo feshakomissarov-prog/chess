@@ -531,11 +531,17 @@ class MainWindow(QMainWindow):
             f"{outcome}\nСоперник: {session.opponent}\nСтатус Lichess: {session.status}"
         )
         stored = self.game_repository.get_game(session.game_id)
-        saved = bool(saved and stored and stored["moves"] == session.moves
-                     and stored["status"] == session.status)
+        if session.final_sync_pending:
+            saved = False
+            saved_label = "Результат получен; ожидаем подтверждённую финальную историю от Lichess."
+        else:
+            saved = bool(saved and stored and stored["moves"] == session.moves
+                         and stored["status"] == session.status
+                         and not stored.get("final_sync_pending", 0))
+            saved_label = ("Партия сохранена локально." if saved else
+                           f"Не удалось подтвердить сохранение локальной партии: {detail or 'ошибка записи'}")
         self.result_saved_label.setText(
-            "Партия сохранена локально." if saved else
-            f"Не удалось подтвердить сохранение локальной партии: {detail or 'ошибка записи'}"
+            saved_label
         )
         self.result_saved_label.setStyleSheet("color: #39704a;" if saved else "color: #9b3434;")
         self.result_review_button.setEnabled(bool(session.moves))
@@ -726,6 +732,31 @@ class MainWindow(QMainWindow):
             button.setVisible(self.online_session is None)
         for button in (self.home_ai_button, self.home_friend_button, self.home_username_button):
             button.setEnabled(True)
+        self._resume_pending_final_syncs()
+
+    def _resume_pending_final_syncs(self) -> None:
+        """Resume persisted terminal games without taking over the visible screen."""
+        for row in self.game_repository.list_pending_final_sync():
+            game_id = row["game_id"]
+            session = self.online_sessions.get(game_id)
+            if session is None:
+                session = LichessGameSession(game_id, self.game_repository)
+                session.initial_fen = row["initial_fen"]
+                session.moves = row["moves"]
+                session.color = chess.WHITE if row["color"] == "white" else chess.BLACK
+                session.opponent = row["opponent"]
+                session.rated = bool(row["rated"])
+                session.clock_control = row["clock"]
+                session.status = row["status"]
+                session.winner = row["winner"]
+                session.white_player = row["white_player"]
+                session.black_player = row["black_player"]
+                session.started_at = row["started_at"]
+                session.final_sync_pending = True
+                session._rebuild_board()
+                self.online_sessions[game_id] = session
+            self.lichess.mark_game_finished(game_id)
+            self.lichess.start_game(game_id)
 
     def _lichess_error(self, message: str) -> None:
         self._awaiting_game_start = False
@@ -931,6 +962,9 @@ class MainWindow(QMainWindow):
                         error = str(exc)
                         session.status = status
                         session.winner = game.get("winner")
+                if session.final_sync_pending:
+                    self.lichess.mark_game_finished(game_id)
+                    self.lichess.start_game(game_id)
                 if (game_id == self._selected_live_game_id
                         and self.online_session is session
                         and self._screen_mode == "online"):
@@ -953,6 +987,7 @@ class MainWindow(QMainWindow):
         # Finish is terminal. A buffered or reordered active state must never
         # reopen the session or overwrite the saved result.
         if (session.status not in {"created", "started", "playing"}
+                and not session.final_sync_pending
                 and event.get("type") in {"gameState", "gameFull"}):
             return
         if event.get("type") == "gameFull":
@@ -1008,6 +1043,10 @@ class MainWindow(QMainWindow):
                 if previous_view_ply is not None and takeback_confirmed:
                     message = "Возврат подтверждён; просмотр ограничен новой историей."
                 self.refresh(message)
+        elif (game_id == self._selected_live_game_id and self.online_session is session
+              and self._screen_mode == "result" and not session.final_sync_pending):
+            # The terminal result screen stays open while its saved history is reconciled.
+            self._show_result(session, True)
         elif (game_id == self._selected_live_game_id and self._screen_mode == "home"
               and session.status not in {"started", "playing", "created"}):
             self.show_home()
