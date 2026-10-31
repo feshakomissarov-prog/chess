@@ -1,10 +1,11 @@
 import chess
 import time
 import pytest
+from pathlib import Path
 from PySide6.QtCore import QPoint, QSettings, Qt
 
 from chess_coach.board_view import BoardView
-from chess_coach.window import MainWindow, SettingsDialog
+from chess_coach.window import ActiveGamesDialog, MainWindow, SettingsDialog
 from chess_coach.lichess.session import LichessGameSession
 from chess_coach.lichess.repository import GameRepository
 
@@ -64,6 +65,160 @@ def test_main_window_smoke_and_game_controller_integration(qtbot, tmp_path) -> N
     assert window.controller.ply == 3
     window.navigate_live()
     assert window.controller.viewing_live_position
+
+
+def test_explicit_offline_window_never_constructs_or_uses_lichess_credentials(qtbot, tmp_path, monkeypatch):
+    def forbidden(*args, **kwargs):
+        raise AssertionError("Offline mode must not construct Lichess or read credentials")
+
+    monkeypatch.setattr("chess_coach.window.WindowsCredentialStore", forbidden)
+    monkeypatch.setattr("chess_coach.window.LichessService", forbidden)
+    window = MainWindow(
+        QSettings(str(tmp_path / "offline.ini"), QSettings.Format.IniFormat),
+        offline_mode=True,
+    )
+    qtbot.addWidget(window)
+
+    assert window.lichess is None
+    assert "Офлайн-режим" in window.connection.text()
+    assert not window.connect_button.isEnabled()
+    assert not window.home_ai_button.isVisible()
+    offline_dir = Path(window.game_repository.path).parent
+    assert offline_dir.name.startswith("chess-coach-offline-")
+    assert not (tmp_path / "games.sqlite3").exists()
+    window.start_local_game()
+    assert window.controller.ply == 0
+    window.close()
+
+
+def test_active_games_dialog_shows_server_confirmed_turn_and_game_type(qtbot):
+    dialog = ActiveGamesDialog()
+    qtbot.addWidget(dialog)
+
+    dialog.set_games([
+        {"gameId": "corr-1", "color": "white", "speed": "correspondence",
+         "isMyTurn": False, "opponent": {"username": "Correspondent"}},
+        {"gameId": "fast-1", "color": "black", "speed": "blitz",
+         "opponent": {"username": "Blitzer"}},
+    ])
+
+    assert dialog.games.count() == 2
+    assert "заочная" in dialog.games.item(0).text()
+    assert "ход соперника" in dialog.games.item(0).text()
+    assert "реальное время" in dialog.games.item(1).text()
+    assert "чей ход не указан" in dialog.games.item(1).text()
+
+
+def test_open_active_game_clears_old_premove_and_background_events_do_not_submit(qtbot, tmp_path, monkeypatch):
+    window = MainWindow(QSettings(str(tmp_path / "active-open.ini"), QSettings.Format.IniFormat))
+    qtbot.addWidget(window)
+    existing = LichessGameSession("background-game", window.game_repository)
+    existing.color = chess.WHITE
+    existing.apply_event({"type": "gameFull", "initialFen": "startpos",
+                          "state": {"moves": "e2e4", "status": "started"}})
+    existing.premove = chess.Move.from_uci("g1f3")
+    window.online_sessions[existing.game_id] = existing
+    window.online_session = existing
+    window._selected_live_game_id = existing.game_id
+    window._screen_mode = "online"
+    starts = []
+    sent = []
+    monkeypatch.setattr(window.lichess, "start_game", starts.append)
+    monkeypatch.setattr(window.lichess, "send_move", lambda *args: sent.append(args))
+
+    window.open_active_game({
+        "gameId": "chosen-game", "color": "black", "speed": "rapid",
+        "opponent": {"username": "Chosen"},
+    })
+
+    assert starts == ["chosen-game"]
+    assert window._selected_live_game_id == "chosen-game"
+    assert window.online_session.game_id == "chosen-game"
+    assert existing.premove == chess.Move.from_uci("g1f3")
+    window._lichess_game_event(existing.game_id, {
+        "type": "gameState", "moves": "e2e4 e7e5", "status": "started"
+    })
+    assert sent == []
+
+
+def test_confirmed_local_move_and_undo_clear_manual_marks_with_old_position_context(qtbot, tmp_path):
+    window = MainWindow(QSettings(str(tmp_path / "local-annotations.ini"), QSettings.Format.IniFormat))
+    qtbot.addWidget(window)
+    window.start_local_game()
+    actions = []
+    window.board.annotation_action.connect(actions.append)
+    window.board._annotation_arrows.add((chess.E2, chess.E4))
+
+    window.on_move_intent(chess.Move.from_uci("e2e4"))
+
+    assert not window.board._annotation_arrows
+    assert actions[-1]["action"] == "clear"
+    assert actions[-1]["game_id"] == "__local__"
+    assert actions[-1]["ply"] == 0
+    window.board._annotation_squares.add(chess.A1)
+    window.undo_local_last_move()
+    assert not window.board._annotation_squares
+    assert actions[-1]["action"] == "clear"
+    assert actions[-1]["ply"] == 1
+
+
+def test_online_confirmed_moves_clear_marks_but_duplicates_and_clocks_do_not(qtbot, tmp_path):
+    window = MainWindow(QSettings(str(tmp_path / "online-annotations.ini"), QSettings.Format.IniFormat))
+    qtbot.addWidget(window)
+    session = LichessGameSession("annotation-game", window.game_repository)
+    session.color = chess.WHITE
+    session.apply_event({"type": "gameFull", "initialFen": "startpos",
+                         "state": {"moves": "", "status": "started"}})
+    select_online(window, session)
+    window.refresh()
+    actions = []
+    window.board.annotation_action.connect(actions.append)
+    window.board._annotation_arrows.add((chess.E2, chess.E4))
+
+    window._lichess_game_event(session.game_id, {
+        "type": "gameState", "moves": "e2e4", "status": "started"
+    })
+    assert not window.board._annotation_arrows
+    assert actions[-1]["action"] == "clear" and actions[-1]["ply"] == 0
+
+    window.board._annotation_squares.add(chess.D4)
+    window._lichess_game_event(session.game_id, {
+        "type": "gameState", "moves": "e2e4", "status": "started", "wtime": 10_000
+    })
+    assert chess.D4 in window.board._annotation_squares
+    assert len(actions) == 1
+
+    window._lichess_game_event(session.game_id, {
+        "type": "gameState", "moves": "e2e4 e7e5", "status": "started"
+    })
+    assert not window.board._annotation_squares
+    assert actions[-1]["action"] == "clear" and actions[-1]["ply"] == 1
+
+
+def test_selected_takeback_clears_marks_but_rejected_pending_move_preserves_them(qtbot, tmp_path, monkeypatch):
+    window = MainWindow(QSettings(str(tmp_path / "branch-annotations.ini"), QSettings.Format.IniFormat))
+    qtbot.addWidget(window)
+    session = LichessGameSession("branch-annotations", window.game_repository)
+    session.color = chess.WHITE
+    session.apply_event({"type": "gameFull", "initialFen": "startpos",
+                         "state": {"moves": "e2e4 e7e5", "status": "started"}})
+    select_online(window, session)
+    window.refresh()
+    actions = []
+    window.board.annotation_action.connect(actions.append)
+    window.board._annotation_squares.add(chess.D4)
+    window._lichess_game_event(session.game_id, {
+        "type": "gameFull", "initialFen": "startpos",
+        "state": {"moves": "e2e4", "status": "started"}
+    })
+    assert not window.board._annotation_squares
+    assert actions[-1]["action"] == "clear"
+
+    session.color = chess.BLACK
+    assert session.begin_submission(chess.Move.from_uci("e7e5"))
+    window.board._annotation_squares.add(chess.A1)
+    window._lichess_move_failed(session.game_id, "e7e5", session.pending_request_id, 400)
+    assert chess.A1 in window.board._annotation_squares
 
 
 def test_completed_pair_allows_selecting_white_halfmove(qtbot, tmp_path) -> None:

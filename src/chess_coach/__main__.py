@@ -1,6 +1,7 @@
 """Application entry point."""
 
 import sys
+import argparse
 from datetime import datetime, timezone
 import os
 from pathlib import Path
@@ -39,12 +40,18 @@ def _exception_hook(exc_type, exc_value, exc_traceback) -> None:
         pass
 
 
-def main() -> int:
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description="Chess Coach")
+    parser.add_argument(
+        "--offline", action="store_true",
+        help="запустить изолированное окно без чтения OAuth-данных и сетевых соединений",
+    )
+    args = parser.parse_args(argv)
     sys.excepthook = _exception_hook
-    app = QApplication(sys.argv)
+    app = QApplication([sys.argv[0]])
     app.setOrganizationName("ChessCoach")
     app.setApplicationName("ChessCoach")
-    window = MainWindow(asynchronous_storage=True)
+    window = MainWindow(asynchronous_storage=True, offline_mode=args.offline)
     window.show()
     return app.exec()
 

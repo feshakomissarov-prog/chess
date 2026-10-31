@@ -169,6 +169,76 @@ def test_api_errors_and_429_cooldown(monkeypatch):
         client.get_account("token")
 
 
+def test_get_active_games_uses_account_playing_and_discards_malformed_entries():
+    payload = {"nowPlaying": [
+        {"gameId": "game1234", "color": "white", "opponent": {"username": "Friend"}},
+        None,
+        {"color": "black"},
+    ]}
+    fake = FakeTransport([response(200, payload)])
+    client = LichessClient(fake, base_url="https://lichess.test")
+
+    games = client.get_playing_games("token")
+
+    assert [game["gameId"] for game in games] == ["game1234"]
+    assert fake.calls[0][0] == "GET"
+    assert fake.calls[0][1].endswith("/api/account/playing?nb=50")
+    assert fake.calls[0][2]["Authorization"] == "Bearer token"
+
+
+def test_active_game_list_service_uses_one_explicit_request_without_retry(monkeypatch):
+    class TokenStore:
+        def get(self):
+            return "fake-token"
+
+    class Client:
+        def __init__(self):
+            self.calls = 0
+
+        def get_playing_games(self, token):
+            self.calls += 1
+            assert token == "fake-token"
+            return [{"gameId": "game1234"}]
+
+    client = Client()
+    service = LichessService(client=client, token_store=TokenStore())
+    results = []
+    service.active_games_received.connect(results.append)
+    workers = []
+    monkeypatch.setattr(service, "_thread", lambda target, name: (workers.append(name), target()))
+
+    service.fetch_active_games()
+
+    assert results == [[{"gameId": "game1234"}]]
+    assert client.calls == 1
+    assert workers == ["chess-coach-active-games"]
+
+
+def test_active_game_list_429_is_reported_without_automatic_retry(monkeypatch):
+    class TokenStore:
+        def get(self):
+            return "fake-token"
+
+    class Client:
+        def __init__(self):
+            self.calls = 0
+
+        def get_playing_games(self, _token):
+            self.calls += 1
+            raise RateLimitError(90)
+
+    client = Client()
+    service = LichessService(client=client, token_store=TokenStore())
+    errors = []
+    service.active_games_error.connect(errors.append)
+    monkeypatch.setattr(service, "_thread", lambda target, _name: target())
+
+    service.fetch_active_games()
+
+    assert client.calls == 1
+    assert errors and "90" in errors[0]
+
+
 def test_retry_after_header_is_honored_and_stream_429_blocks_regular_requests():
     fake = FakeTransport([HttpResponse(429, {"Retry-After": "125"}, b"{}")])
     client = LichessClient(fake)

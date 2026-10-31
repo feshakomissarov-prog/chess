@@ -117,6 +117,30 @@ def test_annotation_right_click_and_drag_toggle_without_move(qtbot) -> None:
     assert widget._board.fen() == board.fen()
 
 
+def test_annotation_action_signal_records_add_remove_and_clear_context(qtbot) -> None:
+    widget = BoardView(chess.Board())
+    qtbot.addWidget(widget)
+    widget.resize(600, 600)
+    widget.show()
+    widget.set_annotation_context("game-a")
+    actions = []
+    widget.annotation_action.connect(actions.append)
+    a1 = QPoint(*center(widget, chess.A1))
+    c3 = QPoint(*center(widget, chess.C3))
+
+    qtbot.mouseClick(widget, Qt.MouseButton.RightButton, pos=a1)
+    qtbot.mouseClick(widget, Qt.MouseButton.RightButton, pos=a1)
+    widget._annotation_arrows.add((chess.A1, chess.C3))
+    widget._record_annotation_action("add", "arrow", from_square="a1", to_square="c3")
+    widget.clear_annotations()
+
+    assert [action["action"] for action in actions] == ["add", "remove", "add", "clear"]
+    assert all(action["game_id"] == "game-a" and action["ply"] == 0 for action in actions)
+    assert all(action["fen"] == chess.Board().fen() for action in actions)
+    assert actions[0]["kind"] == "square" and actions[0]["square"] == "a1"
+    assert actions[2]["kind"] == "arrow" and actions[2]["to_square"] == "c3"
+
+
 def test_promotion_dialog_offers_all_four_choices(qtbot, monkeypatch) -> None:
     widget = BoardView(chess.Board("7k/P7/8/8/8/8/8/7K w - - 0 1"))
     qtbot.addWidget(widget)

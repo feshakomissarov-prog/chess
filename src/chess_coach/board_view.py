@@ -23,6 +23,7 @@ class BoardView(BoardWidget):
     move_intent = Signal(object)
     premove_intent = Signal(object)
     annotations_changed = Signal()
+    annotation_action = Signal(dict)
     cancel_premove_requested = Signal()
 
     def __init__(self, board: chess.Board, parent=None) -> None:
@@ -46,7 +47,22 @@ class BoardView(BoardWidget):
         self._premove_dragging = False
         self._premove_press_pos: Optional[QPointF] = None
         self._premove_target: Optional[int] = None
+        self._line_context: dict = {"game_id": None, "ply": len(self._board.move_stack),
+                                    "fen": self._board.fen()}
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+
+    def set_annotation_context(self, game_id: str | None, board: chess.Board | None = None) -> None:
+        """Attach manual annotation actions to their displayed game position."""
+        position = board or self._board
+        self._line_context = {
+            "game_id": game_id,
+            "ply": len(position.move_stack),
+            "fen": position.fen(),
+        }
+
+    def _record_annotation_action(self, action: str, kind: str, **details) -> None:
+        self.annotation_action.emit({**self._line_context, "action": action,
+                                     "kind": kind, **details})
 
     def set_position(self, board: chess.Board) -> None:
         """Replace render snapshot after the controller accepts an event."""
@@ -60,6 +76,7 @@ class BoardView(BoardWidget):
         self._cancel_premove_gesture(clear_selection=True)
         self._queued_premove = None
         super().set_board(board.copy(stack=True))
+        self.set_annotation_context(self._line_context.get("game_id"), board)
 
     def set_premove(self, move: Optional[chess.Move], color: chess.Color) -> None:
         if self._queued_premove == move and self._premove_color == color:
@@ -103,7 +120,9 @@ class BoardView(BoardWidget):
             self._queued_premove = None
         self.update()
 
-    def clear_annotations(self) -> None:
+    def clear_annotations(self, *, record_action: bool = True) -> None:
+        if record_action and (self._annotation_arrows or self._annotation_squares):
+            self._record_annotation_action("clear", "all")
         self._annotation_arrows.clear()
         self._annotation_squares.clear()
         self.annotations_changed.emit()
@@ -239,13 +258,22 @@ class BoardView(BoardWidget):
                     arrow = (start, end)
                     if arrow in self._annotation_arrows:
                         self._annotation_arrows.remove(arrow)
+                        action = "remove"
                     else:
                         self._annotation_arrows.add(arrow)
+                        action = "add"
+                    self._record_annotation_action(action, "arrow",
+                                                  from_square=chess.square_name(start),
+                                                  to_square=chess.square_name(end))
                 else:
                     if start in self._annotation_squares:
                         self._annotation_squares.remove(start)
+                        action = "remove"
                     else:
                         self._annotation_squares.add(start)
+                        action = "add"
+                    self._record_annotation_action(action, "square",
+                                                  square=chess.square_name(start))
                 self.annotations_changed.emit()
             self._right_start = None
             self._right_end = None

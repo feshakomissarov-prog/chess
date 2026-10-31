@@ -1,6 +1,6 @@
 # Chess Coach — персональный шахматный ИИ-тренер
 
-**Статус на 31.10.2026:** первая играбельная версия Chess Coach **слита в `main`**: [PR #2 — M0](https://github.com/feshakomissarov-prog/chess/pull/2) и [PR #3 — Lichess](https://github.com/feshakomissarov-prog/chess/pull/3). Владелец вручную играл с Lichess AI и другом. Остаются тесты и улучшения: [«Активные партии» #4](https://github.com/feshakomissarov-prog/chess/issues/4), [технический долг #5](https://github.com/feshakomissarov-prog/chess/issues/5). Голос, Stockfish и ИИ-тренер — последующие этапы. [Текущее состояние проекта](docs/PROJECT_STATUS.md).
+**Статус на 31.10.2026:** PR #2 (M0) и PR #3 (Lichess) слиты в `main`. Текущий этап — отдельные проверяемые PR по [эпику #6](https://github.com/feshakomissarov-prog/chess/issues/6): начальная ветка P0 исправляет жизненный цикл ручных пометок, добавляет явный безопасный офлайн-запуск и Windows CI. Отчёт по текущей ветке и проверкам — [docs/PROJECT_STATUS.md](docs/PROJECT_STATUS.md). Архивный импорт, Stockfish-анализ и голос пока не реализованы.
 
 ## Идея
 
@@ -70,7 +70,7 @@ Chess Coach — планируемое настольное приложение
 
 ## Запуск на Windows
 
-**Код теперь в `main`.** Если приложение уже установлено локально в `G:\project\chess` и виртуальное окружение `.venv` существует:
+Из корня репозитория и при существующем `.venv` обычный запуск выглядит так:
 
 ```powershell
 cd G:\project\chess
@@ -80,7 +80,13 @@ git pull --ff-only
 .\.venv\Scripts\python.exe -m chess_coach
 ```
 
-При несохранённых локальных изменениях не делайте `reset --hard` или принудительный переключатель ветки: сначала сохраните изменения. Для чистой установки требуется Python **3.12+** по `pyproject.toml`, но тесты Codex пока выполнялись на 3.11.5 (см. [#5](https://github.com/feshakomissarov-prog/chess/issues/5)).
+Для безопасного офлайн-smoke запуска без чтения OAuth-данных и без сетевых вызовов используйте `--offline`:
+
+```powershell
+.\.venv\Scripts\python.exe -m chess_coach --offline
+```
+
+Для чистой установки требуется Python **3.12+** по `pyproject.toml`. Результаты проверок конкретной ветки и установленная у исполнителя версия указаны в [docs/PROJECT_STATUS.md](docs/PROJECT_STATUS.md).
 
 
 ## Ярлык Windows

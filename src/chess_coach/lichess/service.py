@@ -20,6 +20,8 @@ class LichessService(QObject):
     challenge_ready = Signal(dict)
     challenge_status_changed = Signal(str, bool)
     invitation_cancelled = Signal(str)
+    active_games_received = Signal(object)
+    active_games_error = Signal(str)
     error = Signal(str)
     move_failed = Signal(str, str, str, int)
     takeback_action_completed = Signal(str, str, int)
@@ -74,6 +76,20 @@ class LichessService(QObject):
                 else:
                     self.status_changed.emit("Ошибка подключения")
         self._thread(work, "chess-coach-restore-auth")
+
+    def fetch_active_games(self) -> None:
+        """Fetch a single account/playing snapshot on explicit user request."""
+        def work():
+            try:
+                token = self.token_store.get()
+                if not token:
+                    raise LichessError("Сначала подключите аккаунт Lichess.")
+                games = self.client.get_playing_games(token)
+                self.active_games_received.emit(games)
+            except Exception as exc:
+                self.active_games_error.emit(str(exc))
+
+        self._thread(work, "chess-coach-active-games")
 
     def connect_account(self) -> None:
         def work():

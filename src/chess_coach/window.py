@@ -4,9 +4,9 @@ from __future__ import annotations
 
 import chess
 import time
-import os
 from pathlib import Path
-from PySide6.QtCore import QSettings, Qt, QStandardPaths, QTimer
+import tempfile
+from PySide6.QtCore import QSettings, Qt, QStandardPaths, QTimer, Signal
 from PySide6.QtGui import QKeySequence, QShortcut
 from PySide6.QtWidgets import (
     QCheckBox,
@@ -119,9 +119,88 @@ class SettingsDialog(QDialog):
         settings.sync()
 
 
+class ActiveGamesDialog(QDialog):
+    refresh_requested = Signal()
+    open_requested = Signal(dict)
+
+    def __init__(self, parent=None) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("Активные партии Lichess")
+        self.setMinimumWidth(560)
+        layout = QVBoxLayout(self)
+        self.status = QLabel("Нажмите «Обновить», чтобы запросить список у Lichess.")
+        self.status.setWordWrap(True)
+        layout.addWidget(self.status)
+        self.games = QListWidget()
+        self.games.itemDoubleClicked.connect(lambda _item: self.open_selected())
+        layout.addWidget(self.games)
+        buttons = QHBoxLayout()
+        self.refresh_button = QPushButton("Обновить список")
+        self.refresh_button.clicked.connect(self.refresh_requested.emit)
+        buttons.addWidget(self.refresh_button)
+        self.open_button = QPushButton("Открыть выбранную партию")
+        self.open_button.setEnabled(False)
+        self.open_button.clicked.connect(self.open_selected)
+        buttons.addWidget(self.open_button)
+        close_button = QPushButton("Закрыть")
+        close_button.clicked.connect(self.reject)
+        buttons.addWidget(close_button)
+        layout.addLayout(buttons)
+        self.games.currentItemChanged.connect(
+            lambda current, _previous: self.open_button.setEnabled(current is not None)
+        )
+
+    def set_loading(self) -> None:
+        self.status.setText("Запрашиваем активные партии…")
+        self.refresh_button.setEnabled(False)
+
+    def set_error(self, message: str) -> None:
+        self.status.setText(message)
+        self.refresh_button.setEnabled(True)
+
+    def set_games(self, games: list[dict]) -> None:
+        self.games.clear()
+        for game in games:
+            opponent = game.get("opponent") or {}
+            opponent_name = opponent.get("username") or opponent.get("id") or "Соперник"
+            color = {"white": "белыми", "black": "чёрными"}.get(
+                game.get("color"), "цвет не указан"
+            )
+            speed = str(game.get("speed") or "контроль не указан")
+            kind = "заочная" if speed.casefold() == "correspondence" else "реальное время"
+            is_my_turn = game.get("isMyTurn")
+            turn = ("ваш ход" if is_my_turn else "ход соперника"
+                    if isinstance(is_my_turn, bool) else "чей ход не указан")
+            seconds = game.get("secondsLeft")
+            remaining = f" · осталось {int(seconds)} с" if isinstance(seconds, (int, float)) else ""
+            item = QListWidgetItem(
+                f"{opponent_name} · вы {color} · {kind} ({speed}) · {turn}{remaining}"
+            )
+            item.setData(Qt.ItemDataRole.UserRole, game)
+            self.games.addItem(item)
+        self.status.setText(
+            f"Активных партий: {len(games)}." if games else "Lichess не вернул активных партий."
+        )
+        self.refresh_button.setEnabled(True)
+        self.open_button.setEnabled(self.games.currentItem() is not None)
+
+    def open_selected(self) -> None:
+        item = self.games.currentItem()
+        if item is not None:
+            self.open_requested.emit(item.data(Qt.ItemDataRole.UserRole))
+            self.accept()
+
+
 class MainWindow(QMainWindow):
-    def __init__(self, settings: QSettings | None = None, *, asynchronous_storage: bool = False) -> None:
+    def __init__(
+        self,
+        settings: QSettings | None = None,
+        *,
+        asynchronous_storage: bool = False,
+        offline_mode: bool = False,
+    ) -> None:
         super().__init__()
+        self.offline_mode = offline_mode
         self.settings = (
             settings
             if settings is not None
@@ -129,16 +208,30 @@ class MainWindow(QMainWindow):
         )
         color = self.settings.value("player_color", chess.WHITE, type=int)
         self.controller = GameController(chess.Color(color))
-        data_root = Path(QStandardPaths.writableLocation(QStandardPaths.StandardLocation.AppDataLocation))
-        data_root.mkdir(parents=True, exist_ok=True)
+        self._offline_data_dir: tempfile.TemporaryDirectory | None = None
+        if offline_mode:
+            # Smoke runs must not open, migrate, or write the owner's game DB.
+            self._offline_data_dir = tempfile.TemporaryDirectory(prefix="chess-coach-offline-")
+            data_root = Path(self._offline_data_dir.name)
+        else:
+            data_root = Path(QStandardPaths.writableLocation(
+                QStandardPaths.StandardLocation.AppDataLocation
+            ))
+            data_root.mkdir(parents=True, exist_ok=True)
         self.game_repository = GameRepository(data_root / "games.sqlite3", async_writes=asynchronous_storage)
         self._online_history_game_id: str | None = None
         self._online_history_moves: tuple[chess.Move, ...] = ()
         self._online_history_position: chess.Board | None = None
-        try:
-            self.lichess = LichessService(token_store=WindowsCredentialStore(), parent=self)
-        except CredentialStorageError:
+        if offline_mode:
+            # The offline smoke must not even construct a credential store. This
+            # is stronger than passing an environment variable through a shell
+            # that may launch the app via Explorer/Start-Process.
             self.lichess = None
+        else:
+            try:
+                self.lichess = LichessService(token_store=WindowsCredentialStore(), parent=self)
+            except CredentialStorageError:
+                self.lichess = None
         self.online_sessions: dict[str, LichessGameSession] = {}
         self.online_session: LichessGameSession | None = None
         self.online_view_ply: int | None = None
@@ -179,9 +272,25 @@ class MainWindow(QMainWindow):
             self.lichess.challenge_ready.connect(self._challenge_ready)
             self.lichess.challenge_status_changed.connect(self._challenge_status)
             self.lichess.invitation_cancelled.connect(self._invitation_cancelled)
-            if os.environ.get("CHESS_COACH_OFFLINE_TEST") != "1":
-                self.lichess.restore()
+            self.lichess.active_games_received.connect(self._active_games_received)
+            self.lichess.active_games_error.connect(self._active_games_error)
+            self.lichess.restore()
+        elif offline_mode:
+            self._disable_online_controls()
         self.refresh()
+
+    def _disable_online_controls(self) -> None:
+        self.connection.setText("●  Офлайн-режим · Lichess отключён")
+        self.connect_button.setEnabled(False)
+        self.connect_button.setToolTip("В офлайн-smoke авторизация и сетевые запросы отключены.")
+        self.disconnect_button.setVisible(False)
+        for button in (
+            self.friend_link_button, self.username_button, self.ai_button,
+            self.home_ai_button, self.home_friend_button, self.home_username_button,
+            self.cancel_challenge_button, self.active_games_button,
+        ):
+            button.setEnabled(False)
+            button.setVisible(False)
 
     def _build_ui(self) -> None:
         root = QWidget()
@@ -389,6 +498,9 @@ class MainWindow(QMainWindow):
         self.home_friend_button.clicked.connect(self.open_friend_game)
         self.home_username_button = QPushButton("Вызвать игрока Lichess")
         self.home_username_button.clicked.connect(self.challenge_username)
+        self.active_games_button = QPushButton("Активные партии Lichess")
+        self.active_games_button.clicked.connect(self.show_active_games)
+        self.active_games_button.setEnabled(False)
         self.home_local_button = QPushButton("Локальная доска")
         self.home_local_button.clicked.connect(self.start_local_game)
         self.home_games_button = QPushButton("Завершённые партии")
@@ -398,7 +510,8 @@ class MainWindow(QMainWindow):
         self.resume_game_button = QPushButton("Вернуться в текущую партию")
         self.resume_game_button.clicked.connect(self.resume_current_game)
         for button in (self.home_ai_button, self.home_friend_button,
-                       self.home_username_button, self.home_local_button,
+                       self.home_username_button, self.active_games_button,
+                       self.home_local_button,
                        self.home_games_button, self.home_settings_button,
                        self.resume_game_button):
             layout.addWidget(button)
@@ -440,6 +553,7 @@ class MainWindow(QMainWindow):
         self.undo_local_button.setVisible(local_game_visible and self.controller.ply > 0)
         self.undo_local_button.setEnabled(local_game_visible and self.controller.ply > 0)
         self.board.set_position(snapshot.board)
+        self.board.set_annotation_context("__local__", snapshot.board)
         self.board.set_interaction_enabled(snapshot.live)
         self._apply_preferences()
         self.board.set_premove(self.controller.premove, self.controller.player_color)
@@ -504,12 +618,13 @@ class MainWindow(QMainWindow):
             self.home_status.setText("Выберите режим игры. Анализ и тренировки появятся позже.")
         for button in (self.home_ai_button, self.home_friend_button, self.home_username_button):
             button.setEnabled(self._lichess_connected)
+        self.active_games_button.setEnabled(self._lichess_connected)
 
     def start_local_game(self) -> None:
         self.online_session = None
         self._review_session = None
-        self.controller.new_game()
         self.board.clear_annotations()
+        self.controller.new_game()
         self._screen_mode = "local"
         self.screen_title.setText("Локальная партия")
         self.screen_stack.setCurrentWidget(self.game_page)
@@ -520,6 +635,8 @@ class MainWindow(QMainWindow):
         session = self.online_sessions.get(game_id) if game_id else None
         if not session:
             return
+        if session is not self.online_session:
+            self.board.clear_annotations()
         self.online_session = session
         self._review_session = None
         self.online_view_ply = None
@@ -618,7 +735,10 @@ class MainWindow(QMainWindow):
             self.lichess.send_move(session.game_id, move.uci(), session.pending_request_id)
             self.refresh(f"Отправляем ход {move.uci()}; ожидаем подтверждения Lichess.")
             return
+        previous = tuple(self.controller.board.move_stack)
         if self.controller.apply_move_intent(move):
+            if tuple(self.controller.board.move_stack) != previous:
+                self.board.clear_annotations()
             self.refresh("Ход записан в локальную партию.")
         else:
             self.refresh("Ход не выполнен: позиция не изменилась.")
@@ -649,6 +769,7 @@ class MainWindow(QMainWindow):
         if self.online_session is not None:
             return
         if self.controller.undo_last_move():
+            self.board.clear_annotations()
             self.refresh("Последний ход локальной партии отменён.")
         else:
             self.refresh("В локальной партии пока нет хода для отмены.")
@@ -658,7 +779,10 @@ class MainWindow(QMainWindow):
         if not raw:
             return
         move = chess.Move.from_uci(raw)
+        previous = tuple(self.controller.board.move_stack)
         _, message = self.controller.apply_test_opponent_move(move)
+        if tuple(self.controller.board.move_stack) != previous:
+            self.board.clear_annotations()
         self.refresh(message)
 
     def on_move_selected(self, item: QListWidgetItem) -> None:
@@ -745,6 +869,69 @@ class MainWindow(QMainWindow):
         if self.lichess:
             self.lichess.disconnect_account()
 
+    def show_active_games(self) -> None:
+        if self.offline_mode or not self.lichess or not self._lichess_connected:
+            self.home_status.setText("Подключите Lichess, чтобы запросить активные партии.")
+            return
+        dialog = ActiveGamesDialog(self)
+        self._active_games_dialog = dialog
+        dialog.refresh_requested.connect(self._request_active_games)
+        dialog.open_requested.connect(self.open_active_game)
+        dialog.refresh_requested.emit()
+        dialog.exec()
+        self._active_games_dialog = None
+
+    def _request_active_games(self) -> None:
+        dialog = getattr(self, "_active_games_dialog", None)
+        if not dialog or not self.lichess:
+            return
+        dialog.set_loading()
+        self.lichess.fetch_active_games()
+
+    def _active_games_received(self, games: list[dict]) -> None:
+        dialog = getattr(self, "_active_games_dialog", None)
+        if dialog and dialog.isVisible():
+            dialog.set_games(games)
+
+    def _active_games_error(self, message: str) -> None:
+        dialog = getattr(self, "_active_games_dialog", None)
+        if dialog and dialog.isVisible():
+            dialog.set_error(message)
+
+    def open_active_game(self, game: dict) -> None:
+        game_id = game.get("gameId")
+        if not game_id or not self.lichess:
+            return
+        session = self.online_sessions.get(str(game_id))
+        if session is not None and session.status not in {"created", "started", "playing"}:
+            QMessageBox.information(self, "Активная партия", "Lichess сообщает, что эта партия уже завершена.")
+            return
+        if session is None:
+            session = LichessGameSession(str(game_id), self.game_repository)
+            color = game.get("color")
+            if color in {"white", "black"}:
+                session.color = chess.WHITE if color == "white" else chess.BLACK
+            opponent = game.get("opponent") or {}
+            session.opponent = opponent.get("username") or opponent.get("id") or "Соперник"
+            session.status = "started"
+            session.clock_control = str(game.get("speed") or "-")
+            self.online_sessions[session.game_id] = session
+        else:
+            # A queued premove belongs to an earlier visible session. Viewing a
+            # game from the account list must never submit that stale intent.
+            session.premove = None
+        if session is not self.online_session:
+            self.board.clear_annotations()
+        self.online_session = session
+        self._selected_live_game_id = session.game_id
+        self._review_session = None
+        self.online_view_ply = None
+        self._screen_mode = "online"
+        self.screen_title.setText("Активная партия")
+        self.screen_stack.setCurrentWidget(self.game_page)
+        self.refresh("Открываем выбранную активную партию; позицию подтвердит поток Lichess.")
+        self.lichess.start_game(session.game_id)
+
     def _lichess_status(self, status: str) -> None:
         self.connection.setText("●  " + status)
         connected = (status.startswith("Подключено") or status.startswith("Переподключение")
@@ -753,12 +940,14 @@ class MainWindow(QMainWindow):
             self._lichess_connected = False
             for button in (self.friend_link_button, self.username_button, self.ai_button):
                 button.setVisible(False)
+            self.active_games_button.setEnabled(False)
         self.connect_button.setEnabled(status in {"Не подключено", "Ошибка подключения"})
         self.disconnect_button.setEnabled(connected)
         for button in (self.friend_link_button, self.username_button, self.ai_button):
             button.setEnabled(connected)
         for button in (self.home_ai_button, self.home_friend_button, self.home_username_button):
             button.setEnabled(connected)
+        self.active_games_button.setEnabled(connected)
         if status.startswith("Ограничение Lichess"):
             self.home_status.setText(status + ". Автоматические запросы приостановлены.")
 
@@ -772,6 +961,7 @@ class MainWindow(QMainWindow):
             button.setVisible(self.online_session is None)
         for button in (self.home_ai_button, self.home_friend_button, self.home_username_button):
             button.setEnabled(True)
+        self.active_games_button.setEnabled(True)
         self._resume_pending_final_syncs()
 
     def _resume_pending_final_syncs(self) -> None:
@@ -983,6 +1173,7 @@ class MainWindow(QMainWindow):
             self.online_sessions[game_id] = session
             if self._awaiting_game_start and previous is None:
                 self._awaiting_game_start = False
+                self.board.clear_annotations()
                 self._selected_live_game_id = game_id
                 self.online_session = session
                 self._review_session = None
@@ -1075,6 +1266,10 @@ class MainWindow(QMainWindow):
             and self.online_session is session
             and self._screen_mode == "online"
         )
+        if is_selected_live and current_moves != previous_moves:
+            # Only the selected game's authoritative line can clear current
+            # marks. A duplicate/clock event or background game must not.
+            self.board.clear_annotations()
         if is_selected_live:
             if previous_view_ply is not None:
                 self.online_view_ply = min(previous_view_ply, len(session.board.move_stack))
@@ -1094,7 +1289,7 @@ class MainWindow(QMainWindow):
         elif (game_id == self._selected_live_game_id and self._screen_mode == "home"
               and session.status not in {"started", "playing", "created"}):
             self.show_home()
-        premove = session.take_ready_premove()
+        premove = session.take_ready_premove() if is_selected_live else None
         if premove and session.begin_submission(premove):
             self.lichess.send_move(game_id, premove.uci(), session.pending_request_id)
             if is_selected_live:
@@ -1118,6 +1313,7 @@ class MainWindow(QMainWindow):
             for move in board.move_stack[:ply]:
                 shown.push(move)
         self.board.set_position(shown)
+        self.board.set_annotation_context(session.game_id, shown)
         active = session.status in {"started", "playing"} and self._screen_mode != "review"
         self.board.set_interaction_enabled(live and active and not session.input_locked)
         self._apply_preferences()
@@ -1311,6 +1507,7 @@ class MainWindow(QMainWindow):
                 Path(path).write_text(pgn + "\n", encoding="utf-8")
 
     def _open_saved_game(self, game: dict) -> None:
+        self.board.clear_annotations()
         session = LichessGameSession(game["game_id"], self.game_repository)
         session.initial_fen = game["initial_fen"]
         session.moves = game["moves"]

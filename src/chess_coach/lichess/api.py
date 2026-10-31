@@ -221,6 +221,18 @@ class LichessClient:
     def get_account(self, token: str) -> dict:
         return self._json_call("GET", "/api/account", token=token)
 
+    def get_playing_games(self, token: str, limit: int = 50) -> list[dict]:
+        """Return one explicit snapshot of currently active account games."""
+        if not 1 <= limit <= 50:
+            raise ValueError("Количество активных партий должно быть от 1 до 50.")
+        payload = self._json_call(
+            "GET", "/api/account/playing", token=token, query={"nb": limit}
+        )
+        games = payload.get("nowPlaying")
+        if not isinstance(games, list):
+            raise LichessError("Lichess вернул неожиданный список активных партий.")
+        return [game for game in games if isinstance(game, dict) and game.get("gameId")]
+
     def exchange_code(
         self,
         code: str,
