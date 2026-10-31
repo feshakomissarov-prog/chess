@@ -4,6 +4,14 @@
 **Локальный путь владельца:** `G:\project\chess`. У других исполнителей он может быть иным.  
 **Код работает из ветки `main`.** Вся история и документация GitHub доступны следующему Codex и следующему чату без данного диалога.
 
+## Актуализация 01.11.2026 — PR #16 и локальная ошибка Python (текущая)
+
+[draft PR #16](https://github.com/feshakomissarov-prog/chess/pull/16) `7d93e7c04320a73d5dcff2d6be09b6782cacb47e`, base `codex/m3-m4-review-fixes` (PR #14); PR #15 закрыт без merge как заменённый. `main` и вся цепочка #8–#16 не слиты. Windows GitHub Actions run #41250753509 **152 passed на Python 3.12.10**, compileall и offscreen window smoke PASS. Локально Python 3.11.5: `test_lichess.py` 78 pass, file-backed SQLite integration 8 pass; полный pytest-qt suite закончился native access violation `python.exe` при `_close_widgets`. Dr.Web заблокировал `C:\Windows\System32\WerFault.exe` («Процессу запрещено изменение запущенного приложения»). **Причинная связь с падением не установлена; нельзя отключать/обходить антивирус**.
+
+Ревью подтвердило большую часть исправлений предыдущих P0/P1, но нашло два **незакрытых P1**: `engine.stop()` на `chess.engine.SimpleEngine` отсутствует в реальном python-chess (нужно `SimpleAnalysisResult.stop()` через поддерживаемый `analysis()` flow); `MainWindow.closeEvent` не управляет daemon Stockfish analysis worker, возможно позднее SQLite/Qt использование. Полное новое ТЗ на адресные исправления и read-only диагностику: [PR16_ENGINE_CANCELLATION_AND_NATIVE_CRASH.md](specs/PR16_ENGINE_CANCELLATION_AND_NATIVE_CRASH.md), review оставлен в PR #16. **До решения не рекомендованы merge, реальный массовый импорт и локальный повтор полного Qt suite без диагностики.**
+
+Следующий Codex job: **одно большое ТЗ на два конкретных lifecycle дефекта плюс безопасная диагностика native crash**; только fake engine/network/temp DB, отдельный draft follow-up PR поверх #16, report actual tests/CI и `NOT RUN`. После этого ручной offline smoke владельца, пилот 2–5 своих завершённых игр с явного разрешения, Stockfish на одной завершённой игре, затем последовательная приёмка stacked PR.
+
 ## Актуализация 01.11.2026 — аудит PR #14 (последняя)
 
 **Новый head:** [draft PR #14](https://github.com/feshakomissarov-prog/chess/pull/14), `fd184182f32b485f16b3c921af42913c30f09284`, base `codex/m4-puzzles`, **не слит**. Цепочка PR #8–#14 остаётся draft. GitHub Actions run [#41247808011](https://github.com/feshakomissarov-prog/chess/actions/runs/41247808011) на Windows/Python 3.12.10: **138 passed**, compileall и offline Qt PASS. Реальные Lichess/OAuth/Stockfish/GUI E2E: **NOT RUN**.
