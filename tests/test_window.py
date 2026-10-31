@@ -198,6 +198,70 @@ def test_explicit_offline_window_never_constructs_or_uses_lichess_credentials(qt
     assert not offline_dir.exists()
 
 
+def test_manual_connect_defers_lichess_and_credentials_until_button(qtbot, tmp_path, monkeypatch):
+    def forbidden(*args, **kwargs):
+        raise AssertionError("Manual mode must not initialize OAuth before explicit user intent")
+
+    monkeypatch.setattr("chess_coach.window.WindowsCredentialStore", forbidden)
+    monkeypatch.setattr("chess_coach.window.LichessService", forbidden)
+    settings = QSettings(str(tmp_path / "manual-settings.ini"), QSettings.Format.IniFormat)
+    settings.setValue("board_flipped", True)
+    settings.sync()
+    window = MainWindow(settings, manual_connect_mode=True)
+    qtbot.addWidget(window)
+
+    assert window.lichess is None
+    assert not window.offline_mode
+    assert window.manual_connect_mode
+    assert "Ручной режим" in window.connection.text()
+    assert window.connect_button.isEnabled()
+    assert window.connect_button.text() == "Подключиться вручную"
+    assert "до нажатия" in window.home_status.text()
+    assert Path(window.game_repository.path).parent.name == "ChessCoach"
+    assert window.settings is settings
+    assert settings.value("board_flipped", type=bool) is True
+
+    calls = []
+
+    class ExplicitlyCreatedService:
+        token = None
+        def connect_account(self): calls.append("oauth")
+        def close(self, timeout=None): return True
+
+    service = ExplicitlyCreatedService()
+    monkeypatch.setattr(window, "_create_lichess_service", lambda: service)
+    monkeypatch.setattr(window, "_attach_lichess_service", lambda _service: calls.append("attach"))
+    qtbot.mouseClick(window.connect_button, Qt.MouseButton.LeftButton)
+
+    assert window.lichess is service
+    assert calls == ["attach", "oauth"]
+    window.close()
+
+
+def test_manual_connect_restores_saved_token_only_after_explicit_button(qtbot, tmp_path, monkeypatch):
+    calls = []
+
+    class SavedTokenService:
+        token = "stored-token"
+        def restore(self): calls.append("restore")
+        def connect_account(self): calls.append("oauth")
+        def close(self, timeout=None): return True
+
+    window = MainWindow(QSettings(str(tmp_path / "manual-saved.ini"),
+                                  QSettings.Format.IniFormat), manual_connect_mode=True)
+    qtbot.addWidget(window)
+    service = SavedTokenService()
+    monkeypatch.setattr(window, "_create_lichess_service", lambda: service)
+    monkeypatch.setattr(window, "_attach_lichess_service", lambda _service: calls.append("attach"))
+
+    assert window.lichess is None
+    assert calls == []
+    window.connect_lichess()
+
+    assert calls == ["attach", "restore"]
+    window.close()
+
+
 def test_active_games_dialog_shows_server_confirmed_turn_and_game_type(qtbot):
     dialog = ActiveGamesDialog()
     qtbot.addWidget(dialog)

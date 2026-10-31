@@ -265,9 +265,13 @@ class MainWindow(QMainWindow):
         *,
         asynchronous_storage: bool = False,
         offline_mode: bool = False,
+        manual_connect_mode: bool = False,
     ) -> None:
         super().__init__()
+        if offline_mode and manual_connect_mode:
+            raise ValueError("--offline и --manual-connect нельзя включить одновременно")
         self.offline_mode = offline_mode
+        self.manual_connect_mode = manual_connect_mode
         self._offline_data_dir: tempfile.TemporaryDirectory | None = None
         if offline_mode:
             # Smoke runs must not read or write the owner's settings or game DB.
@@ -288,17 +292,12 @@ class MainWindow(QMainWindow):
         self._online_history_game_id: str | None = None
         self._online_history_moves: tuple[chess.Move, ...] = ()
         self._online_history_position: chess.Board | None = None
-        if offline_mode:
-            # The offline smoke must not even construct a credential store. This
-            # is stronger than passing an environment variable through a shell
-            # that may launch the app via Explorer/Start-Process.
+        if offline_mode or manual_connect_mode:
+            # Offline is isolated; manual-connect uses the normal profile but
+            # must not touch credentials or create workers before user intent.
             self.lichess = None
         else:
-            try:
-                self.lichess = LichessService(token_store=WindowsCredentialStore(),
-                                              repository=self.game_repository, parent=self)
-            except CredentialStorageError:
-                self.lichess = None
+            self.lichess = self._create_lichess_service()
         self.online_sessions: dict[str, LichessGameSession] = {}
         self.online_session: LichessGameSession | None = None
         self._local_board_mode = "free"
@@ -345,27 +344,44 @@ class MainWindow(QMainWindow):
         self.escape_shortcut = QShortcut(QKeySequence(Qt.Key.Key_Escape), self)
         self.escape_shortcut.activated.connect(self.cancel_premove)
         if self.lichess:
-            self.lichess.status_changed.connect(self._lichess_status)
-            self.lichess.authenticated.connect(self._lichess_authenticated)
-            self.lichess.error.connect(self._lichess_error)
-            self.lichess.move_failed.connect(self._lichess_move_failed)
-            self.lichess.takeback_action_completed.connect(self._lichess_takeback_completed)
-            self.lichess.event_received.connect(self._lichess_event)
-            self.lichess.game_event_received.connect(self._lichess_game_event)
-            self.lichess.challenge_ready.connect(self._challenge_ready)
-            self.lichess.challenge_status_changed.connect(self._challenge_status)
-            self.lichess.invitation_cancelled.connect(self._invitation_cancelled)
-            self.lichess.active_games_received.connect(self._active_games_received)
-            self.lichess.active_games_error.connect(self._active_games_error)
-            self.lichess.archive_progress.connect(self._archive_progress)
-            self.lichess.archive_finished.connect(self._archive_finished)
-            self.lichess.archive_game_refresh_finished.connect(self._archive_game_refresh_finished)
-            self.lichess.puzzles_progress.connect(self._puzzles_progress)
-            self.lichess.puzzles_finished.connect(self._puzzles_finished)
+            self._attach_lichess_service(self.lichess)
             self.lichess.restore()
+        elif manual_connect_mode:
+            self.connection.setText("●  Ручной режим · запросов нет")
+            self.connect_button.setText("Подключиться вручную")
+            self.connect_button.setToolTip(
+                "Профиль и локальные партии доступны. OAuth, восстановление соединения и запросы "
+                "к Lichess начнутся только после нажатия этой кнопки."
+            )
         elif offline_mode:
             self._disable_online_controls()
         self.refresh()
+
+    def _create_lichess_service(self):
+        try:
+            return LichessService(token_store=WindowsCredentialStore(),
+                                  repository=self.game_repository, parent=self)
+        except CredentialStorageError:
+            return None
+
+    def _attach_lichess_service(self, service) -> None:
+        service.status_changed.connect(self._lichess_status)
+        service.authenticated.connect(self._lichess_authenticated)
+        service.error.connect(self._lichess_error)
+        service.move_failed.connect(self._lichess_move_failed)
+        service.takeback_action_completed.connect(self._lichess_takeback_completed)
+        service.event_received.connect(self._lichess_event)
+        service.game_event_received.connect(self._lichess_game_event)
+        service.challenge_ready.connect(self._challenge_ready)
+        service.challenge_status_changed.connect(self._challenge_status)
+        service.invitation_cancelled.connect(self._invitation_cancelled)
+        service.active_games_received.connect(self._active_games_received)
+        service.active_games_error.connect(self._active_games_error)
+        service.archive_progress.connect(self._archive_progress)
+        service.archive_finished.connect(self._archive_finished)
+        service.archive_game_refresh_finished.connect(self._archive_game_refresh_finished)
+        service.puzzles_progress.connect(self._puzzles_progress)
+        service.puzzles_finished.connect(self._puzzles_finished)
 
     def _disable_online_controls(self) -> None:
         self.connection.setText("●  Офлайн-режим · Lichess отключён")
@@ -510,7 +526,7 @@ class MainWindow(QMainWindow):
         self.games_button.clicked.connect(self.show_saved_games)
         side_layout.addWidget(self.games_button)
         self.cancel_challenge_button = QPushButton("Отменить ожидающий вызов")
-        self.cancel_challenge_button.clicked.connect(self.lichess.cancel_username_challenge if self.lichess else lambda: None)
+        self.cancel_challenge_button.clicked.connect(self.cancel_username_challenge)
         self.cancel_challenge_button.setEnabled(False)
         self.cancel_challenge_button.setVisible(False)
         side_layout.addWidget(self.cancel_challenge_button)
@@ -736,6 +752,12 @@ class MainWindow(QMainWindow):
         if active and active.status in {"started", "playing"}:
             self.resume_game_button.setVisible(True)
             self.home_status.setText(f"Идёт партия против {active.opponent}. Её можно продолжить позже.")
+        elif self.manual_connect_mode and not self.lichess:
+            self.resume_game_button.setVisible(False)
+            self.home_status.setText(
+                "Ручной режим: до нажатия «Подключиться вручную» приложение не обращается к "
+                "Lichess и не восстанавливает OAuth-сессию. Локальные партии доступны."
+            )
         else:
             self.resume_game_button.setVisible(False)
             self.home_status.setText("Выберите режим игры. Анализ и тренировки появятся позже.")
@@ -1195,8 +1217,27 @@ class MainWindow(QMainWindow):
             self.refresh("Настройки сохранены.")
 
     def connect_lichess(self) -> None:
+        if self.offline_mode:
+            QMessageBox.information(self, "Lichess", "Сетевые функции отключены в изолированном офлайн-режиме.")
+            return
+        if not self.lichess:
+            self.lichess = self._create_lichess_service()
+            if self.lichess:
+                self._attach_lichess_service(self.lichess)
         if not self.lichess:
             QMessageBox.warning(self, "Lichess", "Windows Credential Manager недоступен. Установите зависимости проекта.")
+            return
+        if self.manual_connect_mode:
+            try:
+                has_saved_token = bool(self.lichess.token)
+            except CredentialStorageError as exc:
+                QMessageBox.warning(self, "Lichess", str(exc))
+                return
+            if has_saved_token:
+                self.connect_button.setEnabled(False)
+                self.lichess.restore()
+            else:
+                self.lichess.connect_account()
             return
         if getattr(self, "_restore_retry_ready", False) and self.lichess.token:
             self._restore_retry_ready = False
@@ -1208,6 +1249,10 @@ class MainWindow(QMainWindow):
     def disconnect_lichess(self) -> None:
         if self.lichess:
             self.lichess.disconnect_account()
+
+    def cancel_username_challenge(self) -> None:
+        if self.lichess:
+            self.lichess.cancel_username_challenge()
 
     def show_active_games(self) -> None:
         if not self._online_actions_allowed():
