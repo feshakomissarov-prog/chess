@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import threading
 import random
+import time
 import webbrowser
 
 from PySide6.QtCore import QObject, Signal
@@ -30,6 +31,7 @@ class LichessService(QObject):
     authenticated = Signal(str)
     archive_progress = Signal(int, str)
     archive_finished = Signal(int, str)
+    archive_game_refresh_finished = Signal(str, str)
     puzzles_progress = Signal(int)
     puzzles_finished = Signal(int, str)
 
@@ -45,6 +47,8 @@ class LichessService(QObject):
         self._stop = threading.Event()
         self._connection_stop = threading.Event()
         self._threads: list[threading.Thread] = []
+        self._thread_lock = threading.Lock()
+        self._closing = False
         self._game_stops: dict[str, threading.Event] = {}
         self._final_sync_game_ids: set[str] = set()
         self._event_lock = threading.Lock()
@@ -88,6 +92,24 @@ class LichessService(QObject):
     def cancel_archive_sync(self) -> None:
         if self._archive_stop is not None:
             self._archive_stop.set()
+
+    def refresh_archive_game(self, game_id: str) -> None:
+        """Explicitly refresh one completed, already-linked game; never fetch the archive."""
+        if self.repository is None:
+            self.archive_game_refresh_finished.emit(game_id, "Локальное хранилище недоступно.")
+            return
+        def work():
+            try:
+                token = self.token_store.get()
+                if not token:
+                    raise LichessError("Сначала подключите аккаунт Lichess.")
+                username = self.username or str(self.client.get_account(token)["username"])
+                ArchiveSync(self.client, self.repository).refresh_game(username, token, game_id)
+                self.archive_game_refresh_finished.emit(
+                    game_id, "История этой партии обновлена из Lichess.")
+            except Exception as exc:
+                self.archive_game_refresh_finished.emit(game_id, str(exc))
+        self._thread(work, "chess-coach-archive-game-refresh")
 
     def connect_and_sync_puzzle_activity(self, repository=None,
                                          puzzle_token_store=None) -> None:
@@ -157,8 +179,11 @@ class LichessService(QObject):
 
     def _thread(self, target, name: str) -> None:
         thread = threading.Thread(target=target, name=name, daemon=True)
-        self._threads.append(thread)
-        thread.start()
+        with self._thread_lock:
+            if self._closing:
+                return
+            self._threads.append(thread)
+            thread.start()
 
     def restore(self) -> None:
         with self._restore_lock:
@@ -295,7 +320,11 @@ class LichessService(QObject):
             finally:
                 with self._event_lock:
                     self._event_stream_started = False
-                if not self._stop.is_set() and not connection_stop.is_set():
+                # A fast account switch may have installed a new connection stop
+                # event while this worker was still unwinding. Start exactly one
+                # stream for that current connection after releasing the old one.
+                current_connection_stop = self._connection_stop
+                if not self._stop.is_set() and not current_connection_stop.is_set():
                     try:
                         self._start_event_stream(self.token_store.get())
                     except Exception:
@@ -550,14 +579,34 @@ class LichessService(QObject):
                 self.error.emit(str(exc))
         self._thread(work, "chess-coach-lichess-action")
 
-    def close(self) -> None:
+    def close(self, timeout: float = 1.0) -> bool:
+        """Stop workers cooperatively. Return False while any worker still owns resources."""
+        with self._thread_lock:
+            self._closing = True
         self._stop.set()
         self._connection_stop.set()
+        if self._archive_stop is not None:
+            self._archive_stop.set()
+        if self._puzzle_stop is not None:
+            self._puzzle_stop.set()
         if self._callback:
             self._callback.cancel()
             self._callback = None
+        if self._puzzle_callback:
+            self._puzzle_callback.cancel()
+            self._puzzle_callback = None
+        if self._username_challenge_stop:
+            self._username_challenge_stop.set()
         for stop in self._game_stops.values():
             stop.set()
-        for thread in self._threads:
+        deadline = time.monotonic() + max(0.0, timeout)
+        with self._thread_lock:
+            threads = list(self._threads)
+        for thread in threads:
             if thread.is_alive() and thread is not threading.current_thread():
-                thread.join(timeout=1.5)
+                thread.join(timeout=max(0.0, deadline - time.monotonic()))
+        alive = [thread for thread in threads if thread.is_alive()
+                 and thread is not threading.current_thread()]
+        with self._thread_lock:
+            self._threads = alive
+        return not alive

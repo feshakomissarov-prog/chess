@@ -524,10 +524,10 @@ def test_m3_migration_preserves_legacy_game_creates_revision_and_backup(tmp_path
     assert row["line_revision"] == 1
     assert row["import_error"] is None
     with repo._connection() as migrated:
-        assert migrated.execute("PRAGMA user_version").fetchone()[0] == 5
+        assert migrated.execute("PRAGMA user_version").fetchone()[0] == 6
         assert migrated.execute("SELECT COUNT(*) FROM game_positions").fetchone()[0] == 3
         assert migrated.execute("SELECT san FROM game_moves ORDER BY ply").fetchall()[0][0] == "e4"
-    backup = sqlite3.connect(str(path) + ".pre-m3-v5.bak")
+    backup = sqlite3.connect(str(path) + ".pre-m3-v6.bak")
     try:
         assert backup.execute("PRAGMA user_version").fetchone()[0] == 0
         assert backup.execute("SELECT pgn FROM games WHERE game_id='legacy'").fetchone()[0] == legacy_pgn
@@ -639,6 +639,18 @@ def test_m3_library_search_handles_ten_thousand_games_with_paging(tmp_path):
     assert len(page["items"]) == 500
     assert page["page"] == 9
     assert page["pages"] == 10
+
+
+def test_targeted_game_export_requests_only_the_validated_game_id():
+    pgn = '[Event "Old correspondence"]\n[White "Me"]\n[Black "Friend"]\n\n1. e4 *\n'
+    fake = FakeTransport([HttpResponse(200, {}, pgn.encode("utf-8"))])
+    client = LichessClient(fake, base_url="https://lichess.test")
+    assert client.export_game_pgn("token", "game-123") == pgn
+    assert fake.calls[0][0:2] == ("GET", "https://lichess.test/game/export/game-123")
+    assert fake.calls[0][2]["Authorization"] == "Bearer token"
+    with pytest.raises(ValueError, match="Invalid Lichess game ID"):
+        client.export_game_pgn("token", "../private")
+    assert len(fake.calls) == 1
 
 
 def test_archive_endpoint_streams_json_page_with_cursor_parameters():
@@ -767,6 +779,27 @@ def test_completed_game_is_blocked_while_another_human_game_is_live(tmp_path):
     analyzer = CompletedGameAnalyzer(repo, lambda _path: pytest.fail("engine must not launch"))
     with pytest.raises(ValueError, match="онлайн-партии"):
         analyzer.analyze("finished-a", engine, active_human_game_ids={"live-b"})
+
+
+def test_engine_stop_exception_is_reported_as_cancelled_analysis():
+    from chess_coach.lichess.analysis import _analyze_interruptibly
+
+    stop_event = threading.Event()
+    engine_stopped = threading.Event()
+
+    class StoppableEngine:
+        def analyse(self, _board, _limit):
+            assert engine_stopped.wait(1)
+            raise RuntimeError("engine process stopped")
+        def stop(self):
+            engine_stopped.set()
+
+    cancel_timer = threading.Timer(0.02, stop_event.set)
+    cancel_timer.start()
+    with pytest.raises(InterruptedError, match="Анализ отменён"):
+        _analyze_interruptibly(StoppableEngine(), chess.Board(),
+                               chess.engine.Limit(nodes=10), stop_event)
+    cancel_timer.join()
 
 
 def test_archive_import_keeps_lichess_pgn_evaluations_as_separate_source(tmp_path):
@@ -1047,15 +1080,18 @@ def test_archive_2501_games_paginates_three_pages_and_keeps_raw_pgn(tmp_path):
             self.items = {}
         def ensure_archive_account(self, _username): return "lichess:me"
         def archive_sync_state(self, _account): return dict(self.state)
-        def import_archive_record(self, username, record, *, checkpoint_ms, backfill):
+        def import_archive_record(self, username, record, *, checkpoint_ms, backfill,
+                                  _return_inserted=False):
+            inserted = record["id"] not in self.items
             self.items[record["id"]] = record
             if backfill and checkpoint_ms is not None:
                 self.state["backfill_before"] = checkpoint_ms
-            return record["id"]
+            return (record["id"], inserted) if _return_inserted else record["id"]
         def finish_archive_backfill(self, _account):
             self.state.update(backfill_complete=1, incremental_since=int(time.time() * 1000))
         def finish_archive_incremental(self, _account, cursor):
             self.state["incremental_since"] = cursor
+        def record_archive_error(self, _account, error): self.state["last_error"] = error
         def list_games(self, completed_only=False): return list(self.items.values())
         def export_pgn(self, game_id): return self.items[game_id]["pgn"]
     repo = MemoryRepository()
@@ -1089,9 +1125,12 @@ def test_archive_drains_large_same_timestamp_boundary_without_losing_records():
             self.ids = set()
         def ensure_archive_account(self, _): return "a"
         def archive_sync_state(self, _): return dict(self.state)
-        def import_archive_record(self, _user, record, *, checkpoint_ms, backfill):
+        def import_archive_record(self, _user, record, *, checkpoint_ms, backfill,
+                                  _return_inserted=False):
+            inserted = record["id"] not in self.ids
             self.ids.add(record["id"])
             self.state["backfill_before"] = checkpoint_ms
+            return (record["id"], inserted) if _return_inserted else record["id"]
         def finish_archive_backfill(self, _):
             self.state.update(backfill_complete=1, incremental_since=int(time.time()*1000))
         def finish_archive_incremental(self, _, cursor): self.state["incremental_since"] = cursor
@@ -1225,8 +1264,10 @@ def test_puzzle_sync_handles_2501_descending_attempts_and_restarts_after_page_tw
                               incremental_since=max((r["date"] for r in self.attempts.values()), default=0))
         def set_puzzle_incremental_progress(self, _account, before, target):
             self.state.update(incremental_before=before, incremental_target=target)
-        def finish_puzzle_incremental(self, _account, cursor):
-            self.state.update(incremental_since=cursor, incremental_before=None, incremental_target=None)
+        def finish_puzzle_incremental(self, _account, cursor, new_count=0):
+            self.state.update(incremental_since=cursor, incremental_before=None,
+                              incremental_target=None, last_sync_new_count=new_count)
+        def record_puzzle_error(self, _account, error): self.state["last_error"] = error
         def puzzle_statistics(self, _account): return {"attempts": len(self.attempts)}
         def puzzle_history(self, _account, limit=100, offset=0):
             return list(self.attempts.values())[offset:offset + limit]
@@ -1256,6 +1297,28 @@ def test_archive_unsupported_variant_preserves_pgn_without_fake_standard_line(tm
     assert game["raw_pgn"] == pgn and repo.export_pgn("variant") == pgn
     assert game["initial_fen"] == "" and repo.current_line("variant") is None
     repo.shutdown()
+
+
+def test_archive_malformed_pgn_is_quarantined_and_checkpointed(tmp_path):
+    path = tmp_path / "quarantine.sqlite3"
+    repo = GameRepository(path)
+    pgn = '[Event "Broken"]\n[White "Me"]\n[Black "Friend"]\n\n1. e4 e5 2. e5 *\n'
+    game_id = repo.import_archive_record(
+        "Me", {"id": "broken", "variant": "standard", "pgn": pgn},
+        checkpoint_ms=1234, backfill=True)
+    assert game_id == "broken"
+    game = repo.get_game(game_id)
+    assert game["import_error"].startswith("Malformed PGN quarantined")
+    assert game["raw_pgn"] == pgn
+    assert game["initial_fen"] == "" and repo.current_line(game_id) is None
+    account = repo.ensure_archive_account("Me")
+    assert repo.archive_sync_state(account)["backfill_before"] == 1235
+    assert repo.export_pgn(game_id) == pgn
+    repo.shutdown()
+    reopened = GameRepository(path)
+    assert reopened.get_game(game_id)["raw_pgn"] == pgn
+    assert reopened.export_pgn(game_id) == pgn
+    reopened.shutdown()
 
 
 def test_premove_is_an_intent_and_revalidated_after_opponent_move(tmp_path):

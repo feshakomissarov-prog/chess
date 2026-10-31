@@ -21,7 +21,11 @@ class PuzzleActivitySync:
             page_size: int = 1000, progress: Callable[[int], None] | None = None) -> int:
         account_id = self.repository.ensure_archive_account(username)
         try:
-            return self._run(username, token, stop_event, page_size=page_size, progress=progress)
+            count = self._run(username, token, stop_event, page_size=page_size, progress=progress)
+            if stop_event.is_set():
+                self.repository.record_puzzle_error(
+                    account_id, "Синхронизация остановлена; сохранённый курсор можно возобновить.")
+            return count
         except Exception as exc:
             self.repository.record_puzzle_error(account_id, str(exc))
             raise
@@ -31,6 +35,22 @@ class PuzzleActivitySync:
         account_id = self.repository.ensure_archive_account(username)
         state = self.repository.puzzle_sync_state(account_id)
         count = 0
+
+        def import_page(records: list[dict], *, backfill: bool = False) -> None:
+            nonlocal count
+            bulk_import = getattr(self.repository, "import_puzzle_activities", None)
+            if bulk_import is not None:
+                imported = bulk_import(username, records, backfill=backfill)
+            else:  # Small repository fakes used by sync tests may implement only the row API.
+                imported = [self.repository.import_puzzle_activity(
+                    username, record, backfill=backfill, _return_inserted=True)
+                    for record in records]
+            for _attempt_uid, inserted in imported:
+                if inserted:
+                    count += 1
+                    if progress:
+                        progress(count)
+
         if not state.get("backfill_complete"):
             cursor = int(state.get("backfill_before") or time.time() * 1000)
             seen: set[str] = set()
@@ -44,12 +64,7 @@ class PuzzleActivitySync:
                 fresh = [record for record in records if _key(record) not in seen]
                 for record in fresh:
                     seen.add(_key(record))
-                    _uid, inserted = self.repository.import_puzzle_activity(
-                        username, record, backfill=True, _return_inserted=True)
-                    if inserted:
-                        count += 1
-                        if progress:
-                            progress(count)
+                import_page(fresh, backfill=True)
                 if len(records) < page_size:
                     break
                 oldest = min(dates) if dates else cursor
@@ -83,12 +98,7 @@ class PuzzleActivitySync:
             fresh = [record for record in relevant if _key(record) not in seen]
             for record in fresh:
                 seen.add(_key(record))
-                _uid, inserted = self.repository.import_puzzle_activity(
-                    username, record, _return_inserted=True)
-                if inserted:
-                    count += 1
-                    if progress:
-                        progress(count)
+            import_page(fresh)
             if len(records) < page_size or older_than_window:
                 break
             oldest = min(dates) if dates else cursor
@@ -101,7 +111,7 @@ class PuzzleActivitySync:
             # Attempts are durable before the resumable page cursor is advanced.
             self.repository.set_puzzle_incremental_progress(account_id, cursor, target)
         if not stop_event.is_set():
-            self.repository.finish_puzzle_incremental(account_id, target)
+            self.repository.finish_puzzle_incremental(account_id, target, count)
         return count
 
     def _expand_boundary(self, token: str, stop_event: threading.Event,

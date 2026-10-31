@@ -309,6 +309,7 @@ class MainWindow(QMainWindow):
         self._lichess_connected = False
         self._archive_progress_dialog: QProgressDialog | None = None
         self._puzzle_progress_dialog: QProgressDialog | None = None
+        self._close_retry_scheduled = False
         self.analysis_progress.connect(self._analysis_progress)
         self.analysis_finished.connect(self._analysis_finished)
         self.setWindowTitle("Chess Coach")
@@ -330,6 +331,10 @@ class MainWindow(QMainWindow):
         self.clock_timer = QTimer(self)
         self.clock_timer.timeout.connect(self._update_clock)
         self.clock_timer.start(250)
+        self._close_retry_timer = QTimer(self)
+        self._close_retry_timer.setSingleShot(True)
+        self._close_retry_timer.setInterval(200)
+        self._close_retry_timer.timeout.connect(self._retry_close_after_workers)
         self.escape_shortcut = QShortcut(QKeySequence(Qt.Key.Key_Escape), self)
         self.escape_shortcut.activated.connect(self.cancel_premove)
         if self.lichess:
@@ -347,6 +352,7 @@ class MainWindow(QMainWindow):
             self.lichess.active_games_error.connect(self._active_games_error)
             self.lichess.archive_progress.connect(self._archive_progress)
             self.lichess.archive_finished.connect(self._archive_finished)
+            self.lichess.archive_game_refresh_finished.connect(self._archive_game_refresh_finished)
             self.lichess.puzzles_progress.connect(self._puzzles_progress)
             self.lichess.puzzles_finished.connect(self._puzzles_finished)
             self.lichess.restore()
@@ -702,13 +708,13 @@ class MainWindow(QMainWindow):
             self.resume_game_button.setVisible(False)
             self.home_status.setText("Выберите режим игры. Анализ и тренировки появятся позже.")
         for button in (self.home_ai_button, self.home_friend_button, self.home_username_button):
-            button.setEnabled(self._lichess_connected)
-        self.active_games_button.setEnabled(self._lichess_connected)
-        self.home_archive_button.setEnabled(self._lichess_connected)
-        self.home_puzzles_button.setEnabled(self._lichess_connected)
+            button.setEnabled(self._online_actions_allowed())
+        self.active_games_button.setEnabled(self._online_actions_allowed())
+        self.home_archive_button.setEnabled(self._online_actions_allowed())
+        self.home_puzzles_button.setEnabled(self._online_actions_allowed())
 
     def start_archive_sync(self) -> None:
-        if self.offline_mode or not self.lichess or not self._lichess_connected:
+        if not self._online_actions_allowed():
             return
         answer = QMessageBox.question(
             self, "Синхронизация архива",
@@ -736,7 +742,36 @@ class MainWindow(QMainWindow):
         if self._archive_progress_dialog:
             self._archive_progress_dialog.close()
             self._archive_progress_dialog = None
-        QMessageBox.information(self, "Архив Lichess", f"Обработано: {count}. {message}")
+        state = self._current_archive_sync_state()
+        successful = state.get("last_success_at")
+        last_success = self._format_sync_time(successful) if successful else "ещё не было"
+        resumable = ("Да — продолжение доступно" if state.get("last_error")
+                     or not state.get("backfill_complete") else "Нет")
+        diagnostics = (f"Новых партий в этом запуске: {count}\n"
+                       f"Последняя успешная синхронизация: {last_success}\n"
+                       f"Можно возобновить: {resumable}")
+        if state.get("last_error"):
+            diagnostics += f"\nОшибка/прерывание: {state['last_error']}"
+        QMessageBox.information(self, "Архив Lichess", f"{diagnostics}\n\n{message}")
+
+    def _current_archive_sync_state(self) -> dict:
+        if not self.lichess or not self.lichess.username:
+            return {}
+        account_id = f"lichess:{self.lichess.username.strip().lower()}"
+        return self.game_repository.archive_sync_state(account_id)
+
+    @staticmethod
+    def _format_sync_time(value: str) -> str:
+        try:
+            return datetime.fromisoformat(value.replace("Z", "+00:00")).astimezone().strftime("%Y-%m-%d %H:%M")
+        except (AttributeError, ValueError):
+            return str(value)
+
+    def _archive_game_refresh_finished(self, game_id: str, message: str) -> None:
+        if message.startswith("История этой партии обновлена"):
+            self.home_status.setText(f"Партия {game_id}: {message}")
+        else:
+            self.home_status.setText(f"Не удалось обновить партию {game_id}: {message}")
 
     def show_statistics(self) -> None:
         data = StatisticsService(self.game_repository).summary()
@@ -759,7 +794,7 @@ class MainWindow(QMainWindow):
         QMessageBox.information(self, "Статистика партий", text)
 
     def start_puzzle_sync(self) -> None:
-        if self.offline_mode or not self.lichess:
+        if not self._online_actions_allowed():
             return
         answer = QMessageBox.question(
             self, "История шахматных задач",
@@ -790,11 +825,22 @@ class MainWindow(QMainWindow):
             puzzle_username = self.lichess.puzzle_username or self.lichess.username
             account_id = f"lichess:{puzzle_username.strip().lower()}"
             stats = self.game_repository.puzzle_statistics(account_id)
+            sync_state = self.game_repository.puzzle_sync_state(account_id)
             rate = stats["success_percent"]
+            successful = sync_state.get("last_success_at")
+            last_success = self._format_sync_time(successful) if successful else "ещё не было"
+            resumable = ("Да" if sync_state.get("last_error")
+                         or not sync_state.get("backfill_complete")
+                         or sync_state.get("incremental_before") else "Нет")
             result = (f"Всего попыток: {stats['attempts']}\n"
+                      f"Новых попыток в этом запуске: {count}\n"
                       f"Решено: {stats['wins']} · Ошибок: {stats['failures']}\n"
                       f"Доля успеха: {rate if rate is not None else 'н/д'}%\n"
                       f"Средний рейтинг задач: {stats['average_puzzle_rating'] if stats['average_puzzle_rating'] is not None else 'н/д'}\n"
+                      f"Последняя успешная синхронизация: {last_success}\n"
+                      f"Можно возобновить: {resumable}"
+                      +(f"\nОшибка/прерывание: {sync_state['last_error']}" if sync_state.get("last_error") else "")
+                      +"\n"
                       f"{message}")
         else:
             result = f"Обработано: {count}. {message}"
@@ -1108,7 +1154,7 @@ class MainWindow(QMainWindow):
             self.lichess.disconnect_account()
 
     def show_active_games(self) -> None:
-        if self.offline_mode or not self.lichess or not self._lichess_connected:
+        if not self._online_actions_allowed():
             self.home_status.setText("Подключите Lichess, чтобы запросить активные партии.")
             return
         dialog = ActiveGamesDialog(self)
@@ -1138,7 +1184,7 @@ class MainWindow(QMainWindow):
 
     def open_active_game(self, game: dict) -> None:
         game_id = game.get("gameId")
-        if not game_id or not self.lichess:
+        if not game_id or not self._online_actions_allowed():
             return
         session = self.online_sessions.get(str(game_id))
         if session is not None and session.status not in {"created", "started", "playing"}:
@@ -1172,8 +1218,7 @@ class MainWindow(QMainWindow):
 
     def _lichess_status(self, status: str) -> None:
         self.connection.setText("●  " + status)
-        connected = (status.startswith("Подключено") or status.startswith("Переподключение")
-                     or status.startswith("Ограничение Lichess"))
+        connected = bool(self._lichess_connected and not self.offline_mode)
         if status == "Не подключено":
             self._lichess_connected = False
             for button in (self.friend_link_button, self.username_button, self.ai_button):
@@ -1189,6 +1234,7 @@ class MainWindow(QMainWindow):
             match = re.search(r"через (\d+) с", status)
             delay = max(1, int(match.group(1))) if match else 60
             QTimer.singleShot(delay * 1000, self._enable_restore_retry)
+            QTimer.singleShot(delay * 1000, self._refresh_online_controls)
         elif status in {"Не подключено", "Ошибка подключения"}:
             self._restore_retry_ready = False
             self.connect_button.setText("Подключить Lichess")
@@ -1198,11 +1244,14 @@ class MainWindow(QMainWindow):
             self.connect_button.setText("Подключить Lichess")
             self.connect_button.setEnabled(False)
         self.disconnect_button.setEnabled(connected)
+        online_allowed = connected and self._lichess_rate_limit_remaining() == 0
         for button in (self.friend_link_button, self.username_button, self.ai_button):
-            button.setEnabled(connected)
+            button.setEnabled(online_allowed)
         for button in (self.home_ai_button, self.home_friend_button, self.home_username_button):
-            button.setEnabled(connected)
-        self.active_games_button.setEnabled(connected)
+            button.setEnabled(online_allowed)
+        self.active_games_button.setEnabled(online_allowed)
+        self.home_archive_button.setEnabled(online_allowed)
+        self.home_puzzles_button.setEnabled(online_allowed)
         if status.startswith("Ограничение Lichess"):
             self.home_status.setText(status + ". Автоматические запросы приостановлены.")
 
@@ -1213,19 +1262,35 @@ class MainWindow(QMainWindow):
             self.connect_button.setText("Повторить подключение")
             self.connect_button.setEnabled(True)
 
+    def _lichess_rate_limit_remaining(self) -> int:
+        if not self.lichess:
+            return 0
+        return max(0, int(getattr(self.lichess.client, "rate_limit_remaining", 0)))
+
+    def _online_actions_allowed(self) -> bool:
+        return bool(self.lichess and not self.offline_mode and self._lichess_connected
+                    and self._lichess_rate_limit_remaining() == 0)
+
+    def _refresh_online_controls(self) -> None:
+        if (not self.lichess or self.offline_mode or not self._lichess_connected):
+            return
+        remaining = self._lichess_rate_limit_remaining()
+        if remaining > 0:
+            QTimer.singleShot(remaining * 1000, self._refresh_online_controls)
+            return
+        for button in (self.friend_link_button, self.username_button, self.ai_button,
+                       self.home_ai_button, self.home_friend_button, self.home_username_button,
+                       self.active_games_button, self.home_archive_button, self.home_puzzles_button):
+            button.setEnabled(True)
+
     def _lichess_authenticated(self, username: str) -> None:
         self._lichess_connected = True
         self.connection.setText(f"●  Подключено: {username}")
         self.connect_button.setEnabled(False)
         self.disconnect_button.setEnabled(True)
+        self._refresh_online_controls()
         for button in (self.friend_link_button, self.username_button, self.ai_button):
-            button.setEnabled(True)
             button.setVisible(self.online_session is None)
-        for button in (self.home_ai_button, self.home_friend_button, self.home_username_button):
-            button.setEnabled(True)
-        self.active_games_button.setEnabled(True)
-        self.home_archive_button.setEnabled(True)
-        self.home_puzzles_button.setEnabled(True)
         self._resume_pending_final_syncs()
 
     def _resume_pending_final_syncs(self) -> None:
@@ -1329,6 +1394,8 @@ class MainWindow(QMainWindow):
         self.refresh(message)
 
     def open_friend_game(self) -> None:
+        if not self._online_actions_allowed():
+            return
         dialog = OnlineGameDialog("Партия с другом по ссылке", parent=self)
         if dialog.exec() != QDialog.DialogCode.Accepted:
             return
@@ -1339,6 +1406,8 @@ class MainWindow(QMainWindow):
         self.lichess.open_friend_game(color, limit, increment, rated)
 
     def challenge_username(self) -> None:
+        if not self._online_actions_allowed():
+            return
         username, ok = QInputDialog.getText(self, "Вызов игрока", "Имя пользователя Lichess:")
         if not ok or not username.strip():
             return
@@ -1352,6 +1421,8 @@ class MainWindow(QMainWindow):
         self.lichess.challenge_username(username.strip(), color, limit, increment, rated)
 
     def play_ai(self) -> None:
+        if not self._online_actions_allowed():
+            return
         dialog = OnlineGameDialog("Игра против Lichess AI", include_level=True, parent=self)
         if dialog.exec() != QDialog.DialogCode.Accepted:
             return
@@ -1435,6 +1506,9 @@ class MainWindow(QMainWindow):
             opponent = game.get("opponent", {})
             session.opponent = opponent.get("username", "Соперник")
             self.online_sessions[game_id] = session
+            if (not session.is_ai_opponent
+                    and getattr(self, "_analysis_stop", None) is not None):
+                self._analysis_stop.set()
             if self._awaiting_game_start and previous is None:
                 self._awaiting_game_start = False
                 self.board.clear_annotations()
@@ -1786,10 +1860,13 @@ class MainWindow(QMainWindow):
         open_game = QPushButton("Открыть для просмотра")
         export_game = QPushButton("Экспорт PGN")
         analyze_game = QPushButton("Анализ Stockfish")
+        refresh_game = QPushButton("Обновить эту партию из Lichess")
+        refresh_game.setEnabled(bool(self._lichess_connected and not self.offline_mode))
         close = QPushButton("Закрыть")
         actions.addWidget(open_game)
         actions.addWidget(export_game)
         actions.addWidget(analyze_game)
+        actions.addWidget(refresh_game)
         actions.addStretch(1)
         actions.addWidget(close)
         layout.addLayout(actions)
@@ -1800,13 +1877,21 @@ class MainWindow(QMainWindow):
             return state["items"][index] if 0 <= index < len(state["items"]) else None
 
         def load_page():
+            account_id = (f"lichess:{self.lichess.username.strip().lower()}"
+                          if self.lichess and self.lichess.username else None)
             result = self.game_repository.search_games(
-                search.text(), page=state["page"], page_size=50, completed_only=True)
+                search.text(), page=state["page"], page_size=50, completed_only=True,
+                account_id=account_id)
             state["items"] = result["items"]
             games_list.clear()
             for game in result["items"]:
+                view_state = (f" · просмотр/анализ недоступны ({game.get('variant') or 'variant'})"
+                              if game.get("import_error") or game.get("variant", "standard") != "standard"
+                              else "")
+                opponent_label = game.get("account_opponent") or game["opponent"]
                 games_list.addItem(f"{game['white_player']} – {game['black_player']}  ·  "
-                                   f"{game['status']}  ·  {game['updated_at'][:10]}")
+                                   f"для вас: {opponent_label}  ·  "
+                                   f"{game['status']}  ·  {game['updated_at'][:10]}{view_state}")
             page_label.setText(f"Страница {state['page'] + 1} из {max(1, result['pages'])}"
                                f"  ·  {result['total']} партий")
             previous.setEnabled(state["page"] > 0)
@@ -1814,8 +1899,11 @@ class MainWindow(QMainWindow):
         def open_selected():
             game = selected_game()
             if game:
-                self._open_saved_game(game)
-                dialog.accept()
+                if self._open_saved_game(game):
+                    dialog.accept()
+                else:
+                    QMessageBox.information(dialog, "Партия сохранена как PGN",
+                        self._raw_only_game_message(game))
         def export_selected():
             game = selected_game()
             if not game:
@@ -1842,6 +1930,10 @@ class MainWindow(QMainWindow):
             game = selected_game()
             if not game:
                 return
+            if not self._is_standard_board_game(game):
+                QMessageBox.information(dialog, "Stockfish",
+                    "Для этой записи доска не поддерживается. Оригинальный PGN можно экспортировать.")
+                return
             if game["status"] in {"created", "started", "started_soon", "playing"}:
                 QMessageBox.information(dialog, "Stockfish",
                                         "Движок доступен только после завершения партии.")
@@ -1852,6 +1944,15 @@ class MainWindow(QMainWindow):
             if engine_path:
                 dialog.accept()
                 self._start_game_analysis(game["game_id"], engine_path)
+        def refresh_selected():
+            game = selected_game()
+            if not game or not self.lichess or not self._lichess_connected:
+                return
+            if game.get("source") != "lichess_archive":
+                QMessageBox.information(dialog, "Обновить партию",
+                    "Обновление доступно для партий, импортированных из текущего аккаунта Lichess.")
+                return
+            self.lichess.refresh_archive_game(game["game_id"])
         search.textChanged.connect(lambda _text: (state.update(page=0), load_page()))
         previous.clicked.connect(lambda: (state.update(page=max(0, state["page"] - 1)), load_page()))
         following.clicked.connect(lambda: (state.update(page=state["page"] + 1), load_page()))
@@ -1860,6 +1961,7 @@ class MainWindow(QMainWindow):
         export_game.clicked.connect(export_selected)
         save_note.clicked.connect(save_selected_note)
         analyze_game.clicked.connect(analyze_selected)
+        refresh_game.clicked.connect(refresh_selected)
         close.clicked.connect(dialog.reject)
         load_page()
         dialog.exec()
@@ -1924,10 +2026,28 @@ class MainWindow(QMainWindow):
         game = self.game_repository.get_game(game_id)
         if not game:
             return
-        self._open_saved_game(game)
+        if not self._open_saved_game(game):
+            self.home_status.setText(self._raw_only_game_message(game))
+            return
         self.navigate_to(ply)
 
-    def _open_saved_game(self, game: dict) -> None:
+    @staticmethod
+    def _is_standard_board_game(game: dict) -> bool:
+        return (game.get("variant", "standard") == "standard"
+                and not game.get("import_error")
+                and bool(game.get("initial_fen")))
+
+    @staticmethod
+    def _raw_only_game_message(game: dict) -> str:
+        variant = (game.get("variant") or "неизвестный").capitalize()
+        reason = game.get("import_error") or "для этого варианта нет стандартной шахматной доски"
+        return (f"Запись сохранена как исходный PGN. Вариант: {variant}. "
+                f"Просмотр доски и анализ недоступны: {reason}. Экспорт PGN доступен.")
+
+    def _open_saved_game(self, game: dict) -> bool:
+        if not self._is_standard_board_game(game):
+            self.home_status.setText(self._raw_only_game_message(game))
+            return False
         self.board.clear_annotations()
         session = LichessGameSession(game["game_id"], self.game_repository)
         session.initial_fen = game["initial_fen"]
@@ -1945,6 +2065,7 @@ class MainWindow(QMainWindow):
         self.screen_title.setText("Просмотр сохранённой партии")
         self.screen_stack.setCurrentWidget(self.game_page)
         self.refresh("Открыта локально сохранённая партия (только просмотр).")
+        return True
 
     def leave_online_game(self) -> None:
         if self._screen_mode == "review":
@@ -1962,13 +2083,34 @@ class MainWindow(QMainWindow):
         self.show_home()
 
     def closeEvent(self, event) -> None:
+        workers_stopped = True
         if self.lichess:
-            self.lichess.close()
+            close_method = self.lichess.close
+            try:
+                close_result = close_method(timeout=0.15)
+            except TypeError:
+                close_result = close_method()
+            workers_stopped = close_result is not False
+        if not workers_stopped or self.game_repository.has_pending_writes():
+            event.ignore()
+            self.home_status.setText(
+                "Завершаем сетевые операции и сохраняем подтверждённые данные. "
+                "Окно закроется после безопасной остановки.")
+            if not self._close_retry_scheduled:
+                self._close_retry_scheduled = True
+                self.setEnabled(False)
+                self._close_retry_timer.start()
+            return
         self.game_repository.shutdown()
         if self._offline_data_dir is not None:
             self._offline_data_dir.cleanup()
             self._offline_data_dir = None
+        event.accept()
         super().closeEvent(event)
+
+    def _retry_close_after_workers(self) -> None:
+        self._close_retry_scheduled = False
+        self.close()
 
 
 def _result_label(color: chess.Color, winner: str | None, status: str) -> str:

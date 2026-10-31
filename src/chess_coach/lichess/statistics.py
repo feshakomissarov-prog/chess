@@ -23,7 +23,8 @@ class StatisticsService:
         select = "g.*"
         if account_id:
             join = " JOIN account_games ag ON ag.game_id=g.game_id "
-            select = "g.*,ag.color AS account_color,ag.player_rating AS account_player_rating"
+            select = ("g.*,ag.color AS account_color,ag.player_rating AS account_player_rating,"
+                      "ag.opponent AS account_opponent,ag.player_name AS account_player_name")
             clauses.append("ag.account_id=?")
             params.append(account_id)
         if since:
@@ -33,7 +34,7 @@ class StatisticsService:
             clauses.append("COALESCE(g.started_at,g.updated_at)<?")
             params.append(until)
         if opponent:
-            clauses.append("g.opponent LIKE ?")
+            clauses.append(("ag.opponent" if account_id else "g.opponent") + " LIKE ?")
             params.append(f"%{opponent}%")
         if clock:
             clauses.append("g.clock=?")

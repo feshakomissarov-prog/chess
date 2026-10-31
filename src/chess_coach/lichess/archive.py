@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+import inspect
 import threading
 import time
 from typing import Callable
@@ -23,8 +24,11 @@ class ArchiveSync:
             progress: Callable[[int, str], None] | None = None) -> int:
         account_id = self.repository.ensure_archive_account(username)
         try:
-            return self._run(username, token, stop_event, full=full,
-                             page_size=page_size, progress=progress)
+            imported = self._run(username, token, stop_event, full=full,
+                                 page_size=page_size, progress=progress)
+            if stop_event.is_set() and hasattr(self.repository, "record_archive_interrupted"):
+                self.repository.record_archive_interrupted(account_id)
+            return imported
         except Exception as exc:
             self.repository.record_archive_error(account_id, str(exc))
             raise
@@ -36,7 +40,13 @@ class ArchiveSync:
         account_id = self.repository.ensure_archive_account(username)
         state = self.repository.archive_sync_state(account_id)
         if full or not state.get("backfill_complete"):
-            until_ms = state.get("backfill_before") or int(time.time() * 1000)
+            started_ms = int(time.time() * 1000)
+            if hasattr(self.repository, "begin_archive_backfill"):
+                anchor_ms = self.repository.begin_archive_backfill(account_id, started_ms)
+            else:
+                anchor_ms = int(state.get("backfill_started_at") or
+                                state.get("backfill_before") or started_ms)
+            until_ms = state.get("backfill_before") or anchor_ms
             imported = self._backfill(username, token, account_id, until_ms, stop_event,
                                       page_size, progress)
             if not stop_event.is_set():
@@ -70,10 +80,11 @@ class ArchiveSync:
                 stamp = _timestamp(record)
                 if stamp is not None:
                     page_stamps.append(stamp)
-                self.repository.import_archive_record(
-                    username, record, checkpoint_ms=None, backfill=False)
+                result = self.repository.import_archive_record(
+                    username, record, checkpoint_ms=None, backfill=False, _return_inserted=True)
+                inserted = result[1] if isinstance(result, tuple) else True
                 max_seen = max(max_seen, stamp or since)
-                imported += 1
+                imported += int(inserted)
                 if progress:
                     progress(imported, str(record.get("id", "")))
             if page_items < page_size:
@@ -91,17 +102,36 @@ class ArchiveSync:
                     continue
                 seen.add(game_id)
                 boundary_count += 1
-                self.repository.import_archive_record(username, record, checkpoint_ms=None, backfill=False)
-                imported += 1
+                result = self.repository.import_archive_record(
+                    username, record, checkpoint_ms=None, backfill=False, _return_inserted=True)
+                inserted = result[1] if isinstance(result, tuple) else True
+                imported += int(inserted)
                 if progress:
                     progress(imported, game_id)
             if count == 0 and boundary_count == 0:
                 raise RuntimeError("Lichess archive incremental page made no progress; cursor unchanged.")
             since = max_seen + 1
         if not stop_event.is_set():
-            self.repository.finish_archive_incremental(account_id,
-                max(target_ms, max_seen if 'max_seen' in locals() else since))
+            finish_incremental = self.repository.finish_archive_incremental
+            if len(inspect.signature(finish_incremental).parameters) >= 3:
+                finish_incremental(account_id, target_ms, imported)
+            else:  # Compatibility with small legacy test doubles.
+                finish_incremental(account_id, target_ms)
         return imported
+
+    def refresh_game(self, username: str, token: str, game_id: str) -> bool:
+        """Refresh one previously imported completed game by its Lichess ID."""
+        account_id = self.repository.ensure_archive_account(username)
+        game = self.repository.get_game(game_id)
+        if not game or not self.repository.archive_game_linked(account_id, game_id):
+            raise ValueError("Эта партия не связана с текущим аккаунтом Lichess.")
+        if game.get("status") in {"created", "started", "started_soon", "playing"}:
+            raise ValueError("Обновлять можно только завершённую партию.")
+        pgn = self.client.export_game_pgn(token, game_id)
+        _game_id, inserted = self.repository.import_archive_record(
+            username, {"id": game_id, "pgn": pgn}, checkpoint_ms=None,
+            backfill=False, _return_inserted=True)
+        return bool(inserted)
 
     def _backfill(self, username: str, token: str, account_id: str, until_ms: int,
                   stop_event: threading.Event, page_size: int,
@@ -124,12 +154,13 @@ class ArchiveSync:
                 seen.add(game_id)
                 count += 1
                 stamp = _timestamp(record)
-                self.repository.import_archive_record(
+                result = self.repository.import_archive_record(
                     username, record, checkpoint_ms=stamp,
-                    backfill=True)
+                    backfill=True, _return_inserted=True)
+                inserted = result[1] if isinstance(result, tuple) else True
                 if stamp:
                     stamps.append(stamp)
-                imported += 1
+                imported += int(inserted)
                 if progress:
                     progress(imported, str(record.get("id", "")))
             if page_items < page_size:
@@ -151,9 +182,11 @@ class ArchiveSync:
                     continue
                 seen.add(game_id)
                 stamp = _timestamp(record)
-                self.repository.import_archive_record(username, record,
-                    checkpoint_ms=stamp, backfill=True)
-                imported += 1
+                result = self.repository.import_archive_record(
+                    username, record, checkpoint_ms=stamp, backfill=True,
+                    _return_inserted=True)
+                inserted = result[1] if isinstance(result, tuple) else True
+                imported += int(inserted)
                 if progress:
                     progress(imported, game_id)
             if oldest <= _LICHESS_EPOCH_MS:

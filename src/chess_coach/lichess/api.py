@@ -212,6 +212,11 @@ class LichessClient:
         if deadline > 0:
             raise RateLimitError(max(1, int(deadline + 0.999)))
 
+    @property
+    def rate_limit_remaining(self) -> int:
+        with self._request_lock:
+            return max(0, int(self._rate_limited_until - time.monotonic() + 0.999))
+
     def _json_call(self, *args, **kwargs) -> dict:
         data = self._call(*args, **kwargs).json()
         if not isinstance(data, dict):
@@ -232,6 +237,17 @@ class LichessClient:
         if not isinstance(games, list):
             raise LichessError("Lichess вернул неожиданный список активных партий.")
         return [game for game in games if isinstance(game, dict) and game.get("gameId")]
+
+    def export_game_pgn(self, token: str, game_id: str) -> str:
+        """Fetch one explicitly selected game without requesting the user's archive."""
+        if not game_id or any(char not in "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-" for char in game_id):
+            raise ValueError("Invalid Lichess game ID")
+        response = self._call("GET", f"/game/export/{quote(game_id, safe='')}", token=token,
+                              accept="application/x-chess-pgn")
+        try:
+            return response.body.decode("utf-8")
+        except UnicodeDecodeError as exc:
+            raise LichessError("Lichess returned a PGN that is not valid UTF-8.") from exc
 
     def stream_user_games(self, token: str, username: str, stop_event: threading.Event,
                           *, since: int | None = None, until_ms: int | None = None,

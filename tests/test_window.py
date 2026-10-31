@@ -3,6 +3,7 @@ import time
 import pytest
 from pathlib import Path
 from PySide6.QtCore import QPoint, QSettings, Qt
+from PySide6.QtGui import QCloseEvent
 
 from chess_coach.board_view import BoardView
 from chess_coach.window import ActiveGamesDialog, EvaluationGraph, MainWindow, SettingsDialog
@@ -146,6 +147,7 @@ def test_open_active_game_clears_old_premove_and_background_events_do_not_submit
     existing.premove = chess.Move.from_uci("g1f3")
     window.online_sessions[existing.game_id] = existing
     window.online_session = existing
+    window._lichess_connected = True
     window._selected_live_game_id = existing.game_id
     window._screen_mode = "online"
     starts = []
@@ -722,6 +724,25 @@ def test_game_finish_for_selected_review_does_not_replace_review(qtbot, tmp_path
     assert live.moves == "e2e4 e7e5"
 
 
+def test_raw_only_variant_is_marked_and_open_does_not_create_standard_board(qtbot, tmp_path):
+    window = MainWindow(QSettings(str(tmp_path / "raw-variant.ini"), QSettings.Format.IniFormat),
+                        offline_mode=True)
+    qtbot.addWidget(window)
+    pgn = ('[Event "Variant"]\n[Variant "Crazyhouse"]\n[White "Me"]\n'
+           '[Black "Friend"]\n[Result "*"]\n\n1. e4 *\n')
+    window.game_repository.import_archive_record(
+        "Me", {"id": "raw-variant", "variant": "crazyhouse", "pgn": pgn},
+        checkpoint_ms=99, backfill=True)
+    game = window.game_repository.get_game("raw-variant")
+
+    assert window._open_saved_game(game) is False
+    assert window.online_session is None
+    assert window._screen_mode == "home"
+    assert "Crazyhouse" in window.home_status.text()
+    assert "Экспорт PGN доступен" in window.home_status.text()
+    assert window.game_repository.export_pgn("raw-variant") == pgn
+
+
 def test_finish_before_final_state_keeps_result_screen_then_updates_saved_pgn(qtbot, tmp_path, monkeypatch):
     window = MainWindow(QSettings(str(tmp_path / "finish-late-ply.ini"), QSettings.Format.IniFormat))
     qtbot.addWidget(window)
@@ -976,3 +997,62 @@ def test_429_restore_retry_button_waits_for_cooldown_and_uses_saved_token(qtbot,
     window.connect_lichess()
     assert service.restore_calls == 1
     assert not window.connect_button.isEnabled()
+
+
+def test_online_controls_retry_after_rate_limit_cooldown(qtbot, tmp_path, monkeypatch):
+    window = MainWindow(QSettings(str(tmp_path / "429-actions.ini"), QSettings.Format.IniFormat),
+                        offline_mode=True)
+    qtbot.addWidget(window)
+
+    class Client:
+        rate_limit_remaining = 3
+
+    class Service:
+        client = Client()
+
+    window.lichess = Service()
+    window.offline_mode = False
+    window._lichess_connected = True
+    timers = []
+    monkeypatch.setattr("chess_coach.window.QTimer.singleShot",
+                        lambda milliseconds, callback: timers.append((milliseconds, callback)))
+
+    window._refresh_online_controls()
+    assert timers[0][0] == 3000
+    assert not window.ai_button.isEnabled()
+
+    window.lichess.client.rate_limit_remaining = 0
+    timers[0][1]()
+    assert window.ai_button.isEnabled()
+    assert window.home_archive_button.isEnabled()
+
+
+def test_window_close_waits_for_workers_before_shutting_down_sqlite(qtbot, tmp_path, monkeypatch):
+    window = MainWindow(QSettings(str(tmp_path / "close-workers.ini"), QSettings.Format.IniFormat),
+                        offline_mode=True)
+    qtbot.addWidget(window)
+
+    class Service:
+        def __init__(self): self.close_calls = 0
+        def close(self, timeout=1.0):
+            self.close_calls += 1
+            return self.close_calls > 1
+
+    service = Service()
+    shutdowns = []
+    window.lichess = service
+    monkeypatch.setattr(window.game_repository, "has_pending_writes", lambda: False)
+    monkeypatch.setattr(window.game_repository, "shutdown", lambda: shutdowns.append(True))
+
+    first = QCloseEvent()
+    window.closeEvent(first)
+    assert not first.isAccepted()
+    assert not shutdowns
+    assert window._close_retry_scheduled
+    window._close_retry_timer.stop()
+
+    final = QCloseEvent()
+    window.closeEvent(final)
+    assert final.isAccepted()
+    assert service.close_calls == 2
+    assert shutdowns == [True]
