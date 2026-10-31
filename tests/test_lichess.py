@@ -756,6 +756,48 @@ def test_archive_import_keeps_lichess_pgn_evaluations_as_separate_source(tmp_pat
     assert cached["assessments"][0]["white_cp"] == 25
 
 
+def test_statistics_use_move_denominators_partial_coverage_and_keep_accuracy_separate(tmp_path):
+    from chess_coach.lichess.statistics import StatisticsService
+
+    repo = GameRepository(tmp_path / "stats.sqlite3")
+    games = [
+        ("w", "white", "white"), ("d", None, "black"), ("l", "white", "black")
+    ]
+    for game_id, winner, color in games:
+        repo.save_snapshot(game_id, "startpos", "e2e4 e7e5", color, "Opponent",
+                           False, "180+2", "finished", winner)
+    with repo._connection() as db:
+        db.execute("UPDATE games SET lichess_accuracy_white=90,lichess_accuracy_black=80 "
+                   "WHERE game_id='w'")
+    line = repo.current_line("w")
+    repo.save_analysis("w", line_revision=1, line_hash=line["line_hash"],
+        source="stockfish", engine_name="Fake", engine_version="1", parameters={"nodes": 1},
+        assessments=[{"ply": i, "white_cp": i * 10} for i in range(3)],
+        classifications=[
+            {"ply": 1, "mover": "white", "eval_loss_cp": 100, "label": "mistake",
+             "phase": "opening", "algorithm_version": "test"},
+            {"ply": 2, "mover": "black", "eval_loss_cp": 10, "label": "good",
+             "phase": "opening", "algorithm_version": "test"},
+        ])
+    line = repo.current_line("d")
+    repo.save_analysis("d", line_revision=1, line_hash=line["line_hash"],
+        source="stockfish", engine_name="Fake", engine_version="1", parameters={"nodes": 1},
+        assessments=[{"ply": 1, "white_cp": 10}],
+        classifications=[{"ply": 1, "mover": "black", "eval_loss_cp": 250,
+                          "label": "blunder", "phase": "unknown",
+                          "algorithm_version": "test"}])
+    summary = StatisticsService(repo).summary(analysis_source="stockfish")
+    assert (summary["games"], summary["wins"], summary["draws"], summary["losses"]) == (3, 1, 1, 1)
+    assert summary["confirmed_moves"] == 6
+    assert summary["evaluated_moves"] == 3
+    assert summary["move_coverage_percent"] == 50.0
+    assert summary["own_assessed_moves"] == 2
+    assert summary["own_error_rate_per_100"] == 100.0
+    assert summary["avg_cpl_cp"] == 175.0
+    assert summary["swings_200cp"] == 1
+    assert summary["lichess_accuracy"] == {"white": 90.0, "black": 80.0}
+
+
 def test_premove_is_an_intent_and_revalidated_after_opponent_move(tmp_path):
     session = LichessGameSession("premove", GameRepository(tmp_path / "games.sqlite3"))
     session.color = chess.WHITE

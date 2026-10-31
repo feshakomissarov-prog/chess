@@ -1,0 +1,113 @@
+"""Read-only, denominator-aware aggregates over current game revisions."""
+
+from __future__ import annotations
+
+from typing import Any
+
+from .repository import GameRepository
+
+
+class StatisticsService:
+    def __init__(self, repository: GameRepository) -> None:
+        self.repository = repository
+
+    def summary(self, *, account_id: str | None = None, since: str | None = None,
+                until: str | None = None, opponent: str | None = None,
+                clock: str | None = None, game_source: str | None = None,
+                analysis_source: str | None = None) -> dict[str, Any]:
+        clauses: list[str] = ["g.status NOT IN ('created','started','started_soon','playing')"]
+        params: list[object] = []
+        join = ""
+        if account_id:
+            join = " JOIN account_games ag ON ag.game_id=g.game_id "
+            clauses.append("ag.account_id=?")
+            params.append(account_id)
+        if since:
+            clauses.append("COALESCE(g.started_at,g.updated_at)>=?")
+            params.append(since)
+        if until:
+            clauses.append("COALESCE(g.started_at,g.updated_at)<?")
+            params.append(until)
+        if opponent:
+            clauses.append("g.opponent LIKE ?")
+            params.append(f"%{opponent}%")
+        if clock:
+            clauses.append("g.clock=?")
+            params.append(clock)
+        if game_source:
+            clauses.append("g.source=?")
+            params.append(game_source)
+        where = " AND ".join(clauses)
+        with self.repository._connection() as db:
+            games = [dict(row) for row in db.execute(
+                f"SELECT DISTINCT g.* FROM games g{join} WHERE {where}", params)]
+            ids = [game["game_id"] for game in games]
+            result = {"filters": {"since": since, "until": until, "opponent": opponent,
+                                   "clock": clock, "game_source": game_source,
+                                   "analysis_source": analysis_source},
+                      "games": len(games), "wins": 0, "losses": 0, "draws": 0,
+                      "confirmed_moves": 0, "evaluated_moves": 0,
+                      "move_coverage_percent": None, "own_assessed_moves": 0,
+                      "own_error_rate_per_100": None, "avg_cpl_cp": None,
+                      "swings_200cp": 0, "lichess_accuracy": {"white": None, "black": None},
+                      "analysis_coverage": 0.0, "classifications_by_phase": {}}
+            for game in games:
+                me = game["color"]
+                if game["winner"] is None and game["status"] not in {"playing", "started"}:
+                    result["draws"] += 1
+                elif game["winner"] == me:
+                    result["wins"] += 1
+                elif game["winner"]:
+                    result["losses"] += 1
+            if not ids:
+                return result
+            marks = ",".join("?" for _ in ids)
+            move_rows = db.execute(
+                f"SELECT gm.game_id,gm.ply,gm.mover,g.color FROM game_moves gm "
+                f"JOIN game_revisions gr ON gr.game_id=gm.game_id AND gr.line_revision=gm.line_revision "
+                f"JOIN games g ON g.game_id=gm.game_id WHERE gm.game_id IN ({marks}) AND gr.is_current=1",
+                ids).fetchall()
+            result["confirmed_moves"] = len(move_rows)
+            latest_source_clause = "AND ar.source=?" if analysis_source else ""
+            source_params = [analysis_source] if analysis_source else []
+            classifications = db.execute(
+                f"""WITH latest AS (
+                    SELECT ar.game_id,ar.line_revision,MAX(ar.finished_at) AS finished_at
+                    FROM analysis_runs ar JOIN games g ON g.game_id=ar.game_id
+                    JOIN game_revisions gr ON gr.game_id=ar.game_id AND gr.line_revision=ar.line_revision
+                    WHERE g.game_id IN ({marks}) AND gr.is_current=1 AND ar.status='complete'
+                    {latest_source_clause} GROUP BY ar.game_id,ar.line_revision
+                )
+                SELECT mc.*,g.color AS my_color FROM latest l
+                JOIN analysis_runs ar ON ar.game_id=l.game_id AND ar.line_revision=l.line_revision
+                    AND ar.finished_at=l.finished_at
+                JOIN move_classifications mc ON mc.run_id=ar.run_id
+                JOIN games g ON g.game_id=mc.game_id
+                WHERE mc.ply>0 ORDER BY mc.game_id,mc.ply""",
+                [*ids, *source_params]).fetchall()
+            assessed = [row for row in classifications if row["eval_loss_cp"] is not None]
+            result["evaluated_moves"] = len(assessed)
+            if result["confirmed_moves"]:
+                result["move_coverage_percent"] = round(
+                    100 * len({(r["game_id"], r["ply"]) for r in assessed}) /
+                    result["confirmed_moves"], 1)
+            own = [row for row in assessed if row["mover"] == row["my_color"]]
+            result["own_assessed_moves"] = len(own)
+            if own:
+                errors = sum(row["label"] in {"mistake", "blunder"} for row in own)
+                result["own_error_rate_per_100"] = round(100 * errors / len(own), 1)
+                result["avg_cpl_cp"] = round(sum(row["eval_loss_cp"] for row in own) / len(own), 1)
+                result["swings_200cp"] = sum(row["eval_loss_cp"] >= 200 for row in own)
+            for row in classifications:
+                phase = row["phase"] or "unknown"
+                counts = result["classifications_by_phase"].setdefault(phase, {})
+                side = "mine" if row["mover"] == row["my_color"] else "opponent"
+                side_counts = counts.setdefault(side, {})
+                side_counts[row["label"]] = side_counts.get(row["label"], 0) + 1
+            result["analysis_coverage"] = round(100 * len({r["game_id"] for r in assessed}) /
+                                                len(games), 1) if games else 0.0
+            for side in ("white", "black"):
+                accuracies = [g[f"lichess_accuracy_{side}"] for g in games
+                              if g[f"lichess_accuracy_{side}"] is not None]
+                result["lichess_accuracy"][side] = round(sum(accuracies) / len(accuracies), 1) if accuracies else None
+            return result

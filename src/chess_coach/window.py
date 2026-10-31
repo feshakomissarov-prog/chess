@@ -42,6 +42,7 @@ from .lichess.analysis import AnalysisOptions, CompletedGameAnalyzer
 from .lichess.repository import GameRepository
 from .lichess.service import LichessService
 from .lichess.session import LichessGameSession
+from .lichess.statistics import StatisticsService
 
 
 class OnlineGameDialog(QDialog):
@@ -521,6 +522,8 @@ class MainWindow(QMainWindow):
         self.home_archive_button = QPushButton("Синхронизировать архив Lichess")
         self.home_archive_button.clicked.connect(self.start_archive_sync)
         self.home_archive_button.setEnabled(False)
+        self.home_stats_button = QPushButton("Статистика партий")
+        self.home_stats_button.clicked.connect(self.show_statistics)
         self.home_settings_button = QPushButton("Настройки")
         self.home_settings_button.clicked.connect(self.open_settings)
         self.resume_game_button = QPushButton("Вернуться в текущую партию")
@@ -528,7 +531,8 @@ class MainWindow(QMainWindow):
         for button in (self.home_ai_button, self.home_friend_button,
                        self.home_username_button, self.active_games_button,
                        self.home_local_button,
-                       self.home_games_button, self.home_archive_button, self.home_settings_button,
+                       self.home_games_button, self.home_archive_button, self.home_stats_button,
+                       self.home_settings_button,
                        self.resume_game_button):
             layout.addWidget(button)
         layout.addStretch(1)
@@ -667,6 +671,24 @@ class MainWindow(QMainWindow):
             self._archive_progress_dialog.close()
             self._archive_progress_dialog = None
         QMessageBox.information(self, "Архив Lichess", f"Обработано: {count}. {message}")
+
+    def show_statistics(self) -> None:
+        data = StatisticsService(self.game_repository).summary()
+        coverage = ("нет оценённых ходов" if data["move_coverage_percent"] is None else
+                    f"{data['move_coverage_percent']}% ({data['evaluated_moves']} из "
+                    f"{data['confirmed_moves']} ходов)")
+        error_rate = ("н/д" if data["own_error_rate_per_100"] is None else
+                      f"{data['own_error_rate_per_100']} на 100 оценённых ходов")
+        accuracy = data["lichess_accuracy"]
+        text = (f"Завершённые партии: {data['games']}\n"
+                f"Победы / ничьи / поражения: {data['wins']} / {data['draws']} / {data['losses']}\n"
+                f"Покрытие локальной оценки: {coverage}\n"
+                f"Ошибки своих ходов: {error_rate}\n"
+                f"Средняя потеря CP по оценённым своим ходам: {data['avg_cpl_cp'] if data['avg_cpl_cp'] is not None else 'н/д'}\n"
+                f"Lichess accuracy (официальная, отдельно): белые {accuracy['white'] if accuracy['white'] is not None else 'н/д'}; "
+                f"чёрные {accuracy['black'] if accuracy['black'] is not None else 'н/д'}\n"
+                "Фазы/классификации доступны в локальном отчёте по оценённым ходам.")
+        QMessageBox.information(self, "Статистика партий", text)
 
     def start_local_game(self) -> None:
         self.online_session = None
