@@ -4,6 +4,18 @@
 **Локальный путь владельца:** `G:\project\chess`. У других исполнителей он может быть иным.  
 **Код работает из ветки `main`.** Вся история и документация GitHub доступны следующему Codex и следующему чату без данного диалога.
 
+## Актуализация 01.11.2026 — PR #17, отмена Stockfish (текущая)
+
+[draft PR #17](https://github.com/feshakomissarov-prog/chess/pull/17), head `5613346755d3f333a145b9847aed7668e141f52e`, base `codex/pr14-deep-audit-ci` (PR #16), **не слит**. PR #15 закрыт без merge. Windows GitHub Actions [run #41252069980](https://github.com/feshakomissarov-prog/chess/actions/runs/41252069980), Python 3.12.10: **156 passed**, compileall, offline-window smoke PASS. Локально Python 3.11.5: 80 `test_lichess` PASS, один Qt close fake analyzer PASS; весь локальный Qt suite **не повторяли** из-за native crash.
+
+**Подтверждено ревью:** в `_analyze_interruptibly` теперь правильные `SimpleEngine.analysis()` и `SimpleAnalysisResult.stop()`, обработка отмены/ошибок и `engine.quit()`; при закрытии GUI ждёт окончания analysis worker до SQLite shutdown. В PR #17 оставлен review.
+
+**Оставшийся P2 timeout UX:** по истечении 10 секунд окно включается, но `_shutdown_requested=True`, а LichessService уже закрыт — полноценную работоспособность нельзя обещать. При зависании анализа нужна явная стадия «ожидаем безопасной остановки»/корректное восстановление, с Qt regression test. Не блокирует статически проверенный обычный cancel path, но важно до merge.
+
+**Native crash ещё не устранён/не локализован:** Python 3.11.5 + PySide6/shiboken6 6.12.0, два `0xC0000005` в `shiboken6.abi3.dll` и более ранний `0xC0000374` в `ntdll.dll`. Dr.Web `PsInject (43), deny [5]` заблокировал WerFault.exe для соответствующих PID **после** аварий; это не доказательство первопричины. Нельзя менять защиту/исключения/ExecutionPolicy. Реальный Stockfish, Lichess/OAuth и архив — NOT RUN.
+
+**Дальше:** Codex точечно исправляет timeout UX в draft PR #17; пользователь делает один контролируемый `--offline` smoke в своём Windows, без массовых тестов. При повторной аварии остановиться и сохранить Event Viewer/консоль. Затем разрешённый владельцем малый пилот данных, решение о последовательном merge stacked PR #8–#17. **Ничего не мержить без команды владельца.**
+
 ## Актуализация 01.11.2026 — PR #16 и локальная ошибка Python (текущая)
 
 [draft PR #16](https://github.com/feshakomissarov-prog/chess/pull/16) `7d93e7c04320a73d5dcff2d6be09b6782cacb47e`, base `codex/m3-m4-review-fixes` (PR #14); PR #15 закрыт без merge как заменённый. `main` и вся цепочка #8–#16 не слиты. Windows GitHub Actions run #41250753509 **152 passed на Python 3.12.10**, compileall и offscreen window smoke PASS. Локально Python 3.11.5: `test_lichess.py` 78 pass, file-backed SQLite integration 8 pass; полный pytest-qt suite закончился native access violation `python.exe` при `_close_widgets`. Dr.Web заблокировал `C:\Windows\System32\WerFault.exe` («Процессу запрещено изменение запущенного приложения»). **Причинная связь с падением не установлена; нельзя отключать/обходить антивирус**.
