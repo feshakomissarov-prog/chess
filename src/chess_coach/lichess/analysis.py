@@ -91,7 +91,9 @@ class CompletedGameAnalyzer:
                 label = ("unknown" if loss is None else "blunder" if loss >= 200 else
                          "mistake" if loss >= 100 else "inaccuracy" if loss >= 50 else "good")
                 classifications.append({"ply": ply, "mover": mover, "eval_loss_cp": loss,
-                                        "label": label, "phase": "unknown",
+                                        "label": label,
+                                        "phase": self.repository.phase_for_ply(
+                                            game_id, int(revision["line_revision"]), ply),
                                         "algorithm_version": CLASSIFIER_VERSION})
             run_id = self.repository.save_analysis(
                 game_id, line_revision=int(revision["line_revision"]),

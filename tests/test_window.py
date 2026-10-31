@@ -5,7 +5,7 @@ from pathlib import Path
 from PySide6.QtCore import QPoint, QSettings, Qt
 
 from chess_coach.board_view import BoardView
-from chess_coach.window import ActiveGamesDialog, MainWindow, SettingsDialog
+from chess_coach.window import ActiveGamesDialog, EvaluationGraph, MainWindow, SettingsDialog
 from chess_coach.lichess.session import LichessGameSession
 from chess_coach.lichess.repository import GameRepository
 
@@ -65,6 +65,21 @@ def test_main_window_smoke_and_game_controller_integration(qtbot, tmp_path) -> N
     assert window.controller.ply == 3
     window.navigate_live()
     assert window.controller.viewing_live_position
+
+
+def test_evaluation_graph_click_emits_nearest_ply(qtbot):
+    graph = EvaluationGraph([
+        {"ply": 0, "white_cp": 0}, {"ply": 1, "white_cp": 30},
+        {"ply": 2, "white_cp": -20}, {"ply": 3, "mate_white": 2},
+    ])
+    graph.resize(460, 220)
+    selected = []
+    graph.selected_ply.connect(selected.append)
+    qtbot.addWidget(graph)
+    graph.show()
+    qtbot.wait(20)
+    qtbot.mouseClick(graph, Qt.MouseButton.LeftButton, pos=QPoint(250, 100))
+    assert selected == [2]
 
 
 def test_explicit_offline_window_never_constructs_or_uses_lichess_credentials(qtbot, tmp_path, monkeypatch):

@@ -251,6 +251,23 @@ class LichessClient:
         path = f"/api/games/user/{quote(username, safe='')}?{urlencode(query)}"
         yield from self.stream_ndjson(path, token, stop_event)
 
+    def stream_puzzle_activity(self, token: str, stop_event: threading.Event, *,
+                               since: int | None = None, before: int | None = None,
+                               max_items: int = 1000) -> Iterator[dict]:
+        if not 1 <= max_items <= 10_000:
+            raise ValueError("Размер страницы задач должен быть от 1 до 10000.")
+        query: dict[str, object] = {"max": max_items}
+        if since is not None:
+            query["since"] = since
+        if before is not None:
+            query["before"] = before
+        yield from self.stream_ndjson("/api/puzzle/activity?" + urlencode(query), token, stop_event)
+
+    def get_puzzle_dashboard(self, token: str, days: int = 30) -> dict:
+        if not 1 <= int(days) <= 365:
+            raise ValueError("Период статистики задач должен быть от 1 до 365 дней.")
+        return self._json_call("GET", f"/api/puzzle/dashboard/{int(days)}", token=token)
+
     def exchange_code(
         self,
         code: str,

@@ -14,7 +14,9 @@ class StatisticsService:
     def summary(self, *, account_id: str | None = None, since: str | None = None,
                 until: str | None = None, opponent: str | None = None,
                 clock: str | None = None, game_source: str | None = None,
-                analysis_source: str | None = None) -> dict[str, Any]:
+                analysis_source: str | None = None, side: str | None = None,
+                rating_min: int | None = None, rating_max: int | None = None,
+                opening: str | None = None) -> dict[str, Any]:
         clauses: list[str] = ["g.status NOT IN ('created','started','started_soon','playing')"]
         params: list[object] = []
         join = ""
@@ -37,6 +39,18 @@ class StatisticsService:
         if game_source:
             clauses.append("g.source=?")
             params.append(game_source)
+        if side in {"white", "black"}:
+            clauses.append("g.color=?")
+            params.append(side)
+        if rating_min is not None:
+            clauses.append("(CASE g.color WHEN 'white' THEN g.white_rating ELSE g.black_rating END)>=?")
+            params.append(rating_min)
+        if rating_max is not None:
+            clauses.append("(CASE g.color WHEN 'white' THEN g.white_rating ELSE g.black_rating END)<=?")
+            params.append(rating_max)
+        if opening:
+            clauses.append("(g.opening_name LIKE ? OR g.opening_eco LIKE ?)")
+            params.extend([f"%{opening}%", f"%{opening}%"])
         where = " AND ".join(clauses)
         with self.repository._connection() as db:
             games = [dict(row) for row in db.execute(
@@ -51,6 +65,7 @@ class StatisticsService:
                       "own_error_rate_per_100": None, "avg_cpl_cp": None,
                       "swings_200cp": 0, "lichess_accuracy": {"white": None, "black": None},
                       "analysis_coverage": 0.0, "classifications_by_phase": {}}
+            result["rating_trend"] = []
             for game in games:
                 me = game["color"]
                 if game["winner"] is None and game["status"] not in {"playing", "started"}:
@@ -59,6 +74,13 @@ class StatisticsService:
                     result["wins"] += 1
                 elif game["winner"]:
                     result["losses"] += 1
+                rating = game["white_rating"] if game["color"] == "white" else game["black_rating"]
+                if rating is not None:
+                    result["rating_trend"].append({
+                        "date": game["started_at"] or game["updated_at"],
+                        "rating": rating, "game_id": game["game_id"],
+                    })
+            result["rating_trend"].sort(key=lambda item: item["date"])
             if not ids:
                 return result
             marks = ",".join("?" for _ in ids)
@@ -86,11 +108,25 @@ class StatisticsService:
                 WHERE mc.ply>0 ORDER BY mc.game_id,mc.ply""",
                 [*ids, *source_params]).fetchall()
             assessed = [row for row in classifications if row["eval_loss_cp"] is not None]
-            result["evaluated_moves"] = len(assessed)
+            evaluated = db.execute(
+                f"""WITH latest AS (
+                    SELECT ar.game_id,ar.line_revision,MAX(ar.finished_at) AS finished_at
+                    FROM analysis_runs ar JOIN games g ON g.game_id=ar.game_id
+                    JOIN game_revisions gr ON gr.game_id=ar.game_id AND gr.line_revision=ar.line_revision
+                    WHERE g.game_id IN ({marks}) AND gr.is_current=1 AND ar.status='complete'
+                    {latest_source_clause} GROUP BY ar.game_id,ar.line_revision
+                )
+                SELECT DISTINCT pa.game_id,pa.ply FROM latest l
+                JOIN analysis_runs ar ON ar.game_id=l.game_id AND ar.line_revision=l.line_revision
+                    AND ar.finished_at=l.finished_at
+                JOIN position_assessments pa ON pa.run_id=ar.run_id
+                WHERE pa.ply>0 AND (pa.white_cp IS NOT NULL OR pa.mate_white IS NOT NULL)""",
+                [*ids, *source_params]).fetchall()
+            evaluated_ids = {(row["game_id"], row["ply"]) for row in evaluated}
+            result["evaluated_moves"] = len(evaluated_ids)
             if result["confirmed_moves"]:
                 result["move_coverage_percent"] = round(
-                    100 * len({(r["game_id"], r["ply"]) for r in assessed}) /
-                    result["confirmed_moves"], 1)
+                    100 * len(evaluated_ids) / result["confirmed_moves"], 1)
             own = [row for row in assessed if row["mover"] == row["my_color"]]
             result["own_assessed_moves"] = len(own)
             if own:
@@ -104,7 +140,7 @@ class StatisticsService:
                 side = "mine" if row["mover"] == row["my_color"] else "opponent"
                 side_counts = counts.setdefault(side, {})
                 side_counts[row["label"]] = side_counts.get(row["label"], 0) + 1
-            result["analysis_coverage"] = round(100 * len({r["game_id"] for r in assessed}) /
+            result["analysis_coverage"] = round(100 * len({game_id for game_id, _ in evaluated_ids}) /
                                                 len(games), 1) if games else 0.0
             for side in ("white", "black"):
                 accuracies = [g[f"lichess_accuracy_{side}"] for g in games

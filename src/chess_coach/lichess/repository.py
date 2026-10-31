@@ -17,7 +17,7 @@ import chess
 import chess.pgn
 
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 DEFAULT_PAGE_SIZE = 100
 MAX_PAGE_SIZE = 500
 
@@ -101,6 +101,10 @@ class GameRepository:
                 "last_move_at": "INTEGER",
                 "lichess_accuracy_white": "REAL",
                 "lichess_accuracy_black": "REAL",
+                "white_rating": "INTEGER",
+                "black_rating": "INTEGER",
+                "opening_eco": "TEXT",
+                "opening_name": "TEXT",
             }
             for name, definition in additions.items():
                 if name not in columns:
@@ -145,6 +149,14 @@ class GameRepository:
                     FOREIGN KEY(game_id, line_revision)
                       REFERENCES game_revisions(game_id, line_revision) ON DELETE CASCADE
                 );
+                CREATE TABLE IF NOT EXISTS game_phase_boundaries (
+                    game_id TEXT NOT NULL, line_revision INTEGER NOT NULL,
+                    middle_start_ply INTEGER, end_start_ply INTEGER,
+                    source TEXT NOT NULL, method_version TEXT NOT NULL,
+                    PRIMARY KEY(game_id,line_revision),
+                    FOREIGN KEY(game_id,line_revision)
+                      REFERENCES game_revisions(game_id,line_revision) ON DELETE CASCADE
+                );
                 CREATE TABLE IF NOT EXISTS game_notes (
                     note_id TEXT PRIMARY KEY, game_id TEXT NOT NULL,
                     line_revision INTEGER, ply INTEGER, position_uid TEXT,
@@ -176,6 +188,29 @@ class GameRepository:
                     FOREIGN KEY(game_id,line_revision,ply)
                       REFERENCES game_moves(game_id,line_revision,ply)
                 );
+                CREATE TABLE IF NOT EXISTS puzzles (
+                    puzzle_id TEXT PRIMARY KEY, fen TEXT NOT NULL, solution_json TEXT NOT NULL,
+                    themes_json TEXT NOT NULL, puzzle_rating INTEGER, plays INTEGER,
+                    updated_at TEXT NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS puzzle_attempts (
+                    attempt_uid TEXT PRIMARY KEY, account_id TEXT NOT NULL REFERENCES accounts(account_id),
+                    puzzle_id TEXT NOT NULL REFERENCES puzzles(puzzle_id), attempt_date_ms INTEGER NOT NULL,
+                    win INTEGER NOT NULL, source TEXT NOT NULL DEFAULT 'lichess', metadata_json TEXT NOT NULL,
+                    imported_at TEXT NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS puzzle_sync_state (
+                    account_id TEXT PRIMARY KEY REFERENCES accounts(account_id) ON DELETE CASCADE,
+                    backfill_before INTEGER, backfill_complete INTEGER NOT NULL DEFAULT 0,
+                    incremental_since INTEGER, last_success_at TEXT, imported_count INTEGER NOT NULL DEFAULT 0,
+                    last_error TEXT, updated_at TEXT NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS puzzle_dashboard_snapshots (
+                    snapshot_id TEXT PRIMARY KEY, account_id TEXT NOT NULL REFERENCES accounts(account_id),
+                    days INTEGER NOT NULL, fetched_at TEXT NOT NULL, payload_json TEXT NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS idx_puzzle_attempt_date ON puzzle_attempts(account_id,attempt_date_ms);
+                CREATE INDEX IF NOT EXISTS idx_puzzle_attempt_puzzle ON puzzle_attempts(puzzle_id,attempt_date_ms);
                 CREATE INDEX IF NOT EXISTS idx_games_updated ON games(updated_at DESC, game_id);
                 CREATE INDEX IF NOT EXISTS idx_games_opponent ON games(opponent);
                 CREATE INDEX IF NOT EXISTS idx_game_notes_position ON game_notes(position_uid);
@@ -537,15 +572,21 @@ class GameRepository:
                 "mate_white": score.mate(), "depth": node.eval_depth(),
             })
         raw_hash = hashlib.sha256(raw_pgn.encode("utf-8")).hexdigest()
+        players = record.get("players") if isinstance(record.get("players"), dict) else {}
+        white_data = players.get("white") if isinstance(players.get("white"), dict) else {}
+        black_data = players.get("black") if isinstance(players.get("black"), dict) else {}
+        opening = record.get("opening") if isinstance(record.get("opening"), dict) else {}
         account_id = self.ensure_archive_account(username)
         imported_at = datetime.now(timezone.utc).isoformat()
         with self._connection() as db:
             db.execute("UPDATE games SET source='lichess_archive', source_game_id=?, variant=?, "
                        "raw_checksum=?, raw_pgn=?, last_move_at=?, lichess_accuracy_white=?, "
-                       "lichess_accuracy_black=? WHERE game_id=?",
+                       "lichess_accuracy_black=?,white_rating=?,black_rating=?,opening_eco=?, "
+                       "opening_name=? WHERE game_id=?",
                        (game_id, variant, raw_hash, raw_pgn, record.get("lastMoveAt"),
                         (record.get("accuracy") or {}).get("white"),
-                        (record.get("accuracy") or {}).get("black"), game_id))
+                        (record.get("accuracy") or {}).get("black"), white_data.get("rating"),
+                        black_data.get("rating"), opening.get("eco"), opening.get("name"), game_id))
             db.execute("INSERT INTO account_games(account_id,game_id,remote_id,imported_at) "
                        "VALUES (?,?,?,?) ON CONFLICT(account_id,game_id) DO UPDATE SET "
                        "remote_id=excluded.remote_id, imported_at=excluded.imported_at",
@@ -558,6 +599,22 @@ class GameRepository:
                     line_hash=line["line_hash"], source="lichess-pgn", engine_name="Lichess",
                     engine_version=None, parameters={"format": "pgn-eval-v1"},
                     assessments=lichess_assessments, classifications=[])
+        phase = record.get("division")
+        if isinstance(phase, dict):
+            middle = phase.get("middle")
+            end = phase.get("end")
+            middle_start = _phase_ply(middle)
+            end_start = _phase_ply(end)
+            if middle_start is not None or end_start is not None:
+                line = self.current_line(game_id)
+                with self._connection() as db:
+                    db.execute("INSERT INTO game_phase_boundaries VALUES (?,?,?,?,?,?) "
+                               "ON CONFLICT(game_id,line_revision) DO UPDATE SET "
+                               "middle_start_ply=excluded.middle_start_ply, "
+                               "end_start_ply=excluded.end_start_ply,source=excluded.source, "
+                               "method_version=excluded.method_version",
+                               (game_id, int(line["line_revision"]), middle_start, end_start,
+                                "lichess", "lichess-division-v1"))
         if checkpoint_ms is not None:
             column = "backfill_before" if backfill else "incremental_since"
             with self._connection() as db:
@@ -635,6 +692,125 @@ class GameRepository:
         with self._connection() as db:
             return [dict(row) for row in db.execute(sql, params)]
 
+    def phase_for_ply(self, game_id: str, line_revision: int, ply: int) -> str:
+        with self._connection() as db:
+            row = db.execute("SELECT middle_start_ply,end_start_ply FROM game_phase_boundaries "
+                             "WHERE game_id=? AND line_revision=?", (game_id,line_revision)).fetchone()
+        if not row:
+            return "unknown"
+        middle, end = row["middle_start_ply"], row["end_start_ply"]
+        if middle is None and end is None:
+            return "unknown"
+        if middle is not None and ply < middle:
+            return "opening"
+        if end is not None and ply >= end:
+            return "endgame"
+        if middle is not None or end is not None:
+            return "middlegame"
+        return "unknown"
+
+    def import_puzzle_activity(self, username: str, record: dict, *,
+                               backfill: bool = False) -> str:
+        puzzle = record.get("puzzle")
+        if not isinstance(puzzle, dict):
+            raise ValueError("Puzzle activity entry has no puzzle object")
+        puzzle_id = str(puzzle.get("id") or "").strip()
+        try:
+            attempt_date = int(record["date"])
+        except (KeyError, TypeError, ValueError) as exc:
+            raise ValueError("Puzzle activity entry has no valid date") from exc
+        fen = str(puzzle.get("fen") or "")
+        if not puzzle_id or not fen:
+            raise ValueError("Puzzle activity entry requires puzzle id and FEN")
+        solution = puzzle.get("solution") if isinstance(puzzle.get("solution"), list) else []
+        themes = puzzle.get("themes") if isinstance(puzzle.get("themes"), list) else []
+        stable = json.dumps(record, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+        attempt_uid = hashlib.sha256(f"lichess:{username.casefold()}:{stable}".encode()).hexdigest()
+        account_id = self.ensure_archive_account(username)
+        now = datetime.now(timezone.utc).isoformat()
+        with self._connection() as db:
+            db.execute("INSERT INTO puzzles VALUES (?,?,?,?,?,?,?) ON CONFLICT(puzzle_id) "
+                       "DO UPDATE SET fen=excluded.fen,solution_json=excluded.solution_json, "
+                       "themes_json=excluded.themes_json,puzzle_rating=excluded.puzzle_rating, "
+                       "plays=excluded.plays,updated_at=excluded.updated_at",
+                       (puzzle_id, fen, json.dumps(solution), json.dumps(themes),
+                        puzzle.get("rating"), puzzle.get("plays"), now))
+            inserted = db.execute("INSERT OR IGNORE INTO puzzle_attempts VALUES (?,?,?,?,?,?,?,?)",
+                                  (attempt_uid, account_id, puzzle_id, attempt_date,
+                                   int(bool(record.get("win"))), "lichess", stable, now)).rowcount
+            db.execute("INSERT OR IGNORE INTO puzzle_sync_state(account_id,updated_at) VALUES (?,?)",
+                       (account_id, now))
+            state = db.execute("SELECT incremental_since FROM puzzle_sync_state WHERE account_id=?",
+                               (account_id,)).fetchone()
+            cursor = max(int(state[0] or 0), attempt_date)
+            if backfill:
+                db.execute("UPDATE puzzle_sync_state SET incremental_since=?,backfill_before=?, "
+                           "imported_count=imported_count+?,last_success_at=?,last_error=NULL, "
+                           "updated_at=? WHERE account_id=?",
+                           (cursor, max(0, attempt_date - 1), int(bool(inserted)), now, now, account_id))
+            else:
+                db.execute("UPDATE puzzle_sync_state SET incremental_since=?,imported_count="
+                           "imported_count+?,last_success_at=?,last_error=NULL,updated_at=? WHERE account_id=?",
+                           (cursor, int(bool(inserted)), now, now, account_id))
+        return attempt_uid
+
+    def puzzle_sync_state(self, account_id: str) -> dict:
+        with self._connection() as db:
+            row = db.execute("SELECT * FROM puzzle_sync_state WHERE account_id=?",
+                             (account_id,)).fetchone()
+            return dict(row) if row else {}
+
+    def finish_puzzle_backfill(self, account_id: str) -> None:
+        now = datetime.now(timezone.utc).isoformat()
+        with self._connection() as db:
+            db.execute("UPDATE puzzle_sync_state SET backfill_complete=1,last_success_at=?, "
+                       "last_error=NULL,updated_at=? WHERE account_id=?", (now, now, account_id))
+
+    def puzzle_history(self, account_id: str, *, limit: int = 100, offset: int = 0) -> list[dict]:
+        limit = min(MAX_PAGE_SIZE, max(1, int(limit)))
+        offset = max(0, int(offset))
+        with self._connection() as db:
+            rows = db.execute("SELECT a.*,p.fen,p.solution_json,p.themes_json,p.puzzle_rating,p.plays "
+                               "FROM puzzle_attempts a JOIN puzzles p USING(puzzle_id) "
+                               "WHERE account_id=? ORDER BY attempt_date_ms DESC,attempt_uid "
+                               "LIMIT ? OFFSET ?", (account_id, limit, offset)).fetchall()
+            return [dict(row) for row in rows]
+
+    def puzzle_statistics(self, account_id: str) -> dict:
+        with self._connection() as db:
+            row = db.execute("SELECT COUNT(*) total,COALESCE(SUM(win),0) wins, "
+                              "AVG(p.puzzle_rating) avg_puzzle_rating "
+                              "FROM puzzle_attempts a JOIN puzzles p USING(puzzle_id) "
+                              "WHERE account_id=?", (account_id,)).fetchone()
+            total = int(row["total"])
+            wins = int(row["wins"])
+            themes = db.execute("SELECT p.themes_json,a.win FROM puzzle_attempts a "
+                                "JOIN puzzles p USING(puzzle_id) WHERE account_id=?", (account_id,)).fetchall()
+        counts: dict[str, list[int]] = {}
+        for record in themes:
+            try:
+                values = json.loads(record["themes_json"])
+            except (TypeError, json.JSONDecodeError):
+                values = []
+            for theme in values:
+                pair = counts.setdefault(str(theme), [0, 0])
+                pair[0] += 1
+                pair[1] += int(bool(record["win"]))
+        return {"attempts": total, "wins": wins, "failures": total - wins,
+                "success_percent": round(100 * wins / total, 1) if total else None,
+                "average_puzzle_rating": round(row["avg_puzzle_rating"], 1)
+                    if row["avg_puzzle_rating"] is not None else None,
+                "themes": {theme: {"attempts": values[0], "wins": values[1],
+                                   "success_percent": round(100 * values[1] / values[0], 1)}
+                           for theme, values in counts.items()}}
+
+    def save_puzzle_dashboard(self, account_id: str, days: int, payload: dict) -> None:
+        now = datetime.now(timezone.utc).isoformat()
+        with self._connection() as db:
+            db.execute("INSERT INTO puzzle_dashboard_snapshots VALUES (?,?,?,?,?)",
+                       (uuid.uuid4().hex, account_id, int(days), now,
+                        json.dumps(payload, sort_keys=True)))
+
     def get_game(self, game_id: str) -> dict | None:
         self._wait_before_read(game_id)
         with self._connection() as db:
@@ -681,3 +857,12 @@ def _insert_position(db: sqlite3.Connection, game_id: str, revision: int,
     db.execute("INSERT INTO game_positions "
                "(game_id,line_revision,ply,position_uid,fen,position_hash) "
                "VALUES (?,?,?,?,?,?)", (game_id, revision, ply, uid, fen, position_hash))
+
+
+def _phase_ply(value: object) -> int | None:
+    if isinstance(value, dict):
+        value = value.get("begin")
+    try:
+        return max(0, int(value)) if value is not None else None
+    except (TypeError, ValueError, OverflowError):
+        return None

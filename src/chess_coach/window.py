@@ -5,10 +5,11 @@ from __future__ import annotations
 import chess
 import time
 import threading
+from datetime import datetime
 from pathlib import Path
 import tempfile
 from PySide6.QtCore import QSettings, Qt, QStandardPaths, QTimer, Signal
-from PySide6.QtGui import QKeySequence, QShortcut
+from PySide6.QtGui import QKeySequence, QShortcut, QColor, QPainter, QPen
 from PySide6.QtWidgets import (
     QCheckBox,
     QApplication,
@@ -78,6 +79,63 @@ class OnlineGameDialog(QDialog):
 
     def selection(self):
         return self.color.currentData(), *self.clock.currentData(), self.level.currentData(), self.rated.isChecked()
+
+
+class EvaluationGraph(QWidget):
+    """Small evaluation-over-ply chart; score is always from White's point of view."""
+    selected_ply = Signal(int)
+
+    def __init__(self, assessments: list[dict], parent=None) -> None:
+        super().__init__(parent)
+        self.assessments = assessments
+        self.setMinimumHeight(210)
+        self.setMinimumWidth(420)
+
+    def _points(self):
+        values = []
+        for item in self.assessments:
+            score = item.get("white_cp")
+            if score is None and item.get("mate_white") is not None:
+                score = 1000 if item["mate_white"] > 0 else -1000 if item["mate_white"] < 0 else 0
+            if score is not None:
+                values.append((int(item["ply"]), max(-1000, min(1000, int(score)))))
+        return values
+
+    def paintEvent(self, _event) -> None:
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        rect = self.rect().adjusted(32, 12, -12, -26)
+        painter.setPen(QPen(QColor("#777777"), 1))
+        painter.drawLine(rect.left(), rect.center().y(), rect.right(), rect.center().y())
+        points = self._points()
+        if not points:
+            painter.drawText(rect, Qt.AlignmentFlag.AlignCenter, "Нет оценок для графика")
+            return
+        max_ply = max(1, max(ply for ply, _ in points))
+        coords = []
+        for ply, score in points:
+            x = rect.left() + int((rect.width() * ply) / max_ply)
+            y = rect.center().y() - int((rect.height() * score) / 2000)
+            coords.append((x, y))
+        painter.setPen(QPen(QColor("#315f9b"), 2))
+        for first, second in zip(coords, coords[1:]):
+            painter.drawLine(first[0], first[1], second[0], second[1])
+        painter.setBrush(QColor("#315f9b"))
+        for x, y in coords:
+            painter.drawEllipse(x - 3, y - 3, 6, 6)
+        painter.setPen(QPen(QColor("#555555"), 1))
+        painter.drawText(2, rect.top() + 8, "+10 pawns")
+        painter.drawText(2, rect.bottom(), "−10")
+        painter.drawText(rect.left(), self.height() - 4, "ply 0")
+        painter.drawText(rect.right() - 35, self.height() - 4, f"ply {max_ply}")
+
+    def mousePressEvent(self, event) -> None:
+        points = self._points()
+        if points:
+            rect = self.rect().adjusted(32, 12, -12, -26)
+            max_ply = max(1, max(ply for ply, _ in points))
+            ply = round((event.position().x() - rect.left()) * max_ply / max(1, rect.width()))
+            self.selected_ply.emit(max(0, min(max_ply, ply)))
 
 
 class SettingsDialog(QDialog):
@@ -250,6 +308,7 @@ class MainWindow(QMainWindow):
         self._review_session: LichessGameSession | None = None
         self._lichess_connected = False
         self._archive_progress_dialog: QProgressDialog | None = None
+        self._puzzle_progress_dialog: QProgressDialog | None = None
         self.analysis_progress.connect(self._analysis_progress)
         self.analysis_finished.connect(self._analysis_finished)
         self.setWindowTitle("Chess Coach")
@@ -288,6 +347,8 @@ class MainWindow(QMainWindow):
             self.lichess.active_games_error.connect(self._active_games_error)
             self.lichess.archive_progress.connect(self._archive_progress)
             self.lichess.archive_finished.connect(self._archive_finished)
+            self.lichess.puzzles_progress.connect(self._puzzles_progress)
+            self.lichess.puzzles_finished.connect(self._puzzles_finished)
             self.lichess.restore()
         elif offline_mode:
             self._disable_online_controls()
@@ -524,6 +585,9 @@ class MainWindow(QMainWindow):
         self.home_archive_button.setEnabled(False)
         self.home_stats_button = QPushButton("Статистика партий")
         self.home_stats_button.clicked.connect(self.show_statistics)
+        self.home_puzzles_button = QPushButton("Моя история задач Lichess")
+        self.home_puzzles_button.clicked.connect(self.start_puzzle_sync)
+        self.home_puzzles_button.setEnabled(False)
         self.home_settings_button = QPushButton("Настройки")
         self.home_settings_button.clicked.connect(self.open_settings)
         self.resume_game_button = QPushButton("Вернуться в текущую партию")
@@ -532,6 +596,7 @@ class MainWindow(QMainWindow):
                        self.home_username_button, self.active_games_button,
                        self.home_local_button,
                        self.home_games_button, self.home_archive_button, self.home_stats_button,
+                       self.home_puzzles_button,
                        self.home_settings_button,
                        self.resume_game_button):
             layout.addWidget(button)
@@ -640,6 +705,7 @@ class MainWindow(QMainWindow):
             button.setEnabled(self._lichess_connected)
         self.active_games_button.setEnabled(self._lichess_connected)
         self.home_archive_button.setEnabled(self._lichess_connected)
+        self.home_puzzles_button.setEnabled(self._lichess_connected)
 
     def start_archive_sync(self) -> None:
         if self.offline_mode or not self.lichess or not self._lichess_connected:
@@ -689,6 +755,101 @@ class MainWindow(QMainWindow):
                 f"чёрные {accuracy['black'] if accuracy['black'] is not None else 'н/д'}\n"
                 "Фазы/классификации доступны в локальном отчёте по оценённым ходам.")
         QMessageBox.information(self, "Статистика партий", text)
+
+    def start_puzzle_sync(self) -> None:
+        if self.offline_mode or not self.lichess:
+            return
+        answer = QMessageBox.question(
+            self, "История шахматных задач",
+            "Откроется Lichess OAuth для отдельного разрешения puzzle:read. "
+            "Chess Coach сохранит только вашу личную историю задач в локальной SQLite. "
+            "Текущий токен для партий не будет заменён. Продолжить?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel,
+            QMessageBox.StandardButton.Cancel)
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+        dialog = QProgressDialog("Ожидание OAuth и загрузка истории…", "Отменить", 0, 0, self)
+        dialog.setWindowTitle("История задач Lichess")
+        dialog.setMinimumDuration(0)
+        dialog.canceled.connect(self.lichess.cancel_puzzle_sync)
+        self._puzzle_progress_dialog = dialog
+        dialog.show()
+        self.lichess.connect_and_sync_puzzle_activity(self.game_repository)
+
+    def _puzzles_progress(self, count: int) -> None:
+        if self._puzzle_progress_dialog:
+            self._puzzle_progress_dialog.setLabelText(f"Обработано попыток: {count}")
+
+    def _puzzles_finished(self, count: int, message: str) -> None:
+        if self._puzzle_progress_dialog:
+            self._puzzle_progress_dialog.close()
+            self._puzzle_progress_dialog = None
+        if self.lichess and (self.lichess.puzzle_username or self.lichess.username):
+            puzzle_username = self.lichess.puzzle_username or self.lichess.username
+            account_id = f"lichess:{puzzle_username.strip().lower()}"
+            stats = self.game_repository.puzzle_statistics(account_id)
+            rate = stats["success_percent"]
+            result = (f"Всего попыток: {stats['attempts']}\n"
+                      f"Решено: {stats['wins']} · Ошибок: {stats['failures']}\n"
+                      f"Доля успеха: {rate if rate is not None else 'н/д'}%\n"
+                      f"Средний рейтинг задач: {stats['average_puzzle_rating'] if stats['average_puzzle_rating'] is not None else 'н/д'}\n"
+                      f"{message}")
+        else:
+            result = f"Обработано: {count}. {message}"
+        QMessageBox.information(self, "История задач Lichess", result)
+        if self.lichess and (self.lichess.puzzle_username or self.lichess.username):
+            puzzle_username = self.lichess.puzzle_username or self.lichess.username
+            self.show_puzzle_history(f"lichess:{puzzle_username.strip().lower()}")
+
+    def show_puzzle_history(self, account_id: str) -> None:
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Моя история задач Lichess · локально")
+        dialog.resize(850, 540)
+        layout = QHBoxLayout(dialog)
+        history = QListWidget()
+        detail = QVBoxLayout()
+        board = BoardView(chess.Board(), dialog)
+        board.set_interaction_enabled(False)
+        solution = QLabel("Выберите попытку для офлайн-просмотра.")
+        solution.setWordWrap(True)
+        detail.addWidget(board, 1)
+        detail.addWidget(solution)
+        layout.addWidget(history, 1)
+        detail_widget = QWidget(dialog)
+        detail_widget.setLayout(detail)
+        layout.addWidget(detail_widget, 2)
+        attempts = self.game_repository.puzzle_history(account_id, limit=500)
+        import json
+        for attempt in attempts:
+            date = datetime.fromtimestamp(attempt["attempt_date_ms"] / 1000).strftime("%Y-%m-%d %H:%M")
+            themes = ", ".join(json.loads(attempt["themes_json"]))
+            outcome = "Решено" if attempt["win"] else "Не решено"
+            item = QListWidgetItem(f"{date} · {outcome} · {attempt['puzzle_rating'] or 'без рейтинга'} · {themes}")
+            item.setData(Qt.ItemDataRole.UserRole, attempt)
+            history.addItem(item)
+        def select_attempt(row: int) -> None:
+            if row < 0:
+                return
+            attempt = history.item(row).data(Qt.ItemDataRole.UserRole)
+            try:
+                position = chess.Board(attempt["fen"])
+                board.set_position(position)
+                moves = json.loads(attempt["solution_json"])
+                san = []
+                for uci in moves:
+                    move = chess.Move.from_uci(uci)
+                    san.append(position.san(move))
+                    position.push(move)
+                solution.setText(f"Позиция FEN: {attempt['fen']}\n"+
+                                 "Решение (офлайн, без отправки результата): " + " ".join(san))
+            except (ValueError, chess.InvalidMoveError):
+                solution.setText("Не удалось разобрать позицию или решение этой задачи.")
+        history.currentRowChanged.connect(select_attempt)
+        if attempts:
+            history.setCurrentRow(0)
+        else:
+            solution.setText("История задач пуста.")
+        dialog.exec()
 
     def start_local_game(self) -> None:
         self.online_session = None
@@ -1033,6 +1194,7 @@ class MainWindow(QMainWindow):
             button.setEnabled(True)
         self.active_games_button.setEnabled(True)
         self.home_archive_button.setEnabled(True)
+        self.home_puzzles_button.setEnabled(True)
         self._resume_pending_final_syncs()
 
     def _resume_pending_final_syncs(self) -> None:
@@ -1705,7 +1867,29 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "Stockfish", result["error"])
         else:
             count = len(result.get("assessments", [])) if isinstance(result, dict) else 0
-            QMessageBox.information(self, "Stockfish", f"Оценено позиций: {count}.")
+            if count:
+                dialog = QDialog(self)
+                dialog.setWindowTitle("Оценка партии · белые сверху положительны")
+                layout = QVBoxLayout(dialog)
+                layout.addWidget(QLabel(f"Оценено позиций: {count}. Источник: "
+                                        f"{result.get('source', 'Stockfish')}. Клик по графику открывает позицию."))
+                graph = EvaluationGraph(result["assessments"], dialog)
+                graph.selected_ply.connect(lambda ply: self._open_analysis_position(game_id, ply))
+                layout.addWidget(graph)
+                close = QPushButton("Закрыть")
+                close.clicked.connect(dialog.accept)
+                layout.addWidget(close)
+                dialog.resize(720, 320)
+                dialog.exec()
+            else:
+                QMessageBox.information(self, "Stockfish", "Оценок для этой партии нет.")
+
+    def _open_analysis_position(self, game_id: str, ply: int) -> None:
+        game = self.game_repository.get_game(game_id)
+        if not game:
+            return
+        self._open_saved_game(game)
+        self.navigate_to(ply)
 
     def _open_saved_game(self, game: dict) -> None:
         self.board.clear_annotations()

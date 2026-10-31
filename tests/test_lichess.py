@@ -508,10 +508,10 @@ def test_m3_migration_preserves_legacy_game_creates_revision_and_backup(tmp_path
     assert row["line_revision"] == 1
     assert row["import_error"] is None
     with repo._connection() as migrated:
-        assert migrated.execute("PRAGMA user_version").fetchone()[0] == 3
+        assert migrated.execute("PRAGMA user_version").fetchone()[0] == 4
         assert migrated.execute("SELECT COUNT(*) FROM game_positions").fetchone()[0] == 3
         assert migrated.execute("SELECT san FROM game_moves ORDER BY ply").fetchall()[0][0] == "e4"
-    backup = sqlite3.connect(str(path) + ".pre-m3-v3.bak")
+    backup = sqlite3.connect(str(path) + ".pre-m3-v4.bak")
     try:
         assert backup.execute("PRAGMA user_version").fetchone()[0] == 0
         assert backup.execute("SELECT pgn FROM games WHERE game_id='legacy'").fetchone()[0] == legacy_pgn
@@ -742,9 +742,10 @@ def test_archive_import_keeps_lichess_pgn_evaluations_as_separate_source(tmp_pat
     repo = GameRepository(tmp_path / "lichess-eval.sqlite3")
     repo.import_archive_record("Me", {
         "id": "eval-game",
-        "pgn": '[Event "Archive"]\n[White "Me"]\n[Black "Friend"]\n[Result "*"]\n\n'
-               '1. e4 { [%eval 0.25] } e5 *\n',
+        "pgn": '[Event "Archive"]\n[White "Me"]\n[Black "Friend"]\n[Result "1/2-1/2"]\n\n'
+               '1. e4 { [%eval 0.25] } e5 1/2-1/2\n',
         "lastMoveAt": 1000, "accuracy": {"white": 91.2, "black": 88.0},
+        "division": {"middle": {"begin": 1}, "end": {"begin": 2}},
     }, checkpoint_ms=1000, backfill=True)
     game = repo.get_game("eval-game")
     assert game["raw_pgn"].find("[%eval 0.25]") >= 0
@@ -754,6 +755,14 @@ def test_archive_import_keeps_lichess_pgn_evaluations_as_separate_source(tmp_pat
     cached = repo.find_analysis_cache("eval-game", 1, runs[0]["line_hash"],
                                       "lichess-pgn", None, {"format": "pgn-eval-v1"})
     assert cached["assessments"][0]["white_cp"] == 25
+    assert repo.phase_for_ply("eval-game", 1, 0) == "opening"
+    assert repo.phase_for_ply("eval-game", 1, 1) == "middlegame"
+    assert repo.phase_for_ply("eval-game", 1, 2) == "endgame"
+    from chess_coach.lichess.statistics import StatisticsService
+    summary = StatisticsService(repo).summary(analysis_source="lichess-pgn")
+    assert summary["games"] == 1
+    assert summary["evaluated_moves"] == 1
+    assert summary["move_coverage_percent"] == 50.0
 
 
 def test_statistics_use_move_denominators_partial_coverage_and_keep_accuracy_separate(tmp_path):
@@ -768,6 +777,8 @@ def test_statistics_use_move_denominators_partial_coverage_and_keep_accuracy_sep
                            False, "180+2", "finished", winner)
     with repo._connection() as db:
         db.execute("UPDATE games SET lichess_accuracy_white=90,lichess_accuracy_black=80 "
+                   "WHERE game_id='w'")
+        db.execute("UPDATE games SET white_rating=1500,opening_eco='C20',opening_name='King Pawn' "
                    "WHERE game_id='w'")
     line = repo.current_line("w")
     repo.save_analysis("w", line_revision=1, line_hash=line["line_hash"],
@@ -796,6 +807,123 @@ def test_statistics_use_move_denominators_partial_coverage_and_keep_accuracy_sep
     assert summary["avg_cpl_cp"] == 175.0
     assert summary["swings_200cp"] == 1
     assert summary["lichess_accuracy"] == {"white": 90.0, "black": 80.0}
+    assert summary["rating_trend"] == [{"date": repo.get_game("w")["started_at"] or
+                                         repo.get_game("w")["updated_at"],
+                                         "rating": 1500, "game_id": "w"}]
+    filtered = StatisticsService(repo).summary(rating_min=1400, rating_max=1600, opening="C20")
+    assert filtered["games"] == 1
+
+
+def test_puzzle_activity_oauth_scope_and_activity_endpoint_are_explicit():
+    auth = create_authorization_request("http://127.0.0.1/callback", scopes="puzzle:read")
+    assert parse_qs(urlparse(auth.url).query)["scope"] == ["puzzle:read"]
+    class StreamTransport(FakeTransport):
+        def stream(self, method, url, headers, body, timeout, stop_event):
+            self.calls.append((method, url, headers, body))
+            yield b'{"date":100,"win":true,"puzzle":{"id":"p1"}}\n'
+    fake = StreamTransport()
+    client = LichessClient(fake, base_url="https://lichess.test")
+    assert list(client.stream_puzzle_activity("puzzle-token", threading.Event(),
+                                               before=200, max_items=10))[0]["puzzle"]["id"] == "p1"
+    assert fake.calls[0][1].endswith("/api/puzzle/activity?max=10&before=200")
+    assert fake.calls[0][2]["Authorization"] == "Bearer puzzle-token"
+    dashboard = FakeTransport([response(200, {"global": {"nb": 12}})])
+    result = LichessClient(dashboard, base_url="https://lichess.test").get_puzzle_dashboard("token", 30)
+    assert result["global"]["nb"] == 12
+    assert dashboard.calls[0][1].endswith("/api/puzzle/dashboard/30")
+
+
+def test_puzzle_oauth_credential_slot_does_not_replace_board_token():
+    from chess_coach.lichess.auth import WindowsCredentialStore
+    class FakeKeyring:
+        class errors:
+            class PasswordDeleteError(Exception):
+                pass
+        values = {("ChessCoach.Lichess", "oauth-access-token"): "board-token"}
+        def get_password(self, service, user):
+            return self.values.get((service, user))
+        def set_password(self, service, user, token):
+            self.values[(service, user)] = token
+        def delete_password(self, service, user):
+            if (service, user) not in self.values:
+                raise self.errors.PasswordDeleteError()
+            del self.values[(service, user)]
+    keyring = FakeKeyring()
+    store = WindowsCredentialStore(keyring, service="ChessCoach.Lichess.Puzzles",
+                                   user="puzzle-activity-token")
+    store.set("puzzle-token")
+    assert store.get() == "puzzle-token"
+    assert keyring.get_password("ChessCoach.Lichess", "oauth-access-token") == "board-token"
+
+
+def test_puzzle_import_retains_repeated_attempts_and_is_idempotent(tmp_path):
+    repo = GameRepository(tmp_path / "puzzle-history.sqlite3")
+    first = {"date": 1000, "win": True, "puzzle": {"id": "p1", "fen": chess.STARTING_FEN,
+             "solution": ["e2e4"], "themes": ["fork"], "rating": 1450, "plays": 300}}
+    second = {"date": 1000, "win": False, "puzzle": {**first["puzzle"], "plays": 301}}
+    uid1 = repo.import_puzzle_activity("Me", first, backfill=True)
+    repo.import_puzzle_activity("Me", first, backfill=True)
+    uid2 = repo.import_puzzle_activity("Me", second, backfill=True)
+    account_id = repo.ensure_archive_account("Me")
+    history = repo.puzzle_history(account_id)
+    assert uid1 != uid2
+    assert len(history) == 2
+    stats = repo.puzzle_statistics(account_id)
+    assert stats["attempts"] == 2 and stats["wins"] == 1 and stats["success_percent"] == 50.0
+    assert stats["themes"]["fork"]["attempts"] == 2
+
+
+def test_puzzle_sync_backfills_repeated_puzzle_ids_and_empty_archive(tmp_path):
+    from chess_coach.lichess.puzzles import PuzzleActivitySync
+
+    items = [
+        {"date": 500, "win": True, "puzzle": {"id": "same", "fen": chess.STARTING_FEN,
+         "solution": ["e2e4"], "themes": ["fork"], "rating": 1500, "plays": 10}},
+        {"date": 500, "win": False, "puzzle": {"id": "same", "fen": chess.STARTING_FEN,
+         "solution": ["e2e4"], "themes": ["fork"], "rating": 1500, "plays": 10}},
+        {"date": 400, "win": True, "puzzle": {"id": "other", "fen": chess.STARTING_FEN,
+         "solution": ["d2d4"], "themes": ["pin"], "rating": 1600, "plays": 20}},
+    ]
+    class FakePuzzleClient:
+        def stream_puzzle_activity(self, token, stop, *, since=None, before=None, max_items=1000):
+            if before is not None:
+                yield from sorted((item for item in items if item["date"] < before),
+                                  key=lambda item: item["date"], reverse=True)[:max_items]
+    repo = GameRepository(tmp_path / "puzzle-sync.sqlite3")
+    sync = PuzzleActivitySync(FakePuzzleClient(), repo)
+    assert sync.run("Me", "token", threading.Event(), page_size=2) == 3
+    account_id = repo.ensure_archive_account("Me")
+    assert len(repo.puzzle_history(account_id)) == 3
+    assert repo.puzzle_sync_state(account_id)["backfill_complete"] == 1
+    class EmptyClient:
+        def stream_puzzle_activity(self, *args, **kwargs):
+            return iter(())
+    empty_repo = GameRepository(tmp_path / "puzzle-empty.sqlite3")
+    assert PuzzleActivitySync(EmptyClient(), empty_repo).run(
+        "Empty", "token", threading.Event()) == 0
+    empty_account = empty_repo.ensure_archive_account("Empty")
+    assert empty_repo.puzzle_statistics(empty_account)["attempts"] == 0
+
+
+def test_puzzle_incremental_sync_pages_more_than_one_page(tmp_path):
+    from chess_coach.lichess.puzzles import PuzzleActivitySync
+
+    records = [{"date": date, "win": date % 2 == 0,
+                "puzzle": {"id": f"p{date}", "fen": chess.STARTING_FEN,
+                           "solution": ["e2e4"], "themes": [], "rating": 1000, "plays": 1}}
+               for date in (100, 200, 300)]
+    class Client:
+        def stream_puzzle_activity(self, token, stop, *, since=None, before=None, max_items=1000):
+            if since is None:
+                return iter(())
+            return iter(sorted((record for record in records if record["date"] > since),
+                               key=lambda record: record["date"])[:max_items])
+    repo = GameRepository(tmp_path / "puzzle-incremental.sqlite3")
+    account_id = repo.ensure_archive_account("Me")
+    repo.finish_puzzle_backfill(account_id)
+    assert PuzzleActivitySync(Client(), repo).run(
+        "Me", "token", threading.Event(), page_size=2) == 3
+    assert repo.puzzle_statistics(account_id)["attempts"] == 3
 
 
 def test_premove_is_an_intent_and_revalidated_after_opponent_move(tmp_path):
