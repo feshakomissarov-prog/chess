@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import chess
 import time
+import threading
 from pathlib import Path
 import tempfile
 from PySide6.QtCore import QSettings, Qt, QStandardPaths, QTimer, Signal
@@ -37,6 +38,7 @@ from PySide6.QtWidgets import (
 from .board_view import BoardView
 from .controller import GameController
 from .lichess.auth import CredentialStorageError, WindowsCredentialStore
+from .lichess.analysis import AnalysisOptions, CompletedGameAnalyzer
 from .lichess.repository import GameRepository
 from .lichess.service import LichessService
 from .lichess.session import LichessGameSession
@@ -195,6 +197,9 @@ class ActiveGamesDialog(QDialog):
 
 
 class MainWindow(QMainWindow):
+    analysis_progress = Signal(str, int, int)
+    analysis_finished = Signal(str, object)
+
     def __init__(
         self,
         settings: QSettings | None = None,
@@ -244,6 +249,8 @@ class MainWindow(QMainWindow):
         self._review_session: LichessGameSession | None = None
         self._lichess_connected = False
         self._archive_progress_dialog: QProgressDialog | None = None
+        self.analysis_progress.connect(self._analysis_progress)
+        self.analysis_finished.connect(self._analysis_finished)
         self.setWindowTitle("Chess Coach")
         self.setMinimumSize(1040, 680)
         self.resize(1360, 860)
@@ -1560,9 +1567,11 @@ class MainWindow(QMainWindow):
         actions = QHBoxLayout()
         open_game = QPushButton("Открыть для просмотра")
         export_game = QPushButton("Экспорт PGN")
+        analyze_game = QPushButton("Анализ Stockfish")
         close = QPushButton("Закрыть")
         actions.addWidget(open_game)
         actions.addWidget(export_game)
+        actions.addWidget(analyze_game)
         actions.addStretch(1)
         actions.addWidget(close)
         layout.addLayout(actions)
@@ -1611,6 +1620,20 @@ class MainWindow(QMainWindow):
                 note.clear()
             except (ValueError, KeyError) as exc:
                 QMessageBox.warning(dialog, "Заметка", str(exc))
+        def analyze_selected():
+            game = selected_game()
+            if not game:
+                return
+            if game["status"] in {"created", "started", "started_soon", "playing"}:
+                QMessageBox.information(dialog, "Stockfish",
+                                        "Движок доступен только после завершения партии.")
+                return
+            engine_path, _ = QFileDialog.getOpenFileName(
+                dialog, "Выберите локальный Stockfish UCI executable", "",
+                "Программы (*.exe);;Все файлы (*)")
+            if engine_path:
+                dialog.accept()
+                self._start_game_analysis(game["game_id"], engine_path)
         search.textChanged.connect(lambda _text: (state.update(page=0), load_page()))
         previous.clicked.connect(lambda: (state.update(page=max(0, state["page"] - 1)), load_page()))
         following.clicked.connect(lambda: (state.update(page=state["page"] + 1), load_page()))
@@ -1618,9 +1641,49 @@ class MainWindow(QMainWindow):
         open_game.clicked.connect(open_selected)
         export_game.clicked.connect(export_selected)
         save_note.clicked.connect(save_selected_note)
+        analyze_game.clicked.connect(analyze_selected)
         close.clicked.connect(dialog.reject)
         load_page()
         dialog.exec()
+
+    def _start_game_analysis(self, game_id: str, engine_path: str) -> None:
+        dialog = QProgressDialog("Запуск Stockfish…", "Отменить", 0, 0, self)
+        dialog.setWindowTitle("Послепартийный анализ")
+        dialog.setMinimumDuration(0)
+        dialog.show()
+        self._analysis_dialog = dialog
+        stop = threading.Event()
+        dialog.canceled.connect(stop.set)
+        active_human_ids = {session.game_id for session in self.online_sessions.values()
+                            if session.status in {"started", "playing"}
+                            and not session.is_ai_opponent}
+        def work():
+            try:
+                result = CompletedGameAnalyzer(self.game_repository).analyze(
+                    game_id, engine_path, AnalysisOptions(),
+                    active_human_game_ids=active_human_ids,
+                    progress=lambda done, total: self.analysis_progress.emit(game_id, done, total),
+                    stop_event=stop)
+                self.analysis_finished.emit(game_id, result)
+            except Exception as exc:
+                self.analysis_finished.emit(game_id, {"error": str(exc)})
+        threading.Thread(target=work, name="chess-coach-analysis", daemon=True).start()
+
+    def _analysis_progress(self, game_id: str, done: int, total: int) -> None:
+        if getattr(self, "_analysis_dialog", None):
+            self._analysis_dialog.setLabelText(f"Анализ позиции {done} из {total}")
+            self._analysis_dialog.setRange(0, total)
+            self._analysis_dialog.setValue(done)
+
+    def _analysis_finished(self, game_id: str, result: object) -> None:
+        if getattr(self, "_analysis_dialog", None):
+            self._analysis_dialog.close()
+            self._analysis_dialog = None
+        if isinstance(result, dict) and result.get("error"):
+            QMessageBox.warning(self, "Stockfish", result["error"])
+        else:
+            count = len(result.get("assessments", [])) if isinstance(result, dict) else 0
+            QMessageBox.information(self, "Stockfish", f"Оценено позиций: {count}.")
 
     def _open_saved_game(self, game: dict) -> None:
         self.board.clear_annotations()

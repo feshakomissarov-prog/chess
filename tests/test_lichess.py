@@ -508,10 +508,10 @@ def test_m3_migration_preserves_legacy_game_creates_revision_and_backup(tmp_path
     assert row["line_revision"] == 1
     assert row["import_error"] is None
     with repo._connection() as migrated:
-        assert migrated.execute("PRAGMA user_version").fetchone()[0] == 2
+        assert migrated.execute("PRAGMA user_version").fetchone()[0] == 3
         assert migrated.execute("SELECT COUNT(*) FROM game_positions").fetchone()[0] == 3
         assert migrated.execute("SELECT san FROM game_moves ORDER BY ply").fetchall()[0][0] == "e4"
-    backup = sqlite3.connect(str(path) + ".pre-m3-v2.bak")
+    backup = sqlite3.connect(str(path) + ".pre-m3-v3.bak")
     try:
         assert backup.execute("PRAGMA user_version").fetchone()[0] == 0
         assert backup.execute("SELECT pgn FROM games WHERE game_id='legacy'").fetchone()[0] == legacy_pgn
@@ -640,6 +640,7 @@ def test_archive_endpoint_streams_json_page_with_cursor_parameters():
     assert method == "GET"
     assert "/api/games/user/My%20User?" in url
     assert "since=123" in url and "max=50" in url and "pgnInJson=true" in url
+    assert "evals=true" in url and "accuracy=true" in url
     assert headers["Authorization"] == "Bearer token"
 
 
@@ -682,6 +683,77 @@ def test_archive_sync_resumes_backfill_deduplicates_and_advances_checkpoint(tmp_
     assert client.requests[-1][0] is not None
     assert sync.run("Me", "fake-token", stop, full=False, page_size=2) == 0
     assert len(repo.list_games(completed_only=False)) == 3
+
+
+def test_completed_analyzer_is_gated_caches_by_engine_and_closes_engine(tmp_path):
+    from chess_coach.lichess.analysis import CompletedGameAnalyzer
+
+    repo = GameRepository(tmp_path / "analysis.sqlite3")
+    repo.save_snapshot("done", "startpos", "e2e4 e7e5", "white", "Friend",
+                       False, "-", "mate", "black")
+    engine_path = tmp_path / "stockfish.exe"
+    engine_path.write_text("fake UCI engine", encoding="utf-8")
+
+    class FakeEngine:
+        id = {"name": "FakeFish", "version": "1"}
+        def __init__(self):
+            self.analyzed = 0
+            self.closed = False
+        def configure(self, options):
+            assert options == {"MultiPV": 1}
+        def analyse(self, board, limit):
+            self.analyzed += 1
+            score = chess.engine.PovScore(chess.engine.Cp(20 if board.ply() else 0), chess.WHITE)
+            return {"score": score, "depth": 12, "nodes": 100, "pv": list(board.legal_moves)[:1]}
+        def quit(self):
+            self.closed = True
+
+    engines = []
+    def factory(_path):
+        engine = FakeEngine()
+        engines.append(engine)
+        return engine
+    analyzer = CompletedGameAnalyzer(repo, factory)
+    with pytest.raises(ValueError, match="онлайн-партии"):
+        analyzer.analyze("done", engine_path, active_human_game_ids={"done"})
+    first = analyzer.analyze("done", engine_path)
+    assert len(first["assessments"]) == 3
+    assert len(first["classifications"]) == 2
+    assert first["classifications"][0]["phase"] == "unknown"
+    assert engines[0].closed and engines[0].analyzed == 3
+    second = analyzer.analyze("done", engine_path)
+    assert second["cached"] is True
+    assert engines[1].closed and engines[1].analyzed == 0
+    assert len(repo.list_analyses("done")) == 1
+
+
+def test_completed_analyzer_rejects_live_game_before_engine_start(tmp_path):
+    from chess_coach.lichess.analysis import CompletedGameAnalyzer
+
+    repo = GameRepository(tmp_path / "live-engine.sqlite3")
+    repo.save_snapshot("live", "startpos", "e2e4", "white", "Friend",
+                       False, "3+2", "playing")
+    with pytest.raises(ValueError, match="только после завершения"):
+        CompletedGameAnalyzer(repo, lambda _path: pytest.fail("engine must not launch")).analyze(
+            "live", tmp_path / "stockfish.exe")
+
+
+def test_archive_import_keeps_lichess_pgn_evaluations_as_separate_source(tmp_path):
+    repo = GameRepository(tmp_path / "lichess-eval.sqlite3")
+    repo.import_archive_record("Me", {
+        "id": "eval-game",
+        "pgn": '[Event "Archive"]\n[White "Me"]\n[Black "Friend"]\n[Result "*"]\n\n'
+               '1. e4 { [%eval 0.25] } e5 *\n',
+        "lastMoveAt": 1000, "accuracy": {"white": 91.2, "black": 88.0},
+    }, checkpoint_ms=1000, backfill=True)
+    game = repo.get_game("eval-game")
+    assert game["raw_pgn"].find("[%eval 0.25]") >= 0
+    assert game["lichess_accuracy_white"] == 91.2
+    runs = repo.list_analyses("eval-game")
+    assert len(runs) == 1 and runs[0]["source"] == "lichess-pgn"
+    cached = repo.find_analysis_cache("eval-game", 1, runs[0]["line_hash"],
+                                      "lichess-pgn", None, {"format": "pgn-eval-v1"})
+    assert cached["assessments"][0]["white_cp"] == 25
 
 
 def test_premove_is_an_intent_and_revalidated_after_opponent_move(tmp_path):

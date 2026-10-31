@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections.abc import Iterator
 from contextlib import contextmanager
 import hashlib
+import json
 import sqlite3
 from concurrent.futures import Future, ThreadPoolExecutor
 from datetime import datetime, timezone
@@ -16,7 +17,7 @@ import chess
 import chess.pgn
 
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 DEFAULT_PAGE_SIZE = 100
 MAX_PAGE_SIZE = 500
 
@@ -150,9 +151,35 @@ class GameRepository:
                     body TEXT NOT NULL, author TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
                     FOREIGN KEY(game_id) REFERENCES games(game_id) ON DELETE CASCADE
                 );
+                CREATE TABLE IF NOT EXISTS analysis_runs (
+                    run_id TEXT PRIMARY KEY, game_id TEXT NOT NULL REFERENCES games(game_id) ON DELETE CASCADE,
+                    line_revision INTEGER NOT NULL, line_hash TEXT NOT NULL,
+                    source TEXT NOT NULL, engine_name TEXT, engine_version TEXT,
+                    parameters_json TEXT NOT NULL, started_at TEXT NOT NULL, finished_at TEXT NOT NULL,
+                    status TEXT NOT NULL, error TEXT,
+                    FOREIGN KEY(game_id,line_revision) REFERENCES game_revisions(game_id,line_revision)
+                );
+                CREATE TABLE IF NOT EXISTS position_assessments (
+                    run_id TEXT NOT NULL REFERENCES analysis_runs(run_id) ON DELETE CASCADE,
+                    game_id TEXT NOT NULL, line_revision INTEGER NOT NULL, ply INTEGER NOT NULL,
+                    white_cp INTEGER, mate_white INTEGER, depth INTEGER, nodes INTEGER,
+                    pv_uci TEXT, PRIMARY KEY(run_id,ply),
+                    FOREIGN KEY(game_id,line_revision,ply)
+                      REFERENCES game_positions(game_id,line_revision,ply)
+                );
+                CREATE TABLE IF NOT EXISTS move_classifications (
+                    run_id TEXT NOT NULL REFERENCES analysis_runs(run_id) ON DELETE CASCADE,
+                    game_id TEXT NOT NULL, line_revision INTEGER NOT NULL, ply INTEGER NOT NULL,
+                    mover TEXT NOT NULL, phase TEXT NOT NULL DEFAULT 'unknown',
+                    eval_loss_cp INTEGER, label TEXT NOT NULL, algorithm_version TEXT NOT NULL,
+                    PRIMARY KEY(run_id,ply),
+                    FOREIGN KEY(game_id,line_revision,ply)
+                      REFERENCES game_moves(game_id,line_revision,ply)
+                );
                 CREATE INDEX IF NOT EXISTS idx_games_updated ON games(updated_at DESC, game_id);
                 CREATE INDEX IF NOT EXISTS idx_games_opponent ON games(opponent);
                 CREATE INDEX IF NOT EXISTS idx_game_notes_position ON game_notes(position_uid);
+                CREATE INDEX IF NOT EXISTS idx_analysis_cache ON analysis_runs(game_id,line_revision,source,engine_version,status);
             """
             for statement in schema_sql.split(";"):
                 if statement.strip():
@@ -499,6 +526,16 @@ class GameRepository:
         self.save_snapshot(game_id, initial_fen, moves, player_color, opponent,
                            bool(record.get("rated", False)), clock, status, winner,
                            white_player=white, black_player=black, started_at=started_at)
+        lichess_assessments = []
+        for ply, node in enumerate(parsed.mainline(), start=1):
+            evaluation = node.eval()
+            if evaluation is None:
+                continue
+            score = evaluation.pov(chess.WHITE)
+            lichess_assessments.append({
+                "ply": ply, "white_cp": score.score(mate_score=None),
+                "mate_white": score.mate(), "depth": node.eval_depth(),
+            })
         raw_hash = hashlib.sha256(raw_pgn.encode("utf-8")).hexdigest()
         account_id = self.ensure_archive_account(username)
         imported_at = datetime.now(timezone.utc).isoformat()
@@ -513,8 +550,17 @@ class GameRepository:
                        "VALUES (?,?,?,?) ON CONFLICT(account_id,game_id) DO UPDATE SET "
                        "remote_id=excluded.remote_id, imported_at=excluded.imported_at",
                        (account_id, game_id, game_id, imported_at))
-            if checkpoint_ms is not None:
-                column = "backfill_before" if backfill else "incremental_since"
+        if lichess_assessments:
+            line = self.current_line(game_id)
+            if line and not self.find_analysis_cache(game_id, int(line["line_revision"]),
+                    line["line_hash"], "lichess-pgn", None, {"format": "pgn-eval-v1"}):
+                self.save_analysis(game_id, line_revision=int(line["line_revision"]),
+                    line_hash=line["line_hash"], source="lichess-pgn", engine_name="Lichess",
+                    engine_version=None, parameters={"format": "pgn-eval-v1"},
+                    assessments=lichess_assessments, classifications=[])
+        if checkpoint_ms is not None:
+            column = "backfill_before" if backfill else "incremental_since"
+            with self._connection() as db:
                 db.execute(f"UPDATE archive_sync_state SET {column}=?, imported_count="
                            "imported_count+1,last_success_at=?,last_error=NULL,updated_at=? "
                            "WHERE account_id=?",
@@ -534,6 +580,60 @@ class GameRepository:
         with self._connection() as db:
             db.execute("UPDATE archive_sync_state SET last_error=?,updated_at=? WHERE account_id=?",
                        (error[:500], datetime.now(timezone.utc).isoformat(), account_id))
+
+    def save_analysis(self, game_id: str, *, line_revision: int, line_hash: str,
+                      source: str, engine_name: str | None, engine_version: str | None,
+                      parameters: dict, assessments: list[dict],
+                      classifications: list[dict], status: str = "complete",
+                      error: str | None = None) -> str:
+        self._wait_before_read(game_id)
+        run_id = uuid.uuid4().hex
+        now = datetime.now(timezone.utc).isoformat()
+        with self._connection() as db:
+            db.execute("INSERT INTO analysis_runs VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+                       (run_id, game_id, line_revision, line_hash, source, engine_name,
+                        engine_version, json.dumps(parameters, sort_keys=True), now, now,
+                        status, error))
+            db.executemany("INSERT INTO position_assessments VALUES (?,?,?,?,?,?,?,?,?)",
+                           [(run_id, game_id, line_revision, item["ply"], item.get("white_cp"),
+                             item.get("mate_white"), item.get("depth"), item.get("nodes"),
+                             " ".join(item.get("pv", []))) for item in assessments])
+            db.executemany("INSERT INTO move_classifications VALUES (?,?,?,?,?,?,?,?,?)",
+                           [(run_id, game_id, line_revision, item["ply"], item["mover"],
+                             item.get("phase", "unknown"), item.get("eval_loss_cp"),
+                             item.get("label", "unknown"), item.get("algorithm_version", ""))
+                            for item in classifications])
+        return run_id
+
+    def find_analysis_cache(self, game_id: str, line_revision: int, line_hash: str,
+                            source: str, engine_version: str | None,
+                            parameters: dict) -> dict | None:
+        params_json = json.dumps(parameters, sort_keys=True)
+        with self._connection() as db:
+            run = db.execute("SELECT * FROM analysis_runs WHERE game_id=? AND line_revision=? "
+                             "AND line_hash=? AND source=? AND engine_version IS ? "
+                             "AND parameters_json=? AND status='complete' "
+                             "ORDER BY finished_at DESC LIMIT 1",
+                             (game_id, line_revision, line_hash, source, engine_version,
+                              params_json)).fetchone()
+            if not run:
+                return None
+            result = dict(run)
+            result["assessments"] = [dict(row) for row in db.execute(
+                "SELECT * FROM position_assessments WHERE run_id=? ORDER BY ply", (run["run_id"],))]
+            result["classifications"] = [dict(row) for row in db.execute(
+                "SELECT * FROM move_classifications WHERE run_id=? ORDER BY ply", (run["run_id"],))]
+            return result
+
+    def list_analyses(self, game_id: str, line_revision: int | None = None) -> list[dict]:
+        sql = "SELECT * FROM analysis_runs WHERE game_id=?"
+        params: list[object] = [game_id]
+        if line_revision is not None:
+            sql += " AND line_revision=?"
+            params.append(line_revision)
+        sql += " ORDER BY finished_at DESC"
+        with self._connection() as db:
+            return [dict(row) for row in db.execute(sql, params)]
 
     def get_game(self, game_id: str) -> dict | None:
         self._wait_before_read(game_id)

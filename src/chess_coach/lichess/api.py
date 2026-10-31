@@ -241,7 +241,8 @@ class LichessClient:
             raise ValueError("Размер страницы архива должен быть от 1 до 10000.")
         query: dict[str, object] = {
             "max": max_games, "sort": "dateAsc" if since is not None else "dateDesc",
-            "pgnInJson": "true", "clocks": "true", "opening": "true",
+            "pgnInJson": "true", "clocks": "true", "evals": "true",
+            "accuracy": "true", "opening": "true",
         }
         if since is not None:
             query["since"] = since
