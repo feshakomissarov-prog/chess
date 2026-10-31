@@ -6,9 +6,9 @@
 
 ## Актуализация 01.11.2026 — follow-up глубокого аудита PR #14
 
-- Работа ведётся в `codex/pr14-deep-audit`, основанной на PR #14 head `fd184182f32b485f16b3c921af42913c30f09284`; ветка `main` не менялась. Draft PR и Windows CI ожидаются после публикации изменений.
+- Изменения опубликованы в [draft PR #15](https://github.com/feshakomissarov-prog/chess/pull/15), ветка `codex/pr14-deep-audit` поверх PR #14 (`codex/m3-m4-review-fixes`, base SHA `fd184182f32b485f16b3c921af42913c30f09284`); `main` не менялась. Первый Windows CI run #41250368749 завершился `150 passed, 1 failed, 2 errors`: исправлены устаревший setup connected state и `close()` в test doubles; повторный прогон ожидается.
 - Закрываются пункты A–G из [PR14_DEEP_AUDIT_AND_ACCEPTANCE.md](specs/PR14_DEEP_AUDIT_AND_ACCEPTANCE.md): raw-only сохранение нестандартных партий, безопасное закрытие фоновых workers, account-specific opponent, backfill anchor и точечное обновление игры, идентичность/отмена Stockfish, 429/reconnect диагностика и SQLite интеграционные регрессии.
-- Локально на Windows / Python 3.11.5: `pytest tests/test_lichess.py -q` завершился успешно; file-backed SQLite suite содержит 8 тестов, включая 2501 попытку puzzle sync с resume; `compileall` и `git diff --check` проходили. Qt suite после native access violation не запускался повторно; Windows Python 3.12 CI для follow-up ещё не получен.
+- Локально на Windows / Python 3.11.5: 78 тестов `test_lichess.py` и 8 file-backed SQLite тестов прошли, включая 2501 попытку puzzle sync с resume; `compileall` и `git diff --check` прошли. Qt suite после native access violation не запускался повторно; добавленные Qt-регрессии ждут Windows CI.
 - Владелец прислал сообщение `python.exe - Ошибка приложения` о чтении невалидного адреса. Dr.Web toast показывает: «Процессу запрещено изменение запущенного приложения», PID `26032`, путь `C:\Windows\System32\WerFault.exe`. Скриншот не доказывает связь между этим блокированием и native crash; причины не установлены. Защита/исключения не менялись.
 - Реальные Lichess/OAuth/Stockfish и личные данные не использовались. Слияния не выполнялись; интерактивную проверку GUI следует отложить до разбора crash владельцем и результатов CI.
 

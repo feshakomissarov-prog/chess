@@ -173,6 +173,7 @@ def test_open_active_game_clears_old_premove_and_background_events_do_not_submit
 def test_active_game_blocks_all_actions_until_valid_game_full(qtbot, tmp_path, monkeypatch):
     window = MainWindow(QSettings(str(tmp_path / "active-sync.ini"), QSettings.Format.IniFormat))
     qtbot.addWidget(window)
+    window._lichess_connected = True
     started = []
     sent = []
     takebacks = []
@@ -1009,6 +1010,7 @@ def test_online_controls_retry_after_rate_limit_cooldown(qtbot, tmp_path, monkey
 
     class Service:
         client = Client()
+        def close(self): pass
 
     window.lichess = Service()
     window.offline_mode = False
