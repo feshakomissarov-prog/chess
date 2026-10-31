@@ -66,11 +66,17 @@ class LichessGameSession:
         self._pending_ply: int | None = None
         self._pending_prefix: tuple[str, ...] = ()
         self.premove: chess.Move | None = None
+        self._last_persisted_signature: tuple | None = None
         self._last_clock_at = time.monotonic()
 
     @property
     def is_my_turn(self) -> bool:
         return self.board.turn == self.color and self.status in {"started", "playing"}
+
+    @property
+    def is_ai_opponent(self) -> bool:
+        identity = (self.opponent or "").casefold().replace("_", "-")
+        return "lichess ai" in identity or "lichess-ai" in identity
 
     @property
     def input_locked(self) -> bool:
@@ -359,8 +365,17 @@ class LichessGameSession:
             self.draw_offered_by_opponent)
 
     def _save(self) -> None:
+        signature = (
+            self.initial_fen, self.moves, self.color, self.opponent, self.rated,
+            self.clock_control, self.status, self.winner, self.white_player,
+            self.black_player, self.started_at, self.final_sync_pending,
+        )
+        if (signature == self._last_persisted_signature
+                and not self.repository.has_write_error(self.game_id)):
+            return
         self.repository.save_snapshot(self.game_id, self.initial_fen, self.moves,
             "white" if self.color == chess.WHITE else "black", self.opponent,
             self.rated, self.clock_control, self.status, self.winner,
             white_player=self.white_player, black_player=self.black_player,
             started_at=self.started_at, final_sync_pending=self.final_sync_pending)
+        self._last_persisted_signature = signature

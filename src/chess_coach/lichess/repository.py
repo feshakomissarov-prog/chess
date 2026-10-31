@@ -3,16 +3,24 @@
 from __future__ import annotations
 
 import sqlite3
+from concurrent.futures import Future, ThreadPoolExecutor
 from datetime import datetime, timezone
 from pathlib import Path
+import threading
 
 import chess
 import chess.pgn
 
 
 class GameRepository:
-    def __init__(self, path: str | Path) -> None:
+    def __init__(self, path: str | Path, *, async_writes: bool = False) -> None:
         self.path = str(path)
+        self.async_writes = async_writes
+        self._writer = (ThreadPoolExecutor(max_workers=1, thread_name_prefix="chess-coach-sqlite")
+                        if async_writes else None)
+        self._write_lock = threading.Lock()
+        self._pending_writes: dict[str, Future] = {}
+        self._write_errors: dict[str, str] = {}
         self._initialize()
 
     def _connect(self) -> sqlite3.Connection:
@@ -47,6 +55,27 @@ class GameRepository:
                       winner: str | None = None, *, white_player: str | None = None,
                       black_player: str | None = None, started_at: str | None = None,
                       final_sync_pending: bool = False) -> None:
+        if self._writer is None:
+            self._save_snapshot_sync(game_id, initial_fen, moves, color, opponent,
+                                     rated, clock, status, winner,
+                                     white_player=white_player, black_player=black_player,
+                                     started_at=started_at, final_sync_pending=final_sync_pending)
+            return
+        future = self._writer.submit(
+            self._save_snapshot_sync, game_id, initial_fen, moves, color, opponent,
+            rated, clock, status, winner, white_player=white_player,
+            black_player=black_player, started_at=started_at,
+            final_sync_pending=final_sync_pending,
+        )
+        with self._write_lock:
+            self._pending_writes[game_id] = future
+        future.add_done_callback(lambda completed, key=game_id: self._record_write_result(key, completed))
+
+    def _save_snapshot_sync(self, game_id: str, initial_fen: str, moves: str, color: str,
+                            opponent: str, rated: bool, clock: str, status: str,
+                            winner: str | None = None, *, white_player: str | None = None,
+                            black_player: str | None = None, started_at: str | None = None,
+                            final_sync_pending: bool = False) -> None:
         board = chess.Board() if initial_fen == "startpos" else chess.Board(initial_fen)
         for uci in moves.split():
             board.push_uci(uci)
@@ -97,7 +126,49 @@ class GameRepository:
                  winner, datetime.now(timezone.utc).isoformat(), pgn, white_player,
                  black_player, started_at, int(final_sync_pending)))
 
+    def _record_write_result(self, game_id: str, future: Future) -> None:
+        with self._write_lock:
+            if self._pending_writes.get(game_id) is future:
+                self._pending_writes.pop(game_id, None)
+            try:
+                future.result()
+            except Exception as exc:
+                self._write_errors[game_id] = str(exc)
+            else:
+                self._write_errors.pop(game_id, None)
+
+    def has_pending_write(self, game_id: str) -> bool:
+        with self._write_lock:
+            future = self._pending_writes.get(game_id)
+            return bool(future and not future.done())
+
+    def has_write_error(self, game_id: str) -> bool:
+        with self._write_lock:
+            return game_id in self._write_errors
+
+    def write_error(self, game_id: str) -> str | None:
+        with self._write_lock:
+            return self._write_errors.get(game_id)
+
+    def wait_for_writes(self, game_id: str | None = None) -> None:
+        with self._write_lock:
+            futures = ([self._pending_writes[game_id]] if game_id in self._pending_writes
+                       else [] if game_id else list(self._pending_writes.values()))
+        for future in futures:
+            try:
+                future.result()
+            except Exception:
+                pass
+
+    def shutdown(self) -> None:
+        if self._writer:
+            self._writer.shutdown(wait=True)
+
+    def _wait_before_read(self, game_id: str | None = None) -> None:
+        self.wait_for_writes(game_id)
+
     def list_games(self, completed_only: bool = True) -> list[dict]:
+        self._wait_before_read()
         with self._connect() as db:
             query = "SELECT * FROM games"
             if completed_only:
@@ -106,11 +177,13 @@ class GameRepository:
             return [dict(row) for row in db.execute(query)]
 
     def get_game(self, game_id: str) -> dict | None:
+        self._wait_before_read(game_id)
         with self._connect() as db:
             row = db.execute("SELECT * FROM games WHERE game_id=?", (game_id,)).fetchone()
             return dict(row) if row else None
 
     def list_pending_final_sync(self) -> list[dict]:
+        self._wait_before_read()
         with self._connect() as db:
             return [dict(row) for row in db.execute(
                 "SELECT * FROM games WHERE final_sync_pending=1 ORDER BY updated_at"

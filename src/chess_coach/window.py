@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import chess
 import time
+import os
 from pathlib import Path
 from PySide6.QtCore import QSettings, Qt, QStandardPaths, QTimer
 from PySide6.QtGui import QKeySequence, QShortcut
@@ -98,6 +99,9 @@ class SettingsDialog(QDialog):
         self.annotations = QCheckBox("Включить ручные стрелки и выделения")
         self.annotations.setChecked(settings.value("annotations_enabled", True, type=bool))
         layout.addWidget(self.annotations)
+        self.allow_premoves = QCheckBox("Разрешить предходы")
+        self.allow_premoves.setChecked(settings.value("allow_premoves", True, type=bool))
+        layout.addWidget(self.allow_premoves)
         buttons = QDialogButtonBox(
             QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
         )
@@ -111,11 +115,12 @@ class SettingsDialog(QDialog):
         settings.setValue("show_legal_moves", self.legal.isChecked())
         settings.setValue("show_last_move", self.last.isChecked())
         settings.setValue("annotations_enabled", self.annotations.isChecked())
+        settings.setValue("allow_premoves", self.allow_premoves.isChecked())
         settings.sync()
 
 
 class MainWindow(QMainWindow):
-    def __init__(self, settings: QSettings | None = None) -> None:
+    def __init__(self, settings: QSettings | None = None, *, asynchronous_storage: bool = False) -> None:
         super().__init__()
         self.settings = (
             settings
@@ -126,7 +131,10 @@ class MainWindow(QMainWindow):
         self.controller = GameController(chess.Color(color))
         data_root = Path(QStandardPaths.writableLocation(QStandardPaths.StandardLocation.AppDataLocation))
         data_root.mkdir(parents=True, exist_ok=True)
-        self.game_repository = GameRepository(data_root / "games.sqlite3")
+        self.game_repository = GameRepository(data_root / "games.sqlite3", async_writes=asynchronous_storage)
+        self._online_history_game_id: str | None = None
+        self._online_history_moves: tuple[chess.Move, ...] = ()
+        self._online_history_position: chess.Board | None = None
         try:
             self.lichess = LichessService(token_store=WindowsCredentialStore(), parent=self)
         except CredentialStorageError:
@@ -171,7 +179,8 @@ class MainWindow(QMainWindow):
             self.lichess.challenge_ready.connect(self._challenge_ready)
             self.lichess.challenge_status_changed.connect(self._challenge_status)
             self.lichess.invitation_cancelled.connect(self._invitation_cancelled)
-            self.lichess.restore()
+            if os.environ.get("CHESS_COACH_OFFLINE_TEST") != "1":
+                self.lichess.restore()
         self.refresh()
 
     def _build_ui(self) -> None:
@@ -270,6 +279,7 @@ class MainWindow(QMainWindow):
         self.decline_draw_button.clicked.connect(lambda: self.lichess.draw(self.online_session.game_id, False) if self.online_session else None)
         self.decline_draw_button.setVisible(False)
         self.takeback_button = QPushButton("Предложить вернуть ход")
+        self.takeback_button.setToolTip("Запросить возврат через Lichess и дождаться подтверждённой сервером позиции.")
         self.takeback_button.clicked.connect(self.request_takeback)
         self.accept_takeback_button = QPushButton("Принять возврат хода")
         self.accept_takeback_button.clicked.connect(lambda: self.answer_takeback(True))
@@ -285,6 +295,11 @@ class MainWindow(QMainWindow):
             button.setEnabled(False)
             button.setVisible(False)
             side_layout.addWidget(button)
+        self.undo_local_button = QPushButton("Отменить последний ход")
+        self.undo_local_button.setToolTip("Отменяет последний подтверждённый ход локальной партии. Для Lichess используется «Вернуть ход».")
+        self.undo_local_button.clicked.connect(self.undo_local_last_move)
+        self.undo_local_button.setVisible(False)
+        side_layout.addWidget(self.undo_local_button)
         self.games_button = QPushButton("Завершённые партии")
         self.games_button.clicked.connect(self.show_saved_games)
         side_layout.addWidget(self.games_button)
@@ -414,36 +429,26 @@ class MainWindow(QMainWindow):
 
     def refresh(self, message: str | None = None) -> None:
         if self.online_session is not None:
+            self.undo_local_button.setVisible(False)
             self._refresh_online(message)
             return
         for button in (self.takeback_button, self.accept_takeback_button,
                        self.decline_takeback_button):
             button.setVisible(False)
         snapshot = self.controller.snapshot()
+        local_game_visible = self.screen_stack.currentWidget() is self.game_page
+        self.undo_local_button.setVisible(local_game_visible and self.controller.ply > 0)
+        self.undo_local_button.setEnabled(local_game_visible and self.controller.ply > 0)
         self.board.set_position(snapshot.board)
         self.board.set_interaction_enabled(snapshot.live)
-        self.board.set_premove(self.controller.premove, self.controller.player_color)
         self._apply_preferences()
-        self.moves.clear()
-        position = self.controller.board.root()
+        self.board.set_premove(self.controller.premove, self.controller.player_color)
         viewed_ply = (
             self.controller.ply
             if self.controller.view_ply is None
             else self.controller.view_ply
         )
-        viewed_item = None
-        for ply, move in enumerate(self.controller.board.move_stack, start=1):
-            number = (ply + 1) // 2
-            prefix = f"{number}. " if ply % 2 else f"{number}... "
-            item = QListWidgetItem(prefix + position.san(move))
-            item.setData(Qt.ItemDataRole.UserRole, ply)
-            self.moves.addItem(item)
-            position.push(move)
-            if ply == viewed_ply:
-                viewed_item = item
-        if viewed_item is not None:
-            self.moves.setCurrentItem(viewed_item)
-            self.moves.scrollToItem(viewed_item)
+        self._sync_online_history(self.controller.board, "__local__", viewed_ply)
         if self.controller.view_ply == 0:
             self.history_label.setText("Начальная позиция")
         elif not snapshot.live:
@@ -530,23 +535,42 @@ class MainWindow(QMainWindow):
         self.result_summary.setText(
             f"{outcome}\nСоперник: {session.opponent}\nСтатус Lichess: {session.status}"
         )
-        stored = self.game_repository.get_game(session.game_id)
+        write_pending = self.game_repository.has_pending_write(session.game_id)
+        stored = (None if write_pending or session.final_sync_pending
+                  else self.game_repository.get_game(session.game_id))
         if session.final_sync_pending:
             saved = False
             saved_label = "Результат получен; ожидаем подтверждённую финальную историю от Lichess."
+        elif write_pending:
+            saved = False
+            saved_label = "Финальная история подтверждена; сохраняем партию локально…"
+            QTimer.singleShot(80, lambda game_id=session.game_id: self._poll_result_write(game_id))
         else:
             saved = bool(saved and stored and stored["moves"] == session.moves
                          and stored["status"] == session.status
                          and not stored.get("final_sync_pending", 0))
             saved_label = ("Партия сохранена локально." if saved else
-                           f"Не удалось подтвердить сохранение локальной партии: {detail or 'ошибка записи'}")
+                           f"Не удалось подтвердить сохранение локальной партии: {detail or self.game_repository.write_error(session.game_id) or 'ошибка записи'}")
         self.result_saved_label.setText(
             saved_label
         )
         self.result_saved_label.setStyleSheet("color: #39704a;" if saved else "color: #9b3434;")
         self.result_review_button.setEnabled(bool(session.moves))
-        self.result_export_button.setEnabled(bool(self.game_repository.export_pgn(session.game_id)))
+        self.result_export_button.setEnabled(
+            not session.final_sync_pending and not write_pending
+            and bool(self.game_repository.export_pgn(session.game_id))
+        )
         self.screen_stack.setCurrentWidget(self.result_page)
+
+    def _poll_result_write(self, game_id: str) -> None:
+        session = self.online_sessions.get(game_id)
+        if (not session or session.final_sync_pending or self._screen_mode != "result"
+                or game_id != self._selected_live_game_id):
+            return
+        if self.game_repository.has_pending_write(game_id):
+            QTimer.singleShot(80, lambda: self._poll_result_write(game_id))
+            return
+        self._show_result(session, True)
 
     def review_finished_game(self) -> None:
         session = self.online_session
@@ -578,6 +602,12 @@ class MainWindow(QMainWindow):
         self.board.set_annotations_enabled(
             self.settings.value("annotations_enabled", True, type=bool)
         )
+        allow_premoves = self.settings.value("allow_premoves", True, type=bool)
+        self.board.set_premove_allowed(allow_premoves)
+        if not allow_premoves:
+            self.controller.cancel_premove()
+            if self.online_session:
+                self.online_session.premove = None
 
     def on_move_intent(self, move: chess.Move) -> None:
         if self.online_session is not None:
@@ -614,6 +644,14 @@ class MainWindow(QMainWindow):
             return
         self.controller.cancel_premove()
         self.refresh("Предход отменён.")
+
+    def undo_local_last_move(self) -> None:
+        if self.online_session is not None:
+            return
+        if self.controller.undo_last_move():
+            self.refresh("Последний ход локальной партии отменён.")
+        else:
+            self.refresh("В локальной партии пока нет хода для отмены.")
 
     def apply_opponent_move(self) -> None:
         raw = self.opponent_move.currentData()
@@ -693,6 +731,8 @@ class MainWindow(QMainWindow):
             dialog.save(self.settings)
             new_color = chess.Color(int(self.settings.value("player_color", chess.WHITE)))
             self.controller.player_color = new_color
+            if not self.settings.value("allow_premoves", True, type=bool):
+                self.cancel_premove()
             self.refresh("Настройки сохранены.")
 
     def connect_lichess(self) -> None:
@@ -801,7 +841,8 @@ class MainWindow(QMainWindow):
             self.refresh("Возврат хода сейчас недоступен: дождитесь синхронизации партии.")
             return
         messages = {
-            "offer": "Отправляем предложение вернуть ход…",
+            "offer": ("Запрашиваем возврат хода у Lichess AI…" if session.is_ai_opponent
+                      else "Отправляем предложение вернуть ход…"),
             "accept": "Принимаем предложение; ждём подтверждения позиции Lichess…",
             "decline": "Отправляем отказ от возврата хода…",
         }
@@ -817,7 +858,9 @@ class MainWindow(QMainWindow):
             return
         if status == 0:
             messages = {
-                "offer": "Предложение возврата отправлено; ждём ответа соперника.",
+                "offer": ("Запрос отправлен; ожидаем подтверждённую позицию Lichess AI…"
+                          if session.is_ai_opponent else
+                          "Предложение возврата отправлено; ждём ответа соперника."),
                 "accept": "Предложение принято; ждём обновления позиции от Lichess…",
                 "decline": "Отказ отправлен; ждём подтверждения от Lichess…",
             }
@@ -827,6 +870,7 @@ class MainWindow(QMainWindow):
                 400: "Lichess отклонил запрос возврата хода (400). Позиция не изменена.",
                 403: "Lichess запретил возврат хода (403). Позиция не изменена.",
                 404: "Партия не найдена; позиция не изменена.",
+                429: "Lichess временно ограничил запросы (429). Позиция не изменена; дождитесь окончания паузы перед новым действием.",
             }.get(status, "Не удалось отправить запрос возврата хода. Позиция не изменена.")
         self.refresh(message)
 
@@ -1065,16 +1109,19 @@ class MainWindow(QMainWindow):
         render_board = session.render_board
         ply = len(board.move_stack) if self.online_view_ply is None else min(self.online_view_ply, len(board.move_stack))
         display_source = render_board if self.online_view_ply is None else board
-        shown = display_source.copy(stack=True)
-        shown = shown.root()
-        for move in display_source.move_stack[:(len(display_source.move_stack) if self.online_view_ply is None else ply)]:
-            shown.push(move)
         live = self.online_view_ply is None or ply == len(board.move_stack)
+        if live:
+            # render_board is disposable; BoardView copies it when installing.
+            shown = display_source
+        else:
+            shown = board.root()
+            for move in board.move_stack[:ply]:
+                shown.push(move)
         self.board.set_position(shown)
         active = session.status in {"started", "playing"} and self._screen_mode != "review"
         self.board.set_interaction_enabled(live and active and not session.input_locked)
-        self.board.set_premove(session.premove, session.color)
         self._apply_preferences()
+        self.board.set_premove(session.premove, session.color)
         self.opponent_label.setText(f"Соперник  ·  {session.opponent}")
         self.you_label.setText("Вы  ·  " + ("белыми" if session.color == chess.WHITE else "чёрными"))
         self.turn_label.setText(("Ваш ход" if session.is_my_turn else "Ход соперника") + (" · история" if not live else ""))
@@ -1089,22 +1136,14 @@ class MainWindow(QMainWindow):
         elif session.takeback_decline_pending:
             self.game_status.setText("Отказ отправлен; ожидаем обновления состояния партии…")
         elif session.takeback_requested_by_me:
-            self.game_status.setText("Предложение возврата отправлено; ждём ответа соперника.")
+            self.game_status.setText(
+                "Запрос возврата отправлен; ждём обновления позиции Lichess AI."
+                if session.is_ai_opponent else
+                "Предложение возврата отправлено; ждём ответа соперника."
+            )
         else:
             self.game_status.setText(f"Lichess · {session.status}")
-        self.moves.clear()
-        position = board.root()
-        selected = None
-        for halfmove, move in enumerate(board.move_stack, start=1):
-            label = f"{(halfmove + 1) // 2}. " if halfmove % 2 else f"{(halfmove + 1) // 2}... "
-            item = QListWidgetItem(label + position.san(move))
-            item.setData(Qt.ItemDataRole.UserRole, halfmove)
-            self.moves.addItem(item)
-            position.push(move)
-            if halfmove == ply:
-                selected = item
-        if selected:
-            self.moves.setCurrentItem(selected)
+        self._sync_online_history(board, session.game_id, ply)
         self._update_clock()
         self.history_label.setText("Актуальная позиция" if live else f"Просмотр хода {ply} из {len(board.move_stack)}")
         self.resign_button.setEnabled(session.status in {"started", "playing"})
@@ -1117,8 +1156,14 @@ class MainWindow(QMainWindow):
         self.takeback_button.setVisible(active)
         self.takeback_button.setText(
             "Ожидаем ответа на возврат…" if session.takeback_requested_by_me
-            else "Предложить вернуть ход"
+            else "Вернуть ход" if session.is_ai_opponent else "Предложить вернуть ход"
         )
+        self.takeback_button.setToolTip(
+            "Запросить серверный возврат у Lichess AI. После ответа доска изменится только по подтверждённому состоянию."
+            if session.is_ai_opponent else
+            "Предложить сопернику возврат хода через Lichess. Это не отмена ожидающего предхода."
+        )
+        self.undo_local_button.setVisible(False)
         self.takeback_button.setEnabled(
             active and bool(session.moves) and not session.input_locked
         )
@@ -1147,8 +1192,62 @@ class MainWindow(QMainWindow):
         for widget in (self.opponent_move, self.apply_opponent_button):
             widget.setVisible(False)
 
+    def _sync_online_history(self, board: chess.Board, game_id: str, selected_ply: int) -> None:
+        """Append SAN rows for new plies; rebuild only on a new/divergent line."""
+        moves = tuple(board.move_stack)
+        previous = self._online_history_moves
+        incremental = (
+            self._online_history_game_id == game_id
+            and len(moves) >= len(previous)
+            and moves[:len(previous)] == previous
+            and self._online_history_position is not None
+        )
+        unchanged = incremental and moves == previous
+        scroll = self.moves.verticalScrollBar().value()
+        self.moves.blockSignals(True)
+        try:
+            if not incremental:
+                self.moves.clear()
+                position = board.root()
+                start_ply = 0
+            elif not unchanged:
+                position = self._online_history_position.copy(stack=True)
+                start_ply = len(previous)
+            else:
+                position = None
+                start_ply = len(moves)
+            if position is not None:
+                for index in range(start_ply, len(moves)):
+                    move = moves[index]
+                    ply = index + 1
+                    prefix = f"{(ply + 1) // 2}. " if ply % 2 else f"{(ply + 1) // 2}... "
+                    item = QListWidgetItem(prefix + position.san(move))
+                    item.setData(Qt.ItemDataRole.UserRole, ply)
+                    self.moves.addItem(item)
+                    position.push(move)
+            desired_ply = min(selected_ply, len(moves))
+            current = self.moves.currentItem()
+            if current is None or current.data(Qt.ItemDataRole.UserRole) != desired_ply:
+                selected = next((self.moves.item(i) for i in range(self.moves.count())
+                                 if self.moves.item(i).data(Qt.ItemDataRole.UserRole) == desired_ply), None)
+                if selected:
+                    self.moves.setCurrentItem(selected)
+                elif desired_ply == 0:
+                    self.moves.setCurrentRow(-1)
+            self._online_history_game_id = game_id
+            self._online_history_moves = moves
+            if not unchanged:
+                self._online_history_position = board.copy(stack=True)
+        finally:
+            self.moves.blockSignals(False)
+        self.moves.verticalScrollBar().setValue(scroll)
+
     def _update_clock(self) -> None:
         session = self.online_session
+        if session and self._screen_mode == "online":
+            write_error = self.game_repository.write_error(session.game_id)
+            if write_error:
+                self.game_status.setText(f"Ошибка сохранения локальной партии: {write_error}")
         if not session or session.white_ms is None or session.black_ms is None:
             self.clock_label.setText(
                 f"Контроль {session.clock_control}" if session and session.clock_control != "-" else "Без часов"
@@ -1247,6 +1346,7 @@ class MainWindow(QMainWindow):
     def closeEvent(self, event) -> None:
         if self.lichess:
             self.lichess.close()
+        self.game_repository.shutdown()
         super().closeEvent(event)
 
 

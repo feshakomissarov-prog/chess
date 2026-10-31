@@ -65,6 +65,16 @@ class GameController:
     def cancel_premove(self) -> None:
         self.premove = None
 
+    def undo_last_move(self) -> bool:
+        """Undo one confirmed local ply; online history is server-owned."""
+        if not self.board.move_stack:
+            return False
+        self.board.pop()
+        self.view_ply = None
+        self.cancel_premove()
+        self.last_premove_result = None
+        return True
+
     def apply_test_opponent_move(self, move: chess.Move) -> tuple[bool, str]:
         """Apply a user-selected legal opponent move, then revalidate premove."""
         if not self.viewing_live_position or self.board.turn == self.player_color:

@@ -2,6 +2,7 @@ import base64
 import hashlib
 import json
 import threading
+import time
 from urllib.request import urlopen
 from urllib.parse import parse_qs, urlparse
 
@@ -762,3 +763,80 @@ def test_delayed_final_state_survives_stale_truncated_and_duplicate_events(tmp_p
     assert not session.final_sync_pending
     assert session.status == "mate" and session.moves == final_line
     assert saved["moves"] == final_line and len(session.board.move_stack) == 4
+
+
+def test_async_repository_keeps_gui_event_fast_and_commits_ordered_snapshots(tmp_path, monkeypatch):
+    repo = GameRepository(tmp_path / "async-writes.sqlite3", async_writes=True)
+    entered = threading.Event()
+    release = threading.Event()
+    sync_save = repo._save_snapshot_sync
+
+    def delayed_save(*args, **kwargs):
+        entered.set()
+        release.wait(2)
+        return sync_save(*args, **kwargs)
+
+    monkeypatch.setattr(repo, "_save_snapshot_sync", delayed_save)
+    session = LichessGameSession("async-write", repo)
+    try:
+        started = time.perf_counter()
+        session.apply_event({"type": "gameFull", "initialFen": "startpos",
+                             "state": {"moves": "e2e4", "status": "started"}})
+        elapsed = time.perf_counter() - started
+        assert entered.wait(1)
+        assert elapsed < 0.25
+
+        session.apply_event({"type": "gameState", "moves": "e2e4 e7e5", "status": "started"})
+        release.set()
+        repo.wait_for_writes()
+        saved = repo.get_game(session.game_id)
+        assert saved["moves"] == "e2e4 e7e5"
+        assert not repo.has_pending_write(session.game_id)
+    finally:
+        release.set()
+        repo.shutdown()
+
+
+def test_async_write_failure_is_visible_and_same_snapshot_can_be_retried(tmp_path, monkeypatch):
+    repo = GameRepository(tmp_path / "async-retry.sqlite3", async_writes=True)
+    sync_save = repo._save_snapshot_sync
+    failures = [1]
+
+    def fail_once(*args, **kwargs):
+        if failures:
+            failures.pop()
+            raise OSError("database is locked")
+        return sync_save(*args, **kwargs)
+
+    monkeypatch.setattr(repo, "_save_snapshot_sync", fail_once)
+    session = LichessGameSession("async-retry", repo)
+    event = {"type": "gameFull", "initialFen": "startpos",
+             "state": {"moves": "e2e4", "status": "started"}}
+    try:
+        session.apply_event(event)
+        repo.wait_for_writes()
+        deadline = time.monotonic() + 1
+        while not repo.has_write_error(session.game_id) and time.monotonic() < deadline:
+            time.sleep(0.005)
+        assert "database is locked" in (repo.write_error(session.game_id) or "")
+
+        session.apply_event(event)
+        repo.wait_for_writes()
+        saved = repo.get_game(session.game_id)
+        assert saved["moves"] == "e2e4"
+        assert repo.write_error(session.game_id) is None
+    finally:
+        repo.shutdown()
+
+
+def test_clock_only_duplicate_does_not_reserialize_or_resave_full_pgn(tmp_path, monkeypatch):
+    repo = GameRepository(tmp_path / "clock-dedup.sqlite3")
+    saves = []
+    save = repo.save_snapshot
+    monkeypatch.setattr(repo, "save_snapshot", lambda *args, **kwargs: (saves.append(args), save(*args, **kwargs)))
+    session = LichessGameSession("clock-dedup", repo)
+    session.apply_event({"type": "gameFull", "initialFen": "startpos",
+                         "state": {"moves": "e2e4", "status": "started", "wtime": 10_000}})
+    session.apply_event({"type": "gameState", "moves": "e2e4", "status": "started", "wtime": 9_000})
+    session.apply_event({"type": "gameState", "moves": "e2e4", "status": "started", "wtime": 8_000})
+    assert len(saves) == 1

@@ -31,6 +31,7 @@ class BoardView(BoardWidget):
         self._show_last_move = True
         self._annotations_enabled = True
         self._interaction_enabled = True
+        self._premove_allowed = True
         self._annotation_arrows: set[tuple[int, int]] = set()
         self._annotation_squares: set[int] = set()
         self._right_start: Optional[int] = None
@@ -49,13 +50,20 @@ class BoardView(BoardWidget):
 
     def set_position(self, board: chess.Board) -> None:
         """Replace render snapshot after the controller accepts an event."""
-        if (board.fen() != self._board.fen()
-                or board.move_stack != self._board.move_stack):
-            self._cancel_premove_gesture(clear_selection=True)
+        # chess-widgets resets selection and renderer state on set_board(). Keep
+        # the existing widget board for clock/status-only refreshes.
+        unchanged = (board.fen() == self._board.fen()
+                     and board.move_stack == self._board.move_stack
+                     and board.chess960 == self._board.chess960)
+        if unchanged:
+            return
+        self._cancel_premove_gesture(clear_selection=True)
         self._queued_premove = None
         super().set_board(board.copy(stack=True))
 
     def set_premove(self, move: Optional[chess.Move], color: chess.Color) -> None:
+        if self._queued_premove == move and self._premove_color == color:
+            return
         self._queued_premove = move
         self._premove_color = color
         self.update()
@@ -67,17 +75,32 @@ class BoardView(BoardWidget):
             self._cancel_premove_gesture(clear_selection=True)
 
     def set_show_legal_moves(self, enabled: bool) -> None:
+        if self._show_legal_moves == enabled:
+            return
         self._show_legal_moves = enabled
         self.update()
 
     def set_show_last_move(self, enabled: bool) -> None:
+        if self._show_last_move == enabled:
+            return
         self._show_last_move = enabled
         self.update()
 
     def set_annotations_enabled(self, enabled: bool) -> None:
+        if self._annotations_enabled == enabled:
+            return
         self._annotations_enabled = enabled
         if not enabled:
             self.clear_annotations()
+        self.update()
+
+    def set_premove_allowed(self, enabled: bool) -> None:
+        if self._premove_allowed == enabled:
+            return
+        self._premove_allowed = enabled
+        if not enabled:
+            self._cancel_premove_gesture(clear_selection=True)
+            self._queued_premove = None
         self.update()
 
     def clear_annotations(self) -> None:
@@ -273,7 +296,8 @@ class BoardView(BoardWidget):
         super().focusOutEvent(event)
 
     def _is_premove_turn(self) -> bool:
-        return self._board.turn != self._premove_color and not self._board.is_game_over()
+        return (self._premove_allowed and self._board.turn != self._premove_color
+                and not self._board.is_game_over())
 
     def _start_premove_gesture(self, pos: QPointF) -> None:
         square = self._pos_to_square(pos)
@@ -319,7 +343,15 @@ class BoardView(BoardWidget):
         if piece and piece.piece_type == chess.PAWN:
             target_rank = chess.square_rank(end)
             if target_rank in (0, 7):
-                promotion = chess.QUEEN
+                labels = ["Ферзь", "Ладья", "Слон", "Конь"]
+                choices = [chess.QUEEN, chess.ROOK, chess.BISHOP, chess.KNIGHT]
+                selected, accepted = QInputDialog.getItem(
+                    self, "Превращение предхода", "Выберите фигуру:", labels, 0, False
+                )
+                if not accepted:
+                    self.update()
+                    return
+                promotion = choices[labels.index(selected)]
         self.premove_intent.emit(chess.Move(start, end, promotion=promotion))
         self.update()
 
