@@ -24,6 +24,7 @@ def test_main_window_smoke_and_game_controller_integration(qtbot, tmp_path) -> N
     assert window.board._board.fen() == window.controller.board.fen()
     assert window.controller.queue_premove(chess.Move.from_uci("g1f3"))
     window.refresh()
+    assert window.board._queued_premove == chess.Move.from_uci("g1f3")
     index = window.opponent_move.findData("e7e5")
     assert index >= 0
     window.opponent_move.setCurrentIndex(index)
@@ -44,6 +45,32 @@ def test_main_window_smoke_and_game_controller_integration(qtbot, tmp_path) -> N
     assert window.controller.ply == 3
     window.navigate_live()
     assert window.controller.viewing_live_position
+
+
+def test_completed_pair_allows_selecting_white_halfmove(qtbot, tmp_path) -> None:
+    settings = QSettings(str(tmp_path / "app.ini"), QSettings.Format.IniFormat)
+    window = MainWindow(settings)
+    qtbot.addWidget(window)
+    for uci in ("e2e4", "e7e5"):
+        assert window.controller.apply_move_intent(chess.Move.from_uci(uci))
+    live_fen = window.controller.board.fen()
+    window.refresh()
+    assert window.moves.count() == 2
+    white_item = next(
+        window.moves.item(index)
+        for index in range(window.moves.count())
+        if window.moves.item(index).data(Qt.ItemDataRole.UserRole) == 1
+    )
+    assert white_item.text() == "1. e4"
+    qtbot.mouseClick(
+        window.moves.viewport(),
+        Qt.MouseButton.LeftButton,
+        pos=window.moves.visualItemRect(white_item).center(),
+    )
+    assert window.controller.view_ply == 1
+    assert window.controller.snapshot().board.fen().split()[1] == "b"
+    assert window.controller.board.fen() == live_fen
+    assert window.controller.ply == 2
 
 
 def test_visual_preferences_persist_in_qsettings(tmp_path) -> None:
@@ -78,3 +105,23 @@ def test_cancel_premove_button_clears_queued_intent(qtbot, tmp_path) -> None:
     qtbot.mouseClick(window.cancel_premove_button, Qt.MouseButton.LeftButton)
     assert window.controller.premove is None
     assert not window.cancel_premove_button.isEnabled()
+
+
+def test_new_game_clears_premove_after_confirmation(qtbot, tmp_path, monkeypatch) -> None:
+    from PySide6.QtWidgets import QMessageBox
+
+    settings = QSettings(str(tmp_path / "app.ini"), QSettings.Format.IniFormat)
+    window = MainWindow(settings)
+    qtbot.addWidget(window)
+    window.controller.apply_move_intent(chess.Move.from_uci("e2e4"))
+    assert window.controller.queue_premove(chess.Move.from_uci("g1f3"))
+    window.refresh()
+    monkeypatch.setattr(
+        QMessageBox,
+        "question",
+        lambda *args: QMessageBox.StandardButton.Yes,
+    )
+    window.new_game()
+    assert window.controller.ply == 0
+    assert window.controller.premove is None
+    assert window.board._queued_premove is None

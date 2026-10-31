@@ -222,10 +222,25 @@ class MainWindow(QMainWindow):
         self.board.set_premove(self.controller.premove, self.controller.player_color)
         self._apply_preferences()
         self.moves.clear()
-        for number, white, black in self.controller.san_moves():
-            first = QListWidgetItem(f"{number}.  {white}   {black}")
-            first.setData(Qt.ItemDataRole.UserRole, min(number * 2, self.controller.ply))
-            self.moves.addItem(first)
+        position = self.controller.board.root()
+        viewed_ply = (
+            self.controller.ply
+            if self.controller.view_ply is None
+            else self.controller.view_ply
+        )
+        viewed_item = None
+        for ply, move in enumerate(self.controller.board.move_stack, start=1):
+            number = (ply + 1) // 2
+            prefix = f"{number}. " if ply % 2 else f"{number}... "
+            item = QListWidgetItem(prefix + position.san(move))
+            item.setData(Qt.ItemDataRole.UserRole, ply)
+            self.moves.addItem(item)
+            position.push(move)
+            if ply == viewed_ply:
+                viewed_item = item
+        if viewed_item is not None:
+            self.moves.setCurrentItem(viewed_item)
+            self.moves.scrollToItem(viewed_item)
         if self.controller.view_ply == 0:
             self.history_label.setText("Начальная позиция")
         elif not snapshot.live:

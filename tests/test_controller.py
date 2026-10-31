@@ -56,6 +56,18 @@ def test_invalid_premove_is_removed_after_opponent_captures_piece() -> None:
     assert len(game.board.move_stack) == 1
 
 
+def test_illegal_test_opponent_move_keeps_position_and_premove() -> None:
+    game = GameController(chess.WHITE)
+    game.apply_move_intent(chess.Move.from_uci("e2e4"))
+    assert game.queue_premove(chess.Move.from_uci("g1f3"))
+    before = game.board.fen()
+    accepted, message = game.apply_test_opponent_move(chess.Move.from_uci("e7e4"))
+    assert not accepted
+    assert "недопустим" in message
+    assert game.board.fen() == before
+    assert game.premove == chess.Move.from_uci("g1f3")
+
+
 def test_promotion_requires_explicit_piece_and_supports_underpromotion() -> None:
     game = GameController()
     game.board = chess.Board("7k/P7/8/8/8/8/8/7K w - - 0 1")
