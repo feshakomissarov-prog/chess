@@ -5,6 +5,8 @@ from __future__ import annotations
 import json
 import threading
 import time
+from datetime import datetime, timezone
+from email.utils import parsedate_to_datetime
 from dataclasses import dataclass
 from typing import Iterator, Mapping, Protocol
 from urllib.error import HTTPError, URLError
@@ -109,7 +111,8 @@ class UrlLibTransport:
         except HTTPError as exc:
             payload = exc.read(2048).decode("utf-8", "replace")
             if exc.code == 429:
-                raise RateLimitError(60) from exc
+                retry_after = _retry_after_seconds(exc.headers.get("Retry-After"))
+                raise RateLimitError(retry_after) from exc
             message = _error_message(exc.code, payload)
             raise LichessError(message, exc.code) from exc
         except (URLError, TimeoutError, OSError) as exc:
@@ -139,6 +142,21 @@ def _error_message(status: int, body: str) -> str:
     if detail:
         return f"Lichess отклонил запрос: {str(detail)[:300]}"
     return f"Lichess отклонил запрос (HTTP {status})."
+
+
+def _retry_after_seconds(value: str | None) -> int:
+    if value:
+        try:
+            return max(60, int(float(value)))
+        except (ValueError, OverflowError):
+            try:
+                retry_at = parsedate_to_datetime(value)
+                if retry_at.tzinfo is None:
+                    retry_at = retry_at.replace(tzinfo=timezone.utc)
+                return max(60, int((retry_at - datetime.now(timezone.utc)).total_seconds() + 0.999))
+            except (TypeError, ValueError, OverflowError):
+                pass
+    return 60
 
 
 class LichessClient:
@@ -176,19 +194,23 @@ class LichessClient:
             body = urlencode(form).encode("utf-8")
             headers["Content-Type"] = "application/x-www-form-urlencoded"
         with self._request_lock:
-            deadline = self._rate_limited_until - time.monotonic()
-            if deadline > 0:
-                raise RateLimitError(max(1, int(deadline + 0.999)))
+            self._check_cooldown_locked()
             response = self.transport.request(
                 method, url, headers, body, self.request_timeout
             )
             if response.status == 429:
-                self._rate_limited_until = time.monotonic() + 60
-                raise RateLimitError(60)
+                retry_after = _retry_after_seconds(response.headers.get("Retry-After"))
+                self._rate_limited_until = max(self._rate_limited_until, time.monotonic() + retry_after)
+                raise RateLimitError(retry_after)
         if response.status >= 400:
             detail = response.body[:2048].decode("utf-8", "replace")
             raise LichessError(_error_message(response.status, detail), response.status)
         return response
+
+    def _check_cooldown_locked(self) -> None:
+        deadline = self._rate_limited_until - time.monotonic()
+        if deadline > 0:
+            raise RateLimitError(max(1, int(deadline + 0.999)))
 
     def _json_call(self, *args, **kwargs) -> dict:
         data = self._call(*args, **kwargs).json()
@@ -354,21 +376,31 @@ class LichessClient:
         if form is not None:
             body = urlencode(form).encode("utf-8")
             headers["Content-Type"] = "application/x-www-form-urlencoded"
-        response = self.transport.stream(
-            method, url, headers, body, 35.0, stop_event
-        )
-        for raw in response:
-            if stop_event.is_set():
-                break
-            line = raw.decode("utf-8", "replace").strip()
-            if not line:
-                continue
-            try:
-                value = json.loads(line)
-            except json.JSONDecodeError as exc:
-                raise LichessError("Поток Lichess прислал некорректную строку NDJSON.") from exc
-            if isinstance(value, dict):
-                yield value
+        with self._request_lock:
+            self._check_cooldown_locked()
+        try:
+            response = self.transport.stream(
+                method, url, headers, body, 35.0, stop_event
+            )
+            for raw in response:
+                if stop_event.is_set():
+                    break
+                line = raw.decode("utf-8", "replace").strip()
+                if not line:
+                    continue
+                try:
+                    value = json.loads(line)
+                except json.JSONDecodeError as exc:
+                    raise LichessError("Поток Lichess прислал некорректную строку NDJSON.") from exc
+                if isinstance(value, dict):
+                    yield value
+        except RateLimitError as exc:
+            retry_after = max(60, exc.retry_after)
+            with self._request_lock:
+                self._rate_limited_until = max(
+                    self._rate_limited_until, time.monotonic() + retry_after
+                )
+            raise RateLimitError(retry_after) from exc
 
     def stream_events(self, token: str, stop_event: threading.Event) -> Iterator[dict]:
         yield from self.stream_ndjson("/api/stream/event", token, stop_event)

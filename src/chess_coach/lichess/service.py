@@ -64,7 +64,14 @@ class LichessService(QObject):
                 if isinstance(exc, LichessError) and exc.status == 401:
                     self.token_store.delete()
                 self.error.emit(str(exc))
-                self.status_changed.emit("Ошибка подключения")
+                if isinstance(exc, RateLimitError) or (
+                    isinstance(exc, LichessError) and exc.status == 429
+                ):
+                    self.status_changed.emit(
+                        f"Ограничение Lichess (429): повторная попытка не раньше чем через {max(60, getattr(exc, 'retry_after', 60))} с"
+                    )
+                else:
+                    self.status_changed.emit("Ошибка подключения")
         self._thread(work, "chess-coach-restore-auth")
 
     def connect_account(self) -> None:
@@ -138,6 +145,9 @@ class LichessService(QObject):
                         if not self._stop.is_set() and not connection_stop.is_set():
                             raise LichessError("Поток событий Lichess завершился.")
                     except RateLimitError as exc:
+                        self.status_changed.emit(
+                            f"Ограничение Lichess (429): переподключение через {max(60, exc.retry_after)} с"
+                        )
                         connection_stop.wait(max(60, exc.retry_after))
                     except LichessError as exc:
                         if exc.status == 401:
@@ -161,11 +171,14 @@ class LichessService(QObject):
 
     def start_game(self, game_id: str, token: str | None = None) -> None:
         token = token or self.token
-        if not token or game_id in self._game_stops:
+        if not token:
             return
         stop = threading.Event()
         connection_stop = self._connection_stop
-        self._game_stops[game_id] = stop
+        with self._event_lock:
+            if game_id in self._game_stops:
+                return
+            self._game_stops[game_id] = stop
 
         def work():
             delay = 1
@@ -184,6 +197,9 @@ class LichessService(QObject):
                         if not self._stop.is_set() and not connection_stop.is_set() and not stop.is_set():
                             raise LichessError("Поток партии завершился.")
                     except RateLimitError as exc:
+                        self.status_changed.emit(
+                            f"Ограничение Lichess (429): синхронизация партии через {max(60, exc.retry_after)} с"
+                        )
                         connection_stop.wait(max(60, exc.retry_after))
                     except LichessError as exc:
                         if exc.status == 401:
@@ -195,7 +211,9 @@ class LichessService(QObject):
                         connection_stop.wait(delay)
                         delay = min(delay * 2, 30)
             finally:
-                self._game_stops.pop(game_id, None)
+                with self._event_lock:
+                    if self._game_stops.get(game_id) is stop:
+                        self._game_stops.pop(game_id, None)
         self._thread(work, f"chess-coach-game-{game_id}")
 
     def open_friend_game(self, color: str, clock_limit: int | None, increment: int = 0, rated: bool = False):

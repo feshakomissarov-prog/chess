@@ -129,9 +129,99 @@ def test_premove_click_click_and_drag_emit_only_intents(qtbot) -> None:
     assert emitted == [chess.Move.from_uci("g1f3")]
     assert widget._board.fen() == position.fen()
 
-    emitted.clear()
-    qtbot.mousePress(widget, Qt.MouseButton.LeftButton, pos=QPoint(*center(widget, chess.B1)))
-    qtbot.mouseMove(widget, QPoint(*center(widget, chess.C3)), delay=20)
-    qtbot.mouseRelease(widget, Qt.MouseButton.LeftButton, pos=QPoint(*center(widget, chess.C3)))
-    assert emitted == [chess.Move.from_uci("b1c3")]
+
+def test_premove_drag_keeps_cursor_visible_and_renders_piece_and_target(qtbot) -> None:
+    from PySide6.QtCore import QPoint
+    from PySide6.QtCore import Qt
+
+    position = chess.Board()
+    position.push_uci("e2e4")
+    widget = BoardView(position)
+    qtbot.addWidget(widget)
+    widget.resize(600, 600)
+    widget.show()
+    widget.set_premove(None, chess.WHITE)
+    emitted = []
+    widget.premove_intent.connect(emitted.append)
+    start = QPoint(*center(widget, chess.G1))
+    end = QPoint(*center(widget, chess.F3))
+
+    qtbot.mousePress(widget, Qt.MouseButton.LeftButton, pos=start)
+    assert widget.cursor().shape() != Qt.CursorShape.BlankCursor
+    assert not widget._premove_dragging  # press alone is still a click selection
+    qtbot.mouseMove(widget, end, delay=20)
+    assert widget._premove_dragging
+    assert widget._is_dragging
+    assert widget._premove_target == chess.F3
+    assert widget.cursor().shape() != Qt.CursorShape.BlankCursor
+    qtbot.mouseRelease(widget, Qt.MouseButton.LeftButton, pos=end)
+    assert emitted == [chess.Move.from_uci("g1f3")]
+    assert widget.cursor().shape() != Qt.CursorShape.BlankCursor
+    assert not widget._is_dragging
     assert widget._board.fen() == position.fen()
+
+
+def test_premove_drag_outside_or_escape_cancels_without_changing_position(qtbot) -> None:
+    from PySide6.QtCore import QEvent, QPoint, Qt
+    from PySide6.QtGui import QFocusEvent
+
+    position = chess.Board()
+    position.push_uci("e2e4")
+    widget = BoardView(position)
+    qtbot.addWidget(widget)
+    widget.resize(600, 600)
+    widget.show()
+    emitted = []
+    widget.premove_intent.connect(emitted.append)
+    start = QPoint(*center(widget, chess.G1))
+
+    qtbot.mousePress(widget, Qt.MouseButton.LeftButton, pos=start)
+    qtbot.mouseMove(widget, QPoint(-20, -20), delay=20)
+    qtbot.mouseRelease(widget, Qt.MouseButton.LeftButton, pos=QPoint(-20, -20))
+    assert emitted == []
+    assert widget._board.fen() == position.fen()
+    assert widget.cursor().shape() != Qt.CursorShape.BlankCursor
+    assert not widget._is_dragging
+
+    qtbot.mousePress(widget, Qt.MouseButton.LeftButton, pos=start)
+    qtbot.mouseMove(widget, QPoint(*center(widget, chess.F3)), delay=20)
+    qtbot.keyClick(widget, Qt.Key.Key_Escape)
+    assert emitted == []
+    assert widget.cursor().shape() != Qt.CursorShape.BlankCursor
+    assert not widget._premove_drag_active
+    assert not widget._is_dragging
+
+    qtbot.mousePress(widget, Qt.MouseButton.LeftButton, pos=start)
+    qtbot.mouseMove(widget, QPoint(*center(widget, chess.F3)), delay=20)
+    widget.focusOutEvent(QFocusEvent(QEvent.Type.FocusOut))
+    qtbot.mouseRelease(widget, Qt.MouseButton.LeftButton, pos=QPoint(*center(widget, chess.F3)))
+    assert emitted == []
+    assert widget.cursor().shape() != Qt.CursorShape.BlankCursor
+    assert not widget._premove_drag_active
+    assert not widget._is_dragging
+
+
+def test_server_position_change_cancels_premove_drag_without_emitting_move(qtbot) -> None:
+    from PySide6.QtCore import QPoint, Qt
+
+    position = chess.Board()
+    position.push_uci("e2e4")
+    widget = BoardView(position)
+    qtbot.addWidget(widget)
+    widget.resize(600, 600)
+    widget.show()
+    emitted = []
+    widget.move_intent.connect(emitted.append)
+    widget.premove_intent.connect(emitted.append)
+    start = QPoint(*center(widget, chess.G1))
+    end = QPoint(*center(widget, chess.F3))
+    qtbot.mousePress(widget, Qt.MouseButton.LeftButton, pos=start)
+    qtbot.mouseMove(widget, end, delay=20)
+    changed = position.copy(stack=True)
+    changed.push_uci("e7e5")
+    widget.set_position(changed)
+    qtbot.mouseRelease(widget, Qt.MouseButton.LeftButton, pos=end)
+    assert emitted == []
+    assert not widget._is_dragging
+    assert widget.cursor().shape() != Qt.CursorShape.BlankCursor
+    assert widget._board.fen() == changed.fen()

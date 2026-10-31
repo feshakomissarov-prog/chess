@@ -16,9 +16,10 @@ from chess_coach.lichess.service import LichessService
 
 
 class FakeTransport:
-    def __init__(self, responses=None, lines=None):
+    def __init__(self, responses=None, lines=None, stream_error=None):
         self.responses = list(responses or [])
         self.lines = list(lines or [])
+        self.stream_error = stream_error
         self.calls = []
 
     def request(self, method, url, headers, body, timeout):
@@ -26,6 +27,8 @@ class FakeTransport:
         return self.responses.pop(0)
 
     def stream(self, method, url, headers, body, timeout, stop_event):
+        if self.stream_error:
+            raise self.stream_error
         yield from self.lines
 
 
@@ -163,6 +166,120 @@ def test_api_errors_and_429_cooldown(monkeypatch):
         raise AssertionError("429 must fail")
     with __import__("pytest").raises(RateLimitError):
         client.get_account("token")
+
+
+def test_retry_after_header_is_honored_and_stream_429_blocks_regular_requests():
+    fake = FakeTransport([HttpResponse(429, {"Retry-After": "125"}, b"{}")])
+    client = LichessClient(fake)
+    with __import__("pytest").raises(RateLimitError) as caught:
+        client.get_account("token")
+    assert caught.value.retry_after >= 125
+    assert len(fake.calls) == 1
+
+    streaming = FakeTransport(stream_error=RateLimitError(75))
+    client = LichessClient(streaming)
+    with __import__("pytest").raises(RateLimitError) as caught:
+        list(client.stream_events("token", threading.Event()))
+    assert caught.value.retry_after >= 75
+    with __import__("pytest").raises(RateLimitError):
+        client.get_account("token")
+    assert streaming.calls == []
+
+
+def test_lichess_service_reports_429_without_starting_retry_worker(monkeypatch):
+    class TokenStore:
+        def get(self):
+            return "fake-token"
+
+        def delete(self):
+            raise AssertionError("429 must not delete a valid token")
+
+    class Client:
+        def get_account(self, token):
+            raise RateLimitError(90)
+
+    service = LichessService(client=Client(), token_store=TokenStore())
+    statuses = []
+    errors = []
+    service.status_changed.connect(statuses.append)
+    service.error.connect(errors.append)
+    workers = []
+    monkeypatch.setattr(service, "_thread", lambda target, name: (workers.append(name), target()))
+    service.restore()
+    assert statuses[-1].startswith("Ограничение Lichess (429)")
+    assert "90" in statuses[-1]
+    assert len(workers) == 1
+    assert len(errors) == 1
+
+
+def test_game_stream_start_is_deduplicated_per_game(monkeypatch):
+    class TokenStore:
+        def get(self):
+            return "fake-token"
+
+    service = LichessService(client=object(), token_store=TokenStore())
+    workers = []
+    monkeypatch.setattr(service, "_thread", lambda target, name: workers.append((target, name)))
+    service.start_game("same-game", "fake-token")
+    service.start_game("same-game", "fake-token")
+    assert len(workers) == 1
+    assert "same-game" in workers[0][1]
+
+
+def test_global_event_stream_is_started_once_per_connection(monkeypatch):
+    class TokenStore:
+        def get(self):
+            return "fake-token"
+
+    service = LichessService(client=object(), token_store=TokenStore())
+    workers = []
+    monkeypatch.setattr(service, "_thread", lambda target, name: workers.append((target, name)))
+    service._start_event_stream("fake-token")
+    service._start_event_stream("fake-token")
+    assert len(workers) == 1
+    assert workers[0][1] == "chess-coach-lichess-events"
+
+
+def test_event_stream_429_waits_before_retry_and_does_not_spin(monkeypatch):
+    class TokenStore:
+        def get(self):
+            return "fake-token"
+
+    class Client:
+        def __init__(self):
+            self.calls = 0
+
+        def stream_events(self, token, stop_event):
+            self.calls += 1
+            raise RateLimitError(70)
+            yield  # pragma: no cover
+
+    class StopEvent:
+        def __init__(self):
+            self.stopped = False
+            self.waits = []
+
+        def is_set(self):
+            return self.stopped
+
+        def set(self):
+            self.stopped = True
+
+        def wait(self, seconds):
+            self.waits.append(seconds)
+            self.stopped = True
+            return True
+
+    client = Client()
+    service = LichessService(client=client, token_store=TokenStore())
+    service._connection_stop = StopEvent()
+    statuses = []
+    service.status_changed.connect(statuses.append)
+    monkeypatch.setattr(service, "_thread", lambda target, name: target())
+    service._start_event_stream("fake-token")
+    assert client.calls == 1
+    assert service._connection_stop.waits == [70]
+    assert any(message.startswith("Ограничение Lichess (429)") for message in statuses)
 
 
 def test_game_stream_rebuilds_confirmed_state_and_saves_pgn(tmp_path):
