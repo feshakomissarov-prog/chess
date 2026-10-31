@@ -64,14 +64,14 @@ Chess Coach — планируемое настольное приложение
 
 ## Как запустить текущий прототип Windows
 
-**Важно:** код приложения пока в ветке PR #3, а не в `main`. Если в `G:\\project\\chess` уже создано рабочее окружение `.venv`, запустите в **одном PowerShell**:
+**Важно:** код приложения пока в ветке PR #3, а не в `main`. Если в `G:\project\chess` уже создано рабочее окружение `.venv`, запустите в **одном PowerShell**:
 
 ```powershell
-cd G:\\project\\chess
+cd G:\project\chess
 git status --short
 git switch codex/m1-lichess-client
 git pull --ff-only
-.\\.venv\\Scripts\\python.exe -m chess_coach
+.\.venv\Scripts\python.exe -m chess_coach
 ```
 
 Если Git сообщает о несохранённых локальных изменениях — не сбрасывайте их принудительно. Для новой установки текущий `pyproject.toml` требует Python **3.12+**, однако Codex пока тестировал Windows на Python **3.11.5**; совместимость Python 3.12 нужно отдельно подтвердить. Полная инструкция установки находится в [README ветки PR #3](https://github.com/feshakomissarov-prog/chess/blob/codex/m1-lichess-client/README.md).
