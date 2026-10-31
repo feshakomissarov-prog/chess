@@ -64,17 +64,17 @@ Chess Coach — планируемое настольное приложение
 
 ## Запуск на Windows
 
-**Код теперь в \`main\`.** Если приложение уже установлено локально в \`G:\project\chess\` и виртуальное окружение \`.venv\` существует:
+**Код теперь в `main`.** Если приложение уже установлено локально в `G:\project\chess` и виртуальное окружение `.venv` существует:
 
-\`\`\`powershell
+```powershell
 cd G:\project\chess
 git status --short
 git switch main
 git pull --ff-only
 .\.venv\Scripts\python.exe -m chess_coach
-\`\`\`
+```
 
-При несохранённых локальных изменениях не делайте \`reset --hard\` или принудительный переключатель ветки: сначала сохраните изменения. Для чистой установки требуется Python **3.12+** по \`pyproject.toml\`, но тесты Codex пока выполнялись на 3.11.5 (см. [#5](https://github.com/feshakomissarov-prog/chess/issues/5)).
+При несохранённых локальных изменениях не делайте `reset --hard` или принудительный переключатель ветки: сначала сохраните изменения. Для чистой установки требуется Python **3.12+** по `pyproject.toml`, но тесты Codex пока выполнялись на 3.11.5 (см. [#5](https://github.com/feshakomissarov-prog/chess/issues/5)).
 
 
 ## Ярлык Windows
