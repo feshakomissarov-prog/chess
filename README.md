@@ -53,6 +53,17 @@ python -m pytest
 
 ## Основа и лицензии
 
+Документы проекта:
+
+- [PCD — концепция](docs/PCD.md)
+- [PRD — требования](docs/PRD.md)
+- [ROADMAP — этапы M0–M5](docs/ROADMAP.md)
+- [Спецификация M0](docs/specs/M0_BOARD_UI.md)
+- [Правила разработки](AGENTS.md)
+- [Обзор компонентов доски](docs/BOARD_COMPONENT_REVIEW.md)
+- [Исследование Lichess API](docs/LICHESS_API_RESEARCH.md)
+- [Проекты-ориентиры](docs/REFERENCES.md)
+
 Доска использует [chess-widgets](https://github.com/leszekhanusz/chess-widgets), версия 0.5.0 (MIT, © Leszek Hanusz, 2025). Пакет включает SVG-фигуры, сгенерированные upstream из ресурсов `python-chess`; эти ресурсы имеют отдельные лицензионные условия. `python-chess` распространяется по GPL-3.0-or-later. Подробности и ссылки приведены в [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md). Это не утверждение о лицензии всего приложения; лицензию проекта и условия распространения собранного приложения нужно определить до поставки.
 
 В адаптере Chess Coach виджет получает снимок позиции и отправляет `MoveIntent`; только `GameController` меняет партию. До M1/M2 отсутствует сетевой источник, OAuth и API.
