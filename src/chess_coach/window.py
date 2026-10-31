@@ -25,8 +25,10 @@ from PySide6.QtWidgets import (
     QFileDialog,
     QLineEdit,
     QPushButton,
+    QSpinBox,
     QSplitter,
     QStackedWidget,
+    QTextEdit,
     QVBoxLayout,
     QWidget,
 )
@@ -1490,29 +1492,94 @@ class MainWindow(QMainWindow):
             self.lichess.draw(session.game_id, True)
 
     def show_saved_games(self) -> None:
-        games = self.game_repository.list_games()
-        if not games:
-            QMessageBox.information(self, "Партии", "Сохранённых завершённых партий пока нет.")
-            return
-        labels = [f"{g['opponent']} · {g['status']} · {g['updated_at'][:10]}" for g in games]
-        selected, ok = QInputDialog.getItem(self, "Завершённые партии", "Открыть партию:", labels, 0, False)
-        if not ok:
-            return
-        game = games[labels.index(selected)]
-        pgn = self.game_repository.export_pgn(game["game_id"])
-        choice = QMessageBox(self)
-        choice.setWindowTitle("Сохранённая партия")
-        choice.setText(f"{game['opponent']} · {game['status']}")
-        open_button = choice.addButton("Открыть", QMessageBox.ButtonRole.AcceptRole)
-        export_button = choice.addButton("Экспорт PGN", QMessageBox.ButtonRole.ActionRole)
-        choice.addButton("Отмена", QMessageBox.ButtonRole.RejectRole)
-        choice.exec()
-        if choice.clickedButton() == open_button:
-            self._open_saved_game(game)
-        elif choice.clickedButton() == export_button and pgn:
-            path, _ = QFileDialog.getSaveFileName(self, "Экспорт PGN", f"{game['game_id']}.pgn", "PGN (*.pgn)")
-            if path:
-                Path(path).write_text(pgn + "\n", encoding="utf-8")
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Библиотека партий")
+        dialog.resize(680, 520)
+        layout = QVBoxLayout(dialog)
+        search = QLineEdit()
+        search.setPlaceholderText("Поиск по сопернику, игроку, ID или статусу")
+        layout.addWidget(search)
+        games_list = QListWidget()
+        layout.addWidget(games_list, 1)
+        page_row = QHBoxLayout()
+        previous = QPushButton("← Назад")
+        page_label = QLabel()
+        following = QPushButton("Вперёд →")
+        page_row.addWidget(previous)
+        page_row.addWidget(page_label, 1)
+        page_row.addWidget(following)
+        layout.addLayout(page_row)
+        note_row = QHBoxLayout()
+        note = QLineEdit()
+        note.setPlaceholderText("Заметка к начальной позиции выбранной партии")
+        save_note = QPushButton("Сохранить заметку")
+        note_row.addWidget(note, 1)
+        note_row.addWidget(save_note)
+        layout.addLayout(note_row)
+        actions = QHBoxLayout()
+        open_game = QPushButton("Открыть для просмотра")
+        export_game = QPushButton("Экспорт PGN")
+        close = QPushButton("Закрыть")
+        actions.addWidget(open_game)
+        actions.addWidget(export_game)
+        actions.addStretch(1)
+        actions.addWidget(close)
+        layout.addLayout(actions)
+        state = {"page": 0, "items": []}
+
+        def selected_game():
+            index = games_list.currentRow()
+            return state["items"][index] if 0 <= index < len(state["items"]) else None
+
+        def load_page():
+            result = self.game_repository.search_games(
+                search.text(), page=state["page"], page_size=50, completed_only=True)
+            state["items"] = result["items"]
+            games_list.clear()
+            for game in result["items"]:
+                games_list.addItem(f"{game['white_player']} – {game['black_player']}  ·  "
+                                   f"{game['status']}  ·  {game['updated_at'][:10]}")
+            page_label.setText(f"Страница {state['page'] + 1} из {max(1, result['pages'])}"
+                               f"  ·  {result['total']} партий")
+            previous.setEnabled(state["page"] > 0)
+            following.setEnabled(state["page"] + 1 < result["pages"])
+        def open_selected():
+            game = selected_game()
+            if game:
+                self._open_saved_game(game)
+                dialog.accept()
+        def export_selected():
+            game = selected_game()
+            if not game:
+                return
+            pgn = self.game_repository.export_pgn(game["game_id"])
+            path, _ = QFileDialog.getSaveFileName(
+                dialog, "Экспорт PGN", f"{game['game_id']}.pgn", "PGN (*.pgn)")
+            if path and pgn is not None:
+                Path(path).write_text(pgn.rstrip() + "\n", encoding="utf-8")
+        def save_selected_note():
+            game = selected_game()
+            if not game:
+                return
+            try:
+                current = self.game_repository.current_line(game["game_id"])
+                self.game_repository.save_note(
+                    game["game_id"], note.text(),
+                    line_revision=current["line_revision"] if current else None,
+                    ply=0 if current else None)
+                note.clear()
+            except (ValueError, KeyError) as exc:
+                QMessageBox.warning(dialog, "Заметка", str(exc))
+        search.textChanged.connect(lambda _text: (state.update(page=0), load_page()))
+        previous.clicked.connect(lambda: (state.update(page=max(0, state["page"] - 1)), load_page()))
+        following.clicked.connect(lambda: (state.update(page=state["page"] + 1), load_page()))
+        games_list.itemDoubleClicked.connect(lambda _item: open_selected())
+        open_game.clicked.connect(open_selected)
+        export_game.clicked.connect(export_selected)
+        save_note.clicked.connect(save_selected_note)
+        close.clicked.connect(dialog.reject)
+        load_page()
+        dialog.exec()
 
     def _open_saved_game(self, game: dict) -> None:
         self.board.clear_annotations()

@@ -481,6 +481,150 @@ def test_repository_closes_every_connection_including_exception_and_async_writer
     renamed.unlink()
 
 
+def test_m3_migration_preserves_legacy_game_creates_revision_and_backup(tmp_path):
+    path = tmp_path / "games.sqlite3"
+    db = sqlite3.connect(path)
+    db.execute("""CREATE TABLE games (
+        game_id TEXT PRIMARY KEY, initial_fen TEXT NOT NULL, moves TEXT NOT NULL,
+        color TEXT NOT NULL, opponent TEXT NOT NULL, rated INTEGER NOT NULL,
+        clock TEXT NOT NULL, status TEXT NOT NULL, winner TEXT,
+        updated_at TEXT NOT NULL, pgn TEXT NOT NULL,
+        white_player TEXT NOT NULL DEFAULT '?', black_player TEXT NOT NULL DEFAULT '?',
+        started_at TEXT, final_sync_pending INTEGER NOT NULL DEFAULT 0
+    )""")
+    legacy_pgn = '[Event "Lichess casual"]\n\n1. e4 e5 *\n'
+    db.execute("INSERT INTO games VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+               ("legacy", "startpos", "e2e4 e7e5", "white", "Friend", 0,
+                "180+2", "resign", "black", "2026-01-01T00:00:00+00:00",
+                legacy_pgn, "Me", "Friend", "2026-01-01T00:00:00+00:00", 0))
+    db.commit()
+    db.close()
+
+    repo = GameRepository(path)
+    row = repo.get_game("legacy")
+    assert row["pgn"] == legacy_pgn
+    assert row["moves"] == "e2e4 e7e5"
+    assert row["white_player"] == "Me"
+    assert row["line_revision"] == 1
+    assert row["import_error"] is None
+    with repo._connection() as migrated:
+        assert migrated.execute("PRAGMA user_version").fetchone()[0] == 1
+        assert migrated.execute("SELECT COUNT(*) FROM game_positions").fetchone()[0] == 3
+        assert migrated.execute("SELECT san FROM game_moves ORDER BY ply").fetchall()[0][0] == "e4"
+    backup = sqlite3.connect(str(path) + ".pre-m3-v1.bak")
+    try:
+        assert backup.execute("PRAGMA user_version").fetchone()[0] == 0
+        assert backup.execute("SELECT pgn FROM games WHERE game_id='legacy'").fetchone()[0] == legacy_pgn
+    finally:
+        backup.close()
+
+    # Reopening at the current version is idempotent and never replays legacy rows.
+    GameRepository(path)
+    with repo._connection() as migrated:
+        assert migrated.execute("SELECT COUNT(*) FROM game_revisions").fetchone()[0] == 1
+
+
+def test_m3_invalid_legacy_line_is_retained_and_marked_for_repair(tmp_path):
+    path = tmp_path / "invalid.sqlite3"
+    db = sqlite3.connect(path)
+    db.execute("CREATE TABLE games (game_id TEXT PRIMARY KEY, initial_fen TEXT NOT NULL, "
+               "moves TEXT NOT NULL, color TEXT NOT NULL, opponent TEXT NOT NULL, rated INTEGER "
+               "NOT NULL, clock TEXT NOT NULL, status TEXT NOT NULL, winner TEXT, updated_at "
+               "TEXT NOT NULL, pgn TEXT NOT NULL)")
+    db.execute("INSERT INTO games VALUES ('legacy','startpos','e2e4','white','Friend',0,'-',"
+               "'mate','white','2026-01-01','raw')")
+    raw_pgn = "retained raw PGN"
+    db.execute("INSERT INTO games VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+               ("bad", "startpos", "not-a-move", "white", "Opponent", 0, "-", "mate",
+                "white", "2026-01-01", raw_pgn))
+    db.commit()
+    db.close()
+    repo = GameRepository(path)
+    row = repo.get_game("bad")
+    assert row["pgn"] == raw_pgn
+    assert row["moves"] == "not-a-move"
+    assert row["import_error"]
+    assert repo.current_line("bad") is None
+
+
+def test_m3_takeback_keeps_revision_and_position_notes(tmp_path):
+    repo = GameRepository(tmp_path / "revisions.sqlite3")
+    repo.save_snapshot("game", "startpos", "e2e4 e7e5 g1f3", "white", "AI",
+                       False, "180+2", "started")
+    note_id = repo.save_note("game", "I considered this plan", line_revision=1, ply=2)
+    repo.save_snapshot("game", "startpos", "e2e4 e7e5", "white", "AI",
+                       False, "180+2", "started")
+    assert repo.get_game("game")["line_revision"] == 2
+    assert repo.current_line("game")["line_revision"] == 2
+    assert repo.list_notes("game")[0]["note_id"] == note_id
+    with repo._connection() as db:
+        assert db.execute("SELECT COUNT(*) FROM game_revisions WHERE game_id='game'").fetchone()[0] == 2
+        assert db.execute("SELECT COUNT(*) FROM game_positions WHERE game_id='game' "
+                          "AND line_revision=1").fetchone()[0] == 4
+
+
+def test_m3_paginated_search_and_note_crud(tmp_path):
+    repo = GameRepository(tmp_path / "library.sqlite3")
+    for index in range(25):
+        repo.save_snapshot(f"g{index:02}", "startpos", "e2e4", "white",
+                           "Friend" if index % 2 else "AI", False, "-", "mate")
+    page = repo.search_games("Friend", page=1, page_size=4)
+    assert page["total"] == 12
+    assert page["pages"] == 3
+    assert len(page["items"]) == 4
+    note = repo.save_note("g01", "Opening thought", line_revision=1, ply=1)
+    repo.update_note(note, "Updated thought")
+    assert repo.list_notes("g01")[0]["body"] == "Updated thought"
+    repo.delete_note(note)
+    assert repo.list_notes("g01") == []
+
+
+def test_m3_migration_rolls_back_schema_and_version_on_backfill_failure(tmp_path, monkeypatch):
+    import chess_coach.lichess.repository as repository_module
+
+    path = tmp_path / "rollback.sqlite3"
+    db = sqlite3.connect(path)
+    db.execute("CREATE TABLE games (game_id TEXT PRIMARY KEY, initial_fen TEXT NOT NULL, "
+               "moves TEXT NOT NULL, color TEXT NOT NULL, opponent TEXT NOT NULL, rated INTEGER "
+               "NOT NULL, clock TEXT NOT NULL, status TEXT NOT NULL, winner TEXT, updated_at "
+               "TEXT NOT NULL, pgn TEXT NOT NULL)")
+    db.execute("INSERT INTO games VALUES ('legacy','startpos','e2e4','white','Friend',0,'-',"
+               "'mate','white','2026-01-01','raw')")
+    db.commit()
+    db.close()
+    monkeypatch.setattr(repository_module.GameRepository, "_write_revision",
+                        staticmethod(lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("injected"))))
+    with pytest.raises(RuntimeError, match="injected"):
+        GameRepository(path)
+    db = sqlite3.connect(path)
+    try:
+        assert db.execute("PRAGMA user_version").fetchone()[0] == 0
+        columns = {row[1] for row in db.execute("PRAGMA table_info(games)")}
+        assert "source" not in columns
+        assert not db.execute("SELECT 1 FROM sqlite_master WHERE name='game_revisions'").fetchone()
+    finally:
+        db.close()
+
+
+def test_m3_library_search_handles_ten_thousand_games_with_paging(tmp_path):
+    repo = GameRepository(tmp_path / "large-library.sqlite3")
+    with repo._connection() as db:
+        db.executemany("""INSERT INTO games (
+            game_id, initial_fen, moves, color, opponent, rated, clock, status,
+            winner, updated_at, pgn, white_player, black_player, started_at,
+            final_sync_pending, source, source_game_id, variant, line_revision
+        ) VALUES (?, 'startpos', '', 'white', ?, 0, '-', 'mate', 'white', ?, '',
+                  'Player', 'Opponent', NULL, 0, 'lichess', ?, 'standard', 1)""",
+            ((f"game-{i:05}", "Classical friend" if i % 2 else "AI",
+              f"2026-01-{i % 28 + 1:02}T00:00:00+00:00", f"game-{i:05}")
+             for i in range(10_000)))
+    page = repo.search_games("Classical", page=9, page_size=500)
+    assert page["total"] == 5_000
+    assert len(page["items"]) == 500
+    assert page["page"] == 9
+    assert page["pages"] == 10
+
+
 def test_premove_is_an_intent_and_revalidated_after_opponent_move(tmp_path):
     session = LichessGameSession("premove", GameRepository(tmp_path / "games.sqlite3"))
     session.color = chess.WHITE
