@@ -14,7 +14,7 @@ Chess Coach — локальное настольное Windows-приложен
 2. `docs/PCD.md` — зачем и для кого продукт.
 3. `docs/PRD.md` — согласованные требования.
 4. `docs/ROADMAP.md` — границы этапов.
-5. **`docs/PROJECT_STATUS.md` — текущие PR, известные ошибки, проверки и handoff (всегда читать перед новым Codex-сеансом).** При работе над архивом, анализом или голосом также читать **`docs/specs/M3_M4_ARCHIVE_ANALYSIS_VOICE_THOUGHTS.md`**, но реализовывать только указанный в задаче этап.
+5. **`docs/PROJECT_STATUS.md` — текущие PR, известные ошибки, проверки и handoff (всегда читать перед новым Codex-сеансом).** При работе над текущими M3/M4 читать **`docs/specs/M3_M4_DATA_ARCHIVE_ANALYTICS_PUZZLES.md`** — одно большое ТЗ с последовательными проверяемыми этапами. Для будущего голоса отдельно читать историческую спецификацию `docs/specs/M3_M4_ARCHIVE_ANALYSIS_VOICE_THOUGHTS.md`.
 6. **Только спецификацию текущей задачи**, например `docs/specs/M0_BOARD_UI.md`, и её GitHub Issue.
 7. При выборе сторонней доски — `docs/BOARD_COMPONENT_REVIEW.md`.
 8. Текущий код и тесты в рабочей ветке.
@@ -70,4 +70,6 @@ Chess Coach — локальное настольное Windows-приложен
 
 **Состояние на 2026-10-31:** M0 и Lichess-клиент **слиты в main** ([PR #2](https://github.com/feshakomissarov-prog/chess/pull/2), [PR #3](https://github.com/feshakomissarov-prog/chess/pull/3)). Новые ветки создавать **от актуального main**. Ближайший UX-инкремент — [Issue #4 «Активные партии»](https://github.com/feshakomissarov-prog/chess/issues/4), технический долг — [Issue #5](https://github.com/feshakomissarov-prog/chess/issues/5). Текущее состояние и ограничения: `docs/PROJECT_STATUS.md`. **Новые PR не сливать без разрешения владельца.**
 
-**Следующий пул:** [эпик #6](https://github.com/feshakomissarov-prog/chess/issues/6), [большое ТЗ](docs/specs/M3_M4_ARCHIVE_ANALYSIS_VOICE_THOUGHTS.md), [баг стрелок #7](https://github.com/feshakomissarov-prog/chess/issues/7), [техдолг #5](https://github.com/feshakomissarov-prog/chess/issues/5), [активные партии #4](https://github.com/feshakomissarov-prog/chess/issues/4). **Первый следующий PR — P0 (исправление пометок и безопасность), затем P1 (миграции БД).** Не представлять ТЗ как уже реализованные функции.
+**Следующий пул (01.11.2026):** [эпик #6](https://github.com/feshakomissarov-prog/chess/issues/6), [актуальное большое ТЗ](docs/specs/M3_M4_DATA_ARCHIVE_ANALYTICS_PUZZLES.md). В [draft PR #8](https://github.com/feshakomissarov-prog/chess/pull/8) уже сделаны стрелки, offline, active games и Windows CI (108 passed на Python 3.12), **не слито**. Далее — M3 база и инкрементальный импорт; M4 Stockfish, общая статистика по фазам и история задач Lichess; голос M5. Реализовывать подблоками/PR, не требовать отдельных ТЗ на каждый пункт. Не представлять ТЗ как уже реализованные функции.
+
+**Новые инварианты:** `game_moves`/`game_positions` и текстовые заметки привязаны к game_id + line_revision + ply; старые записи `games` и PGN не терять. Статистика ошибок выводится из версионированных `analysis_runs`/`move_assessments`, не поддерживать вручную недостоверные счётчики. Для личных задач Lichess нужен отдельный `puzzle:read` и таблицы попыток; не смешивать puzzle attempts с играми и не делать mass download без разрешения. Запрет Stockfish при текущих онлайн-партиях против человека.
