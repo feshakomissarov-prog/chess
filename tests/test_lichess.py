@@ -508,10 +508,10 @@ def test_m3_migration_preserves_legacy_game_creates_revision_and_backup(tmp_path
     assert row["line_revision"] == 1
     assert row["import_error"] is None
     with repo._connection() as migrated:
-        assert migrated.execute("PRAGMA user_version").fetchone()[0] == 1
+        assert migrated.execute("PRAGMA user_version").fetchone()[0] == 2
         assert migrated.execute("SELECT COUNT(*) FROM game_positions").fetchone()[0] == 3
         assert migrated.execute("SELECT san FROM game_moves ORDER BY ply").fetchall()[0][0] == "e4"
-    backup = sqlite3.connect(str(path) + ".pre-m3-v1.bak")
+    backup = sqlite3.connect(str(path) + ".pre-m3-v2.bak")
     try:
         assert backup.execute("PRAGMA user_version").fetchone()[0] == 0
         assert backup.execute("SELECT pgn FROM games WHERE game_id='legacy'").fetchone()[0] == legacy_pgn
@@ -623,6 +623,65 @@ def test_m3_library_search_handles_ten_thousand_games_with_paging(tmp_path):
     assert len(page["items"]) == 500
     assert page["page"] == 9
     assert page["pages"] == 10
+
+
+def test_archive_endpoint_streams_json_page_with_cursor_parameters():
+    stop = threading.Event()
+    class StreamTransport(FakeTransport):
+        def stream(self, method, url, headers, body, timeout, stop_event):
+            self.calls.append((method, url, headers, body))
+            yield from self.lines
+    fake = StreamTransport(lines=[b'{"id":"game1","pgn":"1. e4 *"}\n'])
+    client = LichessClient(fake, base_url="https://lichess.test")
+    records = list(client.stream_user_games("token", "My User", stop, since=123,
+                                             max_games=50))
+    assert records == [{"id": "game1", "pgn": "1. e4 *"}]
+    method, url, headers, _body = fake.calls[0]
+    assert method == "GET"
+    assert "/api/games/user/My%20User?" in url
+    assert "since=123" in url and "max=50" in url and "pgnInJson=true" in url
+    assert headers["Authorization"] == "Bearer token"
+
+
+def test_archive_sync_resumes_backfill_deduplicates_and_advances_checkpoint(tmp_path):
+    from chess_coach.lichess.archive import ArchiveSync
+
+    pgns = {}
+    for index, moves in enumerate(("1. e4 *", "1. d4 d5 *", "1. c4 e5 *"), 1):
+        pgns[f"g{index}"] = {
+            "id": f"g{index}", "pgn": f'[Event "Archive"]\n[Site "https://lichess.org/g{index}"]\n'
+            f'[Date "2025.01.0{index}"]\n[White "Me"]\n[Black "Friend"]\n'
+            f'[Result "*"]\n\n{moves}\n', "lastMoveAt": index * 1000,
+            "rated": False, "variant": "standard",
+        }
+
+    class Client:
+        def __init__(self):
+            self.requests = []
+        def stream_user_games(self, token, username, stop_event, *, since=None,
+                              before=None, max_games=1000):
+            self.requests.append((since, before, max_games))
+            if before is not None:
+                candidates = [r for r in pgns.values() if r["lastMoveAt"] < before]
+                yield from sorted(candidates, key=lambda r: r["lastMoveAt"], reverse=True)[:max_games]
+            else:
+                return
+
+    repo = GameRepository(tmp_path / "archive.sqlite3")
+    client = Client()
+    stop = threading.Event()
+    sync = ArchiveSync(client, repo)
+    assert sync.run("Me", "fake-token", stop, full=True, page_size=2) == 3
+    assert len(repo.list_games(completed_only=False)) == 3
+    account = repo.ensure_archive_account("Me")
+    state = repo.archive_sync_state(account)
+    assert state["backfill_complete"] == 1
+    assert state["imported_count"] == 3
+    assert state["backfill_before"] == 999
+    # Incremental query is bounded by the persisted time cursor, not a second full scan.
+    assert client.requests[-1][0] is not None
+    assert sync.run("Me", "fake-token", stop, full=False, page_size=2) == 0
+    assert len(repo.list_games(completed_only=False)) == 3
 
 
 def test_premove_is_an_intent_and_revalidated_after_opponent_move(tmp_path):

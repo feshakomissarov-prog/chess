@@ -25,6 +25,7 @@ from PySide6.QtWidgets import (
     QFileDialog,
     QLineEdit,
     QPushButton,
+    QProgressDialog,
     QSpinBox,
     QSplitter,
     QStackedWidget,
@@ -230,7 +231,8 @@ class MainWindow(QMainWindow):
             self.lichess = None
         else:
             try:
-                self.lichess = LichessService(token_store=WindowsCredentialStore(), parent=self)
+                self.lichess = LichessService(token_store=WindowsCredentialStore(),
+                                              repository=self.game_repository, parent=self)
             except CredentialStorageError:
                 self.lichess = None
         self.online_sessions: dict[str, LichessGameSession] = {}
@@ -241,6 +243,7 @@ class MainWindow(QMainWindow):
         self._selected_live_game_id: str | None = None
         self._review_session: LichessGameSession | None = None
         self._lichess_connected = False
+        self._archive_progress_dialog: QProgressDialog | None = None
         self.setWindowTitle("Chess Coach")
         self.setMinimumSize(1040, 680)
         self.resize(1360, 860)
@@ -275,6 +278,8 @@ class MainWindow(QMainWindow):
             self.lichess.invitation_cancelled.connect(self._invitation_cancelled)
             self.lichess.active_games_received.connect(self._active_games_received)
             self.lichess.active_games_error.connect(self._active_games_error)
+            self.lichess.archive_progress.connect(self._archive_progress)
+            self.lichess.archive_finished.connect(self._archive_finished)
             self.lichess.restore()
         elif offline_mode:
             self._disable_online_controls()
@@ -506,6 +511,9 @@ class MainWindow(QMainWindow):
         self.home_local_button.clicked.connect(self.start_local_game)
         self.home_games_button = QPushButton("Завершённые партии")
         self.home_games_button.clicked.connect(self.show_saved_games)
+        self.home_archive_button = QPushButton("Синхронизировать архив Lichess")
+        self.home_archive_button.clicked.connect(self.start_archive_sync)
+        self.home_archive_button.setEnabled(False)
         self.home_settings_button = QPushButton("Настройки")
         self.home_settings_button.clicked.connect(self.open_settings)
         self.resume_game_button = QPushButton("Вернуться в текущую партию")
@@ -513,7 +521,7 @@ class MainWindow(QMainWindow):
         for button in (self.home_ai_button, self.home_friend_button,
                        self.home_username_button, self.active_games_button,
                        self.home_local_button,
-                       self.home_games_button, self.home_settings_button,
+                       self.home_games_button, self.home_archive_button, self.home_settings_button,
                        self.resume_game_button):
             layout.addWidget(button)
         layout.addStretch(1)
@@ -620,6 +628,38 @@ class MainWindow(QMainWindow):
         for button in (self.home_ai_button, self.home_friend_button, self.home_username_button):
             button.setEnabled(self._lichess_connected)
         self.active_games_button.setEnabled(self._lichess_connected)
+        self.home_archive_button.setEnabled(self._lichess_connected)
+
+    def start_archive_sync(self) -> None:
+        if self.offline_mode or not self.lichess or not self._lichess_connected:
+            return
+        answer = QMessageBox.question(
+            self, "Синхронизация архива",
+            "Chess Coach запросит PGN партий вашего аккаунта и сохранит их локально. "
+            "Первый запуск загрузит архив, следующие — только новые/изменившиеся записи. "
+            "Продолжить?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel,
+            QMessageBox.StandardButton.Cancel)
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+        dialog = QProgressDialog("Подготовка синхронизации…", "Отменить", 0, 0, self)
+        dialog.setWindowTitle("Архив Lichess")
+        dialog.setMinimumDuration(0)
+        dialog.canceled.connect(self.lichess.cancel_archive_sync)
+        self._archive_progress_dialog = dialog
+        dialog.show()
+        self.lichess.sync_archive()
+
+    def _archive_progress(self, count: int, game_id: str) -> None:
+        if self._archive_progress_dialog:
+            self._archive_progress_dialog.setLabelText(
+                f"Сохранено партий: {count}\nТекущая запись: {game_id}")
+
+    def _archive_finished(self, count: int, message: str) -> None:
+        if self._archive_progress_dialog:
+            self._archive_progress_dialog.close()
+            self._archive_progress_dialog = None
+        QMessageBox.information(self, "Архив Lichess", f"Обработано: {count}. {message}")
 
     def start_local_game(self) -> None:
         self.online_session = None
@@ -963,6 +1003,7 @@ class MainWindow(QMainWindow):
         for button in (self.home_ai_button, self.home_friend_button, self.home_username_button):
             button.setEnabled(True)
         self.active_games_button.setEnabled(True)
+        self.home_archive_button.setEnabled(True)
         self._resume_pending_final_syncs()
 
     def _resume_pending_final_syncs(self) -> None:

@@ -9,6 +9,7 @@ import webbrowser
 from PySide6.QtCore import QObject, Signal
 
 from .api import LichessClient, LichessError, RateLimitError
+from .archive import ArchiveSync
 from .auth import (CLIENT_ID, OAuthCallbackServer, WindowsCredentialStore,
                    authorize_and_store, create_authorization_request)
 
@@ -26,11 +27,16 @@ class LichessService(QObject):
     move_failed = Signal(str, str, str, int)
     takeback_action_completed = Signal(str, str, int)
     authenticated = Signal(str)
+    archive_progress = Signal(int, str)
+    archive_finished = Signal(int, str)
 
-    def __init__(self, client: LichessClient | None = None, token_store=None, parent=None):
+    def __init__(self, client: LichessClient | None = None, token_store=None,
+                 repository=None, parent=None):
         super().__init__(parent)
         self.client = client or LichessClient()
         self.token_store = token_store or WindowsCredentialStore()
+        self.repository = repository
+        self._archive_stop: threading.Event | None = None
         self._stop = threading.Event()
         self._connection_stop = threading.Event()
         self._threads: list[threading.Thread] = []
@@ -42,6 +48,38 @@ class LichessService(QObject):
         self._callback: OAuthCallbackServer | None = None
         self._username_challenge_stop: threading.Event | None = None
         self._username_challenge_id: str | None = None
+
+    def sync_archive(self, *, full: bool = False) -> None:
+        """Run an explicitly requested archive sync off the Qt thread."""
+        if self.repository is None:
+            self.archive_finished.emit(0, "Хранилище архива не подключено.")
+            return
+        if self._archive_stop is not None and not self._archive_stop.is_set():
+            self.archive_finished.emit(0, "Синхронизация архива уже выполняется.")
+            return
+        stop = threading.Event()
+        self._archive_stop = stop
+        def work():
+            count = 0
+            try:
+                token = self.token_store.get()
+                if not token:
+                    raise LichessError("Сначала подключите аккаунт Lichess.")
+                username = self.username or str(self.client.get_account(token)["username"])
+                sync = ArchiveSync(self.client, self.repository)
+                count = sync.run(username, token, stop, full=full,
+                                 progress=lambda n, game_id: self.archive_progress.emit(n, game_id))
+                self.archive_finished.emit(count, "Отменено пользователем." if stop.is_set()
+                                            else "Синхронизация завершена.")
+            except Exception as exc:
+                self.archive_finished.emit(count, str(exc))
+            finally:
+                self._archive_stop = None
+        self._thread(work, "chess-coach-archive-sync")
+
+    def cancel_archive_sync(self) -> None:
+        if self._archive_stop is not None:
+            self._archive_stop.set()
 
     @property
     def token(self) -> str | None:
