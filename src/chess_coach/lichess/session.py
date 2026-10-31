@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import time
+import uuid
 
 import chess
 
@@ -39,6 +40,9 @@ class LichessGameSession:
         self.moves = ""
         self.color = chess.WHITE
         self.opponent = "Соперник"
+        self.white_player: str | None = None
+        self.black_player: str | None = None
+        self.started_at: str | None = None
         self.status = "created"
         self.white_ms = self.black_ms = None
         self.white_inc = self.black_inc = 0
@@ -49,6 +53,9 @@ class LichessGameSession:
         self.draw_offered_by_opponent = False
         self.board = chess.Board()
         self.pending_uci: str | None = None
+        self.pending_request_id: str | None = None
+        self._pending_ply: int | None = None
+        self._pending_prefix: tuple[str, ...] = ()
         self.premove: chess.Move | None = None
         self._last_clock_at = time.monotonic()
 
@@ -58,9 +65,29 @@ class LichessGameSession:
 
     def apply_event(self, event: dict) -> GameSnapshot:
         kind = event.get("type")
+        if kind not in {"gameState", "gameFull"}:
+            return self.snapshot()
+        incoming_fen = event.get("initialFen", self.initial_fen) if kind == "gameFull" else self.initial_fen
+        if self.moves and incoming_fen != self.initial_fen:
+            return self.snapshot()
+        state = event.get("state", event)
+        incoming_moves = tuple(state.get("moves", self.moves).split())
+        confirmed_moves = tuple(self.moves.split())
+        # A stream can replay gameFull or deliver an old buffered state after reconnect.
+        # Only accept a monotonic extension of the already confirmed move list.
+        if confirmed_moves and incoming_moves[:len(confirmed_moves)] != confirmed_moves:
+            return self.snapshot()
+        if len(incoming_moves) < len(confirmed_moves):
+            return self.snapshot()
         if kind == "gameFull":
-            self.initial_fen = event.get("initialFen", "startpos")
+            self.initial_fen = incoming_fen
             self.rated = bool(event.get("rated", False))
+            created_at = event.get("createdAt") or event.get("created_at")
+            if created_at and not self.started_at:
+                try:
+                    self.started_at = time.strftime("%Y.%m.%d", time.gmtime(int(created_at) / 1000))
+                except (TypeError, ValueError, OverflowError):
+                    self.started_at = str(created_at)[:10].replace("-", ".")
             clock = event.get("clock") or {}
             self.clock_initial = int(clock.get("initial", 0) or 0)
             self.white_inc = int(clock.get("increment", 0) or 0)
@@ -68,10 +95,8 @@ class LichessGameSession:
             self.clock_control = (f"{self.clock_initial // 1000}+{self.white_inc // 1000}"
                                   if self.clock_initial else "-")
         if kind in {"gameState", "gameFull"}:
-            state = event.get("state", event)
-            previous_moves = self.moves
             self.status = state.get("status", self.status)
-            self.moves = state.get("moves", self.moves)
+            self.moves = " ".join(incoming_moves)
             self.white_ms = state.get("wtime", self.white_ms)
             self.black_ms = state.get("btime", self.black_ms)
             self.white_inc = state.get("winc", self.white_inc)
@@ -80,19 +105,23 @@ class LichessGameSession:
             own_draw_flag = "bdraw" if self.color == chess.WHITE else "wdraw"
             self.draw_offered_by_opponent = bool(state.get(own_draw_flag, False))
             self._rebuild_board()
-            if self.pending_uci and self.pending_uci in self.moves.split():
-                self.pending_uci = None
-            elif self.pending_uci and self.moves != previous_moves and self.board.turn == self.color:
-                # The server has advanced/refused our submission; never resend it.
-                self.pending_uci = None
+            if self.pending_uci and self._pending_ply is not None:
+                if (len(incoming_moves) >= self._pending_ply
+                        and incoming_moves[:len(self._pending_prefix)] == self._pending_prefix
+                        and incoming_moves[self._pending_ply - 1] == self.pending_uci):
+                    self._clear_pending()
+                elif self.status not in {"started", "created", "playing"}:
+                    self._clear_pending()
             self._save()
         self._last_clock_at = time.monotonic()
         return self.snapshot()
 
     def configure_players(self, white: dict, black: dict, my_color: str) -> None:
         self.color = chess.WHITE if my_color == "white" else chess.BLACK
+        self.white_player = white.get("name") or white.get("id") or "?"
+        self.black_player = black.get("name") or black.get("id") or "?"
         player = black if self.color == chess.WHITE else white
-        self.opponent = player.get("name", player.get("id", "Соперник"))
+        self.opponent = player.get("name") or player.get("id") or "Соперник"
 
     def _rebuild_board(self) -> None:
         self.board = chess.Board() if self.initial_fen == "startpos" else chess.Board(self.initial_fen)
@@ -103,10 +132,28 @@ class LichessGameSession:
         if self.pending_uci is not None or not self.is_my_turn or move not in self.board.legal_moves:
             return False
         self.pending_uci = move.uci()
+        self.pending_request_id = uuid.uuid4().hex
+        self._pending_ply = len(self.moves.split()) + 1
+        self._pending_prefix = tuple(self.moves.split())
         return True
 
+    def fail_submission(self, request_id: str | None, *, definitive: bool) -> bool:
+        """Clear only the matching, definitively rejected request; ambiguous POST failures stay pending."""
+        if not self.pending_uci or not request_id or request_id != self.pending_request_id:
+            return False
+        if not definitive:
+            return False
+        self._clear_pending()
+        return True
+
+    def _clear_pending(self) -> None:
+        self.pending_uci = None
+        self.pending_request_id = None
+        self._pending_ply = None
+        self._pending_prefix = ()
+
     def queue_premove(self, move: chess.Move) -> bool:
-        if self.is_my_turn or self.premove is not None:
+        if self.status not in {"started", "playing"} or self.is_my_turn or self.premove is not None:
             return False
         piece = self.board.piece_at(move.from_square)
         if piece is None or piece.color != self.color:
@@ -136,4 +183,6 @@ class LichessGameSession:
     def _save(self) -> None:
         self.repository.save_snapshot(self.game_id, self.initial_fen, self.moves,
             "white" if self.color == chess.WHITE else "black", self.opponent,
-            self.rated, self.clock_control, self.status, self.winner)
+            self.rated, self.clock_control, self.status, self.winner,
+            white_player=self.white_player, black_player=self.black_player,
+            started_at=self.started_at)

@@ -414,7 +414,7 @@ class MainWindow(QMainWindow):
             if self.online_view_ply is not None or not session.begin_submission(move):
                 self.refresh("Ход недоступен: проверьте актуальную позицию.")
                 return
-            self.lichess.send_move(session.game_id, move.uci())
+            self.lichess.send_move(session.game_id, move.uci(), session.pending_request_id)
             self.refresh("Ход отправлен; ожидаем подтверждение Lichess.")
             return
         if self.controller.apply_move_intent(move):
@@ -564,12 +564,23 @@ class MainWindow(QMainWindow):
         QMessageBox.warning(self, "Lichess", message)
         self.refresh(message)
 
-    def _lichess_move_failed(self, game_id: str, uci: str, message: str) -> None:
+    def _lichess_move_failed(self, game_id: str, uci: str, request_id: str, status: int) -> None:
         session = self.online_sessions.get(game_id)
-        if session and session.pending_uci == uci:
-            session.pending_uci = None
-        self.game_status.setText(f"Ход {uci} отклонён: {message}")
-        self.refresh(f"Ход не подтверждён Lichess: {message}")
+        definitive = status in {400, 401, 403, 404, 429}
+        if not session or session.pending_uci != uci or not session.fail_submission(
+                request_id, definitive=definitive):
+            return
+        message = {
+            400: "Lichess отклонил ход (400). Проверьте позицию и попробуйте снова.",
+            401: "Lichess отклонил ход (401). Переподключите аккаунт.",
+            403: "Lichess запретил ход (403). Проверьте состояние партии.",
+            404: "Партия больше не найдена.",
+            429: "Lichess временно ограничил запросы (429). Попробуйте позже.",
+        }.get(status, "Не удалось отправить ход; результат запроса неизвестен.")
+        if status not in {400, 401, 403, 404, 429}:
+            self.game_status.setText(f"Ход {uci}: {message}")
+            return
+        self.refresh(message)
 
     def open_friend_game(self) -> None:
         dialog = OnlineGameDialog("Партия с другом по ссылке", parent=self)
@@ -711,7 +722,7 @@ class MainWindow(QMainWindow):
         self.refresh()
         premove = session.take_ready_premove()
         if premove and session.begin_submission(premove):
-            self.lichess.send_move(game_id, premove.uci())
+            self.lichess.send_move(game_id, premove.uci(), session.pending_request_id)
             self.refresh("Предход проверен и отправлен; ожидаем подтверждение Lichess.")
         elif had_premove and session.premove is None:
             self.refresh("Предход не стал легальным и снят.")
@@ -726,13 +737,19 @@ class MainWindow(QMainWindow):
             shown.push(move)
         live = self.online_view_ply is None or ply == len(board.move_stack)
         self.board.set_position(shown)
-        self.board.set_interaction_enabled(live and session.is_my_turn and session.pending_uci is None)
+        active = session.status in {"started", "playing"}
+        self.board.set_interaction_enabled(live and active and session.pending_uci is None)
         self.board.set_premove(session.premove, session.color)
         self._apply_preferences()
         self.opponent_label.setText(f"Соперник  ·  {session.opponent}")
         self.you_label.setText("Вы  ·  " + ("белыми" if session.color == chess.WHITE else "чёрными"))
         self.turn_label.setText(("Ваш ход" if session.is_my_turn else "Ход соперника") + (" · история" if not live else ""))
-        self.game_status.setText(message or f"Lichess · {session.status}")
+        if message:
+            self.game_status.setText(message)
+        elif session.pending_uci:
+            self.game_status.setText(f"Ожидаем подтверждения хода {session.pending_uci} от Lichess…")
+        else:
+            self.game_status.setText(f"Lichess · {session.status}")
         self.moves.clear()
         position = board.root()
         selected = None

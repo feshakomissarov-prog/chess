@@ -6,6 +6,7 @@ from urllib.request import urlopen
 from urllib.parse import parse_qs, urlparse
 
 import chess
+import chess.pgn
 
 from chess_coach.lichess.api import HttpResponse, LichessClient, LichessError, RateLimitError
 from chess_coach.lichess.auth import OAuthCallbackServer, create_authorization_request
@@ -236,6 +237,91 @@ def test_online_move_is_pending_until_stream_confirmation(tmp_path):
     session.apply_event({"type": "gameState", "moves": "e2e4", "status": "started"})
     assert session.pending_uci is None
     assert session.board.move_stack == [move]
+
+
+def test_pending_move_confirmation_uses_expected_ply_not_old_repeated_uci(tmp_path):
+    session = LichessGameSession("repeat", GameRepository(tmp_path / "repeat.sqlite3"))
+    session.color = chess.WHITE
+    history = "e2e4 g8f6 g1f3 f6g8 f3g1 g8f6"
+    session.apply_event({"type": "gameFull", "initialFen": "startpos",
+                         "state": {"moves": history, "status": "started"}})
+    move = chess.Move.from_uci("g1f3")
+    assert session.begin_submission(move)
+    request_id = session.pending_request_id
+    session.apply_event({"type": "gameState", "moves": history, "status": "started"})
+    assert session.pending_uci == "g1f3"
+    session.apply_event({"type": "gameState", "moves": history + " g1f3", "status": "started"})
+    assert session.pending_uci is None
+    assert session.pending_request_id is None
+    assert request_id
+
+
+def test_stale_and_divergent_stream_states_do_not_roll_back_position(tmp_path):
+    session = LichessGameSession("stale", GameRepository(tmp_path / "stale.sqlite3"))
+    session.apply_event({"type": "gameFull", "initialFen": "startpos",
+                         "state": {"moves": "e2e4 e7e5", "status": "started"}})
+    current = session.board.fen()
+    session.apply_event({"type": "gameState", "moves": "e2e4", "status": "started"})
+    assert session.moves == "e2e4 e7e5"
+    assert session.board.fen() == current
+    session.apply_event({"type": "gameState", "moves": "e2e4 c7c5", "status": "started"})
+    assert session.moves == "e2e4 e7e5"
+    assert session.board.fen() == current
+
+
+def test_late_failure_only_clears_matching_definitive_submission(tmp_path):
+    session = LichessGameSession("late", GameRepository(tmp_path / "late.sqlite3"))
+    session.apply_event({"type": "gameFull", "initialFen": "startpos",
+                         "state": {"moves": "", "status": "started"}})
+    move = chess.Move.from_uci("e2e4")
+    assert session.begin_submission(move)
+    old_request = session.pending_request_id
+    session.apply_event({"type": "gameState", "moves": "e2e4", "status": "started"})
+    session.apply_event({"type": "gameState", "moves": "e2e4 e7e5", "status": "started"})
+    assert session.begin_submission(chess.Move.from_uci("g1f3"))
+    new_request = session.pending_request_id
+    assert old_request != new_request
+    assert not session.fail_submission(old_request, definitive=True)
+    assert session.pending_uci == "g1f3"
+    assert not session.fail_submission(new_request, definitive=False)
+    assert session.pending_uci == "g1f3"  # ambiguous timeout/disconnect awaits stream sync
+    assert session.fail_submission(new_request, definitive=True)
+    assert session.pending_uci is None
+
+
+def test_pgn_keeps_real_players_and_original_game_date_on_resave(tmp_path):
+    repo = GameRepository(tmp_path / "pgn.sqlite3")
+    session = LichessGameSession("pgn123", repo)
+    session.color = chess.WHITE
+    game_full = {
+        "type": "gameFull", "initialFen": "startpos", "rated": False,
+        "createdAt": 1793404800000,
+        "clock": {"initial": 180000, "increment": 2000},
+        "white": {"name": "OwnerName", "id": "ownername"},
+        "black": {"name": "Lichess AI level 1", "id": "lichess-ai-level1"},
+        "state": {"moves": "e2e4 e7e5", "status": "started"},
+    }
+    session.configure_players(game_full["white"], game_full["black"], "white")
+    session.apply_event(game_full)
+    session.finish("mate", "white")
+    original = repo.export_pgn("pgn123")
+    parsed = chess.pgn.read_game(__import__("io").StringIO(original))
+    assert parsed.headers["White"] == "OwnerName"
+    assert parsed.headers["Black"] == "Lichess AI level 1"
+    assert parsed.headers["Date"] == "2026.10.31"
+    assert parsed.headers["TimeControl"] == "180+2"
+    assert parsed.headers["Result"] == "1-0"
+    repo.save_snapshot("pgn123", "startpos", "e2e4 e7e5", "white", "Lichess AI level 1",
+                       False, "180+2", "mate", "white")
+    assert repo.export_pgn("pgn123") == original
+
+
+def test_pgn_missing_start_time_uses_unknown_date_not_resave_date(tmp_path):
+    repo = GameRepository(tmp_path / "unknown-date.sqlite3")
+    repo.save_snapshot("unknown", "startpos", "", "black", "RealOpponent", False, "-", "started")
+    pgn = repo.export_pgn("unknown")
+    assert '[Date "????.??.??"]' in pgn
+    assert '"Chess Coach"' not in pgn
 
 
 def test_special_moves_are_accepted_from_authoritative_uci_stream(tmp_path):

@@ -21,7 +21,7 @@ class LichessService(QObject):
     challenge_status_changed = Signal(str, bool)
     invitation_cancelled = Signal(str)
     error = Signal(str)
-    move_failed = Signal(str, str, str)
+    move_failed = Signal(str, str, str, int)
     authenticated = Signal(str)
 
     def __init__(self, client: LichessClient | None = None, token_store=None, parent=None):
@@ -316,7 +316,7 @@ class LichessService(QObject):
                 self.error.emit(str(exc))
         self._thread(work, "chess-coach-challenge")
 
-    def send_move(self, game_id: str, uci: str):
+    def send_move(self, game_id: str, uci: str, request_id: str):
         def work():
             try:
                 token = self.token_store.get()
@@ -327,7 +327,8 @@ class LichessService(QObject):
                 if isinstance(exc, LichessError) and exc.status == 401:
                     self.token_store.delete()
                     self._connection_stop.set()
-                self.move_failed.emit(game_id, uci, str(exc))
+                status = exc.status if isinstance(exc, LichessError) and exc.status else 0
+                self.move_failed.emit(game_id, uci, request_id, status)
         self._thread(work, "chess-coach-send-move")
 
     def resign(self, game_id: str):

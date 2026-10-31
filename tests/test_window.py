@@ -1,8 +1,11 @@
 import chess
+import pytest
 from PySide6.QtCore import QPoint, QSettings, Qt
 
 from chess_coach.board_view import BoardView
 from chess_coach.window import MainWindow, SettingsDialog
+from chess_coach.lichess.session import LichessGameSession
+from chess_coach.lichess.repository import GameRepository
 
 
 def test_main_window_smoke_and_game_controller_integration(qtbot, tmp_path) -> None:
@@ -125,3 +128,78 @@ def test_new_game_clears_premove_after_confirmation(qtbot, tmp_path, monkeypatch
     assert window.controller.ply == 0
     assert window.controller.premove is None
     assert window.board._queued_premove is None
+
+
+@pytest.mark.parametrize("gesture", ["click", "drag"])
+def test_online_premove_is_available_on_opponent_turn_and_sent_once_after_state(
+    qtbot, tmp_path, monkeypatch, gesture
+) -> None:
+    from PySide6.QtCore import QPoint
+
+    window = MainWindow(QSettings(str(tmp_path / f"{gesture}.ini"), QSettings.Format.IniFormat))
+    qtbot.addWidget(window)
+    calls = []
+    monkeypatch.setattr(window.lichess, "send_move", lambda game_id, uci, request_id: calls.append(
+        (game_id, uci, request_id)
+    ))
+    session = LichessGameSession(gesture, GameRepository(tmp_path / f"{gesture}.sqlite3"))
+    session.color = chess.WHITE
+    session.apply_event({"type": "gameFull", "initialFen": "startpos",
+                         "state": {"moves": "e2e4", "status": "started"}})
+    window.online_sessions[gesture] = session
+    window.online_session = session
+    window.online_view_ply = None
+    window.show()
+    window._refresh_online()
+    assert window.board._interaction_enabled  # permits premove gestures during opponent turn
+    assert not session.is_my_turn
+
+    rect = window.board._get_board_rect()
+    side = rect.width() / 8
+    def center(square):
+        row, col = window.board._renderer.get_visual_coordinates(square, window.board._flipped)
+        return QPoint(int(rect.x() + (col + .5) * side), int(rect.y() + (row + .5) * side))
+    start, end = center(chess.G1), center(chess.F3)
+    window.board.show()
+    if gesture == "click":
+        qtbot.mouseClick(window.board, Qt.MouseButton.LeftButton, pos=start)
+        qtbot.mouseClick(window.board, Qt.MouseButton.LeftButton, pos=end)
+    else:
+        qtbot.mousePress(window.board, Qt.MouseButton.LeftButton, pos=start)
+        qtbot.mouseMove(window.board, end, delay=20)
+        qtbot.mouseRelease(window.board, Qt.MouseButton.LeftButton, pos=end)
+    assert session.premove == chess.Move.from_uci("g1f3")
+    assert session.moves == "e2e4"  # queue does not mutate confirmed history
+    assert window.cancel_premove_button.isVisible()
+    qtbot.mouseClick(window.cancel_premove_button, Qt.MouseButton.LeftButton)
+    # Restore the intent after also verifying explicit UI cancellation.
+    assert session.premove is None
+    assert session.queue_premove(chess.Move.from_uci("g1f3"))
+    window._refresh_online()
+    window._lichess_game_event(gesture, {"type": "gameState", "moves": "e2e4 e7e5",
+                                         "status": "started"})
+    assert calls == [(gesture, "g1f3", session.pending_request_id)]
+    window._lichess_game_event(gesture, {"type": "gameState", "moves": "e2e4 e7e5",
+                                         "status": "started"})
+    assert len(calls) == 1  # repeated state must not submit the same premove again
+
+
+def test_online_premove_is_discarded_when_server_position_makes_it_illegal(qtbot, tmp_path, monkeypatch):
+    window = MainWindow(QSettings(str(tmp_path / "illegal.ini"), QSettings.Format.IniFormat))
+    qtbot.addWidget(window)
+    calls = []
+    monkeypatch.setattr(window.lichess, "send_move", lambda *args: calls.append(args))
+    session = LichessGameSession("illegal", GameRepository(tmp_path / "illegal.sqlite3"))
+    session.color = chess.WHITE
+    fen = "4k3/8/8/2b5/8/8/8/4K1N1 b - - 0 1"
+    session.apply_event({"type": "gameFull", "initialFen": fen,
+                         "state": {"moves": "", "status": "started"}})
+    window.online_sessions["illegal"] = session
+    window.online_session = session
+    window.show()
+    window._refresh_online()
+    assert session.queue_premove(chess.Move.from_uci("g1f3"))
+    window._lichess_game_event("illegal", {"type": "gameState", "moves": "c5f2",
+                                             "status": "started"})
+    assert session.premove is None
+    assert not calls
