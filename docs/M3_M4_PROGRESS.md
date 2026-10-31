@@ -55,6 +55,8 @@
 - OAuth `puzzle:read` запрашивается отдельным PKCE действием. Токен хранится в отдельном Windows Credential Manager slot и не заменяет Board API token. При последующих явных синхронизациях используется отдельный токен.
 - UI показывает отдельную историю, результат/рейтинг/темы и офлайн-просмотр FEN/решения. Локальный просмотр не отправляет попытку обратно в Lichess.
 - Проверки fake API/данных покрывают puzzle-only OAuth scope, отдельный credential slot, duplicate records/timestamps, повторные попытки одного puzzle, пустую историю, checkpoint и success/theme statistics. Точный итог — в PR #13.
+- На финальном коммите PR #13 `81fe7b6` GitHub Actions Windows / Python 3.12 завершился SUCCESS; в workflow есть deprecation warning действий, переводимых с Node 20 на Node 24.
+- Один `python.exe -m chess_coach --offline` открыл видимое окно с `Офлайн-режим · Lichess отключён`; при снимке также было открыто модальное окно библиотеки с 0 партиями. Процесс остановлен; ручной проход новых функций не выполнялся.
 - Реальный OAuth puzzle:read, API импорт задач и Windows Credential Manager в реальной сессии не проверялись. Владелец должен явно нажать действие и одобрить scope.
 
 ## Оставшиеся ограничения
@@ -62,6 +64,6 @@
 - Полноценные интерактивные фильтры статистики, rating band/phase/ECO ручная проверка и сравнение нескольких движков требуют продолжения.
 - Настоящий import требует explicit OAuth владельца; E2E сети не запускался.
 - Реальный Stockfish не запускался; UCI wiring проверено только fake engine.
-- Windows 3.12 CI для новых stacked PR не запускался; локальная среда — Windows Python 3.11.5, ниже минимального требования проекта.
+- Реальный Lichess full import/puzzle activity и реальный Stockfish не запускались. Локальная среда — Windows Python 3.11.5, ниже минимального требования проекта; GitHub Actions подтверждает Python 3.12 для финального PR head.
 
 Переходы между планами подтверждаются в отдельных reviewable PR; merge не выполняется автоматически.
