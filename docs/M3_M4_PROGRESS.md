@@ -110,3 +110,11 @@
 - После исправления фикстуры задержанной отмены: `pytest -o addopts= tests/test_lichess.py -q` — **80 passed**; `compileall -q src tests` — PASS; `git diff --check` — PASS (есть только предупреждения Git LF/CRLF). Один целевой Qt-тест закрытия был пройден локально; полный Qt-набор намеренно оставлен CI из-за прежнего native crash.
 - GitHub Actions Windows Server 2025 / Python 3.12.10, run **#41251911324 (#20)** на follow-up PR #17 — **SUCCESS, 156 passed**, compileall и isolated offline-window smoke PASS. Это автоматический headless CI, не интерактивный GUI владельца.
 - Реальный Lichess и реальный Stockfish не запускались. Обычный GUI smoke после зафиксированных native crash не проводился.
+
+## Pilot A — свободная локальная доска (draft follow-up поверх PR #17)
+
+- Обычная локальная партия теперь начинается в режиме «Свободная доска (за обе стороны)»: обе стороны делают обычные легальные ходы мышью; цвет из настроек больше не ограничивает мышь. Подпись показывает, чья очередь, а блок проверки предходов скрыт.
+- Отдельный режим «Тренировка предходов (мой цвет)» включает существующий premove и тестовый ход соперника только локально. Переключение режимов сохраняет историю и явно сообщает, если при переходе в свободный режим снят ожидающий предход. Online Lichess premove продолжает использовать прежний путь.
+- Регрессии используют реальные Qt события BoardView: click-click и drag проходят `1.e4 e5 2.Nf3 Nc6`, аннотационные стрелки очищаются после каждого хода; есть проверка переключения режима без сброса линии и сохранения online premove.
+- Windows Python 3.11.5: `pytest tests/test_controller.py -q` — **11 passed**; целевой offscreen Qt набор — **24 passed** (3 local-board/window tests и 21 BoardView/online/local-premove tests); `compileall` — PASS; `git diff --check` — PASS. Полный локальный Qt suite не запускался. Windows Python 3.12 CI для блока ожидает запуска.
+- Native access violation Python 3.11.5/shiboken6 остаётся нерешённой диагностической проблемой; в этой ограниченной серии целевых тестов она не воспроизвелась. Реальные Lichess/OAuth/Stockfish и личные данные не использовались.

@@ -34,6 +34,8 @@ def test_main_window_smoke_and_game_controller_integration(qtbot, tmp_path) -> N
     window.start_local_game()
     window.show()
     assert isinstance(window.board, BoardView)
+    assert window.local_mode_combo.currentData() == "free"
+    assert not window.premove_title.isVisible()
     assert "Не подключено" in window.connection.text()
     assert window.controller.ply == 0
     e2 = window.board._get_board_rect()
@@ -45,6 +47,7 @@ def test_main_window_smoke_and_game_controller_integration(qtbot, tmp_path) -> N
     assert window.controller.ply == 1
     assert window.controller.san_moves() == [(1, "e4", "")]
     assert window.board._board.fen() == window.controller.board.fen()
+    window.local_mode_combo.setCurrentIndex(window.local_mode_combo.findData("premove_training"))
     assert window.controller.queue_premove(chess.Move.from_uci("g1f3"))
     window.refresh()
     assert window.board._queued_premove == chess.Move.from_uci("g1f3")
@@ -83,6 +86,80 @@ def test_evaluation_graph_click_emits_nearest_ply(qtbot):
     qtbot.wait(20)
     qtbot.mouseClick(graph, Qt.MouseButton.LeftButton, pos=QPoint(250, 100))
     assert selected == [2]
+
+
+def test_free_local_board_moves_both_sides_by_clicks_and_drag(qtbot, tmp_path):
+    window = MainWindow(QSettings(str(tmp_path / "free-board.ini"), QSettings.Format.IniFormat),
+                        offline_mode=True)
+    qtbot.addWidget(window)
+    window.start_local_game()
+    window.resize(1100, 760)
+    window.show()
+
+    def pos(square):
+        rect = window.board._get_board_rect()
+        side = rect.width() / 8
+        row, col = window.board._renderer.get_visual_coordinates(square, window.board._flipped)
+        return QPoint(int(rect.x() + (col + 0.5) * side),
+                      int(rect.y() + (row + 0.5) * side))
+
+    def click_move(start, end):
+        qtbot.mouseClick(window.board, Qt.MouseButton.LeftButton, pos=pos(start))
+        qtbot.mouseClick(window.board, Qt.MouseButton.LeftButton, pos=pos(end))
+
+    def drag_move(start, end):
+        qtbot.mousePress(window.board, Qt.MouseButton.LeftButton, pos=pos(start))
+        qtbot.mouseMove(window.board, pos(end), delay=20)
+        qtbot.mouseRelease(window.board, Qt.MouseButton.LeftButton, pos=pos(end))
+
+    assert not window.board._is_premove_turn()
+    click_move(chess.E2, chess.E4)
+    assert window.controller.ply == 1
+    assert window.turn_label.text().startswith("Сейчас ход чёрных")
+    assert "Вы играете белыми" not in window.game_status.text()
+
+    window.board._annotation_arrows.add((chess.E7, chess.E5))
+    click_move(chess.E7, chess.E5)
+    assert window.controller.ply == 2
+    assert not window.board._annotation_arrows
+
+    window.board._annotation_arrows.add((chess.G1, chess.F3))
+    drag_move(chess.G1, chess.F3)
+    assert window.controller.ply == 3
+    assert not window.board._annotation_arrows
+
+    window.board._annotation_arrows.add((chess.B8, chess.C6))
+    drag_move(chess.B8, chess.C6)
+    assert window.controller.ply == 4
+    assert not window.board._annotation_arrows
+    assert window.controller.san_moves() == [(1, "e4", "e5"), (2, "Nf3", "Nc6")]
+    assert window.board._board.fen() == window.controller.board.fen()
+    assert not window.premove_title.isVisible()
+    assert not window.apply_opponent_button.isVisible()
+    assert not window.controller.premove_training
+
+
+def test_local_mode_change_discards_premove_but_preserves_move_history(qtbot, tmp_path):
+    window = MainWindow(QSettings(str(tmp_path / "local-mode-switch.ini"),
+                                  QSettings.Format.IniFormat), offline_mode=True)
+    qtbot.addWidget(window)
+    window.start_local_game()
+    window.show()
+    window.on_move_intent(chess.Move.from_uci("e2e4"))
+    window.local_mode_combo.setCurrentIndex(window.local_mode_combo.findData("premove_training"))
+    assert window.controller.premove_training
+    assert window.controller.queue_premove(chess.Move.from_uci("g1f3"))
+    window.refresh()
+
+    window.local_mode_combo.setCurrentIndex(window.local_mode_combo.findData("free"))
+
+    assert window.controller.premove is None
+    assert window.board._queued_premove is None
+    assert window.controller.san_moves() == [(1, "e4", "")]
+    assert "предход снят" in window.game_status.text()
+    assert not window.premove_title.isVisible()
+    assert window.turn_label.text().startswith("Сейчас ход чёрных")
+    assert window.controller.apply_move_intent(chess.Move.from_uci("e7e5"))
 
 
 def test_explicit_offline_window_never_constructs_or_uses_lichess_credentials(qtbot, tmp_path, monkeypatch):
@@ -365,7 +442,9 @@ def test_cancel_premove_button_clears_queued_intent(qtbot, tmp_path) -> None:
     settings = QSettings(str(tmp_path / "app.ini"), QSettings.Format.IniFormat)
     window = MainWindow(settings)
     qtbot.addWidget(window)
+    window.start_local_game()
     window.controller.apply_move_intent(chess.Move.from_uci("e2e4"))
+    window.local_mode_combo.setCurrentIndex(window.local_mode_combo.findData("premove_training"))
     assert window.controller.queue_premove(chess.Move.from_uci("g1f3"))
     window.refresh()
     assert window.cancel_premove_button.isEnabled()
@@ -380,7 +459,9 @@ def test_new_game_clears_premove_after_confirmation(qtbot, tmp_path, monkeypatch
     settings = QSettings(str(tmp_path / "app.ini"), QSettings.Format.IniFormat)
     window = MainWindow(settings)
     qtbot.addWidget(window)
+    window.start_local_game()
     window.controller.apply_move_intent(chess.Move.from_uci("e2e4"))
+    window.local_mode_combo.setCurrentIndex(window.local_mode_combo.findData("premove_training"))
     assert window.controller.queue_premove(chess.Move.from_uci("g1f3"))
     window.refresh()
     monkeypatch.setattr(
@@ -913,6 +994,7 @@ def test_premove_setting_is_persisted_and_disabling_clears_queued_move(qtbot, tm
     qtbot.addWidget(window)
     window.start_local_game()
     assert window.controller.apply_move_intent(chess.Move.from_uci("e2e4"))
+    window.local_mode_combo.setCurrentIndex(window.local_mode_combo.findData("premove_training"))
     assert window.controller.queue_premove(chess.Move.from_uci("g1f3"))
     window.board.set_premove(chess.Move.from_uci("g1f3"), chess.WHITE)
     window.refresh()

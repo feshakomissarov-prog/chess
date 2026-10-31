@@ -301,6 +301,7 @@ class MainWindow(QMainWindow):
                 self.lichess = None
         self.online_sessions: dict[str, LichessGameSession] = {}
         self.online_session: LichessGameSession | None = None
+        self._local_board_mode = "free"
         self.online_view_ply: int | None = None
         self._screen_mode = "home"
         self._awaiting_game_start = False
@@ -458,6 +459,15 @@ class MainWindow(QMainWindow):
         self.game_status.setStyleSheet("color: #77766f;")
         status_layout.addWidget(self.game_status)
         side_layout.addWidget(status_card)
+        self.local_mode_label = QLabel("Режим локальной доски")
+        side_layout.addWidget(self.local_mode_label)
+        self.local_mode_combo = QComboBox()
+        self.local_mode_combo.addItem("Свободная доска (за обе стороны)", "free")
+        self.local_mode_combo.addItem("Тренировка предходов (мой цвет)", "premove_training")
+        self.local_mode_combo.currentIndexChanged.connect(self._local_board_mode_changed)
+        side_layout.addWidget(self.local_mode_combo)
+        self.local_mode_label.setVisible(False)
+        self.local_mode_combo.setVisible(False)
         self.clock_label = QLabel("Без часов")
         self.clock_label.setStyleSheet("font-size: 18px; font-weight: 700;")
         side_layout.addWidget(self.clock_label)
@@ -534,9 +544,9 @@ class MainWindow(QMainWindow):
         self.history_label.setStyleSheet("color: #77766f;")
         side_layout.addWidget(self.history_label)
 
-        premove_title = QLabel("ПРОВЕРКА ПРЕДХОДОВ")
-        premove_title.setStyleSheet("font-size: 11px; font-weight: 700; color: #77766f;")
-        side_layout.addWidget(premove_title)
+        self.premove_title = QLabel("ПРОВЕРКА ПРЕДХОДОВ")
+        self.premove_title.setStyleSheet("font-size: 11px; font-weight: 700; color: #77766f;")
+        side_layout.addWidget(self.premove_title)
         self.premove_label = QLabel("Один предход можно поставить, пока ходит соперник.")
         self.premove_label.setWordWrap(True)
         side_layout.addWidget(self.premove_label)
@@ -652,7 +662,18 @@ class MainWindow(QMainWindow):
         self.board.set_position(snapshot.board)
         self.board.set_annotation_context("__local__", snapshot.board)
         self.board.set_interaction_enabled(snapshot.live)
+        is_local_mode = self._screen_mode == "local" and local_game_visible
+        is_training = is_local_mode and self._local_board_mode == "premove_training"
+        self.local_mode_label.setVisible(is_local_mode)
+        self.local_mode_combo.setVisible(is_local_mode)
+        for widget in (self.premove_title, self.premove_label, self.cancel_premove_button,
+                       self.opponent_move, self.apply_opponent_button):
+            widget.setVisible(is_training)
         self._apply_preferences()
+        if is_local_mode:
+            self.board.set_premove_allowed(
+                self.settings.value("allow_premoves", True, type=bool) and is_training
+            )
         self.board.set_premove(self.controller.premove, self.controller.player_color)
         viewed_ply = (
             self.controller.ply
@@ -666,11 +687,12 @@ class MainWindow(QMainWindow):
             self.history_label.setText(f"Просмотр хода {snapshot.ply} из {self.controller.ply}")
         else:
             self.history_label.setText("Актуальная позиция")
-        side_name = "белыми" if self.controller.player_color == chess.WHITE else "чёрными"
-        self.turn_label.setText(
-            ("Ход белых" if snapshot.board.turn else "Ход чёрных")
-            + ("  ·  просмотр истории" if not snapshot.live else "")
-        )
+        turn_name = "белых" if snapshot.board.turn == chess.WHITE else "чёрных"
+        if is_local_mode and self._local_board_mode == "free":
+            turn_text = f"Сейчас ход {turn_name}"
+        else:
+            turn_text = "Ход белых" if snapshot.board.turn else "Ход чёрных"
+        self.turn_label.setText(turn_text + ("  ·  просмотр истории" if not snapshot.live else ""))
         opponent_turn = self.controller.board.turn != self.controller.player_color
         legal = (
             list(self.controller.board.legal_moves)
@@ -681,23 +703,27 @@ class MainWindow(QMainWindow):
         for move in legal:
             san = self.controller.board.san(move)
             self.opponent_move.addItem(f"{san}  ({move.uci()})", move.uci())
-        enabled = opponent_turn and self.controller.viewing_live_position and bool(legal)
+        enabled = (is_training and opponent_turn and self.controller.viewing_live_position
+                   and bool(legal))
         self.opponent_move.setEnabled(enabled)
         self.apply_opponent_button.setEnabled(enabled)
         if self.controller.premove is not None:
             self.premove_label.setText(
                 f"Предход: {self.controller.premove.uci()}  ·  Esc отменяет"
             )
-        elif opponent_turn:
-            self.premove_label.setText(
-                f"Вы играете {side_name}. Выберите свою фигуру, затем клетку назначения."
-            )
-        else:
+        elif is_training and opponent_turn:
+            side_name = "белыми" if self.controller.player_color == chess.WHITE else "чёрными"
+            self.premove_label.setText(f"Вы играете {side_name}. Выберите свою фигуру, затем клетку назначения.")
+        elif is_training:
             self.premove_label.setText("Предход появится, когда будет ход соперника.")
         self.cancel_premove_button.setEnabled(self.controller.premove is not None)
         self.clear_marks_button.setEnabled(self.board._annotations_enabled)
         if message:
             self.game_status.setText(message)
+        elif is_local_mode and self._local_board_mode == "free":
+            self.game_status.setText("Свободная доска: делайте ходы за белых и чёрных.")
+        elif is_training:
+            self.game_status.setText("Локальная тренировка предходов.")
         else:
             self.game_status.setText("Локальная тренировочная доска")
 
@@ -910,10 +936,32 @@ class MainWindow(QMainWindow):
         self._review_session = None
         self.board.clear_annotations()
         self.controller.new_game()
+        self._local_board_mode = "free"
+        self.controller.set_premove_training(False)
+        self.local_mode_combo.blockSignals(True)
+        self.local_mode_combo.setCurrentIndex(self.local_mode_combo.findData("free"))
+        self.local_mode_combo.blockSignals(False)
         self._screen_mode = "local"
         self.screen_title.setText("Локальная партия")
         self.screen_stack.setCurrentWidget(self.game_page)
-        self.refresh("Новая локальная партия.")
+        self.refresh("Новая свободная партия. Можно ходить за обе стороны.")
+
+    def _local_board_mode_changed(self, _index: int) -> None:
+        if self._screen_mode != "local":
+            return
+        mode = self.local_mode_combo.currentData()
+        if mode not in {"free", "premove_training"} or mode == self._local_board_mode:
+            return
+        self._local_board_mode = mode
+        discarded = self.controller.set_premove_training(mode == "premove_training")
+        self.board.set_premove(None, self.controller.player_color)
+        if discarded:
+            message = "Режим изменён; ожидавшийся предход снят, история ходов сохранена."
+        elif mode == "free":
+            message = "Свободная доска включена. История ходов сохранена."
+        else:
+            message = "Тренировка предходов включена. История ходов сохранена."
+        self.refresh(message)
 
     def resume_current_game(self) -> None:
         game_id = self._selected_live_game_id
@@ -1060,6 +1108,8 @@ class MainWindow(QMainWindow):
             self.refresh("В локальной партии пока нет хода для отмены.")
 
     def apply_opponent_move(self) -> None:
+        if self._local_board_mode != "premove_training" or not self.controller.premove_training:
+            return
         raw = self.opponent_move.currentData()
         if not raw:
             return
@@ -1646,6 +1696,9 @@ class MainWindow(QMainWindow):
                 self.refresh("Предход не стал легальным и снят.")
 
     def _refresh_online(self, message: str | None = None) -> None:
+        self.local_mode_label.setVisible(False)
+        self.local_mode_combo.setVisible(False)
+        self.premove_title.setVisible(True)
         session = self.online_session
         board = session.board
         render_board = session.render_board
