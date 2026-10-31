@@ -4,6 +4,16 @@
 **Локальный путь владельца:** `G:\project\chess`. У других исполнителей он может быть иным.  
 **Код работает из ветки `main`.** Вся история и документация GitHub доступны следующему Codex и следующему чату без данного диалога.
 
+## Актуализация 01.11.2026 — аудит PR #14 (последняя)
+
+**Новый head:** [draft PR #14](https://github.com/feshakomissarov-prog/chess/pull/14), `fd184182f32b485f16b3c921af42913c30f09284`, base `codex/m4-puzzles`, **не слит**. Цепочка PR #8–#14 остаётся draft. GitHub Actions run [#41247808011](https://github.com/feshakomissarov-prog/chess/actions/runs/41247808011) на Windows/Python 3.12.10: **138 passed**, compileall и offline Qt PASS. Реальные Lichess/OAuth/Stockfish/GUI E2E: **NOT RUN**.
+
+**Что подтверждено кодом:** game export API использует `until` и `division=true`; атомарный archive upsert с SQLite cursor; descending puzzle pagination с checkpoint; улучшение result classification, глобальный human game guard при старте Stockfish, retry-кнопка после restore 429.
+
+**Новое обязательное ТЗ по результатам углублённой проверки:** [PR14_DEEP_AUDIT_AND_ACCEPTANCE.md](specs/PR14_DEEP_AUDIT_AND_ACCEPTANCE.md), review добавлен в [PR #14](https://github.com/feshakomissarov-prog/chess/pull/14). **Остающиеся подтверждённые/существенные проблемы:** raw-only variant вызывает исключение `chess.Board('')` при открытии в библиотеке; `LichessService.close` не отменяет архив/puzzle worker до shutdown writer; сохранение opponent между двумя аккаунтами неверно; долгий backfill может потерять игры из-за `incremental_since=now` и 24h overlap; UCI Stockfish version cache key часто unknown; после неуспешного 429 restore онлайн-кнопки могут активироваться без подтверждения OAuth. **Полный архив пользователя пока не загружать; merge не рекомендован.**
+
+Следующий Codex job: **все пункты большого ТЗ одним заданием, по небольшим блокам A–G с тестами**, один stacked fix PR поверх #14 или аккуратное обновление нужных веток; затем ручная приёмка владельца, малый live pilot, только затем решение о последовательном merge. Не менять Dr.Web, не запускать реальный OAuth/полный импорт/Stockfish без разрешения владельца.
+
 ## Актуализация 01.11.2026 — аудит M3/M4 перед реальным импортом
 
 **Новая спецификация на исправления:** [M3_M4_REVIEW_FIXES_BEFORE_IMPORT.md](specs/M3_M4_REVIEW_FIXES_BEFORE_IMPORT.md).
