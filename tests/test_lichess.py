@@ -728,12 +728,26 @@ def test_completed_analyzer_is_gated_caches_by_engine_and_closes_engine(tmp_path
         def __init__(self):
             self.analyzed = 0
             self.closed = False
+            self.protocol_has_stop = False
         def configure(self, options):
             assert options == {"MultiPV": 1}
-        def analyse(self, board, limit):
+        def analysis(self, board, limit):
             self.analyzed += 1
             score = chess.engine.PovScore(chess.engine.Cp(20 if board.ply() else 0), chess.WHITE)
-            return {"score": score, "depth": 12, "nodes": 100, "pv": list(board.legal_moves)[:1]}
+            info = {"score": score, "depth": 12, "nodes": 100,
+                    "pv": list(board.legal_moves)[:1]}
+            class Analysis:
+                def __init__(self):
+                    self._items = iter([info])
+                    self.stop_calls = 0
+                @property
+                def info(self): return info
+                def __enter__(self): return self
+                def __exit__(self, *_args): self.stop()
+                def __iter__(self): return self
+                def __next__(self): return next(self._items)
+                def stop(self): self.stop_calls += 1
+            return Analysis()
         def quit(self):
             self.closed = True
 
@@ -781,25 +795,129 @@ def test_completed_game_is_blocked_while_another_human_game_is_live(tmp_path):
         analyzer.analyze("finished-a", engine, active_human_game_ids={"live-b"})
 
 
-def test_engine_stop_exception_is_reported_as_cancelled_analysis():
-    from chess_coach.lichess.analysis import _analyze_interruptibly
+def test_engine_cancellation_uses_simple_analysis_result_stop_and_skips_cache(tmp_path):
+    from chess_coach.lichess.analysis import CompletedGameAnalyzer
 
+    repo = GameRepository(tmp_path / "analysis-cancel.sqlite3")
+    repo.save_snapshot("cancel", "startpos", "", "white", "Friend",
+                       False, "-", "finished", "white")
+    engine_path = tmp_path / "fake-engine.exe"
+    engine_path.write_text("fake UCI engine", encoding="utf-8")
+    engines = []
+    for _attempt in range(2):
+        stop_event = threading.Event()
+        analysis_started = threading.Event()
+        result_stopped = threading.Event()
+
+        class FakeAnalysisResult:
+            def __init__(self): self.stop_calls = 0
+            @property
+            def info(self):
+                return {"score": chess.engine.PovScore(chess.engine.Cp(0), chess.WHITE),
+                        "depth": 1, "nodes": 1, "pv": []}
+            def __enter__(self): return self
+            def __exit__(self, *_args): self.stop()
+            def __iter__(self): return self
+            def __next__(self):
+                analysis_started.set()
+                time.sleep(0.12)  # Cancellation must remain watched after the first poll.
+                stop_event.set()
+                if not result_stopped.wait(2):
+                    raise RuntimeError("analysis wasn't stopped")
+                raise StopIteration
+            def stop(self):
+                self.stop_calls += 1
+                result_stopped.set()
+
+        result = FakeAnalysisResult()
+
+        class FakeEngine:
+            id = {"name": "FakeFish", "author": "Test"}
+            def __init__(self): self.closed = False
+            def configure(self, _options): pass
+            def analysis(self, _board, _limit): return result
+            def quit(self): self.closed = True
+
+        engine = FakeEngine()
+        engines.append((engine, result, analysis_started))
+        with pytest.raises(InterruptedError, match="Анализ отменён"):
+            CompletedGameAnalyzer(repo, lambda _path: engine).analyze(
+                "cancel", engine_path, stop_event=stop_event)
+
+    assert len(engines) == 2
+    for engine, result, analysis_started in engines:
+        assert analysis_started.is_set()
+        assert result.stop_calls >= 1
+        assert not hasattr(engine, "stop")  # SimpleEngine.stop() does not exist.
+        assert engine.closed
+    assert repo.list_analyses("cancel") == []
+    repo.shutdown()
+
+
+def test_engine_startup_cancellation_quits_engine_without_analysis(tmp_path):
+    from chess_coach.lichess.analysis import CompletedGameAnalyzer
+
+    repo = GameRepository(tmp_path / "analysis-startup-cancel.sqlite3")
+    repo.save_snapshot("startup", "startpos", "", "white", "Friend",
+                       False, "-", "finished", "white")
+    engine_path = tmp_path / "fake-engine.exe"
+    engine_path.write_text("fake UCI engine", encoding="utf-8")
     stop_event = threading.Event()
-    engine_stopped = threading.Event()
 
-    class StoppableEngine:
-        def analyse(self, _board, _limit):
-            assert engine_stopped.wait(1)
-            raise RuntimeError("engine process stopped")
-        def stop(self):
-            engine_stopped.set()
+    class FakeEngine:
+        id = {"name": "FakeFish"}
+        def __init__(self): self.closed = False
+        def configure(self, _options): pytest.fail("cancelled startup must skip configure")
+        def analysis(self, *_args, **_kwargs): pytest.fail("cancelled startup must skip analysis")
+        def quit(self): self.closed = True
 
-    cancel_timer = threading.Timer(0.02, stop_event.set)
-    cancel_timer.start()
+    engine = FakeEngine()
+    def factory(_path):
+        stop_event.set()
+        return engine
+
     with pytest.raises(InterruptedError, match="Анализ отменён"):
-        _analyze_interruptibly(StoppableEngine(), chess.Board(),
-                               chess.engine.Limit(nodes=10), stop_event)
-    cancel_timer.join()
+        CompletedGameAnalyzer(repo, factory).analyze(
+            "startup", engine_path, stop_event=stop_event)
+    assert engine.closed
+    assert repo.list_analyses("startup") == []
+    repo.shutdown()
+
+
+def test_engine_stream_error_stops_result_quits_engine_and_saves_nothing(tmp_path):
+    from chess_coach.lichess.analysis import CompletedGameAnalyzer
+
+    repo = GameRepository(tmp_path / "analysis-stream-error.sqlite3")
+    repo.save_snapshot("stream-error", "startpos", "", "white", "Friend",
+                       False, "-", "finished", "white")
+    engine_path = tmp_path / "fake-engine.exe"
+    engine_path.write_text("fake UCI engine", encoding="utf-8")
+    stream_stopped = threading.Event()
+
+    class FailingAnalysis:
+        @property
+        def info(self): return {}
+        def __enter__(self): return self
+        def __exit__(self, *_args): self.stop()
+        def __iter__(self): return self
+        def __next__(self): raise RuntimeError("fake info stream failure")
+        def stop(self): stream_stopped.set()
+
+    class FakeEngine:
+        id = {"name": "FakeFish"}
+        def __init__(self): self.closed = False
+        def configure(self, _options): pass
+        def analysis(self, _board, _limit): return FailingAnalysis()
+        def quit(self): self.closed = True
+
+    engine = FakeEngine()
+    with pytest.raises(RuntimeError, match="fake info stream failure"):
+        CompletedGameAnalyzer(repo, lambda _path: engine).analyze(
+            "stream-error", engine_path)
+    assert stream_stopped.is_set()
+    assert engine.closed
+    assert repo.list_analyses("stream-error") == []
+    repo.shutdown()
 
 
 def test_archive_import_keeps_lichess_pgn_evaluations_as_separate_source(tmp_path):

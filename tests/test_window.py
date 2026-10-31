@@ -1,4 +1,6 @@
 import chess
+import chess.engine
+import threading
 import time
 import pytest
 from pathlib import Path
@@ -1058,3 +1060,111 @@ def test_window_close_waits_for_workers_before_shutting_down_sqlite(qtbot, tmp_p
     assert final.isAccepted()
     assert service.close_calls == 2
     assert shutdowns == [True]
+
+
+def test_window_close_cancels_analysis_and_waits_for_engine_quit_before_sqlite(
+        qtbot, tmp_path, monkeypatch):
+    from chess_coach.lichess import analysis as analysis_module
+
+    window = MainWindow(QSettings(str(tmp_path / "close-analysis.ini"), QSettings.Format.IniFormat),
+                        offline_mode=True)
+    qtbot.addWidget(window)
+    window.game_repository.save_snapshot(
+        "close-analysis", "startpos", "", "white", "Friend", False, "-", "finished", "white")
+    engine_path = tmp_path / "fake-stockfish.exe"
+    engine_path.write_text("fake UCI engine", encoding="utf-8")
+
+    started = threading.Event()
+    result_stopped = threading.Event()
+    engine_quit = threading.Event()
+    shutdown_order = []
+    engine_starts = []
+
+    class FakeAnalysisResult:
+        @property
+        def info(self):
+            return {"score": chess.engine.PovScore(chess.engine.Cp(0), chess.WHITE),
+                    "depth": 1, "nodes": 1, "pv": []}
+        def __enter__(self): return self
+        def __exit__(self, *_args): self.stop()
+        def __iter__(self): return self
+        def __next__(self):
+            started.set()
+            if not result_stopped.wait(3):
+                raise RuntimeError("test analysis did not receive stop")
+            raise StopIteration
+        def stop(self): result_stopped.set()
+
+    class FakeEngine:
+        id = {"name": "FakeFish", "author": "Test"}
+        def configure(self, _options): pass
+        def analysis(self, _board, _limit): return FakeAnalysisResult()
+        def quit(self):
+            shutdown_order.append("engine.quit")
+            engine_quit.set()
+
+    engine = FakeEngine()
+    def make_engine(_path):
+        engine_starts.append(True)
+        return engine
+    monkeypatch.setattr(analysis_module.chess.engine.SimpleEngine, "popen_uci", make_engine)
+    repo_shutdown = window.game_repository.shutdown
+    def tracked_shutdown():
+        assert engine_quit.is_set()
+        shutdown_order.append("sqlite.shutdown")
+        repo_shutdown()
+    monkeypatch.setattr(window.game_repository, "shutdown", tracked_shutdown)
+
+    window._start_game_analysis("close-analysis", str(engine_path))
+    worker = window._analysis_thread
+    assert worker is not None
+    qtbot.waitUntil(started.is_set, timeout=2000)
+    window._start_game_analysis("close-analysis", str(engine_path))
+    assert len(engine_starts) == 1
+
+    assert window.close() is False
+    assert window._analysis_stop is not None and window._analysis_stop.is_set()
+    assert not shutdown_order
+    window._close_retry_timer.stop()
+
+    qtbot.waitUntil(lambda: not worker.is_alive(), timeout=4000)
+    assert result_stopped.is_set()
+    assert engine_quit.is_set()
+    assert window.game_repository.list_analyses("close-analysis") == []
+    assert window.close() is True
+    assert shutdown_order[:2] == ["engine.quit", "sqlite.shutdown"]
+
+
+def test_analysis_shutdown_timeout_keeps_window_open_without_killing_worker(
+        qtbot, tmp_path, monkeypatch):
+    window = MainWindow(QSettings(str(tmp_path / "close-analysis-timeout.ini"),
+                                  QSettings.Format.IniFormat), offline_mode=True)
+    qtbot.addWidget(window)
+    stop = threading.Event()
+    clock = [100.0]
+
+    class AliveThread:
+        def __init__(self): self.alive = True
+        def is_alive(self): return self.alive
+
+    worker = AliveThread()
+    window._analysis_stop = stop
+    window._analysis_thread = worker
+    monkeypatch.setattr("chess_coach.window.time.monotonic", lambda: clock[0])
+    window._close_retry_timer.stop()
+    first = QCloseEvent()
+    window.closeEvent(first)
+    assert not first.isAccepted()
+    assert stop.is_set()
+    window._close_retry_timer.stop()
+
+    clock[0] += 11.0
+    timed_out = QCloseEvent()
+    window.closeEvent(timed_out)
+    assert not timed_out.isAccepted()
+    assert window.isEnabled()
+    assert "Stockfish не завершился" in window.home_status.text()
+    assert worker.is_alive()  # No forced process kill or hidden worker detachment.
+    window._close_retry_timer.stop()
+    worker.alive = False
+    window._analysis_thread = None

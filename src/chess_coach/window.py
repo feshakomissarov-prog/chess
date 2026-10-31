@@ -310,6 +310,11 @@ class MainWindow(QMainWindow):
         self._archive_progress_dialog: QProgressDialog | None = None
         self._puzzle_progress_dialog: QProgressDialog | None = None
         self._close_retry_scheduled = False
+        self._analysis_stop: threading.Event | None = None
+        self._analysis_thread: threading.Thread | None = None
+        self._analysis_dialog: QProgressDialog | None = None
+        self._shutdown_requested = False
+        self._analysis_shutdown_deadline: float | None = None
         self.analysis_progress.connect(self._analysis_progress)
         self.analysis_finished.connect(self._analysis_finished)
         self.setWindowTitle("Chess Coach")
@@ -1967,6 +1972,12 @@ class MainWindow(QMainWindow):
         dialog.exec()
 
     def _start_game_analysis(self, game_id: str, engine_path: str) -> None:
+        active_thread = self._analysis_thread
+        if self._shutdown_requested:
+            return
+        if active_thread is not None and active_thread.is_alive():
+            self.home_status.setText("Анализ уже выполняется. Дождитесь его завершения или отмените его.")
+            return
         dialog = QProgressDialog("Запуск Stockfish…", "Отменить", 0, 0, self)
         dialog.setWindowTitle("Послепартийный анализ")
         dialog.setMinimumDuration(0)
@@ -1988,9 +1999,13 @@ class MainWindow(QMainWindow):
                 self.analysis_finished.emit(game_id, result)
             except Exception as exc:
                 self.analysis_finished.emit(game_id, {"error": str(exc)})
-        threading.Thread(target=work, name="chess-coach-analysis", daemon=True).start()
+        thread = threading.Thread(target=work, name="chess-coach-analysis", daemon=True)
+        self._analysis_thread = thread
+        thread.start()
 
     def _analysis_progress(self, game_id: str, done: int, total: int) -> None:
+        if self._shutdown_requested:
+            return
         if getattr(self, "_analysis_dialog", None):
             self._analysis_dialog.setLabelText(f"Анализ позиции {done} из {total}")
             self._analysis_dialog.setRange(0, total)
@@ -2001,6 +2016,8 @@ class MainWindow(QMainWindow):
         if getattr(self, "_analysis_dialog", None):
             self._analysis_dialog.close()
             self._analysis_dialog = None
+        if self._shutdown_requested:
+            return
         if isinstance(result, dict) and result.get("error"):
             QMessageBox.warning(self, "Stockfish", result["error"])
         else:
@@ -2083,6 +2100,19 @@ class MainWindow(QMainWindow):
         self.show_home()
 
     def closeEvent(self, event) -> None:
+        self._shutdown_requested = True
+        analysis_thread = self._analysis_thread
+        analysis_running = bool(analysis_thread and analysis_thread.is_alive())
+        if analysis_running:
+            if self._analysis_shutdown_deadline is None:
+                self._analysis_shutdown_deadline = time.monotonic() + 10.0
+            if self._analysis_stop is not None:
+                self._analysis_stop.set()
+            if self._analysis_dialog is not None:
+                self._analysis_dialog.setLabelText("Останавливаем Stockfish перед закрытием приложения…")
+        else:
+            self._analysis_shutdown_deadline = None
+
         workers_stopped = True
         if self.lichess:
             close_method = self.lichess.close
@@ -2091,11 +2121,21 @@ class MainWindow(QMainWindow):
             except TypeError:
                 close_result = close_method()
             workers_stopped = close_result is not False
-        if not workers_stopped or self.game_repository.has_pending_writes():
+        analysis_stopped = not (analysis_thread and analysis_thread.is_alive())
+        if not workers_stopped or not analysis_stopped or self.game_repository.has_pending_writes():
             event.ignore()
-            self.home_status.setText(
-                "Завершаем сетевые операции и сохраняем подтверждённые данные. "
-                "Окно закроется после безопасной остановки.")
+            self.home_status.setText("Завершаем фоновые операции и сохраняем подтверждённые данные. "
+                                     "Окно закроется после безопасной остановки.")
+            if (analysis_running and self._analysis_shutdown_deadline is not None
+                    and time.monotonic() >= self._analysis_shutdown_deadline):
+                self._analysis_shutdown_deadline = None
+                self._close_retry_scheduled = False
+                self._close_retry_timer.stop()
+                self.setEnabled(True)
+                self.home_status.setText(
+                    "Stockfish не завершился за отведённое время. Приложение оставлено открытым; "
+                    "можно подождать и повторить закрытие.")
+                return
             if not self._close_retry_scheduled:
                 self._close_retry_scheduled = True
                 self.setEnabled(False)

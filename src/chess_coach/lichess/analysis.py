@@ -62,6 +62,8 @@ class CompletedGameAnalyzer:
             boards.append(board.copy())
         engine = self.engine_factory(str(path))
         try:
+            if stop_event is not None and stop_event.is_set():
+                raise InterruptedError("Анализ отменён.")
             identity = dict(engine.id)
             engine_name = str(identity.get("name") or "UCI engine")
             engine_version = json.dumps({
@@ -77,6 +79,8 @@ class CompletedGameAnalyzer:
                 cache["cached"] = True
                 return cache
             engine.configure({"MultiPV": 1})
+            if stop_event is not None and stop_event.is_set():
+                raise InterruptedError("Анализ отменён.")
             assessments = []
             for ply, position in enumerate(boards):
                 if stop_event is not None and stop_event.is_set():
@@ -138,34 +142,50 @@ def _binary_fingerprint(path: Path) -> str:
 
 
 def _analyze_interruptibly(engine, board: chess.Board, limit, stop_event: threading.Event | None):
-    if stop_event is None:
-        return engine.analyse(board, limit)
-    if stop_event.is_set():
+    if stop_event is not None and stop_event.is_set():
         raise InterruptedError("Анализ отменён.")
-    finished = threading.Event()
+    try:
+        analysis = engine.analysis(board, limit)
+    except Exception as exc:
+        if stop_event is not None and stop_event.is_set():
+            raise InterruptedError("Анализ отменён.") from exc
+        raise
 
-    def stop_engine_when_requested() -> None:
+    finished = threading.Event()
+    stop_errors: list[Exception] = []
+
+    def stop_analysis_when_requested() -> None:
+        assert stop_event is not None
         while not finished.is_set():
             if stop_event.wait(0.05):
                 if not finished.is_set():
                     try:
-                        engine.stop()
-                    except Exception:
-                        pass
+                        analysis.stop()
+                    except Exception as exc:
+                        stop_errors.append(exc)
                 return
 
-    stopper = threading.Thread(target=stop_engine_when_requested,
-                               name="chess-coach-engine-cancel", daemon=True)
-    stopper.start()
-    try:
-        result = engine.analyse(board, limit)
-    except Exception as exc:
-        if stop_event.is_set():
-            raise InterruptedError("Анализ отменён.") from exc
-        raise
-    finally:
-        finished.set()
-        stopper.join(timeout=0.2)
-    if stop_event.is_set():
-        raise InterruptedError("Анализ отменён.")
-    return result
+    with analysis:
+        stopper = None
+        if stop_event is not None:
+            stopper = threading.Thread(target=stop_analysis_when_requested,
+                                       name="chess-coach-analysis-cancel", daemon=True)
+            stopper.start()
+        try:
+            for _info in analysis:
+                pass  # Drain streamed updates until the finite search completes or is stopped.
+            if stop_event is not None and stop_event.is_set():
+                error = stop_errors[0] if stop_errors else None
+                raise InterruptedError("Анализ отменён.") from error
+            return analysis.info
+        except Exception as exc:
+            if stop_event is not None and stop_event.is_set() and not isinstance(exc, InterruptedError):
+                error = stop_errors[0] if stop_errors else exc
+                raise InterruptedError("Анализ отменён.") from error
+            raise
+        finally:
+            finished.set()
+            if stopper is not None:
+                # Do not let engine.quit() race a still-running analysis.stop().
+                # This join runs on the analysis worker, never in the GUI thread.
+                stopper.join()
