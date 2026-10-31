@@ -1,0 +1,137 @@
+import chess
+from PySide6.QtCore import QPoint, Qt
+from PySide6.QtWidgets import QInputDialog
+
+from chess_coach.board_view import BoardView
+
+
+def center(board_widget: BoardView, square: int) -> tuple[int, int]:
+    rect = board_widget._get_board_rect()
+    side = rect.width() / 8
+    row, col = board_widget._renderer.get_visual_coordinates(square, board_widget._flipped)
+    return int(rect.x() + (col + 0.5) * side), int(rect.y() + (row + 0.5) * side)
+
+
+def test_click_click_emits_move_intent_without_mutating_widget_board(qtbot) -> None:
+    board = chess.Board()
+    widget = BoardView(board)
+    qtbot.addWidget(widget)
+    widget.resize(600, 600)
+    widget.show()
+    emitted = []
+    widget.move_intent.connect(emitted.append)
+    qtbot.mouseClick(widget, Qt.MouseButton.LeftButton, pos=QPoint(*center(widget, chess.E2)))
+    qtbot.mouseClick(widget, Qt.MouseButton.LeftButton, pos=QPoint(*center(widget, chess.E4)))
+    assert emitted == [chess.Move.from_uci("e2e4")]
+    assert widget._board.fen() == board.fen()
+
+
+def test_illegal_click_target_does_not_emit_move(qtbot) -> None:
+    board = chess.Board()
+    widget = BoardView(board)
+    qtbot.addWidget(widget)
+    widget.resize(600, 600)
+    widget.show()
+    emitted = []
+    widget.move_intent.connect(emitted.append)
+    qtbot.mouseClick(widget, Qt.MouseButton.LeftButton, pos=QPoint(*center(widget, chess.E2)))
+    qtbot.mouseClick(widget, Qt.MouseButton.LeftButton, pos=QPoint(*center(widget, chess.E5)))
+    assert emitted == []
+    assert widget._board.fen() == board.fen()
+
+
+def test_drag_and_drop_emits_intent(qtbot) -> None:
+    widget = BoardView(chess.Board())
+    qtbot.addWidget(widget)
+    widget.resize(600, 600)
+    widget.show()
+    emitted = []
+    widget.move_intent.connect(emitted.append)
+    start, end = QPoint(*center(widget, chess.E2)), QPoint(*center(widget, chess.E4))
+    qtbot.mousePress(widget, Qt.MouseButton.LeftButton, pos=start)
+    qtbot.mouseMove(widget, end, delay=20)
+    qtbot.mouseRelease(widget, Qt.MouseButton.LeftButton, pos=end)
+    assert emitted == [chess.Move.from_uci("e2e4")]
+
+
+def test_flipped_board_keeps_square_coordinates_and_move_intents(qtbot) -> None:
+    widget = BoardView(chess.Board())
+    qtbot.addWidget(widget)
+    widget.resize(600, 600)
+    widget.set_flipped(True)
+    widget.show()
+    emitted = []
+    widget.move_intent.connect(emitted.append)
+    qtbot.mouseClick(widget, Qt.MouseButton.LeftButton, pos=QPoint(*center(widget, chess.E2)))
+    qtbot.mouseClick(widget, Qt.MouseButton.LeftButton, pos=QPoint(*center(widget, chess.E4)))
+    assert emitted == [chess.Move.from_uci("e2e4")]
+
+
+def test_annotation_right_click_and_drag_toggle_without_move(qtbot) -> None:
+    board = chess.Board()
+    widget = BoardView(board)
+    qtbot.addWidget(widget)
+    widget.resize(600, 600)
+    widget.show()
+    a1 = QPoint(*center(widget, chess.A1))
+    c3 = QPoint(*center(widget, chess.C3))
+    qtbot.mouseClick(widget, Qt.MouseButton.RightButton, pos=a1)
+    assert chess.A1 in widget._annotation_squares
+    qtbot.mouseClick(widget, Qt.MouseButton.RightButton, pos=a1)
+    assert chess.A1 not in widget._annotation_squares
+    qtbot.mousePress(widget, Qt.MouseButton.RightButton, pos=a1)
+    qtbot.mouseMove(widget, c3, delay=20)
+    qtbot.mouseRelease(widget, Qt.MouseButton.RightButton, pos=c3)
+    assert (chess.A1, chess.C3) in widget._annotation_arrows
+    assert widget._board.fen() == board.fen()
+
+
+def test_promotion_dialog_offers_all_four_choices(qtbot, monkeypatch) -> None:
+    widget = BoardView(chess.Board("7k/P7/8/8/8/8/8/7K w - - 0 1"))
+    qtbot.addWidget(widget)
+    widget._handling_input = True
+    seen = {}
+
+    def choose(parent, title, label, items, current, editable):
+        seen["items"] = items
+        return "Конь", True
+
+    monkeypatch.setattr(QInputDialog, "getItem", choose)
+    move = widget._find_move(chess.A7, chess.A8)
+    assert seen["items"] == ["Ферзь", "Ладья", "Слон", "Конь"]
+    assert move == chess.Move.from_uci("a7a8n")
+
+
+def test_cancelled_promotion_does_not_create_move_intent(qtbot, monkeypatch) -> None:
+    widget = BoardView(chess.Board("7k/P7/8/8/8/8/8/7K w - - 0 1"))
+    qtbot.addWidget(widget)
+    widget._handling_input = True
+    monkeypatch.setattr(QInputDialog, "getItem", lambda *args: ("", False))
+    assert widget._find_move(chess.A7, chess.A8) is None
+    assert widget._board.piece_at(chess.A7) == chess.Piece(chess.PAWN, chess.WHITE)
+
+
+def test_premove_click_click_and_drag_emit_only_intents(qtbot) -> None:
+    from PySide6.QtCore import QPoint
+
+    position = chess.Board()
+    position.push_uci("e2e4")
+    widget = BoardView(position)
+    qtbot.addWidget(widget)
+    widget.resize(600, 600)
+    widget.show()
+    widget.set_premove(None, chess.WHITE)
+    emitted = []
+    widget.premove_intent.connect(emitted.append)
+
+    qtbot.mouseClick(widget, Qt.MouseButton.LeftButton, pos=QPoint(*center(widget, chess.G1)))
+    qtbot.mouseClick(widget, Qt.MouseButton.LeftButton, pos=QPoint(*center(widget, chess.F3)))
+    assert emitted == [chess.Move.from_uci("g1f3")]
+    assert widget._board.fen() == position.fen()
+
+    emitted.clear()
+    qtbot.mousePress(widget, Qt.MouseButton.LeftButton, pos=QPoint(*center(widget, chess.B1)))
+    qtbot.mouseMove(widget, QPoint(*center(widget, chess.C3)), delay=20)
+    qtbot.mouseRelease(widget, Qt.MouseButton.LeftButton, pos=QPoint(*center(widget, chess.C3)))
+    assert emitted == [chess.Move.from_uci("b1c3")]
+    assert widget._board.fen() == position.fen()
