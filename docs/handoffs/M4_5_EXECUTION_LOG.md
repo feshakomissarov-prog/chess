@@ -202,6 +202,14 @@
 - Проверено на Windows Python 3.12.10 offscreen: `pytest tests/test_m45_batch.py tests/test_m45_analysis_store.py tests/test_window.py::test_batch_analysis_controls_are_explicit_and_resume_after_pause -q` — PASS; compileall/diff-check — PASS. Реальный Stockfish/Lichess/user DB не запускались.
 - Остались R6–R9; следующий блок исправляет PV для missed-opportunity и проверяет legal mover/позицию ответа.
 
+## PR #30 deep review — R7 (2026-11-01)
+
+- R7 code commit `6ebbb8267a4a66748bc3e30dec414e050dead2f3`: общий `phase_at_ply` и repository lookup теперь возвращают middlegame после известной middle boundary даже при неизвестном end boundary. Когда известен только end boundary, предшествующая область остаётся unknown; с двумя неизвестными границы нет ложного дебютного/среднеигрового вывода. SQL-агрегаты, passport и detail используют согласованную CASE policy.
+- Поздняя phase hydration по-прежнему обновляет сохранённые legacy classification phase через `_apply_phase_labels`; канонические move-metrics вычисляют phase на чтении из versioned boundaries, поэтому не требуют дублирования поля/миграции.
+- Регрессии включают обе отсутствующие границы, middle-only, end-only, ранний end boundary, exact boundary ply и late hydration с проверкой `phase_for_ply`, канонического passport metric и legacy phase row.
+- Проверено: Windows Python 3.12.10 offscreen, targeted suite (`test_m45_openings`, `test_m45_profiles`, `test_m45_analysis_store`, `test_m45_move_metrics`, `test_window`) — PASS; compileall/diff-check — PASS.
+- Остались R8–R9; следующий этап — выбрать metric run deterministically, привести coverage к сопоставимым own-move pairs и убрать ложные dashboard claims.
+
 ## PR #30 deep review — R4 (2026-11-01)
 
 - R4 code commit `8c2bb074c23bfe5b0c03dcfca2a880acabce0c10`: изменения/дозагрузка Lichess eval теперь перестраивают `move_metrics` v2 и управляемые opportunity/base-detector events только для этого `analysis_run`, внутри той же SQLite transaction что PGN assessments. Прежние derived rows удаляются перед детерминированной заменой; каскадно удаляются только теги управляемых events. Notes, исходные PGN/ходы, другие runs и другие metric versions сохраняются.
