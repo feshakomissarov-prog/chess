@@ -282,11 +282,11 @@ def test_premove_drag_outside_or_escape_cancels_without_changing_position(qtbot)
     assert not widget._is_dragging
 
 
-def test_server_position_change_cancels_premove_drag_without_emitting_move(qtbot) -> None:
+def test_server_capture_of_held_piece_cancels_drag_without_move(qtbot) -> None:
     from PySide6.QtCore import QPoint, Qt
 
-    position = chess.Board()
-    position.push_uci("e2e4")
+    # Black can capture the held white knight on g1.
+    position = chess.Board("4k3/8/8/8/8/8/7b/4K1N1 b - - 0 1")
     widget = BoardView(position)
     qtbot.addWidget(widget)
     widget.resize(600, 600)
@@ -299,7 +299,7 @@ def test_server_position_change_cancels_premove_drag_without_emitting_move(qtbot
     qtbot.mousePress(widget, Qt.MouseButton.LeftButton, pos=start)
     qtbot.mouseMove(widget, end, delay=20)
     changed = position.copy(stack=True)
-    changed.push_uci("e7e5")
+    changed.push_uci("h2g1")
     widget.set_position(changed)
     qtbot.mouseRelease(widget, Qt.MouseButton.LeftButton, pos=end)
     assert emitted == []
