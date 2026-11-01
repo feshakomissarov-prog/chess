@@ -418,6 +418,12 @@ class LichessService(QObject):
         self._thread(work, "chess-coach-oauth")
 
     def disconnect_account(self) -> None:
+        # A disconnect must cancel ongoing background requests immediately,
+        # before the token is revoked by the worker.
+        if self._archive_stop is not None:
+            self._archive_stop.set()
+        if self._puzzle_stop is not None:
+            self._puzzle_stop.set()
         def work():
             self._connection_stop.set()
             if self._username_challenge_stop:
