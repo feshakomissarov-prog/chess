@@ -4,6 +4,14 @@
 **Локальный путь владельца:** `G:\project\chess`. У других исполнителей он может быть иным.  
 **Код работает из ветки `main`.** Вся история и документация GitHub доступны следующему Codex и следующему чату без данного диалога.
 
+## Актуализация 01.11.2026 — stacked M3/M4 pilot A–F и диагностика G
+
+- Последовательные draft PR #18–#23 построены поверх PR #17; ни один не слит. PR #22 добавляет реальный экран статистики, PR #23 — bounded puzzle pilot. Доска обеих сторон, отдельный `--manual-connect`, bounded archive pilot, безопасная настройка Stockfish и аналитика также описаны в [журнале M3/M4](M3_M4_PROGRESS.md).
+- Блоки A–E: PR #22 head `b87217804e63b8d34ec1bd11158d25efa07d56ff`, Windows CI #41256959528 — 178 passed. Блок F: PR #23 head `426e55898116061301c8589b2b9ad989cc68e868`; кодовый head `737b6765b46fb1899fdbd4c52c3ba0ff3d65dcff` прошёл Windows CI #41257770615 (184 passed). Поздний docs-only commit PR #23 ещё может иметь отдельный workflow run; итоговый stack CI будет повторён на PR G.
+- Локальный Windows Python — **3.11.5**; отдельного Python 3.12+ окружения в этой сессии нет. Python не устанавливался и существующая `.venv` не изменялась. CI подтверждает headless Windows Python 3.12.10. Локальный native crash (`shiboken6.abi3.dll` `0xC0000005`, ранее `ntdll.dll` `0xC0000374`) остаётся нерешённым; Dr.Web не менялся, crash-loop и полный локальный Qt suite не запускались.
+- PR #23: bounded puzzle pilot использует fake transport/временную SQLite; OAuth, реальные puzzle attempts и полный импорт не запускались. Для G добавляются проверенные версии GitHub Actions, runtime diagnostics, а также вручную запускаемый smoke script с защитой от случайного использования пользовательской базы.
+- Блок G оформляется draft PR #24 поверх #23. После CI нужна ручная приёмка владельца по [пилотному ТЗ](specs/M3_M4_REAL_WORLD_PILOT_AND_ANALYTICS_UI.md). Текущий критерий — **READY FOR MANUAL PILOT**, не DONE; слияния не выполнять.
+
 ## Актуализация 01.11.2026 — follow-up глубокого аудита PR #14
 
 - Изменения опубликованы в [draft PR #16](https://github.com/feshakomissarov-prog/chess/pull/16), ветка `codex/pr14-deep-audit-ci` поверх PR #14 (`codex/m3-m4-review-fixes`, base SHA `fd184182f32b485f16b3c921af42913c30f09284`); `main` не менялась. Устаревший PR #15 закрыт как заменённый. Первый Windows CI run #16 выявил stale connected-state setup и неполные test doubles; после исправлений run #17 на SHA `0dd0745` завершился успешно: **152 passed**, compileall и offline-window smoke PASS на Python 3.12.10.

@@ -6,10 +6,13 @@ import chess
 import json
 import time
 import threading
+import platform
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 import tempfile
-from PySide6.QtCore import QProcess, QSettings, Qt, QStandardPaths, QTimer, Signal
+import PySide6
+import shiboken6
+from PySide6.QtCore import QProcess, QSettings, Qt, QStandardPaths, QTimer, Signal, qVersion
 from PySide6.QtGui import QKeySequence, QShortcut, QColor, QPainter, QPen
 from PySide6.QtWidgets import (
     QCheckBox,
@@ -1506,6 +1509,9 @@ class MainWindow(QMainWindow):
         store_type = "Изолированная временная база --offline" if self.offline_mode else "Пользовательская SQLite"
         details = [
             f"Хранилище: {store_type}",
+            f"Режим запуска: {'--offline' if self.offline_mode else '--manual-connect' if self.manual_connect_mode else 'обычный'}",
+            f"Состояние Lichess: {'подключено' if self._lichess_connected else 'не подключено'}",
+            f"Python: {platform.python_version()} · PySide6: {PySide6.__version__} · Qt: {qVersion()} · shiboken6: {shiboken6.__version__}",
             f"Путь к базе (показан по явному запросу): {self.game_repository.path}",
             f"Локальных партий: {count}",
             f"Lichess аккаунт: {username or 'не подключён'}",

@@ -360,6 +360,9 @@ def test_archive_status_discloses_offline_database_and_local_count_on_request(qt
     window.show_archive_status()
 
     assert "Изолированная временная база --offline" in messages[0]
+    assert "Режим запуска: --offline" in messages[0]
+    assert "Python:" in messages[0] and "PySide6:" in messages[0]
+    assert "Состояние Lichess: не подключено" in messages[0]
     assert "Локальных партий: 1" in messages[0]
     assert window.game_repository.path in messages[0]
     assert "Lichess аккаунт: не подключён" in messages[0]
