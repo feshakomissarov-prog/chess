@@ -110,6 +110,21 @@ def test_oauth_account_403_does_not_persist_new_credential():
     assert store.writes == []
 
 
+def test_oauth_requires_nonblank_account_identity_before_persisting():
+    class Callback:
+        def wait(self, state, timeout): return "synthetic-code"
+
+    class Client(AccountClient):
+        def exchange_code(self, *args): return "synthetic-oauth-token"
+
+    store = MemoryStore()
+    request = AuthorizationRequest("https://lichess.test/oauth", "state", "verifier", "http://127.0.0.1/cb")
+    with pytest.raises(LichessError, match="имя аккаунта"):
+        authorize_and_store(Client(result={"username": "   "}), store, Callback(), request)
+    assert store.value is None
+    assert store.writes == []
+
+
 @pytest.mark.parametrize(("status", "body", "content_type", "expected"), [
     (403, b"<html>edge denied</html>", "text/html", "html"),
     (403, b'{"error":"denied"}', "application/json", "json"),
@@ -333,4 +348,3 @@ def test_account_denial_logs_no_token_body_or_account_data(tmp_path, monkeypatch
     assert "example.test" not in contents
     diagnostics._LOGGER.handlers.clear()
     diagnostics._HANDLER = None
-

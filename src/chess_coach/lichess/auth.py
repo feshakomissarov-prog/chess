@@ -247,7 +247,7 @@ def authorize_and_store(
                   response_type=getattr(exc, "response_type", None), error=exc)
         raise
     username = account.get("username")
-    if not isinstance(username, str) or not username:
+    if not isinstance(username, str) or not username.strip():
         raise LichessError("Lichess не вернул имя аккаунта.")
     if is_current is not None and not is_current():
         raise LichessError("Проверка аккаунта устарела; подключение не сохранено.")
@@ -258,4 +258,4 @@ def authorize_and_store(
               stage="oauth")
     log_event("connection_ready", "lichess_auth", correlation_id=correlation_id,
               stage="oauth")
-    return token, username
+    return token, username.strip()
