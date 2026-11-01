@@ -1829,6 +1829,12 @@ class GameRepository:
                                            user_color=user_color)
             result["local_game_accuracy"] = None
             result["local_game_accuracy_formula_id"] = None
+            result["local_accuracy_status"] = {
+                "status": "unsupported",
+                "reason": "Локальная accuracy не рассчитывается: CPL и категории ошибок не являются процентом точности.",
+                "coverage": {"comparable_own_moves": result["decision_coverage"]["comparable_own_moves"],
+                             "own_moves": result["decision_coverage"]["own_moves"]},
+            }
             return result
 
     def list_analyses(self, game_id: str, line_revision: int | None = None) -> list[dict]:
@@ -1898,6 +1904,12 @@ class GameRepository:
                                            user_color=user_color)
             result["local_game_accuracy"] = None
             result["local_game_accuracy_formula_id"] = None
+            result["local_accuracy_status"] = {
+                "status": "unsupported",
+                "reason": "Локальная accuracy не рассчитывается: CPL и категории ошибок не являются процентом точности.",
+                "coverage": {"comparable_own_moves": result["decision_coverage"]["comparable_own_moves"],
+                             "own_moves": result["decision_coverage"]["own_moves"]},
+            }
             return result
 
     @staticmethod

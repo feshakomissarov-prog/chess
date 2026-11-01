@@ -336,6 +336,9 @@ class StatisticsGameDialog(QDialog):
             decision_text = (f"Сравнимость собственных ходов: {comparable_own}/{own_moves}"
                              + ("; первый ход не оценён: нет оценки позиции до хода"
                                 if decision.get("first_own_move_missing_baseline") else ""))
+            accuracy_state = analysis.get("local_accuracy_status") or {}
+            accuracy_reason = accuracy_state.get(
+                "reason", "Локальная accuracy не рассчитывается; CPL не является процентом точности.")
             review_coverage = analysis.get("review_coverage") or {}
             review_text = (f"Selective review: {review_coverage.get('reviewed_moves', 0)} "
                            f"оценённых критических ходов из {review_coverage.get('selected_moves', 0)} "
@@ -347,7 +350,7 @@ class StatisticsGameDialog(QDialog):
             self.graph_layout.addWidget(QLabel(
                 f"Оценено позиций: {scored_positions} / {total_positions}; "
                 f"источник: {source}; статус: {analysis.get('status', 'unknown')}; "
-                f"алгоритм ошибок: {CLASSIFIER_VERSION}\n{decision_text}\n{review_text}"))
+                f"алгоритм ошибок: {CLASSIFIER_VERSION}\n{decision_text}\n{accuracy_reason}\n{review_text}"))
             metrics = analysis.get("move_metrics", [])
             for item in metrics:
                 label = str(item.get("severity", "unknown"))
@@ -719,7 +722,8 @@ class StatisticsDialog(QDialog):
                 error_counts = (f"н/о/з {game.get('own_inaccuracies') or 0}/"
                                 f"{game.get('own_mistakes') or 0}/{game.get('own_blunders') or 0}")
                 accuracy = game.get("owner_lichess_accuracy")
-                accuracy_label = f"Lichess {accuracy:.1f}%" if accuracy is not None else "точность н/д"
+                accuracy_label = (f"Lichess accuracy {accuracy:.1f}%" if accuracy is not None else
+                                  "Lichess accuracy: данных нет")
                 conflict = " · конфликт названия" if game.get("opening_conflict") else ""
                 item = QListWidgetItem(
                     f"{_game_date_label(game)} · {outcome} · "

@@ -315,6 +315,7 @@ def test_game_detail_explains_missing_initial_eval_for_first_own_move(qtbot, tmp
     labels = "\n".join(label.text() for label in dialog.findChildren(QLabel))
     assert "Сравнимость собственных ходов: 1/2" in labels
     assert "первый ход не оценён: нет оценки позиции до хода" in labels
+    assert "CPL и категории ошибок не являются процентом точности" in labels
     assert "статус: complete" in labels  # source scores remain separately complete
 
 

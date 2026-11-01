@@ -607,6 +607,11 @@ def test_lichess_post_move_eval_completeness_does_not_claim_full_own_decision_co
             "source_eval_scored_post_moves": 4, "source_eval_expected_post_moves": 4,
             "source_eval_complete": True,
         }
+        assert detail["local_game_accuracy"] is None
+        assert detail["local_accuracy_status"]["status"] == "unsupported"
+        assert "CPL" in detail["local_accuracy_status"]["reason"]
+        assert detail["local_accuracy_status"]["coverage"] == {
+            "comparable_own_moves": 1, "own_moves": 2}
 
         with_baseline = ('[Event "Archive"]\n[White "Me"]\n[Black "Friend"]\n'
             '[Result "*"]\n\n{ [%eval 0.00] } 1. e4 { [%eval 0.20] } '

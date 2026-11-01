@@ -288,3 +288,10 @@
 - Regression меняет версию detector, отключает выдачу старого candidate и подтверждает: старый event/tag физически сохранён для истории, но отсутствует в активной выдаче.
 - Проверено: Windows Python 3.12.10, analysis-event/profile/store suites — PASS.
 - Далее: R16 accuracy UX contract и затем полный R17/regression/CI.
+
+## PR #30 second-pass review — R16 (2026-11-01)
+
+- R16 оставлен PARTIAL/DEFERRED по методике: `local_game_accuracy` остаётся `NULL`, никакой CPL не переименован в accuracy и Lichess accuracy хранится отдельно. Detail model теперь возвращает unsupported status, причину и покрытие comparable own moves; GUI объясняет почему локальный процент не показывается. История партий отдельно подписывает отсутствие официальных Lichess данных.
+- Regression проверяет null/status/reason/coverage и Qt текст. Конкретную версионированную модель локального accuracy для всех Stockfish-партий в этот fix не добавлял: требуется отдельно доказать шкалу и интерпретацию на синтетическом корпусе.
+- Проверено: Python 3.12.10, repository + Qt offscreen regressions — 2 PASS.
+- Далее: R17 — Fair Play regression, схема/rollback, scale workloads, полный офлайн/Qt набор, PROJECT_STATUS, Windows CI на итоговом SHA.
