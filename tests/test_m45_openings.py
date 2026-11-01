@@ -133,24 +133,24 @@ def test_phase_fallback_uses_board_facts_and_lichess_division_wins(tmp_path):
         repo.shutdown()
 
 
-def test_schema_v15_upgrade_preserves_existing_facts_and_backup(tmp_path):
-    path = tmp_path / "upgrade-v14.sqlite3"
+def test_schema_v16_upgrade_preserves_existing_facts_and_backup(tmp_path):
+    path = tmp_path / "upgrade-v15.sqlite3"
     repo = GameRepository(path)
     repo.save_snapshot("keep", "startpos", "e2e4 e7e5", "white", "Friend", False,
                        "300+0", "finished", "white")
     repo.shutdown()
     with sqlite3.connect(path) as db:
-        db.execute("PRAGMA user_version=14")
+        db.execute("PRAGMA user_version=15")
     upgraded = GameRepository(path)
     try:
-        assert SCHEMA_VERSION == 15
+        assert SCHEMA_VERSION == 16
         assert upgraded.get_game("keep")["moves"] == "e2e4 e7e5"
         with upgraded._connection() as db:
-            assert db.execute("PRAGMA user_version").fetchone()[0] == 15
+            assert db.execute("PRAGMA user_version").fetchone()[0] == 16
             assert db.execute("SELECT COUNT(*) FROM opening_matches").fetchone()[0] == 0
             assert db.execute("PRAGMA integrity_check").fetchone()[0] == "ok"
-        with sqlite3.connect(str(path) + ".pre-m3-v15.bak") as backup:
-            assert backup.execute("PRAGMA user_version").fetchone()[0] == 14
+        with sqlite3.connect(str(path) + ".pre-m3-v16.bak") as backup:
+            assert backup.execute("PRAGMA user_version").fetchone()[0] == 15
             assert backup.execute("SELECT COUNT(*) FROM games").fetchone()[0] == 1
     finally:
         upgraded.shutdown()

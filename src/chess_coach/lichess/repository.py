@@ -18,7 +18,7 @@ import chess
 import chess.pgn
 
 
-SCHEMA_VERSION = 15
+SCHEMA_VERSION = 16
 DEFAULT_PAGE_SIZE = 100
 MAX_PAGE_SIZE = 500
 
@@ -117,6 +117,7 @@ class GameRepository:
                 "white_player": "TEXT NOT NULL DEFAULT '?'",
                 "black_player": "TEXT NOT NULL DEFAULT '?'",
                 "started_at": "TEXT",
+                "game_time_precision": "TEXT NOT NULL DEFAULT 'unknown'",
                 "final_sync_pending": "INTEGER NOT NULL DEFAULT 0",
                 "source": "TEXT NOT NULL DEFAULT 'lichess'",
                 "source_game_id": "TEXT",
@@ -557,12 +558,15 @@ class GameRepository:
         previous = None
         if not (white_player and black_player and started_at):
             with self._connection() as db:
-                previous = db.execute("SELECT white_player, black_player, started_at FROM games "
+                previous = db.execute("SELECT white_player, black_player, started_at,game_time_precision FROM games "
                                       "WHERE game_id=?", (game_id,)).fetchone()
         if previous:
             white_player = white_player or previous["white_player"]
             black_player = black_player or previous["black_player"]
             started_at = started_at or previous["started_at"]
+        precision = _time_precision(started_at)
+        if precision == "unknown" and previous:
+            precision = previous["game_time_precision"] or "unknown"
         if color == "white":
             white_player = white_player or "Вы"
             black_player = black_player or opponent or "?"
@@ -584,9 +588,9 @@ class GameRepository:
         with self._connection() as db:
             db.execute("""INSERT INTO games (
                 game_id, initial_fen, moves, color, opponent, rated, clock, status,
-                winner, updated_at, pgn, white_player, black_player, started_at,
+                winner, updated_at, pgn, white_player, black_player, started_at,game_time_precision,
                 final_sync_pending, source, source_game_id, variant
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'lichess', ?, 'standard')
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'lichess', ?, 'standard')
                 ON CONFLICT(game_id) DO UPDATE SET initial_fen=excluded.initial_fen,
                 moves=excluded.moves, opponent=CASE WHEN ? THEN games.opponent ELSE excluded.opponent END,
                 rated=excluded.rated, clock=excluded.clock, status=excluded.status,
@@ -594,12 +598,13 @@ class GameRepository:
                 color=CASE WHEN ? THEN games.color ELSE excluded.color END,
                 white_player=excluded.white_player, black_player=excluded.black_player,
                 started_at=excluded.started_at,
+                game_time_precision=excluded.game_time_precision,
                 final_sync_pending=excluded.final_sync_pending,
                 source=excluded.source, source_game_id=excluded.source_game_id,
                 variant=excluded.variant""",
                 (game_id, initial_fen, moves, color, opponent, int(rated), clock, status,
                  winner, datetime.now(timezone.utc).isoformat(), pgn, white_player,
-                 black_player, started_at, int(final_sync_pending), game_id,
+                 black_player, started_at, precision, int(final_sync_pending), game_id,
                  int(preserve_existing_color),
                  int(preserve_existing_color)))
             current = db.execute("SELECT line_revision, line_hash FROM game_revisions "
@@ -1092,15 +1097,25 @@ class GameRepository:
         status = ("draw" if result == "1/2-1/2" else "finished"
                   if result in {"1-0", "0-1"} else "unknownFinish")
         clock = parsed.headers.get("TimeControl", "-")
-        started_at = parsed.headers.get("UTCDate") or parsed.headers.get("Date")
-        if started_at and len(started_at) == 10 and started_at[4] == ".":
-            started_at = started_at.replace(".", "-") + "T00:00:00+00:00"
-        if not started_at and record.get("createdAt") is not None:
+        header_date = parsed.headers.get("UTCDate") or parsed.headers.get("Date")
+        started_at = None
+        time_precision = "unknown"
+        if header_date and len(header_date) == 10 and header_date[4] in {".", "-"}:
+            try:
+                parsed_date = datetime.strptime(header_date, "%Y.%m.%d" if header_date[4] == "."
+                                                else "%Y-%m-%d").date()
+                started_at = parsed_date.isoformat() + "T00:00:00+00:00"
+                time_precision = "date_only"
+            except ValueError:
+                pass
+        if started_at is None and record.get("createdAt") is not None:
             try:
                 started_at = datetime.fromtimestamp(int(record["createdAt"]) / 1000,
                     timezone.utc).isoformat()
+                time_precision = "timestamp"
             except (TypeError, ValueError, OverflowError, OSError):
                 started_at = None
+                time_precision = "unknown"
         lichess_assessments = []
         for ply, node in enumerate(parsed.mainline(), start=1):
             evaluation = node.eval()
@@ -1138,13 +1153,17 @@ class GameRepository:
 
         def commit_archive(db: sqlite3.Connection, revision: int, line_hash: str) -> None:
             db.execute("UPDATE games SET source='lichess_archive', source_game_id=?, variant=?, "
+                       "started_at=COALESCE(started_at,?), "
+                       "game_time_precision=CASE WHEN ?='unknown' THEN game_time_precision "
+                       "ELSE ? END, "
                        "raw_checksum=?, raw_pgn=?, last_move_at=COALESCE(?,last_move_at), "
                        "lichess_accuracy_white=COALESCE(?,lichess_accuracy_white), "
                        "lichess_accuracy_black=COALESCE(?,lichess_accuracy_black), "
                        "white_rating=COALESCE(?,white_rating),black_rating=COALESCE(?,black_rating), "
                        "opening_eco=COALESCE(?,opening_eco),opening_name=COALESCE(?,opening_name) "
                        "WHERE game_id=?",
-                       (game_id, variant, raw_hash, raw_pgn, record.get("lastMoveAt"),
+                       (game_id, variant, started_at, time_precision, time_precision,
+                        raw_hash, raw_pgn, record.get("lastMoveAt"),
                         (record.get("accuracy") or {}).get("white"),
                         (record.get("accuracy") or {}).get("black"), white_data.get("rating"),
                         black_data.get("rating"), opening.get("eco"), opening.get("name"), game_id))
@@ -2025,6 +2044,23 @@ def _pgn_date(started_at: str | None) -> str:
         return instant.strftime("%Y.%m.%d")
     except (ValueError, OverflowError, OSError):
         return "????.??.??"
+
+
+def _time_precision(value: str | None) -> str:
+    if not value:
+        return "unknown"
+    text = str(value).strip()
+    if len(text) == 10:
+        try:
+            datetime.strptime(text, "%Y-%m-%d")
+            return "date_only"
+        except ValueError:
+            return "unknown"
+    try:
+        datetime.fromisoformat(text.replace("Z", "+00:00"))
+        return "timestamp"
+    except ValueError:
+        return "unknown"
 
 
 def _line_hash(initial_fen: str, moves: str) -> str:

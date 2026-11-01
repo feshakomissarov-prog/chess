@@ -1,0 +1,153 @@
+from __future__ import annotations
+
+from datetime import datetime, timedelta, timezone
+
+import pytest
+
+from chess_coach.lichess.repository import GameRepository
+from chess_coach.lichess.statistics import StatisticsService
+
+
+def _add_account_game(repo, account_id, index, color, started_at, *, accuracy=85.0,
+                      complete=True, time_control="300+0", label="good"):
+    game_id = f"profile-{index}"
+    moves = "e2e4" if color == "white" else "e2e4 e7e5"
+    repo.save_snapshot(game_id, "startpos", moves, color, "Synthetic", False,
+                       time_control, "finished", color, started_at=started_at)
+    with repo._connection() as db:
+        db.execute("UPDATE games SET source='lichess_archive',"
+                   "lichess_accuracy_white=?,lichess_accuracy_black=? WHERE game_id=?",
+                   (accuracy, accuracy + 2, game_id))
+        db.execute("INSERT INTO account_games(account_id,game_id,remote_id,imported_at,color,"
+                   "player_rating,opponent_rating,opponent,player_name) VALUES (?,?,?,?,?,?,?,?,?)",
+                   (account_id, game_id, game_id, datetime.now(timezone.utc).isoformat(),
+                    color, 1500, 1500, "Synthetic", "Owner"))
+    if complete:
+        line = repo.current_line(game_id)
+        count = len(moves.split())
+        assessments = [{"ply": ply, "white_cp": 0, "depth": 1}
+                       for ply in range(count + 1)]
+        classes = [{"ply": ply, "mover": "white" if ply % 2 else "black",
+                    "eval_loss_cp": 120 if label != "good" else 0, "label": label, "phase": "opening",
+                    "algorithm_version": "synthetic"}
+                   for ply in range(1, count + 1)]
+        repo.save_analysis(game_id, line_revision=line["line_revision"],
+            line_hash=line["line_hash"], source="stockfish", engine_name="FakeFish",
+            engine_version="fixture", parameters={"nodes": 1},
+            assessments=assessments, classifications=classes, status="complete")
+    return game_id
+
+
+def test_profile_uses_90_day_complete_sample_per_color_and_keeps_denominators(tmp_path):
+    repo = GameRepository(tmp_path / "profiles.sqlite3")
+    try:
+        account = repo.ensure_archive_account("ProfileOwner")
+        now = datetime(2026, 11, 1, 12, tzinfo=timezone.utc)
+        for index in range(30):
+            _add_account_game(repo, account, index, "white",
+                (now - timedelta(days=index + 1)).isoformat(), accuracy=80.0)
+        _add_account_game(repo, account, 40, "black", (now - timedelta(days=15)).isoformat(),
+                          accuracy=90.0)
+        # Undated games are retained in history but never silently enter recent windows.
+        _add_account_game(repo, account, 41, "white", None, accuracy=70.0, complete=False)
+
+        profile = StatisticsService(repo).personal_profile(
+            account_id=account, clock="300+0", now=now)
+        white = profile["color_segments"]["white"]
+        black = profile["color_segments"]["black"]
+        assert white["current_window"] == "90 дней"
+        assert white["complete_games"] == 30
+        assert not white["provisional"]
+        assert white["current"]["games"] == 30
+        assert white["current_official_accuracy"] == {
+            "games": 30, "n": 30, "accuracy": 80.0, "source": "lichess"}
+        assert white["current"]["avg_mistakes_per_analyzed_game"] == 0.0
+        diagnostics = white["opening_phase_diagnostics"]
+        assert diagnostics["focus_is_evidence_not_cause"]
+        assert diagnostics["phases"][0]["phase"] == "opening"
+        assert diagnostics["current_focus"] == []
+        assert black["current_window"] == "12 месяцев (расширено)"
+        assert black["provisional"]
+        assert black["current"]["games"] == 1
+        unknown = [row for row in profile["historical_timeline"] if row["period"] == "unknown"]
+        assert len(unknown) == 1
+        assert unknown[0]["games"] == 1
+        assert unknown[0]["accuracy_n"] == 1
+        assert unknown[0]["my_color"] == "white"
+        assert all(row["opportunity_conversion"] is None
+                   for row in profile["historical_timeline"] if row["opportunity_candidates"] == 0)
+    finally:
+        repo.shutdown()
+
+
+def test_current_focus_is_backed_by_opening_phase_and_move_evidence(tmp_path):
+    repo = GameRepository(tmp_path / "focus.sqlite3")
+    try:
+        account = repo.ensure_archive_account("FocusOwner")
+        now = datetime(2026, 11, 1, 12, tzinfo=timezone.utc)
+        for index in range(3):
+            game_id = _add_account_game(repo, account, index, "white",
+                (now - timedelta(days=index + 1)).isoformat(), label="mistake")
+            with repo._connection() as db:
+                db.execute("UPDATE games SET opening_eco='C20',opening_name='King Pawn' WHERE game_id=?",
+                           (game_id,))
+        profile = StatisticsService(repo).personal_profile(account_id=account, clock="300+0", now=now)
+        diagnostics = profile["color_segments"]["white"]["opening_phase_diagnostics"]
+        assert diagnostics["openings"][0]["eco"] == "C20"
+        assert diagnostics["openings"][0]["games"] == 3
+        assert diagnostics["openings"][0]["errors"] == 3
+        # Three games with only three assessed own opening moves are evidence,
+        # but too small to promote an opening-weakness hypothesis.
+        assert not diagnostics["openings"][0]["hypothesis_eligible"]
+        assert diagnostics["phases"][0]["errors"] == 3
+        assert {(row["game_id"], row["ply"], row["label"]) for row in diagnostics["current_focus"]} == {
+            (f"profile-{index}", 1, "mistake") for index in range(3)}
+    finally:
+        repo.shutdown()
+
+
+def test_period_comparison_requires_large_samples_and_similar_analysis_coverage(tmp_path):
+    repo = GameRepository(tmp_path / "period-comparison.sqlite3")
+    try:
+        account = repo.ensure_archive_account("Comparator")
+        now = datetime(2026, 11, 1, 12, tzinfo=timezone.utc)
+        for index in range(3):
+            _add_account_game(repo, account, index,
+                "white", (now - timedelta(days=index)).isoformat())
+        service = StatisticsService(repo)
+        result = service.compare_periods(
+            account_id=account,
+            current_since=(now - timedelta(days=30)).isoformat(), current_until=now.isoformat(),
+            previous_since=(now - timedelta(days=60)).isoformat(),
+            previous_until=(now - timedelta(days=30)).isoformat(), clock="300+0", side="white")
+        assert not result["eligible_for_comparison"]
+        assert result["differences"] is None
+        assert "предварительное" in result["explanation"]
+    finally:
+        repo.shutdown()
+
+
+def test_archive_import_records_date_precision_and_unknown_date_is_not_recent(tmp_path):
+    repo = GameRepository(tmp_path / "date-precision.sqlite3")
+    try:
+        date_pgn = ('[Event "date-only"]\n[White "Me"]\n[Black "Friend"]\n'
+                    '[Date "2026.10.01"]\n[Result "1-0"]\n\n1. e4 1-0\n')
+        repo.import_archive_record("Me", {"id": "date-only", "pgn": date_pgn},
+                                   checkpoint_ms=None, backfill=False)
+        time_pgn = ('[Event "timestamp"]\n[White "Me"]\n[Black "Friend"]\n'
+                    '[Result "1-0"]\n\n1. e4 1-0\n')
+        repo.import_archive_record("Me", {"id": "timestamp", "pgn": time_pgn,
+                                   "createdAt": 1790841600000},
+                                   checkpoint_ms=None, backfill=False)
+        repo.import_archive_record("Me", {"id": "unknown", "pgn": time_pgn},
+                                   checkpoint_ms=None, backfill=False)
+        assert repo.get_game("date-only")["game_time_precision"] == "date_only"
+        assert repo.get_game("timestamp")["game_time_precision"] == "timestamp"
+        assert repo.get_game("unknown")["game_time_precision"] == "unknown"
+        with repo._connection() as db:
+            assert db.execute("PRAGMA user_version").fetchone()[0] == 16
+            assert db.execute("PRAGMA integrity_check").fetchone()[0] == "ok"
+        with pytest.raises(ValueError, match="selected account"):
+            StatisticsService(repo).personal_profile(account_id=None)
+    finally:
+        repo.shutdown()

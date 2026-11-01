@@ -80,6 +80,15 @@ def _puzzle_attempt_summary(attempts: list[dict]) -> str:
             "Повторные попытки одной задачи учитываются отдельно.")
 
 
+def _game_date_label(game: dict) -> str:
+    started = game.get("started_at")
+    if not started:
+        return "дата неизвестна"
+    if game.get("game_time_precision") == "date_only":
+        return f"{str(started)[:10]} (точность до дня)"
+    return str(started)
+
+
 class OnlineGameDialog(QDialog):
     def __init__(self, title: str, include_level: bool = False, parent=None) -> None:
         super().__init__(parent)
@@ -285,7 +294,7 @@ class StatisticsGameDialog(QDialog):
                       f"middlegame={phases['middle_start_ply']}, endgame={phases['end_start_ply']}"
                       if phases else "Границы фаз неизвестны")
         header = QLabel(
-            f"{game.get('started_at') or game.get('updated_at') or 'дата неизвестна'} · "
+            f"{_game_date_label(game)} · "
             f"{game.get('white_player') or 'Белые'} — {game.get('black_player') or 'Чёрные'}\n"
             f"Ваш цвет: {color}; соперник: {opponent}; результат: {result}\n"
             f"Источник оценки: {source}; дебют: {game.get('opening_eco') or ''} "
@@ -447,6 +456,7 @@ class StatisticsDialog(QDialog):
         self.period = QComboBox()
         for title, days in (("Всё время", 0), ("30 дней", 30), ("90 дней", 90), ("1 год", 365)):
             self.period.addItem(title, days)
+        self.period.setCurrentIndex(self.period.findData(90))
         self.clock = QComboBox()
         self.clock.addItem("Любой контроль", "")
         for value in options["clocks"]:
@@ -594,6 +604,10 @@ class StatisticsDialog(QDialog):
             try:
                 summary = self.service.summary(**filters)
                 parties = self.service.game_page(**filters, page=page, page_size=100)
+                if filters["account_id"]:
+                    summary["personal_profile"] = self.service.personal_profile(
+                        account_id=filters["account_id"], clock=filters["clock"],
+                        side=filters["side"], analysis_source=filters["analysis_source"])
                 self.loaded.emit(generation, summary, parties, None)
             except Exception as exc:
                 self.loaded.emit(generation, None, None, str(exc))
@@ -680,7 +694,7 @@ class StatisticsDialog(QDialog):
                 accuracy_label = f"Lichess {accuracy:.1f}%" if accuracy is not None else "точность н/д"
                 conflict = " · конфликт названия" if game.get("opening_conflict") else ""
                 item = QListWidgetItem(
-                    f"{game.get('started_at') or game.get('updated_at')} · {outcome} · "
+                    f"{_game_date_label(game)} · {outcome} · "
                     f"{player} vs {opponent} · {eco} {opening_name}{conflict}\n"
                     f"{accuracy_label} · {error_counts} · {coverage} · "
                     f"{game.get('selected_analysis_source') or 'источник оценки отсутствует'}")
@@ -712,6 +726,61 @@ class StatisticsDialog(QDialog):
                 f"колебания ≥200 CP: {summary['swings_200cp']} · "
                 f"Lichess accuracy (официально): белые {accuracy['white'] if accuracy['white'] is not None else 'нет данных'}, "
                 f"чёрные {accuracy['black'] if accuracy['black'] is not None else 'нет данных'}")
+            profile = summary.get("personal_profile")
+            if isinstance(profile, dict):
+                sections = []
+                for color, segment in profile["color_segments"].items():
+                    stats = segment["current"]
+                    official = segment["current_official_accuracy"]
+                    official_text = (f"{official['accuracy']}% ({official['n']}/{official['games']} игр, Lichess)"
+                                     if official["accuracy"] is not None else
+                                     f"нет официальной accuracy ({official['n']}/{official['games']} игр)")
+                    quality = (f"{stats['own_error_rate_per_100']} ошибок/100 оценённых ходов"
+                               if stats["own_error_rate_per_100"] is not None else "ошибки/100: нет знаменателя")
+                    average_errors = (f"среднее ошибок на анализированную игру: "
+                                      f"{stats['avg_mistakes_per_analyzed_game']} ошибок + "
+                                      f"{stats['avg_blunders_per_analyzed_game']} зевков "
+                                      f"(N={stats['analyzed_games_with_classifications']})")
+                    confidence = "предварительно (<30 полных партий)" if segment["provisional"] else "выборка >=30 полных партий"
+                    sections.append(f"{('Белые' if color == 'white' else 'Чёрные')}, "
+                                    f"{segment['current_window']}: игр {stats['games']}, "
+                                    f"полных анализов {segment['complete_games']}, {confidence}; "
+                                    f"официальная accuracy {official_text}; {quality}; {average_errors}")
+                    diagnostics = segment["opening_phase_diagnostics"]
+                    phase_lines = [f"{item['phase']}: {item['errors']} ошибок / "
+                                   f"{item['evaluated_moves']} оценённых собственных ходов"
+                                   for item in diagnostics["phases"][:3] if item["evaluated_moves"]]
+                    opening_lines = [f"{item['eco']} {item['opening']}: {item['errors']} ошибок / "
+                                     f"{item['evaluated_moves']} ходов в {item['games']} партиях"
+                                     + ("; возможная повторяющаяся проблема требует проверки"
+                                        if item["hypothesis_eligible"] else "; выборки недостаточно для гипотезы")
+                                     for item in diagnostics["openings"][:3] if item["evaluated_moves"]]
+                    focus_lines = [f"{item['game_id']} ply {item['ply']} ({item['phase']}): "
+                                   f"{item['label']} {item['eval_loss_cp']} cp"
+                                   for item in diagnostics["current_focus"][:3]]
+                    sections.append("Срезы по фазам: " + ("; ".join(phase_lines) if phase_lines else "нет данных")
+                                    + "\nСрезы по дебютам: "
+                                    + ("; ".join(opening_lines) if opening_lines else "нет данных")
+                                    + "\nДоказательные позиции для проверки: "
+                                    + ("; ".join(focus_lines) if focus_lines else "нет ошибок в текущем срезе"))
+                timeline = profile.get("historical_timeline") or []
+                history_lines = [f"{item['period']} {('белыми' if item['my_color']=='white' else 'чёрными')}: "
+                                 f"{item['games']} игр, W/D/L {item['wins']}/{item['draws']}/{item['losses']}, "
+                                 f"accuracy {item['official_accuracy'] if item['official_accuracy'] is not None else 'н/д'} "
+                                 f"(n={item['accuracy_n']})"
+                                 for item in timeline[-6:]]
+                comparison = profile["period_comparison_90d_vs_previous_90d"]
+                comparison_text = "Сравнение 90-дневных периодов: " + "; ".join(
+                    ("белые" if color == "white" else "чёрные") + " — " + value["explanation"]
+                    for color, value in comparison.items())
+                self.summary_label.setText(self.summary_label.text() + "\n\nТЕКУЩИЙ ПРОФИЛЬ "
+                    f"(аккаунт; контроль: {profile['clock_scope']})\n" + "\n".join(sections) + "\n"
+                    + comparison_text + "\nИСТОРИЯ ПО МЕСЯЦАМ\n"
+                    + ("\n".join(history_lines) if history_lines else "Исторических партий нет."))
+            elif not self.account.currentData():
+                self.summary_label.setText(self.summary_label.text() +
+                    "\n\nПерсональный профиль: выберите конкретный аккаунт; смешанные аккаунты "
+                    "не используются для вывода о слабых сторонах.")
             self.trend.points = summary["rating_trend"]
             self.trend.update()
             self.page_label.setText(f"Строки {self._page * 100 + 1}–"
@@ -749,9 +818,10 @@ class StatisticsDialog(QDialog):
         detail.exec()
 
     def reset_filters(self) -> None:
-        for combo in (self.account, self.period, self.clock, self.side, self.result_filter,
+        for combo in (self.account, self.clock, self.side, self.result_filter,
                       self.game_source, self.analyzed, self.analysis_source):
             combo.setCurrentIndex(0)
+        self.period.setCurrentIndex(self.period.findData(90))
         self.opponent.clear()
         self.opening.clear()
 

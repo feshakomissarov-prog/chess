@@ -1106,7 +1106,8 @@ def test_statistics_use_move_denominators_partial_coverage_and_keep_accuracy_sep
     ]
     for game_id, winner, color, status in games:
         repo.save_snapshot(game_id, "startpos", "e2e4 e7e5", color, "Opponent",
-                           False, "180+2", status, winner)
+                               False, "180+2", status, winner,
+                               started_at="2026-10-01T12:00:00+00:00" if game_id == "w" else None)
     with repo._connection() as db:
         db.execute("UPDATE games SET lichess_accuracy_white=90,lichess_accuracy_black=80 "
                    "WHERE game_id='w'")
@@ -1139,8 +1140,8 @@ def test_statistics_use_move_denominators_partial_coverage_and_keep_accuracy_sep
     assert summary["avg_cpl_cp"] == 175.0
     assert summary["swings_200cp"] == 1
     assert summary["lichess_accuracy"] == {"white": 90.0, "black": 80.0}
-    assert summary["rating_trend"] == [{"date": repo.get_game("w")["started_at"] or
-                                         repo.get_game("w")["updated_at"],
+    assert summary["rating_trend"] == [{"date": repo.get_game("w")["started_at"],
+                                         "game_time_precision": "timestamp",
                                          "rating": 1500, "game_id": "w"}]
     filtered = StatisticsService(repo).summary(rating_min=1400, rating_max=1600, opening="C20")
     assert filtered["games"] == 1

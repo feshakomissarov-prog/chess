@@ -105,9 +105,11 @@ def test_evaluation_graph_keeps_phase_boundaries_for_rendering(qtbot):
 def test_statistics_screen_filters_asynchronously_and_resets(qtbot, tmp_path):
     repo = GameRepository(tmp_path / "statistics-screen.sqlite3")
     repo.save_snapshot("screen-win", "startpos", "e2e4", "white", "Alice",
-                       False, "180+2", "finished", "white")
+                       False, "180+2", "finished", "white",
+                       started_at="2026-10-31T12:00:00+00:00")
     repo.save_snapshot("screen-draw", "startpos", "d2d4", "black", "Bob",
-                       False, "600+0", "draw", None)
+                       False, "600+0", "draw", None,
+                       started_at="2026-10-30T12:00:00+00:00")
     line = repo.current_line("screen-win")
     repo.save_analysis("screen-win", line_revision=1, line_hash=line["line_hash"],
         source="stockfish", engine_name="FixtureFish", engine_version="1",
@@ -127,6 +129,7 @@ def test_statistics_screen_filters_asynchronously_and_resets(qtbot, tmp_path):
     assert "н/о/з 0/1/0" in win_item.text()
     assert "2/2 поз." in win_item.text()
     assert "stockfish" in win_item.text()
+    assert dialog.period.currentData() == 90
     dialog.result_filter.setCurrentIndex(dialog.result_filter.findData("draw"))
     qtbot.waitUntil(lambda: dialog._query_thread is None and dialog.games.count() == 1
                     and dialog.games.item(0).data(Qt.ItemDataRole.UserRole) == "screen-draw",
