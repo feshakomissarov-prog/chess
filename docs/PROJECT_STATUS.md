@@ -229,3 +229,15 @@ git pull --ff-only
 Windows Actions run [#86](https://github.com/feshakomissarov-prog/chess/actions/runs/41329457378) на code SHA `44782f00374456f35cfc9ab45b453b8fdb3d0ce6` — **SUCCESS**, 310 passed за 201.80 с; Windows Server 2025, Python 3.12.10 x64, PySide6/Qt/shiboken6 6.12.0. `compileall` и isolated offline window initialization PASS. Подробный status каждого R10–R17 и ручные ограничения — в [execution log](handoffs/M4_5_EXECUTION_LOG.md). Final exact-head verification is recorded there.
 
 Документационный head `9ca4b32e75744db980bd4540579a3bbcc12eee65` проверен Windows Actions run [#87](https://github.com/feshakomissarov-prog/chess/actions/runs/41329890613): SUCCESS, 310 passed за 224.16 с; compileall и isolated offline window init PASS. После обновления журнала запускается завершающий точный CI на новом head.
+
+## M4.5.1 U10–U16 — актуальный handoff (2026-11-01)
+
+Продолжение: тот же `codex/m45-batch-analysis`, тот же draft [PR #30](https://github.com/feshakomissarov-prog/chess/pull/30), base `main`. Обязательное ревью-ТЗ: [U10–U16](reviews/PR30_M451_U0_U9_FOLLOWUP_REVIEW_SPEC.md); полный статус этапов и результаты см. [журнал исполнения](handoffs/M4_5_EXECUTION_LOG.md). Исторические статусы выше описывают предыдущие checkpoint и не являются текущим состоянием.
+
+- U10: локальный position evaluation в обычном режиме требует успешного актуального Lichess `/api/account/playing` preflight; активная человеческая игра, неизвестный/усечённый ответ, устаревшая сессия, 429 или disconnect блокируют запуск и отменяют выдачу. Fake-service/fake-engine проверки PASS; абсолютный сетевой race с новой игрой остаётся ограничением короткого lease, реальный Lichess не проверялся.
+- U11–U15: bounded discovery существующего вложенного Stockfish; скрытое до подтверждения решение Lichess Puzzle; честные знаменатели статистики и реально свёрнутые фильтры; реактивная fail-closed готовность Batch Analysis; локальный выбор истории задач по аккаунту без сетевых запросов. Регрессионные тесты добавлены.
+- U16: M4.6 не реализуется; из origin/main перенесён только будущий документ спецификации. Ранее установленный Stockfish 19 проверен UCI без переустановки. Ни личная SQLite, ни OAuth, ни архив не использовались.
+- Локально на Windows Python 3.12.10: полный offscreen набор **350 тестов PASS**, целевые проверки — **13 PASS**. Exact-head Windows CI ещё ожидается; не объявлять его успешным до фактического Actions run.
+- GUI-пилот, Lichess, OAuth, пользовательские данные и анализ двух партий остаются **НЕ ПРОВЕРЕНЫ**. Следующая ручная приёмка должна ограничиться ровно двумя завершёнными партиями после создания пользователем резервной копии собственной SQLite.
+
+PR остаётся draft. M4.6 не начинать до отдельного принятия M4.5/M4.5.1 владельцем.
