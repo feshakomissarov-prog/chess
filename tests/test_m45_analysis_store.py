@@ -3,10 +3,13 @@
 from __future__ import annotations
 
 import sqlite3
+import threading
 
 import pytest
 
 from chess_coach.lichess.repository import GameRepository, SCHEMA_VERSION
+from chess_coach.lichess.archive import ArchiveSync
+from chess_coach.lichess.api import RateLimitError
 
 
 def _seed_repository(path) -> tuple[GameRepository, str]:
@@ -136,3 +139,127 @@ def test_v9_migration_failure_rolls_back_new_ddl_and_keeps_backup_and_facts(
             assert db.execute("SELECT COUNT(*) FROM analysis_jobs").fetchone()[0] == 0
     finally:
         recovered.shutdown()
+
+
+def test_late_lichess_pgn_evaluations_merge_into_one_partial_run_without_erasing_scores(tmp_path):
+    repository = GameRepository(tmp_path / "late-evals.sqlite3")
+    try:
+        partial = {
+            "id": "late-eval-game",
+            "pgn": ('[Event "Archive"]\n[White "Me"]\n[Black "Friend"]\n[Result "*"]\n\n'
+                    '1. e4 { [%eval 0.25,20] } e5 *\n'),
+        }
+        repository.import_archive_record("Me", partial, checkpoint_ms=10, backfill=True)
+        first_runs = repository.list_analyses("late-eval-game")
+        assert len(first_runs) == 1
+        assert first_runs[0]["status"] == "partial"
+        from chess_coach.lichess.statistics import StatisticsService
+        partial_summary = StatisticsService(repository).summary(analysis_source="lichess-pgn")
+        assert partial_summary["analysis_games"] == 1
+        assert partial_summary["evaluated_moves"] == 1
+        first_run_id = first_runs[0]["run_id"]
+        first = repository.find_analysis_cache(
+            "late-eval-game", 1, first_runs[0]["line_hash"], "lichess-pgn", None,
+            {"format": "pgn-eval-v1"})
+        assert len(first["assessments"]) == 1
+        assert first["assessments"][0]["white_cp"] == 25
+
+        refreshed = {
+            **partial,
+            "pgn": ('[Event "Archive"]\n[White "Me"]\n[Black "Friend"]\n[Result "*"]\n\n'
+                    '1. e4 { [%eval 0.10,10] } e5 { [%eval 0.10,10] } *\n'),
+        }
+        repository.import_archive_record("Me", refreshed, checkpoint_ms=11, backfill=True)
+        repository.import_archive_record("Me", refreshed, checkpoint_ms=11, backfill=True)
+
+        runs = repository.list_analyses("late-eval-game")
+        assert len(runs) == 1
+        assert runs[0]["run_id"] == first_run_id
+        assert runs[0]["status"] == "complete"
+        detail = repository.find_analysis_cache(
+            "late-eval-game", 1, runs[0]["line_hash"], "lichess-pgn", None,
+            {"format": "pgn-eval-v1"})
+        assert [(row["ply"], row["white_cp"]) for row in detail["assessments"]] == [
+            (1, 25), (2, 10)]
+        with repository._connection() as db:
+            assert db.execute("SELECT COUNT(*) FROM position_assessments WHERE run_id=?",
+                              (first_run_id,)).fetchone()[0] == 2
+            coverage = db.execute("SELECT scored_positions,comparable_move_pairs "
+                                  "FROM analysis_coverage WHERE run_id=?",
+                                  (first_run_id,)).fetchone()
+        assert tuple(coverage) == (2, 1)
+    finally:
+        repository.shutdown()
+
+
+def test_bounded_eval_refresh_only_requests_incomplete_recent_lines_and_keeps_cursors(tmp_path):
+    repository = GameRepository(tmp_path / "targeted-refresh.sqlite3")
+    try:
+        repository.import_archive_record("Me", {
+            "id": "needs-eval",
+            "pgn": ('[Event "Archive"]\n[White "Me"]\n[Black "Friend"]\n[Result "*"]\n\n'
+                    '1. e4 { [%eval 0.20] } e5 *\n'),
+        }, checkpoint_ms=None, backfill=False)
+        repository.import_archive_record("Me", {
+            "id": "already-covered",
+            "pgn": ('[Event "Archive"]\n[White "Me"]\n[Black "Friend"]\n[Result "*"]\n\n'
+                    '1. d4 { [%eval 0.30] } d5 { [%eval 0.10] } *\n'),
+        }, checkpoint_ms=None, backfill=False)
+        account_id = "lichess:me"
+        before = repository.archive_sync_state(account_id)
+
+        class FakeExportClient:
+            def __init__(self):
+                self.calls = []
+
+            def export_game_pgn(self, token, game_id):
+                self.calls.append((token, game_id))
+                assert token == "fake-token"
+                assert game_id == "needs-eval"
+                return ('[Event "Archive"]\n[White "Me"]\n[Black "Friend"]\n[Result "*"]\n\n'
+                        '1. e4 { [%eval 0.20] } e5 { [%eval 0.10] } *\n')
+
+        client = FakeExportClient()
+        result = ArchiveSync(client, repository).refresh_missing_evaluations(
+            "Me", "fake-token", threading.Event(), limit=10)
+        after = repository.archive_sync_state(account_id)
+        assert result == {"selected": 1, "refreshed": 1, "cancelled": False}
+        assert client.calls == [("fake-token", "needs-eval")]
+        for key in ("backfill_before", "backfill_complete", "backfill_started_at",
+                    "incremental_since"):
+            assert after.get(key) == before.get(key)
+        run = repository.list_analyses("needs-eval")[0]
+        assert run["status"] == "complete"
+        assert repository.list_games_missing_lichess_evaluations(account_id, limit=10) == []
+        with pytest.raises(ValueError, match="1–100"):
+            ArchiveSync(client, repository).refresh_missing_evaluations(
+                "Me", "fake-token", threading.Event(), limit=101)
+    finally:
+        repository.shutdown()
+
+
+def test_targeted_eval_refresh_stops_on_429_without_retrying_or_masking_error(tmp_path):
+    repository = GameRepository(tmp_path / "targeted-refresh-429.sqlite3")
+    try:
+        repository.import_archive_record("Me", {
+            "id": "needs-eval",
+            "pgn": ('[Event "Archive"]\n[White "Me"]\n[Black "Friend"]\n[Result "*"]\n\n'
+                    '1. e4 *\n'),
+        }, checkpoint_ms=None, backfill=False)
+
+        class LimitedClient:
+            calls = 0
+
+            def export_game_pgn(self, _token, _game_id):
+                self.calls += 1
+                raise RateLimitError(75)
+
+        client = LimitedClient()
+        with pytest.raises(RateLimitError) as error:
+            ArchiveSync(client, repository).refresh_missing_evaluations(
+                "Me", "fake-token", threading.Event(), limit=10)
+        assert error.value.retry_after == 75
+        assert client.calls == 1
+        assert len(repository.list_games_missing_lichess_evaluations("lichess:me")) == 1
+    finally:
+        repository.shutdown()

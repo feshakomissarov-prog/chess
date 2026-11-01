@@ -36,6 +36,8 @@ class LichessService(QObject):
     archive_pilot_progress = Signal(int, int, str)
     archive_pilot_finished = Signal(int, int, str)
     archive_game_refresh_finished = Signal(str, str)
+    archive_eval_refresh_progress = Signal(int, int, str)
+    archive_eval_refresh_finished = Signal(int, int, str)
     puzzles_progress = Signal(int)
     puzzles_scanned = Signal(int)
     puzzles_finished = Signal(int, str)
@@ -162,6 +164,40 @@ class LichessService(QObject):
             except Exception as exc:
                 self.archive_game_refresh_finished.emit(game_id, str(exc))
         self._thread(work, "chess-coach-archive-game-refresh")
+
+    def refresh_missing_archive_evaluations(self, *, limit: int = 25) -> None:
+        """Explicit, bounded refresh of missing Lichess PGN evals using saved OAuth only."""
+        if self.repository is None:
+            self.archive_eval_refresh_finished.emit(0, 0, "Архив недоступен.")
+            return
+        if self._archive_stop is not None and not self._archive_stop.is_set():
+            self.archive_eval_refresh_finished.emit(0, 0, "Синхронизация архива уже выполняется.")
+            return
+        stop = threading.Event()
+        self._archive_stop = stop
+
+        def work():
+            refreshed = selected = 0
+            try:
+                token = self.token_store.get()
+                if not token:
+                    raise LichessError("Сначала подключите аккаунт Lichess.")
+                username = self.username or str(self.client.get_account(token)["username"])
+                result = ArchiveSync(self.client, self.repository).refresh_missing_evaluations(
+                    username, token, stop, limit=limit,
+                    progress=lambda done, total, game_id:
+                    self.archive_eval_refresh_progress.emit(done, total, game_id))
+                refreshed = int(result["refreshed"])
+                selected = int(result["selected"])
+                message = ("Обновление оценок отменено." if result["cancelled"] else
+                           "Оценки Lichess обновлены.")
+                self.archive_eval_refresh_finished.emit(refreshed, selected, message)
+            except Exception as exc:
+                self.archive_eval_refresh_finished.emit(refreshed, selected, str(exc))
+            finally:
+                self._archive_stop = None
+
+        self._thread(work, "chess-coach-archive-eval-refresh")
 
     def connect_and_sync_puzzle_activity(self, repository=None,
                                          puzzle_token_store=None) -> None:

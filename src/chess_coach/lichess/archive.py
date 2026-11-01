@@ -163,6 +163,32 @@ class ArchiveSync:
             backfill=False, _return_inserted=True)
         return bool(inserted)
 
+    def refresh_missing_evaluations(self, username: str, token: str,
+                                    stop_event: threading.Event, *, limit: int = 25,
+                                    progress: Callable[[int, int, str], None] | None = None
+                                    ) -> dict[str, int | bool]:
+        """Explicitly hydrate a bounded recent-first set; never moves archive cursors."""
+        if not 1 <= int(limit) <= 100:
+            raise ValueError("Targeted eval refresh is limited to 1–100 games per request.")
+        account_id = self.repository.ensure_archive_account(username)
+        candidates = self.repository.list_games_missing_lichess_evaluations(
+            account_id, limit=int(limit))
+        refreshed = 0
+        for index, game in enumerate(candidates, start=1):
+            if stop_event.is_set():
+                break
+            pgn = self.client.export_game_pgn(token, game["game_id"])
+            # import_archive_record writes game/analysis facts transactionally; with no
+            # checkpoint and an existing account link it does not advance archive cursors.
+            self.repository.import_archive_record(
+                username, {"id": game["game_id"], "pgn": pgn},
+                checkpoint_ms=None, backfill=False)
+            refreshed += 1
+            if progress:
+                progress(refreshed, len(candidates), game["game_id"])
+        return {"selected": len(candidates), "refreshed": refreshed,
+                "cancelled": stop_event.is_set()}
+
     def _backfill(self, username: str, token: str, account_id: str, until_ms: int,
                   stop_event: threading.Event, page_size: int,
                   progress: Callable[[int, str], None] | None) -> int:

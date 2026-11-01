@@ -85,7 +85,8 @@ class StatisticsService:
                            "AND g.pgn NOT LIKE '%[Result \"1/2-1/2\"]%'")
         analysis_exists = ("EXISTS (SELECT 1 FROM analysis_runs ar JOIN game_revisions gr "
                            "ON gr.game_id=ar.game_id AND gr.line_revision=ar.line_revision "
-                           "WHERE ar.game_id=g.game_id AND gr.is_current=1 AND ar.status='complete' "
+                           "WHERE ar.game_id=g.game_id AND gr.is_current=1 "
+                           "AND ar.status IN ('complete','partial') "
                            + ("AND ar.source=? " if analysis_source else "") + ")")
         if analyzed == "yes":
             clauses.append(analysis_exists)
@@ -136,7 +137,7 @@ class StatisticsService:
                   "FROM analysis_runs ar JOIN game_revisions gr "
                   "ON gr.game_id=ar.game_id AND gr.line_revision=ar.line_revision "
                   "JOIN filtered_games fg ON fg.game_id=ar.game_id "
-                  "WHERE gr.is_current=1 AND ar.status='complete' "
+                  "WHERE gr.is_current=1 AND ar.status IN ('complete','partial') "
                   + ("AND ar.source=? " if analysis_source else "") + ")")
         source_params = [analysis_source] if analysis_source else []
         selected = filtered + latest + ", chosen AS (SELECT * FROM latest WHERE rank=1)"

@@ -625,6 +625,29 @@ class GameRepository:
             query += " ORDER BY updated_at DESC"
             return [dict(row) for row in db.execute(query)]
 
+    def list_games_missing_lichess_evaluations(self, account_id: str, *,
+                                                limit: int = 25) -> list[dict]:
+        """Return a bounded recent-first list whose current Lichess PGN evals are incomplete."""
+        limit = max(1, min(100, int(limit)))
+        with self._connection() as db:
+            rows = db.execute(
+                "SELECT g.game_id,gr.line_revision,gr.line_hash,g.started_at,g.variant "
+                "FROM games g JOIN account_games ag ON ag.game_id=g.game_id "
+                "JOIN game_revisions gr ON gr.game_id=g.game_id AND gr.is_current=1 "
+                "WHERE ag.account_id=? AND g.status NOT IN "
+                "('created','started','started_soon','playing') AND g.variant='standard' "
+                "AND NOT EXISTS (SELECT 1 FROM analysis_runs ar "
+                "WHERE ar.game_id=g.game_id AND ar.line_revision=gr.line_revision "
+                "AND ar.line_hash=gr.line_hash AND ar.source='lichess-pgn' "
+                "AND ar.status='complete' AND "
+                "(SELECT COUNT(*) FROM position_assessments pa WHERE pa.run_id=ar.run_id "
+                "AND (pa.white_cp IS NOT NULL OR pa.mate_white IS NOT NULL)) >= "
+                "(SELECT COUNT(*) FROM game_moves gm WHERE gm.game_id=g.game_id "
+                "AND gm.line_revision=gr.line_revision)) "
+                "ORDER BY CASE WHEN g.started_at IS NULL THEN 1 ELSE 0 END,"
+                "g.started_at DESC,g.game_id DESC LIMIT ?", (account_id, limit)).fetchall()
+        return [dict(row) for row in rows]
+
     def search_games(self, query: str = "", *, page: int = 0,
                      page_size: int = DEFAULT_PAGE_SIZE, completed_only: bool = False,
                      source: str | None = None, opponent: str | None = None,
@@ -889,21 +912,61 @@ class GameRepository:
                        "opponent=excluded.opponent,player_name=excluded.player_name",
                        (account_id, game_id, game_id, imported_at, player_color, player_rating,
                         opponent_rating, opponent, white if player_color == "white" else black))
-            if lichess_assessments:
-                existing = db.execute("SELECT 1 FROM analysis_runs WHERE game_id=? AND line_revision=? "
-                                      "AND line_hash=? AND source='lichess-pgn' AND status='complete' "
-                                      "LIMIT 1", (game_id, revision, line_hash)).fetchone()
-                if not existing:
+            eval_parameters = json.dumps({"format": "pgn-eval-v1"}, sort_keys=True)
+            existing_eval_run = db.execute(
+                "SELECT * FROM analysis_runs WHERE game_id=? AND line_revision=? AND line_hash=? "
+                "AND source='lichess-pgn' AND parameters_json=? "
+                "ORDER BY finished_at DESC,run_id DESC LIMIT 1",
+                (game_id, revision, line_hash, eval_parameters)).fetchone()
+            if lichess_assessments or existing_eval_run:
+                now = datetime.now(timezone.utc).isoformat()
+                if existing_eval_run:
+                    run_id = existing_eval_run["run_id"]
+                    changed = False
+                else:
                     run_id = uuid.uuid4().hex
-                    now = datetime.now(timezone.utc).isoformat()
                     db.execute("INSERT INTO analysis_runs VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
                                (run_id, game_id, revision, line_hash, "lichess-pgn", "Lichess", None,
-                                json.dumps({"format": "pgn-eval-v1"}, sort_keys=True), now, now,
-                                "complete", None))
-                    db.executemany("INSERT INTO position_assessments VALUES (?,?,?,?,?,?,?,?,?)",
-                                   [(run_id, game_id, revision, item["ply"], item["white_cp"],
-                                     item["mate_white"], item["depth"], None, "")
-                                    for item in lichess_assessments])
+                                eval_parameters, now, now, "partial", None))
+                    changed = True
+                for item in lichess_assessments:
+                    old = db.execute("SELECT white_cp,mate_white,depth,nodes,pv_uci "
+                                     "FROM position_assessments WHERE run_id=? AND ply=?",
+                                     (run_id, item["ply"])).fetchone()
+                    incoming_has_score = (item["white_cp"] is not None or
+                                          item["mate_white"] is not None)
+                    if old:
+                        old_has_score = old["white_cp"] is not None or old["mate_white"] is not None
+                        incoming_depth = item["depth"]
+                        old_depth = old["depth"]
+                        # Preserve an existing higher-quality assessment when a later
+                        # export is shallower or omits depth; equal/newer depth replaces it.
+                        if not incoming_has_score or (old_has_score and old_depth is not None and
+                                (incoming_depth is None or incoming_depth < old_depth)):
+                            continue
+                        values = (item["white_cp"], item["mate_white"], incoming_depth)
+                        if tuple(old[:3]) != values:
+                            db.execute("UPDATE position_assessments SET white_cp=?,mate_white=?,depth=? "
+                                       "WHERE run_id=? AND ply=?",
+                                       (*values, run_id, item["ply"]))
+                            changed = True
+                    else:
+                        db.execute("INSERT INTO position_assessments VALUES (?,?,?,?,?,?,?,?,?)",
+                                   (run_id, game_id, revision, item["ply"], item["white_cp"],
+                                    item["mate_white"], item["depth"], None, ""))
+                        changed = True
+                expected_positions = db.execute(
+                    "SELECT COUNT(*) FROM game_moves WHERE game_id=? AND line_revision=?",
+                    (game_id, revision)).fetchone()[0]
+                scored_positions = db.execute(
+                    "SELECT COUNT(*) FROM position_assessments WHERE run_id=? "
+                    "AND (white_cp IS NOT NULL OR mate_white IS NOT NULL)", (run_id,)).fetchone()[0]
+                eval_status = "complete" if expected_positions and scored_positions >= expected_positions else "partial"
+                if existing_eval_run and existing_eval_run["status"] != eval_status:
+                    changed = True
+                if changed:
+                    db.execute("UPDATE analysis_runs SET status=?,finished_at=?,error=NULL WHERE run_id=?",
+                               (eval_status, now, run_id))
             if middle_start is not None or end_start is not None:
                 db.execute("INSERT INTO game_phase_boundaries VALUES (?,?,?,?,?,?) "
                            "ON CONFLICT(game_id,line_revision) DO UPDATE SET "
@@ -1074,10 +1137,11 @@ class GameRepository:
                             source: str, engine_version: str | None,
                             parameters: dict) -> dict | None:
         params_json = json.dumps(parameters, sort_keys=True)
+        usable_statuses = "('complete','partial')" if source == "lichess-pgn" else "('complete')"
         with self._connection() as db:
             run = db.execute("SELECT * FROM analysis_runs WHERE game_id=? AND line_revision=? "
                              "AND line_hash=? AND source=? AND engine_version IS ? "
-                             "AND parameters_json=? AND status='complete' "
+                             f"AND parameters_json=? AND status IN {usable_statuses} "
                              "ORDER BY finished_at DESC LIMIT 1",
                              (game_id, line_revision, line_hash, source, engine_version,
                               params_json)).fetchone()
@@ -1107,7 +1171,8 @@ class GameRepository:
                 "SELECT ar.* FROM analysis_runs ar JOIN game_revisions gr "
                 "ON gr.game_id=ar.game_id AND gr.line_revision=ar.line_revision "
                 "WHERE ar.game_id=? AND ar.line_revision=? AND gr.is_current=1 "
-                "AND ar.status='complete' ORDER BY ar.finished_at DESC,ar.run_id DESC LIMIT 1",
+                "AND ar.status IN ('complete','partial') "
+                "ORDER BY ar.finished_at DESC,ar.run_id DESC LIMIT 1",
                 (game_id, line_revision)).fetchone()
             if not run:
                 return None
