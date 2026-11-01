@@ -5,7 +5,7 @@ import sqlite3
 import chess
 
 from chess_coach.lichess.opening_matcher import (
-    DATASET_REVISION, OpeningMatcher, epd_key,
+    DATASET_REVISION, OpeningMatcher, _dataset_digest, epd_key,
 )
 from chess_coach.lichess.phases import PHASE_FALLBACK_VERSION, infer_phase_boundaries
 from chess_coach.lichess.repository import GameRepository, SCHEMA_VERSION
@@ -35,6 +35,13 @@ def test_bundled_cc0_dataset_matches_last_known_position_and_keeps_provenance(tm
         assert StatisticsService(repo).summary(opening=match["eco"])["games"] == 1
     finally:
         repo.shutdown()
+
+
+def test_opening_dataset_checksum_is_stable_across_windows_line_endings():
+    files_lf = [("a.tsv", b"eco\tname\tpgn\nA00\tFixture\t1. e4\n"),
+                ("b.tsv", b"eco\tname\tpgn\nB00\tFixture\t1. d4\n")]
+    files_crlf = [(name, content.replace(b"\n", b"\r\n")) for name, content in files_lf]
+    assert _dataset_digest(files_lf) == _dataset_digest(files_crlf)
 
 
 def test_epd_key_supports_transposed_lines_and_legal_en_passant_identity():

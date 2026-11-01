@@ -21,14 +21,23 @@ def epd_key(board: chess.Board) -> str:
     return " ".join(board.fen(en_passant="legal").split()[:4])
 
 
+def _dataset_digest(files: list[tuple[str, bytes]]) -> str:
+    """Hash canonical UTF-8/LF data so Windows checkout EOL conversion is harmless."""
+    digest = hashlib.sha256()
+    for name, data in files:
+        digest.update(name.encode()); digest.update(b"\0")
+        digest.update(data.replace(b"\r\n", b"\n")); digest.update(b"\0")
+    return digest.hexdigest()
+
+
 def _dataset_rows() -> list[tuple[str, str, str, int, str]]:
     root = files("chess_coach").joinpath("opening_data")
     by_position: list[tuple[str, str, str, int, str]] = []
-    digest = hashlib.sha256()
+    dataset_files = []
     for letter in "abcde":
-        data = root.joinpath(f"{letter}.tsv").read_bytes()
-        digest.update(f"{letter}.tsv".encode()); digest.update(b"\0")
-        digest.update(data); digest.update(b"\0")
+        name = f"{letter}.tsv"
+        data = root.joinpath(name).read_bytes()
+        dataset_files.append((name, data))
         for row in csv.DictReader(io.StringIO(data.decode("utf-8")), delimiter="\t"):
             text = str(row.get("pgn") or "").strip()
             if not text:
@@ -51,7 +60,7 @@ def _dataset_rows() -> list[tuple[str, str, str, int, str]]:
                                         ply, family.strip() or name))
             except (ValueError, KeyError, chess.InvalidMoveError, chess.IllegalMoveError):
                 continue
-    if digest.hexdigest() != DATASET_SHA256:
+    if _dataset_digest(dataset_files) != DATASET_SHA256:
         raise RuntimeError("Bundled opening dataset checksum does not match its pinned revision")
     return by_position
 
