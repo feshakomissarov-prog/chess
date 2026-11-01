@@ -243,6 +243,38 @@ def test_active_game_list_429_is_reported_without_automatic_retry(monkeypatch):
     assert errors and "90" in errors[0]
 
 
+def test_analysis_safety_snapshot_is_one_explicit_fail_closed_request(monkeypatch):
+    class TokenStore:
+        def get(self):
+            return "fake-token"
+
+    class Client:
+        def __init__(self): self.calls = []
+        def get_playing_games(self, token):
+            self.calls.append(token)
+            return [{"gameId": "unopened-human-game", "opponent": {"username": "Friend"}}]
+
+    client = Client()
+    service = LichessService(client=client, token_store=TokenStore())
+    results, errors, workers = [], [], []
+    service.analysis_safety_games_received.connect(lambda request, games: results.append((request, games)))
+    service.analysis_safety_error.connect(lambda request, message: errors.append((request, message)))
+    monkeypatch.setattr(service, "_thread", lambda target, name: (workers.append(name), target()))
+    service.check_active_games_for_analysis("req-1")
+    assert client.calls == ["fake-token"]
+    assert results[0][0] == "req-1" and results[0][1][0]["gameId"] == "unopened-human-game"
+    assert not errors and workers == ["chess-coach-analysis-safety"]
+
+    class BrokenClient:
+        def get_playing_games(self, _token): raise RateLimitError(90)
+    failed = LichessService(client=BrokenClient(), token_store=TokenStore())
+    failures = []
+    failed.analysis_safety_error.connect(lambda request, message: failures.append((request, message)))
+    monkeypatch.setattr(failed, "_thread", lambda target, _name: target())
+    failed.check_active_games_for_analysis("req-429")
+    assert failures and failures[0][0] == "req-429" and "90" in failures[0][1]
+
+
 def test_retry_after_header_is_honored_and_stream_429_blocks_regular_requests():
     fake = FakeTransport([HttpResponse(429, {"Retry-After": "125"}, b"{}")])
     client = LichessClient(fake)
@@ -524,10 +556,10 @@ def test_m3_migration_preserves_legacy_game_creates_revision_and_backup(tmp_path
     assert row["line_revision"] == 1
     assert row["import_error"] is None
     with repo._connection() as migrated:
-        assert migrated.execute("PRAGMA user_version").fetchone()[0] == 8
+        assert migrated.execute("PRAGMA user_version").fetchone()[0] == 9
         assert migrated.execute("SELECT COUNT(*) FROM game_positions").fetchone()[0] == 3
         assert migrated.execute("SELECT san FROM game_moves ORDER BY ply").fetchall()[0][0] == "e4"
-    backup = sqlite3.connect(str(path) + ".pre-m3-v8.bak")
+    backup = sqlite3.connect(str(path) + ".pre-m3-v9.bak")
     try:
         assert backup.execute("PRAGMA integrity_check").fetchone()[0] == "ok"
         assert backup.execute("PRAGMA user_version").fetchone()[0] == 0
@@ -1037,10 +1069,10 @@ def test_statistics_use_move_denominators_partial_coverage_and_keep_accuracy_sep
                           "label": "blunder", "phase": "unknown",
                           "algorithm_version": "test"}])
     summary = StatisticsService(repo).summary(analysis_source="stockfish")
-    assert (summary["games"], summary["wins"], summary["draws"], summary["losses"]) == (3, 1, 1, 1)
-    assert summary["confirmed_moves"] == 6
+    assert (summary["games"], summary["wins"], summary["draws"], summary["losses"]) == (2, 1, 1, 0)
+    assert summary["confirmed_moves"] == 4
     assert summary["evaluated_moves"] == 3
-    assert summary["move_coverage_percent"] == 50.0
+    assert summary["move_coverage_percent"] == 75.0
     assert summary["own_assessed_moves"] == 2
     assert summary["own_error_rate_per_100"] == 100.0
     assert summary["avg_cpl_cp"] == 175.0
@@ -1095,6 +1127,78 @@ def test_statistics_page_is_bounded_for_large_archive(tmp_path):
     assert page["total"] == 1_005
     assert len(page["items"]) == 5
     assert service.summary(result="win")["games"] == 1_005
+
+
+def test_statistics_summary_scales_to_35000_file_backed_games_without_id_bind_lists(tmp_path):
+    from chess_coach.lichess.statistics import StatisticsService
+
+    path = tmp_path / "statistics-35000.sqlite3"
+    repo = GameRepository(path)
+    count = 35_000
+    now = "2026-10-31T00:00:00+00:00"
+    games = []
+    revisions = []
+    moves = []
+    for index in range(count):
+        game_id = f"stress-{index:05}"
+        winner = "white" if index % 2 == 0 else "black"
+        pgn = f'[Result "{ "1-0" if winner == "white" else "0-1" }"]'
+        games.append((game_id, "startpos", "", "white", "Fixture", 0, "-", "mate",
+                      winner, now, pgn, "White", "Black", now, 0, "local", game_id,
+                      "standard", 1, None, None, None, None, 1500, 1500, None, None, None, None))
+        revisions.append((game_id, 1, "startpos", "", pgn, f"hash-{index}", now, 1))
+        if index < 1375:
+            moves.append((game_id, 1, 1, "e2e4", "e4", "white", None, None))
+    with repo._connection() as db:
+        db.executemany("INSERT INTO games(game_id,initial_fen,moves,color,opponent,rated,clock,status,"
+                       "winner,updated_at,pgn,white_player,black_player,started_at,final_sync_pending,"
+                       "source,source_game_id,variant,line_revision,import_error,raw_checksum,raw_pgn,"
+                       "last_move_at,white_rating,black_rating,opening_eco,opening_name,"
+                       "lichess_accuracy_white,lichess_accuracy_black) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                       games)
+        db.executemany("INSERT INTO game_revisions VALUES (?,?,?,?,?,?,?,?)", revisions)
+        db.executemany("INSERT INTO game_moves VALUES (?,?,?,?,?,?,?,?)", moves)
+    service = StatisticsService(repo)
+    summary = service.summary()
+    page = service.game_page(page=0, page_size=100)
+    assert summary["games"] == count
+    assert summary["wins"] == count // 2
+    assert summary["losses"] == count // 2
+    assert summary["confirmed_moves"] == 1375
+    assert len(summary["rating_trend"]) == 500
+    assert page["total"] == count and len(page["items"]) == 100
+    repo.save_snapshot("stress-after-cache", "startpos", "e2e4", "white", "Fixture",
+                       False, "-", "mate", "white")
+    assert service.summary()["games"] == count + 1
+
+
+def test_analysis_source_filter_constrains_default_summary_and_page_selection(tmp_path):
+    from chess_coach.lichess.statistics import StatisticsService
+
+    repo = GameRepository(tmp_path / "statistics-analysis-source.sqlite3")
+    for game_id in ("stockfish-only", "lichess-only", "both", "neither"):
+        repo.save_snapshot(game_id, "startpos", "e2e4", "white", "Opponent",
+                           False, "180+2", "finished", "white")
+    for game_id, sources in (("stockfish-only", ("stockfish",)),
+                             ("lichess-only", ("lichess-pgn",)),
+                             ("both", ("stockfish", "lichess-pgn"))):
+        line = repo.current_line(game_id)
+        for source in sources:
+            repo.save_analysis(game_id, line_revision=1, line_hash=line["line_hash"],
+                source=source, engine_name="Fixture", engine_version="1", parameters={},
+                assessments=[{"ply": 1, "white_cp": 10}], classifications=[])
+    service = StatisticsService(repo)
+    for source in ("stockfish", "lichess-pgn"):
+        default = service.summary(analysis_source=source)
+        assert default["games"] == default["analysis_games"] == 2
+        assert default["wins"] == 2 and default["losses"] == 0 and default["draws"] == 0
+        assert service.game_page(analysis_source=source)["total"] == 2
+        assert service.summary(analysis_source=source, analyzed="yes")["games"] == 2
+        assert service.game_page(analysis_source=source, analyzed="yes")["total"] == 2
+        assert service.summary(analysis_source=source, analyzed="no")["games"] == 2
+        assert service.game_page(analysis_source=source, analyzed="no")["total"] == 2
+    assert service.summary()["games"] == 4
+    assert service.game_page()["total"] == 4
 
 
 def test_statistics_query_cache_invalidates_after_game_and_analysis_writes(tmp_path):
@@ -1297,6 +1401,80 @@ def test_puzzle_pilot_is_bounded_idempotent_and_does_not_move_full_sync_cursor(t
         assert db.execute("PRAGMA user_version").fetchone()[0] >= 8
         assert db.execute("SELECT COUNT(*) FROM puzzle_pilot_runs").fetchone()[0] == 2
     repo.shutdown()
+
+
+def test_puzzle_attempt_identity_ignores_mutable_metadata_but_keeps_events_distinct(tmp_path):
+    from chess_coach.lichess.puzzles import _key
+
+    repo = GameRepository(tmp_path / "puzzle-stable-event.sqlite3")
+    first = {"date": 123456, "win": True,
+             "puzzle": {"id": "stable-p", "fen": chess.STARTING_FEN,
+                        "solution": ["e2e4"], "themes": ["fork", "pin"],
+                        "rating": 1400, "plays": 100}}
+    refreshed = {"date": 123456, "win": True,
+                 "puzzle": {**first["puzzle"], "themes": ["pin", "fork"],
+                            "rating": 1430, "plays": 101}}
+    assert _key(first, "lichess:alice") == _key(refreshed, "lichess:alice")
+    uid, inserted = repo.import_puzzle_activities("Alice", [first])[0]
+    same_uid, inserted_again = repo.import_puzzle_activities("Alice", [refreshed])[0]
+    assert uid == same_uid and inserted and not inserted_again
+    assert repo.puzzle_statistics(repo.ensure_archive_account("Alice"))["attempts"] == 1
+    assert repo.has_puzzle_attempt("Alice", refreshed)
+    with repo._connection() as db:
+        puzzle = db.execute("SELECT puzzle_rating,plays,themes_json FROM puzzles WHERE puzzle_id='stable-p'").fetchone()
+        assert tuple(puzzle) == (1430, 101, '["pin", "fork"]')
+
+    later = {**refreshed, "date": 123457}
+    _uid_later, inserted_later = repo.import_puzzle_activities("Alice", [later])[0]
+    _uid_other_account, inserted_other_account = repo.import_puzzle_activities("Bob", [refreshed])[0]
+    assert inserted_later and inserted_other_account
+    assert repo.puzzle_statistics(repo.ensure_archive_account("Alice"))["attempts"] == 2
+    assert repo.puzzle_statistics(repo.ensure_archive_account("Bob"))["attempts"] == 1
+    repo.shutdown()
+
+
+def test_v8_puzzle_attempt_migration_deduplicates_legacy_uids_and_preserves_pilot_links(tmp_path):
+    path = tmp_path / "legacy-puzzle-v8.sqlite3"
+    repo = GameRepository(path)
+    account_id = repo.ensure_archive_account("LegacyUser")
+    run_id = repo.start_puzzle_pilot(account_id, 5)
+    record_a = {"date": 789, "win": True, "puzzle": {"id": "legacy-p",
+                 "fen": chess.STARTING_FEN, "solution": ["e2e4"], "themes": ["fork"],
+                 "rating": 1200, "plays": 10}}
+    record_b = {"date": 789, "win": True, "puzzle": {**record_a["puzzle"],
+                 "rating": 1220, "plays": 11, "themes": ["fork", "pin"]}}
+    repo.import_puzzle_activities("LegacyUser", [record_a, record_b], pilot_run_id=run_id)
+    with repo._connection() as db:
+        db.execute("DROP INDEX idx_puzzle_attempt_event")
+        duplicate_uid = hashlib.sha256(b"legacy-v8-duplicate-metadata-hash").hexdigest()
+        db.execute("INSERT INTO puzzle_attempts SELECT ?,account_id,puzzle_id,attempt_date_ms,"
+                   "win,source,metadata_json,imported_at FROM puzzle_attempts LIMIT 1",
+                   (duplicate_uid,))
+        db.execute("INSERT INTO puzzle_pilot_run_attempts VALUES (?,?)", (run_id, duplicate_uid))
+        db.execute("UPDATE puzzle_pilot_runs SET new_count=2,received_count=2 WHERE run_id=?", (run_id,))
+        db.execute("PRAGMA user_version=8")
+    repo.shutdown()
+
+    migrated = GameRepository(path)
+    with migrated._connection() as db:
+        attempts = db.execute("SELECT attempt_uid,metadata_json FROM puzzle_attempts").fetchall()
+        links = db.execute("SELECT run_id,attempt_uid FROM puzzle_pilot_run_attempts").fetchall()
+        run = db.execute("SELECT received_count,new_count FROM puzzle_pilot_runs WHERE run_id=?", (run_id,)).fetchone()
+        assert db.execute("PRAGMA user_version").fetchone()[0] == 9
+        assert db.execute("PRAGMA integrity_check").fetchone()[0] == "ok"
+    assert len(attempts) == 1
+    assert len(links) == 1 and links[0][0] == run_id and links[0][1] == attempts[0][0]
+    assert tuple(run) == (2, 2)  # historical run counters are not rewritten
+    assert json.loads(attempts[0][1])["puzzle"]["rating"] in {1200, 1220}
+    backup = sqlite3.connect(str(path) + ".pre-m3-v9.bak")
+    try:
+        assert backup.execute("PRAGMA integrity_check").fetchone()[0] == "ok"
+        assert backup.execute("PRAGMA user_version").fetchone()[0] == 8
+        assert backup.execute("SELECT COUNT(*) FROM puzzle_attempts").fetchone()[0] == 2
+        assert backup.execute("SELECT COUNT(*) FROM puzzle_pilot_run_attempts").fetchone()[0] == 2
+    finally:
+        backup.close()
+    migrated.shutdown()
 
 
 def test_puzzle_pilot_rejects_unbounded_limits_and_records_cancelled_run(tmp_path):

@@ -25,6 +25,8 @@ class LichessService(QObject):
     invitation_cancelled = Signal(str)
     active_games_received = Signal(object)
     active_games_error = Signal(str)
+    analysis_safety_games_received = Signal(str, object)
+    analysis_safety_error = Signal(str, str)
     error = Signal(str)
     move_failed = Signal(str, str, str, int)
     takeback_action_completed = Signal(str, str, int)
@@ -334,6 +336,20 @@ class LichessService(QObject):
                 self.active_games_error.emit(str(exc))
 
         self._thread(work, "chess-coach-active-games")
+
+    def check_active_games_for_analysis(self, request_id: str) -> None:
+        """Take one explicit server snapshot before a user-started local analysis."""
+        def work():
+            try:
+                token = self.token_store.get()
+                if not token:
+                    raise LichessError("Токен Lichess недоступен; безопасность анализа не подтверждена.")
+                games = self.client.get_playing_games(token)
+                self.analysis_safety_games_received.emit(request_id, games)
+            except Exception as exc:
+                self.analysis_safety_error.emit(request_id, str(exc))
+
+        self._thread(work, "chess-coach-analysis-safety")
 
     def connect_account(self) -> None:
         def work():

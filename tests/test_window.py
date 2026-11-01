@@ -686,11 +686,28 @@ def test_stockfish_settings_persist_without_launching_engine(tmp_path) -> None:
     assert loaded.value("stockfish_hash_mb", type=int) == 256
 
 
-def test_stockfish_uci_probe_is_explicit_and_stops_on_timeout(qtbot, tmp_path, monkeypatch):
+def test_saved_custom_node_limit_survives_settings_reopen_and_preset_changes_are_explicit(tmp_path):
+    settings = QSettings(str(tmp_path / "custom-node-limit.ini"), QSettings.Format.IniFormat)
+    settings.setValue("analysis_preset", "normal")
+    settings.setValue("analysis_limit_kind", "nodes")
+    settings.setValue("analysis_limit_value", 333_333)
+    dialog = SettingsDialog(settings)
+    assert dialog.analysis_limit_value.value() == 333_333
+    dialog.save(settings)
+    reopened = SettingsDialog(settings)
+    assert reopened.analysis_limit_value.value() == 333_333
+    reopened.analysis_preset.setCurrentIndex(reopened.analysis_preset.findData("quick"))
+    assert reopened.analysis_limit_value.value() == 25_000
+
+
+def test_stockfish_uci_probe_timeout_waits_for_process_finished(qtbot, tmp_path, monkeypatch):
     import chess_coach.window as window_module
 
     class FakeSignal:
-        def connect(self, callback): self.callback = callback
+        def __init__(self): self.callbacks = []
+        def connect(self, callback): self.callbacks.append(callback)
+        def emit(self, *args):
+            for callback in list(self.callbacks): callback(*args)
 
     class FakeProcess:
         class ProcessState:
@@ -705,36 +722,113 @@ def test_stockfish_uci_probe_is_explicit_and_stops_on_timeout(qtbot, tmp_path, m
             self.finished = FakeSignal()
             self.current_state = self.ProcessState.NotRunning
             self.program = None
-            self.terminated = False
             self.killed = False
+            self.deleted = False
+            self.output = b""
+            self.writes = []
         def start(self, program, _args):
             self.program = program
             self.current_state = self.ProcessState.Running
         def state(self): return self.current_state
-        def terminate(self):
-            self.terminated = True
-            self.current_state = self.ProcessState.NotRunning
-        def kill(self):
-            self.killed = True
-            self.current_state = self.ProcessState.NotRunning
-        def deleteLater(self): pass
+        def write(self, payload): self.writes.append(payload); return len(payload)
+        def readAllStandardOutput(self):
+            payload, self.output = self.output, b""
+            return payload
+        def kill(self): self.killed = True  # completion is intentionally delayed
+        def deleteLater(self): self.deleted = True
         def errorString(self): return "test error"
+        def complete(self):
+            self.current_state = self.ProcessState.NotRunning
+            self.finished.emit(1, 0)
 
     created = []
     monkeypatch.setattr(window_module, "QProcess", FakeProcess)
-    dialog = SettingsDialog(QSettings(str(tmp_path / "probe.ini"), QSettings.Format.IniFormat))
+    dialog = SettingsDialog(QSettings(str(tmp_path / "probe-timeout.ini"), QSettings.Format.IniFormat))
     qtbot.addWidget(dialog)
     dialog.engine_path.setText("C:/user-selected/stockfish.exe")
     assert created == []
     dialog.engine_test.click()
-    assert len(created) == 1
-    assert created[0].program == "C:/user-selected/stockfish.exe"
-    assert dialog._engine_process is created[0]
-    dialog._engine_probe_timeout()
-    assert created[0].killed
+    process = created[0]
+    process.started.emit()
+    assert process.program == "C:/user-selected/stockfish.exe"
+    assert process.writes == [b"uci\n"]
+    dialog._engine_probe_timeout(process)
+    assert process.killed and not process.deleted
+    assert dialog._engine_process is process
+    assert not dialog.engine_test.isEnabled()
+    process.complete()
+    assert process.deleted
     assert dialog._engine_process is None
     assert dialog.engine_test.isEnabled()
     assert "5 секунд" in dialog.engine_test_status.text()
+
+
+def test_stockfish_uci_probe_quits_gracefully_and_close_waits_for_delayed_finished(
+        qtbot, tmp_path, monkeypatch):
+    import chess_coach.window as window_module
+
+    class FakeSignal:
+        def __init__(self): self.callbacks = []
+        def connect(self, callback): self.callbacks.append(callback)
+        def emit(self, *args):
+            for callback in list(self.callbacks): callback(*args)
+
+    class FakeProcess:
+        class ProcessState:
+            NotRunning = 0
+            Running = 1
+        ProcessState = ProcessState
+        def __init__(self, _parent):
+            created.append(self)
+            self.started = FakeSignal()
+            self.readyReadStandardOutput = FakeSignal()
+            self.errorOccurred = FakeSignal()
+            self.finished = FakeSignal()
+            self.current_state = self.ProcessState.NotRunning
+            self.output = b""
+            self.writes = []
+            self.deleted = False
+            self.killed = False
+        def start(self, _program, _args): self.current_state = self.ProcessState.Running
+        def state(self): return self.current_state
+        def write(self, payload): self.writes.append(payload); return len(payload)
+        def readAllStandardOutput(self):
+            payload, self.output = self.output, b""
+            return payload
+        def kill(self): self.killed = True
+        def deleteLater(self): self.deleted = True
+        def errorString(self): return "test error"
+        def complete(self):
+            self.current_state = self.ProcessState.NotRunning
+            self.finished.emit(0, 0)
+
+    created = []
+    monkeypatch.setattr(window_module, "QProcess", FakeProcess)
+    dialog = SettingsDialog(QSettings(str(tmp_path / "probe-close.ini"), QSettings.Format.IniFormat))
+    qtbot.addWidget(dialog)
+    dialog.engine_path.setText("fake-stockfish.exe")
+    dialog.engine_test.click()
+    process = created[0]
+    process.output = b"id name FakeFish\nuciok\n"
+    process.readyReadStandardOutput.emit()
+    assert process.writes[-1] == b"quit\n"
+    assert dialog._engine_process is process and not process.deleted
+    assert not dialog.engine_test.isEnabled()
+
+    dialog.reject()  # repeated close/cancel while graceful shutdown is pending is idempotent
+    assert dialog._engine_process is process and not process.deleted
+    process.complete()
+    assert dialog._engine_process is None and process.deleted
+    assert dialog.engine_test.isEnabled()
+    assert dialog.engine_test_status.text() == "UCI отвечает: FakeFish"
+
+    dialog.engine_test.click()
+    second = created[1]
+    dialog.reject()  # cancellation kills the child but does not destroy its live wrapper
+    assert second.killed and not second.deleted
+    assert dialog._engine_process is second
+    second.complete()
+    assert dialog._engine_process is None and second.deleted
 
 
 def test_cancel_premove_button_clears_queued_intent(qtbot, tmp_path) -> None:
@@ -1181,6 +1275,7 @@ def test_takeback_button_is_clear_for_ai_and_sends_one_yes_request(qtbot, tmp_pa
     qtbot.addWidget(window)
     session = LichessGameSession("ai-takeback", window.game_repository)
     session.opponent = "Lichess AI level 4"
+    session.opponent_title = "BOT"
     session.color = chess.WHITE
     session.apply_event({"type": "gameFull", "initialFen": "startpos",
                          "state": {"moves": "e2e4 e7e5", "status": "started"}})
@@ -1213,6 +1308,7 @@ def test_ai_takeback_errors_never_rewind_server_position(qtbot, tmp_path, monkey
     qtbot.addWidget(window)
     session = LichessGameSession(f"ai-takeback-{status}", window.game_repository)
     session.opponent = "Lichess AI level 4"
+    session.opponent_title = "BOT"
     session.color = chess.WHITE
     session.apply_event({"type": "gameFull", "initialFen": "startpos",
                          "state": {"moves": "e2e4 e7e5", "status": "started"}})
@@ -1491,6 +1587,8 @@ def test_window_close_cancels_analysis_and_waits_for_engine_quit_before_sqlite(
         engine_starts.append(True)
         return engine
     monkeypatch.setattr(analysis_module.chess.engine.SimpleEngine, "popen_uci", make_engine)
+    monkeypatch.setattr(QMessageBox, "question",
+                        lambda *_args: QMessageBox.StandardButton.Yes)
     repo_shutdown = window.game_repository.shutdown
     def tracked_shutdown():
         assert engine_quit.is_set()
@@ -1516,6 +1614,61 @@ def test_window_close_cancels_analysis_and_waits_for_engine_quit_before_sqlite(
     assert window.game_repository.list_analyses("close-analysis") == []
     assert window.close() is True
     assert shutdown_order[:2] == ["engine.quit", "sqlite.shutdown"]
+
+
+def test_connected_analysis_is_blocked_by_unopened_human_game_and_allowed_only_for_proven_bot(
+        qtbot, tmp_path, monkeypatch):
+    window = MainWindow(QSettings(str(tmp_path / "analysis-fair-play.ini"),
+                                  QSettings.Format.IniFormat), offline_mode=True)
+    qtbot.addWidget(window)
+    window._lichess_connected = True
+    requests = []
+    class ConnectedService:
+        def check_active_games_for_analysis(self, request_id): requests.append(request_id)
+    window.lichess = ConnectedService()
+    launches = []
+    monkeypatch.setattr(window, "_launch_game_analysis", lambda *args, **kwargs: launches.append((args, kwargs)))
+    monkeypatch.setattr(QMessageBox, "warning", lambda *_args: QMessageBox.StandardButton.Ok)
+
+    window._start_game_analysis("finished-game", "fake-stockfish")
+    assert len(requests) == 1 and not launches
+    window._analysis_safety_games_received(requests[-1], [
+        {"gameId": "unopened-human-game", "opponent": {"username": "Friend"}}])
+    assert not launches
+    assert window._analysis_stop is None
+
+    window._start_game_analysis("finished-game", "fake-stockfish")
+    window._analysis_safety_games_received(requests[-1], [
+        {"gameId": "ai-game", "opponent": {"username": "stockfish", "title": "BOT"}}])
+    assert len(launches) == 1
+    assert window._active_game_is_human({"opponent": {"username": "Lichess AI"}})
+
+
+def test_connected_analysis_fails_closed_on_snapshot_error_and_new_human_game_start(
+        qtbot, tmp_path, monkeypatch):
+    window = MainWindow(QSettings(str(tmp_path / "analysis-fail-closed.ini"),
+                                  QSettings.Format.IniFormat), offline_mode=True)
+    qtbot.addWidget(window)
+    window._lichess_connected = True
+    requests = []
+    class ConnectedService:
+        def check_active_games_for_analysis(self, request_id): requests.append(request_id)
+    window.lichess = ConnectedService()
+    launches = []
+    warnings = []
+    monkeypatch.setattr(window, "_launch_game_analysis", lambda *args, **kwargs: launches.append(args))
+    monkeypatch.setattr(QMessageBox, "warning", lambda *args: warnings.append(args))
+
+    window._start_game_analysis("finished-game", "fake-stockfish")
+    window._analysis_safety_error(requests[-1], "HTTP 429")
+    assert not launches and warnings
+
+    stop = threading.Event()
+    window._analysis_stop = stop
+    window._lichess_event({"type": "gameStart", "game": {
+        "gameId": "new-human-game", "color": "white",
+        "opponent": {"username": "Friend"}}})
+    assert stop.is_set()
 
 
 def test_analysis_shutdown_timeout_enters_read_only_then_repeated_close_finishes(

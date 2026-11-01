@@ -7,7 +7,7 @@ import time
 from typing import Callable
 
 from .api import LichessClient
-from .repository import GameRepository
+from .repository import GameRepository, puzzle_attempt_uid
 
 _LICHESS_EPOCH_MS = 1_356_998_400_070
 
@@ -89,11 +89,11 @@ class PuzzleActivitySync:
                     token, stop_event, before=cursor, max_items=page_size))
                 if stop_event.is_set():
                     break
-                records = self._expand_boundary(token, stop_event, records, page_size)
+                records = self._expand_boundary(token, stop_event, records, page_size, account_id)
                 dates = [int(record.get("date", 0)) for record in records if record.get("date") is not None]
-                fresh = [record for record in records if _key(record) not in seen]
+                fresh = [record for record in records if _key(record, account_id) not in seen]
                 for record in fresh:
-                    seen.add(_key(record))
+                    seen.add(_key(record, account_id))
                 import_page(fresh, backfill=True)
                 if len(records) < page_size:
                     break
@@ -121,13 +121,13 @@ class PuzzleActivitySync:
                 token, stop_event, before=cursor, max_items=page_size))
             if stop_event.is_set():
                 break
-            records = self._expand_boundary(token, stop_event, records, page_size)
+            records = self._expand_boundary(token, stop_event, records, page_size, account_id)
             dates = [int(record.get("date", 0)) for record in records if record.get("date") is not None]
             older_than_window = any(date <= lower_bound for date in dates)
             relevant = [record for record in records if lower_bound < int(record.get("date", 0)) <= target]
-            fresh = [record for record in relevant if _key(record) not in seen]
+            fresh = [record for record in relevant if _key(record, account_id) not in seen]
             for record in fresh:
-                seen.add(_key(record))
+                seen.add(_key(record, account_id))
             import_page(fresh)
             if len(records) < page_size or older_than_window:
                 break
@@ -145,7 +145,8 @@ class PuzzleActivitySync:
         return count
 
     def _expand_boundary(self, token: str, stop_event: threading.Event,
-                         records: list[dict], page_size: int) -> list[dict]:
+                         records: list[dict], page_size: int,
+                         account_id: str = "") -> list[dict]:
         """Fetch a bounded wider window when a page may split same-ms attempts."""
         if len(records) < page_size or not records:
             return records
@@ -154,13 +155,18 @@ class PuzzleActivitySync:
             token, stop_event, since=oldest, before=oldest + 1, max_items=10_000))
         if len(wide) >= 10_000:
             raise RuntimeError("More than 10000 puzzle attempts share a timestamp; pagination cannot prove completeness.")
-        combined = {_key(record): record for record in records}
-        combined.update({_key(record): record for record in wide})
+        combined = {_key(record, account_id): record for record in records}
+        combined.update({_key(record, account_id): record for record in wide})
         return sorted(combined.values(), key=lambda item: int(item.get("date", 0)), reverse=True)
 
 
-def _key(record: dict) -> str:
-    import hashlib
-    import json
-    return hashlib.sha256(json.dumps(record, sort_keys=True, separators=(",", ":"),
-                                ensure_ascii=False).encode("utf-8")).hexdigest()
+def _key(record: dict, account_id: str = "") -> str:
+    puzzle = record.get("puzzle") or {}
+    try:
+        date = int(record["date"])
+    except (KeyError, TypeError, ValueError) as exc:
+        raise ValueError("Puzzle activity entry has no valid date") from exc
+    puzzle_id = str(puzzle.get("id") or "").strip()
+    if not puzzle_id:
+        raise ValueError("Puzzle activity entry has no puzzle id")
+    return puzzle_attempt_uid(account_id, puzzle_id, date, bool(record.get("win")))

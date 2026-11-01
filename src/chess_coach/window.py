@@ -10,6 +10,8 @@ import platform
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 import tempfile
+import uuid
+import weakref
 import PySide6
 import shiboken6
 from PySide6.QtCore import QProcess, QSettings, Qt, QStandardPaths, QTimer, Signal, qVersion
@@ -670,7 +672,6 @@ class SettingsDialog(QDialog):
         layout.addWidget(self.analysis_limit_value)
         self.analysis_limit.currentIndexChanged.connect(self._update_limit_range)
         self._update_limit_range()
-        self._apply_analysis_preset()
         self.engine_threads = QSpinBox()
         self.engine_threads.setRange(1, 8)
         self.engine_threads.setValue(settings.value("stockfish_threads", 1, type=int))
@@ -684,7 +685,11 @@ class SettingsDialog(QDialog):
         layout.addWidget(self.engine_hash)
         self._engine_process: QProcess | None = None
         self._engine_probe_timer: QTimer | None = None
+        self._engine_probe_shutdown_timer: QTimer | None = None
         self._engine_probe_buffer = bytearray()
+        self._engine_probe_finishing = False
+        self._engine_probe_finish_message: str | None = None
+        self._engine_probe_owner = None
         self.finished.connect(lambda _result: self._stop_engine_probe())
         buttons = QDialogButtonBox(
             QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
@@ -723,10 +728,6 @@ class SettingsDialog(QDialog):
         old_value = self.analysis_limit_value.value()
         self.analysis_limit_value.setRange(minimum, maximum)
         self.analysis_limit_value.setValue(old_value if minimum <= old_value <= maximum else default)
-        if kind == "nodes":
-            preset_nodes = {"quick": 25_000, "normal": 100_000, "detailed": 500_000}
-            self.analysis_limit_value.setValue(
-                preset_nodes.get(self.analysis_preset.currentData(), self.analysis_limit_value.value()))
 
     def _apply_analysis_preset(self) -> None:
         if self.analysis_limit.currentData() != "nodes":
@@ -751,65 +752,139 @@ class SettingsDialog(QDialog):
             return
         if self._engine_process is not None:
             return
-        process = QProcess(self)
+        process_parent = self.parent() or QApplication.instance()
+        self._engine_probe_owner = process_parent
+        process = QProcess(process_parent)
         self._engine_process = process
+        self._engine_probe_finishing = False
+        self._engine_probe_finish_message = None
         self._engine_probe_buffer.clear()
         self.engine_test.setEnabled(False)
         self.engine_test_status.setText("Запущена ограниченная UCI-проверка…")
-        process.started.connect(lambda: process.write(b"uci\n"))
-        process.readyReadStandardOutput.connect(self._read_engine_probe)
-        process.errorOccurred.connect(self._engine_probe_error)
-        process.finished.connect(self._engine_probe_finished)
+        dialog_ref = weakref.ref(self)
+        def dispatch(method: str, *args) -> None:
+            dialog = dialog_ref()
+            if dialog is not None and shiboken6.isValid(dialog):
+                getattr(dialog, method)(*args)
+            elif method == "_engine_probe_finished":
+                current = args[0]
+                if current.state() == QProcess.ProcessState.NotRunning:
+                    current.deleteLater()
+        process.started.connect(lambda current=process: dispatch("_engine_probe_started", current))
+        process.readyReadStandardOutput.connect(lambda current=process: dispatch("_read_engine_probe", current))
+        process.errorOccurred.connect(lambda error, current=process:
+                                      dispatch("_engine_probe_error", current, error))
+        process.finished.connect(lambda code, status, current=process:
+                                  dispatch("_engine_probe_finished", current, code, status))
         timer = QTimer(self)
         timer.setSingleShot(True)
-        timer.timeout.connect(self._engine_probe_timeout)
+        timer.timeout.connect(lambda current=process: dispatch("_engine_probe_timeout", current))
         self._engine_probe_timer = timer
         timer.start(5_000)
         process.start(path, [])
 
-    def _read_engine_probe(self) -> None:
-        process = self._engine_process
-        if process is None:
+    def _engine_probe_started(self, process: QProcess) -> None:
+        if process is self._engine_process and not self._engine_probe_finishing:
+            process.write(b"uci\n")
+
+    def _read_engine_probe(self, process: QProcess) -> None:
+        if process is not self._engine_process or self._engine_probe_finishing:
             return
         self._engine_probe_buffer.extend(bytes(process.readAllStandardOutput()))
         output = self._engine_probe_buffer.decode("utf-8", errors="replace")
         if "uciok" in output:
             name = next((line.partition(" ")[2] for line in output.splitlines()
                          if line.startswith("id name ")), "UCI engine")
-            self.engine_test_status.setText(f"UCI отвечает: {name}")
-            self._finish_engine_probe()
+            self._finish_engine_probe(f"UCI отвечает: {name}", graceful=True)
 
-    def _engine_probe_error(self, _error) -> None:
+    def _engine_probe_error(self, process: QProcess, _error) -> None:
+        if (process is self._engine_process and not self._engine_probe_finishing
+                and process.state() == QProcess.ProcessState.NotRunning):
+            self._finish_engine_probe(f"Не удалось запустить движок: {process.errorString()}")
+
+    def _engine_probe_finished(self, process: QProcess, _code, _status) -> None:
+        if process is not self._engine_process:
+            process.deleteLater()
+            return
+        if not self._engine_probe_finishing and "uciok" not in self._engine_probe_buffer.decode(
+                "utf-8", errors="replace"):
+            self._engine_probe_finish_message = "Процесс завершился до ответа uciok."
+        self._finalize_engine_probe(process)
+
+    def _engine_probe_timeout(self, process: QProcess | None = None) -> None:
+        process = process or self._engine_process
+        if process is None:
+            return
+        if process is self._engine_process and not self._engine_probe_finishing:
+            self._finish_engine_probe("UCI не ответил за 5 секунд; останавливаем процесс.")
+
+    def _finish_engine_probe(self, message: str | None = None, *, graceful: bool = False) -> None:
         process = self._engine_process
-        if process is not None and process.state() == QProcess.ProcessState.NotRunning:
-            self.engine_test_status.setText(f"Не удалось запустить движок: {process.errorString()}")
-            self._finish_engine_probe()
-
-    def _engine_probe_finished(self, _code, _status) -> None:
-        if self._engine_process is not None:
-            if "uciok" not in self._engine_probe_buffer.decode("utf-8", errors="replace"):
-                self.engine_test_status.setText("Процесс завершился до ответа uciok.")
-            self._finish_engine_probe()
-
-    def _engine_probe_timeout(self) -> None:
-        self.engine_test_status.setText("UCI не ответил за 5 секунд; процесс остановлен.")
-        self._finish_engine_probe()
-
-    def _finish_engine_probe(self) -> None:
-        process = self._engine_process
-        self._engine_process = None
+        if process is None or self._engine_probe_finishing:
+            return
+        self._engine_probe_finishing = True
+        if message is not None:
+            self._engine_probe_finish_message = message
         if self._engine_probe_timer is not None:
             self._engine_probe_timer.stop()
             self._engine_probe_timer.deleteLater()
             self._engine_probe_timer = None
-        if process is not None:
-            if process.state() != QProcess.ProcessState.NotRunning:
-                process.kill()
-            process.deleteLater()
+        if process.state() == QProcess.ProcessState.NotRunning:
+            self._finalize_engine_probe(process)
+            return
+        if graceful:
+            process.write(b"quit\n")
+        else:
+            process.kill()
+        # The bounded kill timer must outlive SettingsDialog if it is closed while
+        # the child is still shutting down.
+        owner = self._engine_probe_owner or QApplication.instance()
+        timer = QTimer(owner)
+        timer.setSingleShot(True)
+        dialog_ref = weakref.ref(self)
+        def kill_or_delegate(current=process) -> None:
+            dialog = dialog_ref()
+            if dialog is not None and shiboken6.isValid(dialog):
+                dialog._kill_engine_probe(current)
+            elif current.state() != QProcess.ProcessState.NotRunning:
+                current.kill()
+        timer.timeout.connect(kill_or_delegate)
+        self._engine_probe_shutdown_timer = timer
+        timer.start(1_000 if graceful else 2_000)
+
+    def _kill_engine_probe(self, process: QProcess) -> None:
+        if process is not self._engine_process:
+            return
+        if process.state() == QProcess.ProcessState.NotRunning:
+            self._finalize_engine_probe(process)
+            return
+        process.kill()
+        # Keep the QProcess alive until its finished signal confirms OS exit.
+        if self._engine_probe_shutdown_timer is not None:
+            self._engine_probe_shutdown_timer.start(2_000)
+
+    def _finalize_engine_probe(self, process: QProcess) -> None:
+        if process is not self._engine_process:
+            return
+        if process.state() != QProcess.ProcessState.NotRunning:
+            return
+        for timer_name in ("_engine_probe_timer", "_engine_probe_shutdown_timer"):
+            timer = getattr(self, timer_name)
+            if timer is not None:
+                timer.stop()
+                timer.deleteLater()
+                setattr(self, timer_name, None)
+        self._engine_process = None
+        self._engine_probe_owner = None
+        self._engine_probe_finishing = False
+        if self._engine_probe_finish_message:
+            self.engine_test_status.setText(self._engine_probe_finish_message)
+        self._engine_probe_finish_message = None
+        process.deleteLater()
         self.engine_test.setEnabled(True)
 
     def _stop_engine_probe(self) -> None:
-        self._finish_engine_probe()
+        self._finish_engine_probe("Проверка движка остановлена.")
 
 
 class ActiveGamesDialog(QDialog):
@@ -943,6 +1018,8 @@ class MainWindow(QMainWindow):
         self._analysis_thread: threading.Thread | None = None
         self._statistics_workers: set[threading.Thread] = set()
         self._analysis_dialog: QProgressDialog | None = None
+        self._analysis_safety_request_id: str | None = None
+        self._analysis_safety_context: tuple | None = None
         self._shutdown_requested = False
         self._shutdown_read_only = False
         self._analysis_shutdown_deadline: float | None = None
@@ -1007,6 +1084,8 @@ class MainWindow(QMainWindow):
         service.invitation_cancelled.connect(self._invitation_cancelled)
         service.active_games_received.connect(self._active_games_received)
         service.active_games_error.connect(self._active_games_error)
+        service.analysis_safety_games_received.connect(self._analysis_safety_games_received)
+        service.analysis_safety_error.connect(self._analysis_safety_error)
         service.archive_progress.connect(self._archive_progress)
         service.archive_finished.connect(self._archive_finished)
         service.archive_pilot_progress.connect(self._archive_pilot_progress)
@@ -2080,6 +2159,7 @@ class MainWindow(QMainWindow):
                 session.color = chess.WHITE if color == "white" else chess.BLACK
             opponent = game.get("opponent") or {}
             session.opponent = opponent.get("username") or opponent.get("id") or "Соперник"
+            session.opponent_title = opponent.get("title")
             session.status = "started"
             session.clock_control = str(game.get("speed") or "-")
             self.online_sessions[session.game_id] = session
@@ -2391,6 +2471,7 @@ class MainWindow(QMainWindow):
             session.status = "started"
             opponent = game.get("opponent", {})
             session.opponent = opponent.get("username", "Соперник")
+            session.opponent_title = opponent.get("title")
             self.online_sessions[game_id] = session
             if (not session.is_ai_opponent
                     and getattr(self, "_analysis_stop", None) is not None):
@@ -2865,18 +2946,105 @@ class MainWindow(QMainWindow):
         if active_thread is not None and active_thread.is_alive():
             self.home_status.setText("Анализ уже выполняется. Дождитесь его завершения или отмените его.")
             return
-        dialog = QProgressDialog("Запуск Stockfish…", "Отменить", 0, 0, self)
+        if self._analysis_safety_request_id is not None:
+            self.home_status.setText("Проверяется активность Lichess для анализа.")
+            return
+        options = self._analysis_options_from_settings()
+        if not (self.lichess and self._lichess_connected):
+            answer = QMessageBox.question(
+                self, "Проверка перед анализом",
+                "Подключённый аккаунт Lichess не может быть проверен. Подтвердите, что сейчас "
+                "не участвуете в онлайн-партии с человеком, прежде чем запускать Stockfish.",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel,
+                QMessageBox.StandardButton.Cancel)
+            if answer != QMessageBox.StandardButton.Yes:
+                return
+            self._launch_game_analysis(game_id, engine_path, options)
+            return
+
+        request_id = uuid.uuid4().hex
+        self._analysis_safety_request_id = request_id
+        dialog = QProgressDialog("Проверяем активные партии Lichess…", "Отменить", 0, 0, self)
         dialog.setWindowTitle("Послепартийный анализ")
         dialog.setMinimumDuration(0)
         dialog.show()
         self._analysis_dialog = dialog
         stop = threading.Event()
         self._analysis_stop = stop
-        dialog.canceled.connect(stop.set)
-        options = self._analysis_options_from_settings()
+        self._analysis_safety_context = (request_id, game_id, engine_path, options)
+        dialog.canceled.connect(lambda request=request_id: self._cancel_analysis_safety_check(request))
+        self.lichess.check_active_games_for_analysis(request_id)
+
+    def _cancel_analysis_safety_check(self, request_id: str) -> None:
+        if request_id != self._analysis_safety_request_id:
+            return
+        self._analysis_safety_request_id = None
+        self._analysis_safety_context = None
+        if self._analysis_stop is not None:
+            self._analysis_stop.set()
+            self._analysis_stop = None
+        if self._analysis_dialog is not None:
+            self._analysis_dialog.close()
+            self._analysis_dialog = None
+
+    @staticmethod
+    def _active_game_is_human(game: dict) -> bool:
+        opponent = game.get("opponent")
+        return not (isinstance(opponent, dict) and opponent.get("title") == "BOT")
+
+    def _analysis_safety_games_received(self, request_id: str, games: list[dict]) -> None:
+        if request_id != self._analysis_safety_request_id:
+            return
+        self._analysis_safety_request_id = None
+        context = self._analysis_safety_context
+        self._analysis_safety_context = None
+        stop = self._analysis_stop
+        if not context or stop is None or stop.is_set():
+            return
         active_human_ids = {session.game_id for session in self.online_sessions.values()
-                            if session.status in {"started", "playing"}
-                            and not session.is_ai_opponent}
+                            if session.status in {"started", "playing"} and not session.is_ai_opponent}
+        if any(self._active_game_is_human(game) for game in games) or active_human_ids:
+            stop.set()
+            if self._analysis_dialog:
+                self._analysis_dialog.close()
+                self._analysis_dialog = None
+            self._analysis_stop = None
+            QMessageBox.warning(self, "Stockfish заблокирован",
+                "У аккаунта есть активная партия с человеком. Анализ Stockfish не запущен.")
+            return
+        _request, game_id, engine_path, options = context
+        self._launch_game_analysis(game_id, engine_path, options,
+                                   stop=stop, dialog=self._analysis_dialog)
+
+    def _analysis_safety_error(self, request_id: str, message: str) -> None:
+        if request_id != self._analysis_safety_request_id:
+            return
+        self._analysis_safety_request_id = None
+        self._analysis_safety_context = None
+        if self._analysis_stop is not None:
+            self._analysis_stop.set()
+            self._analysis_stop = None
+        if self._analysis_dialog:
+            self._analysis_dialog.close()
+            self._analysis_dialog = None
+        if not self._shutdown_requested:
+            QMessageBox.warning(self, "Проверка Lichess не выполнена",
+                "Не удалось подтвердить отсутствие активной партии. Stockfish не запущен.\n\n" + message)
+
+    def _launch_game_analysis(self, game_id: str, engine_path: str, options: AnalysisOptions,
+                              *, stop: threading.Event | None = None,
+                              dialog: QProgressDialog | None = None) -> None:
+        stop = stop or threading.Event()
+        if dialog is None:
+            dialog = QProgressDialog("Запуск Stockfish…", "Отменить", 0, 0, self)
+            dialog.setWindowTitle("Послепартийный анализ")
+            dialog.setMinimumDuration(0)
+            dialog.show()
+            self._analysis_dialog = dialog
+            self._analysis_stop = stop
+            dialog.canceled.connect(stop.set)
+        active_human_ids = {session.game_id for session in self.online_sessions.values()
+                            if session.status in {"started", "playing"} and not session.is_ai_opponent}
         def work():
             try:
                 result = CompletedGameAnalyzer(self.game_repository).analyze(
@@ -3004,6 +3172,8 @@ class MainWindow(QMainWindow):
 
     def closeEvent(self, event) -> None:
         self._shutdown_requested = True
+        if self._analysis_safety_request_id is not None:
+            self._cancel_analysis_safety_check(self._analysis_safety_request_id)
         analysis_thread = self._analysis_thread
         analysis_running = bool(analysis_thread and analysis_thread.is_alive())
         if analysis_running:

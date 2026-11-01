@@ -18,9 +18,17 @@ import chess
 import chess.pgn
 
 
-SCHEMA_VERSION = 8
+SCHEMA_VERSION = 9
 DEFAULT_PAGE_SIZE = 100
 MAX_PAGE_SIZE = 500
+
+
+def puzzle_attempt_uid(account_id: str, puzzle_id: str, attempt_date_ms: int,
+                       win: bool | int) -> str:
+    """Identity of a Lichess PuzzleActivity event, excluding mutable puzzle metadata."""
+    payload = json.dumps([str(account_id), str(puzzle_id), int(attempt_date_ms),
+                          int(bool(win))], separators=(",", ":"), ensure_ascii=False)
+    return hashlib.sha256(("lichess-puzzle-attempt:v1:" + payload).encode("utf-8")).hexdigest()
 
 
 class GameRepository:
@@ -301,6 +309,47 @@ class GameRepository:
             db.execute("UPDATE archive_sync_state SET backfill_started_at="
                        "COALESCE(backfill_started_at,incremental_since,backfill_before) "
                        "WHERE backfill_complete=0")
+            if version < 9:
+                # Older versions hashed the entire API object. Puzzle metadata may
+                # change, so collapse those legacy rows to the stable event identity.
+                db.execute("CREATE TEMP TABLE old_puzzle_attempts AS SELECT * FROM puzzle_attempts")
+                db.execute("CREATE TEMP TABLE puzzle_attempt_uid_map "
+                           "(old_uid TEXT PRIMARY KEY,new_uid TEXT NOT NULL)")
+                source = db.execute("SELECT attempt_uid,account_id,puzzle_id,attempt_date_ms,win "
+                                    "FROM old_puzzle_attempts")
+                batch: list[tuple[str, str]] = []
+                while True:
+                    rows = source.fetchmany(1000)
+                    if not rows:
+                        break
+                    batch.extend((row["attempt_uid"], puzzle_attempt_uid(
+                        row["account_id"], row["puzzle_id"], row["attempt_date_ms"], row["win"]))
+                                 for row in rows)
+                    if len(batch) >= 1000:
+                        db.executemany("INSERT INTO puzzle_attempt_uid_map VALUES (?,?)", batch)
+                        batch.clear()
+                if batch:
+                    db.executemany("INSERT INTO puzzle_attempt_uid_map VALUES (?,?)", batch)
+                db.execute("CREATE TEMP TABLE migrated_puzzle_links AS "
+                           "SELECT DISTINCT links.run_id,m.new_uid AS attempt_uid "
+                           "FROM puzzle_pilot_run_attempts links "
+                           "JOIN puzzle_attempt_uid_map m ON m.old_uid=links.attempt_uid")
+                db.execute("CREATE TEMP TABLE migrated_puzzle_attempts AS "
+                           "SELECT m.new_uid AS attempt_uid,a.account_id,a.puzzle_id,"
+                           "a.attempt_date_ms,a.win,a.source,a.metadata_json,a.imported_at,"
+                           "ROW_NUMBER() OVER (PARTITION BY m.new_uid "
+                           "ORDER BY a.imported_at DESC,a.attempt_uid DESC) AS rank "
+                           "FROM old_puzzle_attempts a "
+                           "JOIN puzzle_attempt_uid_map m ON m.old_uid=a.attempt_uid")
+                db.execute("DELETE FROM puzzle_pilot_run_attempts")
+                db.execute("DELETE FROM puzzle_attempts")
+                db.execute("INSERT INTO puzzle_attempts "
+                           "SELECT attempt_uid,account_id,puzzle_id,attempt_date_ms,win,source,"
+                           "metadata_json,imported_at FROM migrated_puzzle_attempts WHERE rank=1")
+                db.execute("INSERT OR IGNORE INTO puzzle_pilot_run_attempts(run_id,attempt_uid) "
+                           "SELECT run_id,attempt_uid FROM migrated_puzzle_links")
+                db.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_puzzle_attempt_event "
+                           "ON puzzle_attempts(account_id,puzzle_id,attempt_date_ms,win)")
             # Backfill old rows exactly once, retaining bad raw PGN/moves for repair.
             for row in db.execute("SELECT * FROM games WHERE game_id NOT IN "
                                   "(SELECT game_id FROM game_revisions)").fetchall():
@@ -1054,8 +1103,8 @@ class GameRepository:
             if not puzzle_id or not str(puzzle.get("fen") or ""):
                 raise ValueError("Puzzle activity entry requires puzzle id and FEN")
             stable = json.dumps(record, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
-            attempt_uid = hashlib.sha256(
-                f"lichess:{username.casefold()}:{stable}".encode()).hexdigest()
+            attempt_uid = puzzle_attempt_uid(account_id, puzzle_id, attempt_date,
+                                             bool(record.get("win")))
             prepared.append((attempt_uid, puzzle_id, attempt_date, record, stable))
 
         results: list[tuple[str, bool]] = []
@@ -1143,8 +1192,10 @@ class GameRepository:
             return [dict(row) for row in rows]
 
     def has_puzzle_attempt(self, username: str, record: dict) -> bool:
-        stable = json.dumps(record, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
-        attempt_uid = hashlib.sha256(f"lichess:{username.casefold()}:{stable}".encode()).hexdigest()
+        puzzle = record.get("puzzle") or {}
+        account_id = self.ensure_archive_account(username)
+        attempt_uid = puzzle_attempt_uid(account_id, str(puzzle.get("id") or ""),
+                                         int(record.get("date", 0)), bool(record.get("win")))
         with self._connection() as db:
             return bool(db.execute("SELECT 1 FROM puzzle_attempts WHERE attempt_uid=?",
                                    (attempt_uid,)).fetchone())

@@ -40,6 +40,7 @@ class LichessGameSession:
         self.moves = ""
         self.color = chess.WHITE
         self.opponent = "Соперник"
+        self.opponent_title: str | None = None
         self.white_player: str | None = None
         self.black_player: str | None = None
         self.started_at: str | None = None
@@ -80,8 +81,8 @@ class LichessGameSession:
 
     @property
     def is_ai_opponent(self) -> bool:
-        identity = (self.opponent or "").casefold().replace("_", "-")
-        return "lichess ai" in identity or "lichess-ai" in identity
+        # Only the API's explicit BOT title proves that this is an engine opponent.
+        return self.opponent_title == "BOT"
 
     @property
     def input_locked(self) -> bool:
