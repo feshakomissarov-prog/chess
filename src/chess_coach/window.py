@@ -793,7 +793,7 @@ class SettingsDialog(QDialog):
         self._engine_probe_buffer.extend(bytes(process.readAllStandardOutput()))
         output = self._engine_probe_buffer.decode("utf-8", errors="replace")
         if "uciok" in output:
-            name = next((line.partition(" ")[2] for line in output.splitlines()
+            name = next((line.removeprefix("id name ") for line in output.splitlines()
                          if line.startswith("id name ")), "UCI engine")
             self._finish_engine_probe(f"UCI отвечает: {name}", graceful=True)
 

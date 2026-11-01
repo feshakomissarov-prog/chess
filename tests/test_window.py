@@ -1625,6 +1625,7 @@ def test_connected_analysis_is_blocked_by_unopened_human_game_and_allowed_only_f
     requests = []
     class ConnectedService:
         def check_active_games_for_analysis(self, request_id): requests.append(request_id)
+        def close(self, timeout=1.0): return True
     window.lichess = ConnectedService()
     launches = []
     monkeypatch.setattr(window, "_launch_game_analysis", lambda *args, **kwargs: launches.append((args, kwargs)))
@@ -1653,6 +1654,7 @@ def test_connected_analysis_fails_closed_on_snapshot_error_and_new_human_game_st
     requests = []
     class ConnectedService:
         def check_active_games_for_analysis(self, request_id): requests.append(request_id)
+        def close(self, timeout=1.0): return True
     window.lichess = ConnectedService()
     launches = []
     warnings = []
