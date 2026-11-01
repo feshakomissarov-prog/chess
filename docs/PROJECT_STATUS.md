@@ -1,3 +1,11 @@
+## Актуализация 01.11.2026 — независимый аудит PR #25 (текущая)
+
+**Последний код:** [draft PR #25](https://github.com/feshakomissarov-prog/chess/pull/25) `aa4289e56edfaa6834ecffffcd50061922c67ecd`, base PR #24 `codex/m3-windows-diagnostics`. Ни одна ветка #8–#25 не слита. **CI подтверждён** по [run #41261611961](https://github.com/feshakomissarov-prog/chess/actions/runs/41261611961) и [run #41261837883](https://github.com/feshakomissarov-prog/chess/actions/runs/41261837883): **194 passed** (последний лог: 65.08s), Python 3.12.10, PySide6/Qt/shiboken6 6.12.0, compileall и isolated window PASS.
+
+**Большинство старых замечаний устранено:** v9 PuzzleAttempt UID без mutable rating/plays; SQLite migration и переназначение pilot links; статистика через bounded CTE с 35k-game regression; source filters; ожидание finished у QProcess. **Новые выявленные блокеры — P1:** при connected preflight кнопка `QProgressDialog Отменить` больше не устанавливает stop_event для уже запущенного Stockfish (переиспользуется dialog с обработчиком старого request ID); неполный/некорректный ответ `/api/account/playing?nb=50` может ошибочно трактоваться как «нет human»; при disconnect/reconnect во время preflight late reply старого аккаунта может разрешить запуск. Подробности: [независимое ревью PR #25](reviews/PR25_INDEPENDENT_REVIEW_AND_ACCEPTANCE.md), замечания оставлены [в PR #25](https://github.com/feshakomissarov-prog/chess/pull/25).
+
+**Решение: пока НЕ MERGE, не запускать настоящий UCI/live OAuth до адресных исправлений и повторного CI.** Пользовательская SQLite, реальные Lichess parties и puzzle activity — NOT RUN, старый native crash Windows/Python3.11 не объяснён. **PR #8→main остаётся mergeable=false**, потребуется отдельная интеграция с сохранением обновлённых `PRODUCT_VISION`, `README`, `ROADMAP` и docs/research. Следующее Codex действие — исправить три preflight/cancel guard-регрессии в существующем draft PR #25 и дать новый SHA/CI. Далее — один ручной offline smoke владельца (Python 3.12+), затем отдельно согласованный online pilot с backup, затем интеграция.
+
 # Chess Coach — текущее состояние и handoff
 
 **Основа проекта от 31.10.2026; последние обновления — 01.11.2026.** Репозиторий: https://github.com/feshakomissarov-prog/chess  
