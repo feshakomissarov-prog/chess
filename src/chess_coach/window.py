@@ -284,15 +284,20 @@ class StatisticsGameDialog(QDialog):
                                game.get("winner"), game.get("status", ""))
         line = repository.current_line(game["game_id"])
         analysis = repository.latest_analysis_detail(
-            game["game_id"], int(line["line_revision"])) if line else None
+            game["game_id"], int(line["line_revision"]),
+            account_id=game.get("account_id"), user_color=game.get("account_color") or game.get("color")) if line else None
         revision = int(line["line_revision"]) if line else int(game.get("line_revision", 1))
         opening = repository.opening_match(game["game_id"], revision)
         phases = repository.phase_boundaries(game["game_id"], revision)
         source = (analysis.get("source") if analysis else "нет локальной оценки")
-        accuracy = game.get("lichess_accuracy_white"), game.get("lichess_accuracy_black")
-        accuracy_text = (f"Lichess accuracy: белые {accuracy[0]}, чёрные {accuracy[1]}"
-                         if any(value is not None for value in accuracy) else
-                         "Lichess accuracy: нет данных от Lichess")
+        owner_accuracy = (analysis.get("official_game_accuracy") if analysis else
+                          game.get("lichess_accuracy_white") if color == "white" else
+                          game.get("lichess_accuracy_black"))
+        lichess_origin = (game.get("source") in {"lichess", "lichess_archive"}
+                          or game.get("source_game_id"))
+        accuracy_text = (f"Официальная Lichess accuracy игрока ({color}): "
+                         f"{owner_accuracy if owner_accuracy is not None else 'нет данных'}"
+                         if lichess_origin else "Официальная Lichess accuracy: нет данных от Lichess")
         opening_text = (f"Справочник: {opening['eco']} {opening['name']} · совпадение до ply {opening['matched_ply']}"
                         if opening else "Справочник дебютов: совпадения пока нет")
         if opening and opening.get("lichess_conflict"):

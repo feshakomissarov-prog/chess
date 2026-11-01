@@ -1612,7 +1612,8 @@ class GameRepository:
 
     def find_analysis_cache(self, game_id: str, line_revision: int, line_hash: str,
                             source: str, engine_version: str | None,
-                            parameters: dict) -> dict | None:
+                            parameters: dict, *, account_id: str | None = None,
+                            user_color: str | None = None) -> dict | None:
         params_json = json.dumps(parameters, sort_keys=True)
         usable_statuses = ("('complete','partial')" if source == "lichess-pgn" or
                            parameters.get("analysis_pass") == "review" else "('complete')")
@@ -1637,19 +1638,9 @@ class GameRepository:
             result["events"] = self._load_analysis_events(db, run["run_id"])
             coverage = db.execute("SELECT * FROM analysis_coverage WHERE run_id=?",
                                   (run["run_id"],)).fetchone()
-            game = db.execute("SELECT source,color,lichess_accuracy_white,lichess_accuracy_black "
-                              "FROM games WHERE game_id=?", (game_id,)).fetchone()
             result["coverage"] = dict(coverage) if coverage else None
-            selected_accuracy = None
-            if game and game["source"] == "lichess":
-                accuracy_column = ("lichess_accuracy_white" if game["color"] == "white"
-                                   else "lichess_accuracy_black" if game["color"] == "black"
-                                   else None)
-                if accuracy_column:
-                    selected_accuracy = game[accuracy_column]
-            result["official_game_accuracy"] = selected_accuracy
-            result["official_game_accuracy_source"] = "lichess" if selected_accuracy is not None else None
-            result["official_game_accuracy_color"] = game["color"] if game else None
+            self._attach_official_accuracy(db, result, game_id, account_id=account_id,
+                                           user_color=user_color)
             result["local_game_accuracy"] = None
             result["local_game_accuracy_formula_id"] = None
             return result
@@ -1664,7 +1655,9 @@ class GameRepository:
         with self._connection() as db:
             return [dict(row) for row in db.execute(sql, params)]
 
-    def latest_analysis_detail(self, game_id: str, line_revision: int) -> dict | None:
+    def latest_analysis_detail(self, game_id: str, line_revision: int, *,
+                               account_id: str | None = None,
+                               user_color: str | None = None) -> dict | None:
         """Load one current analysis and its plotted points/classifications for a detail view."""
         with self._connection() as db:
             materialize = db.execute(
@@ -1706,22 +1699,40 @@ class GameRepository:
             result["events"] = self._load_analysis_events(db, run["run_id"])
             coverage = db.execute("SELECT * FROM analysis_coverage WHERE run_id=?",
                                   (run["run_id"],)).fetchone()
-            game = db.execute("SELECT source,color,lichess_accuracy_white,lichess_accuracy_black "
-                              "FROM games WHERE game_id=?", (game_id,)).fetchone()
             result["coverage"] = dict(coverage) if coverage else None
-            selected_accuracy = None
-            if game and game["source"] == "lichess":
-                accuracy_column = ("lichess_accuracy_white" if game["color"] == "white"
-                                   else "lichess_accuracy_black" if game["color"] == "black"
-                                   else None)
-                if accuracy_column:
-                    selected_accuracy = game[accuracy_column]
-            result["official_game_accuracy"] = selected_accuracy
-            result["official_game_accuracy_source"] = "lichess" if selected_accuracy is not None else None
-            result["official_game_accuracy_color"] = game["color"] if game else None
+            self._attach_official_accuracy(db, result, game_id, account_id=account_id,
+                                           user_color=user_color)
             result["local_game_accuracy"] = None
             result["local_game_accuracy_formula_id"] = None
             return result
+
+    @staticmethod
+    def _attach_official_accuracy(db: sqlite3.Connection, result: dict, game_id: str, *,
+                                  account_id: str | None, user_color: str | None) -> None:
+        game = db.execute("SELECT source,source_game_id,color,lichess_accuracy_white,"
+                          "lichess_accuracy_black FROM games WHERE game_id=?", (game_id,)).fetchone()
+        linked_color = None
+        if account_id:
+            link = db.execute("SELECT color FROM account_games WHERE account_id=? AND game_id=?",
+                              (account_id, game_id)).fetchone()
+            linked_color = link["color"] if link else None
+        color = (linked_color if account_id else
+                 user_color if user_color in {"white", "black"} else
+                 game["color"] if game else None)
+        is_lichess = bool(game and (game["source"] in {"lichess", "lichess_archive"}
+                                    or game["source_game_id"]
+                                    or db.execute("SELECT 1 FROM account_games WHERE game_id=? LIMIT 1",
+                                                  (game_id,)).fetchone()))
+        value = None
+        if is_lichess and (not account_id or linked_color):
+            column = "lichess_accuracy_white" if color == "white" else (
+                "lichess_accuracy_black" if color == "black" else None)
+            if column:
+                value = game[column]
+        result["official_game_accuracy"] = value
+        result["official_game_accuracy_source"] = "lichess" if is_lichess else None
+        result["official_game_accuracy_color"] = color
+        result["official_game_accuracy_n"] = int(value is not None)
 
     def materialize_analysis_metrics(self, run_id: str) -> int:
         """Idempotently derive v2 facts from persisted assessments; no engine is started."""

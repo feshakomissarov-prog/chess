@@ -336,6 +336,10 @@ def test_lichess_archive_move_metrics_drive_summary_without_legacy_classificatio
         assert legacy_count == 0
         assert by_ply[3]["severity"] in {"mistake", "blunder"}
         assert by_ply[3]["source"] == "lichess-pgn"
+        assert detail["official_game_accuracy"] == 76
+        assert detail["official_game_accuracy_color"] == "white"
+        assert detail["official_game_accuracy_source"] == "lichess"
+        assert detail["official_game_accuracy_n"] == 1
         summary = StatisticsService(repository).summary(
             account_id=account_id, analysis_source="lichess-pgn")
         assert summary["own_assessed_moves"] == 1
@@ -344,6 +348,16 @@ def test_lichess_archive_move_metrics_drive_summary_without_legacy_classificatio
         page = StatisticsService(repository).game_page(
             account_id=account_id, analysis_source="lichess-pgn")
         assert page["items"][0]["own_mistakes"] + page["items"][0]["own_blunders"] == 1
+        second_account = repository.ensure_archive_account("SecondOwner")
+        with repository._connection() as db:
+            db.execute("INSERT INTO account_games(account_id,game_id,remote_id,imported_at,color) "
+                       "VALUES(?,?,?,?,?)", (second_account, "lichess-metrics", "same-game",
+                       "2026-11-01T00:00:00+00:00", "black"))
+        second_detail = repository.latest_analysis_detail(
+            "lichess-metrics", 1, account_id=second_account)
+        assert second_detail["official_game_accuracy"] == 81
+        assert second_detail["official_game_accuracy_color"] == "black"
+        assert second_detail["official_game_accuracy_n"] == 1
     finally:
         repository.shutdown()
 

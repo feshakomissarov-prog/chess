@@ -679,7 +679,7 @@ class StatisticsService:
                     "(SELECT om.lichess_conflict FROM opening_matches om WHERE om.game_id=g.game_id " \
                     "AND om.line_revision=g.line_revision) AS opening_conflict"
         if account_id:
-            selected += ",ag.opponent AS account_opponent,ag.player_name AS account_player_name,ag.color AS account_color"
+            selected += ",ag.account_id AS account_id,ag.opponent AS account_opponent,ag.player_name AS account_player_name,ag.color AS account_color"
         owner_color = "ag.color" if account_id else "g.color"
         latest_run = ("SELECT ar.run_id FROM analysis_runs ar JOIN game_revisions rr "
                       "ON rr.game_id=ar.game_id AND rr.line_revision=ar.line_revision "

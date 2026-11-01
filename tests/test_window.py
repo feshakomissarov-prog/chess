@@ -112,7 +112,7 @@ def test_batch_analysis_controls_are_explicit_and_resume_after_pause(qtbot):
     assert not dialog.pause_button.isEnabled()
     assert dialog.resume_button.isEnabled()
     qtbot.mouseClick(dialog.start_button, Qt.MouseButton.LeftButton)
-    assert started == [(1000, 20_000, 64, False)]
+    assert started == [(1000, 20_000, 64, False, False)]
     dialog.set_running(True)
     assert dialog.close() is False
     qtbot.mouseClick(dialog.pause_button, Qt.MouseButton.LeftButton)
@@ -120,7 +120,7 @@ def test_batch_analysis_controls_are_explicit_and_resume_after_pause(qtbot):
     dialog.worker_finished.emit(True, "Пауза")
     assert dialog.resume_button.isEnabled()
     qtbot.mouseClick(dialog.resume_button, Qt.MouseButton.LeftButton)
-    assert started[-1] == (1000, 20_000, 64, True)
+    assert started[-1] == (1000, 20_000, 64, True, False)
     dialog.worker_finished.emit(False, "Завершено")
     assert not dialog.pause_button.isEnabled()
 
@@ -188,7 +188,7 @@ def test_statistics_screen_filters_asynchronously_and_resets(qtbot, tmp_path):
     repo.save_analysis("screen-win", line_revision=1, line_hash=line["line_hash"],
         source="stockfish", engine_name="FixtureFish", engine_version="1",
         parameters={"nodes": 1}, assessments=[{"ply": 0, "white_cp": 0},
-                                              {"ply": 1, "white_cp": -40}],
+                                              {"ply": 1, "white_cp": -100}],
         classifications=[{"ply": 1, "mover": "white", "eval_loss_cp": 100,
                           "label": "mistake", "phase": "opening",
                           "algorithm_version": "test"}])
