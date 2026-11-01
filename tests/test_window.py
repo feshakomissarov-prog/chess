@@ -10,7 +10,8 @@ from PySide6.QtWidgets import QInputDialog, QMessageBox
 
 from chess_coach.board_view import BoardView
 from chess_coach.window import (ActiveGamesDialog, EvaluationGraph, MainWindow,
-                                SettingsDialog, StatisticsDialog, StatisticsGameDialog)
+                                SettingsDialog, StatisticsDialog, StatisticsGameDialog,
+                                _puzzle_attempt_summary)
 from chess_coach.lichess.session import LichessGameSession
 from chess_coach.lichess.repository import GameRepository
 
@@ -396,13 +397,26 @@ def test_puzzle_pilot_ui_requires_bounded_choice_and_confirmation(qtbot, tmp_pat
 
     window.start_puzzle_pilot()
     assert calls == [(10, window.game_repository)]
-    assert "курсор полной синхронизации" in confirmations[0].lower()
+    assert "полный курсор синхронизации" in confirmations[0].lower()
     window._puzzle_pilot_progress(10, 6)
     assert "Получено попыток: 10 · новых: 6" in window._puzzle_pilot_progress_dialog.labelText()
     window._puzzle_pilot_finished(10, 6, "pilot-run", "Пробная загрузка задач завершена.")
     assert "Курсор полной синхронизации не изменён" in messages[0]
     assert calls[-1] == ("history", "lichess:pilotuser", "pilot-run")
     window.close()
+
+
+def test_puzzle_history_summary_uses_attempt_denominators_and_available_fields():
+    summary = _puzzle_attempt_summary([
+        {"win": 1, "puzzle_rating": 1500, "themes_json": '["fork", "pin"]'},
+        {"win": 0, "puzzle_rating": 1700, "themes_json": '["fork"]'},
+        {"win": 1, "puzzle_rating": None, "themes_json": '["pin"]'},
+    ])
+    assert "3 попыток · решено 2 (66.7%)" in summary
+    assert "средний рейтинг задачи 1600" in summary
+    assert "fork: 1/2 (50%)" in summary
+    assert "pin: 2/2 (100%)" in summary
+    assert "учитываются отдельно" in summary
 
 
 def test_active_games_dialog_shows_server_confirmed_turn_and_game_type(qtbot):

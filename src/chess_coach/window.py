@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import chess
+import json
 import time
 import threading
 from datetime import datetime, timedelta, timezone
@@ -45,6 +46,33 @@ from .lichess.repository import GameRepository
 from .lichess.service import LichessService
 from .lichess.session import LichessGameSession
 from .lichess.statistics import StatisticsService
+
+
+def _puzzle_attempt_summary(attempts: list[dict]) -> str:
+    """Describe only the displayed local attempts; repeated puzzle IDs count per try."""
+    if not attempts:
+        return "Попыток в этой выборке нет."
+    wins = sum(int(bool(item["win"])) for item in attempts)
+    ratings = [int(item["puzzle_rating"]) for item in attempts
+               if item.get("puzzle_rating") is not None]
+    themes: dict[str, list[int]] = {}
+    for item in attempts:
+        try:
+            values = json.loads(item.get("themes_json") or "[]")
+        except (TypeError, json.JSONDecodeError):
+            values = []
+        for theme in values if isinstance(values, list) else []:
+            aggregate = themes.setdefault(str(theme), [0, 0])
+            aggregate[0] += 1
+            aggregate[1] += int(bool(item["win"]))
+    theme_text = ", ".join(
+        f"{theme}: {values[1]}/{values[0]} ({round(100 * values[1] / values[0])}%)"
+        for theme, values in sorted(themes.items())) or "нет данных"
+    average = round(sum(ratings) / len(ratings)) if ratings else "н/д"
+    rate = round(100 * wins / len(attempts), 1)
+    return (f"В показанной выборке: {len(attempts)} попыток · решено {wins} ({rate}%) · "
+            f"средний рейтинг задачи {average}. Темы (успешно/попытки): {theme_text}. "
+            "Повторные попытки одной задачи учитываются отдельно.")
 
 
 class OnlineGameDialog(QDialog):
@@ -1647,6 +1675,11 @@ class MainWindow(QMainWindow):
         dialog.resize(850, 540)
         layout = QHBoxLayout(dialog)
         history = QListWidget()
+        history_panel = QVBoxLayout()
+        summary = QLabel()
+        summary.setWordWrap(True)
+        history_panel.addWidget(summary)
+        history_panel.addWidget(history, 1)
         detail = QVBoxLayout()
         board = BoardView(chess.Board(), dialog)
         board.set_interaction_enabled(False)
@@ -1654,15 +1687,17 @@ class MainWindow(QMainWindow):
         solution.setWordWrap(True)
         detail.addWidget(board, 1)
         detail.addWidget(solution)
-        layout.addWidget(history, 1)
+        history_widget = QWidget(dialog)
+        history_widget.setLayout(history_panel)
+        layout.addWidget(history_widget, 1)
         detail_widget = QWidget(dialog)
         detail_widget.setLayout(detail)
         layout.addWidget(detail_widget, 2)
         attempts = (self.game_repository.puzzle_pilot_history(
             account_id, run_id=pilot_run_id, limit=500) if pilot_run_id
             else self.game_repository.puzzle_history(account_id, limit=500))
-        import json
         attempts = [attempt for attempt in attempts if attempt.get("attempt_uid")]
+        summary.setText(_puzzle_attempt_summary(attempts))
         for attempt in attempts:
             date = datetime.fromtimestamp(attempt["attempt_date_ms"] / 1000).strftime("%Y-%m-%d %H:%M")
             themes = ", ".join(json.loads(attempt["themes_json"]))

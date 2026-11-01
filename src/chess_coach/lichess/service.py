@@ -264,6 +264,8 @@ class LichessService(QObject):
                 message = {"complete": "Пробная загрузка задач завершена.",
                            "cancelled": "Пробная загрузка задач отменена.",
                            "error": "Пробная загрузка завершилась ошибкой."}.get(status, status)
+                if result.get("error"):
+                    message += " " + str(result["error"])
                 self.puzzle_pilot_finished.emit(received, new_count, run_id, message)
             except Exception as exc:
                 self.puzzle_pilot_finished.emit(received, new_count, run_id, str(exc))

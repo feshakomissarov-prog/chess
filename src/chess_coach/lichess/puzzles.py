@@ -56,8 +56,9 @@ class PuzzleActivitySync:
             status = "cancelled" if stop_event.is_set() else "complete"
             return self.repository.finish_puzzle_pilot(run_id, status)
         except Exception as exc:
-            self.repository.finish_puzzle_pilot(run_id, "error", str(exc))
-            raise
+            result = self.repository.finish_puzzle_pilot(run_id, "error", str(exc))
+            result["error"] = str(exc)
+            return result
 
     def _run(self, username: str, token: str, stop_event: threading.Event, *,
              page_size: int, progress: Callable[[int], None] | None) -> int:

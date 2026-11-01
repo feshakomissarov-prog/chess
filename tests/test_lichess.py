@@ -1360,6 +1360,26 @@ def test_puzzle_pilot_service_uses_separate_stored_credential_and_never_runs_ful
     repo.shutdown()
 
 
+def test_puzzle_pilot_api_failure_is_journaled_without_advancing_full_sync(tmp_path):
+    from chess_coach.lichess.puzzles import PuzzleActivitySync
+
+    repo = GameRepository(tmp_path / "puzzle-pilot-error.sqlite3")
+    account_id = repo.ensure_archive_account("ErrorUser")
+    before = repo.puzzle_sync_state(account_id)
+
+    class BrokenClient:
+        def stream_puzzle_activity(self, *args, **kwargs):
+            raise RuntimeError("fixture transport failed")
+
+    result = PuzzleActivitySync(BrokenClient(), repo).run_pilot(
+        "ErrorUser", "fake", threading.Event(), limit=10)
+    assert result["status"] == "error"
+    assert result["last_error"] == "fixture transport failed"
+    assert result["received_count"] == 0
+    assert repo.puzzle_sync_state(account_id) == before
+    repo.shutdown()
+
+
 def test_puzzle_incremental_sync_pages_more_than_one_page(tmp_path):
     from chess_coach.lichess.puzzles import PuzzleActivitySync
 
