@@ -171,3 +171,12 @@
 - Регрессии: `tests/test_m45_batch.py` содержит mid-analysis сценарий без Qt `gameStart`, при котором после первоначального safe snapshot появляется human; parametrized false/unknown/429/timeout snapshots останавливают search, закрывают fake engine, сохраняют paused/queued state и не сохраняют partial analysis.
 - Фактическая проверка: `.venv312/Scripts/python.exe -m pytest tests/test_m45_batch.py -q` — **15 PASS**; `git diff --check` — PASS. Реальный Lichess/OAuth/Stockfish и пользовательская SQLite — NOT RUN.
 - Остальные пункты R1–R9 не выполнены на момент этого checkpoint; следующий блок — R1: paging/retry/eligibility очереди.
+
+## PR #30 deep review — R1 (2026-11-01)
+
+- R1 code commit `da64793381334b1d2b422fdfbe239a280e4ddde6`: очередь выбирает следующие страницы по точному engine fingerprint + canonical settings, а не повторно первые 10k уже поставленных/завершённых заданий. Отдельный checkbox разрешает повтор failed/cancelled/stale; без выбора эти записи не мешают странице пройти к следующим партиям. Другой settings fingerprint создаёт независимую очередь.
+- Eligible set ограничен известными terminal Lichess/game statuses + завершённым PGN result, `final_sync_pending=0`, отсутствующим `import_error`, стандартным вариантом и текущей ревизией. В runner непосредственно перед UCI повторно проверяются статус/синхронизация/source-line identity и легальность всех UCI ходов; устаревшая/некорректная задача помечается failed до создания движка.
+- UI показывает явный переключатель retry failed/cancelled; resume остаётся отдельным действием. Дублирование одной партии в account relation не создаёт повторных line jobs за счёт `DISTINCT` и уникального queue key.
+- Синтетические regressions: 15,000 игр идут страницами 10,000 + 5,000 + 0, один engine/settings job на игру; отдельная конфигурация допускается, явный retry переводит failed задачу обратно в queued; изменившийся на не-standard game блокируется до вызова fake UCI.
+- Проверено на Windows Python 3.12.10: `QT_QPA_PLATFORM=offscreen .venv312/Scripts/python.exe -m pytest tests/test_m45_batch.py tests/test_m45_analysis_store.py -q` — **28 PASS**; `compileall` и `git diff --check` — PASS. Сетевые API, реальный движок и пользовательская база не запускались.
+- Остались R2–R9; следующий блок — канонические source-aware Lichess/Stockfish move metrics и accuracy.
