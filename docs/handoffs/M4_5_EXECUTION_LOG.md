@@ -16,7 +16,7 @@
 | 0 | Аудит схемы v9 и договоры о метриках | DONE | `6bf0078fff22977869f3be786c19b492e4ece39a`, PR #30 | 212 pytest PASS; compileall PASS; baseline main `6c3692c`; личные данные NOT TOUCHED |
 | A | Аддитивные миграции, coverage | DONE | `d4c61816424fd61f181411b815f1d0956f4d7b94`, PR #30 | schema v10; 215 pytest PASS; v9 backup/integrity/rollback PASS |
 | B | Частичные и поздние оценки Lichess | DONE | `d2da1445ad3573df07af7c7fb6c7d2eccf07c2d1`, PR #30 | 218 pytest PASS; fake export/429 PASS; real network NOT RUN |
-| C | Быстрая очередь Stockfish, recent-first | TODO | — | — |
+| C | Быстрая очередь Stockfish, recent-first | DONE | `c918e5e49ad531a13530851f5e9bdb7672f709a8`, PR #30 | schema v11; 228 pytest PASS; fake UCI/lease/fair-play PASS |
 | D | Метрики, severity, события и возможности | TODO | — | — |
 | E | Выборочное уточнение, тактические мотивы | TODO | — | — |
 | F | CC0 дебюты, фазы игры | TODO | — | — |
@@ -77,4 +77,13 @@
 - Добавлен bounded (`1..100`) recent-first missing-eval selector и явные `ArchiveSync.refresh_missing_evaluations()` / `LichessService.refresh_missing_archive_evaluations()`. Они используют только уже сохранённую OAuth-сессию при явном вызове, один официальный export endpoint на игру, не запускаются при открытии экрана и не двигают full-backfill/incremental cursors. UI-кнопка будет добавлена на этапе G.
 - Регрессии: partial→late-full completion; повторная идентичная загрузка не создаёт run; сохраняется более глубокий старый score; coverage summary учитывает partial; targeted refresh выбирает только неполную партию, не меняет курсор; fake HTTP 429 прекращает цикл и не маскируется/не повторяется. Всё на temp SQLite/fake client.
 - Проверки: полный `QT_QPA_PLATFORM=offscreen .venv312/Scripts/python.exe -m pytest -q -ra` — exit 0, 218 PASS; `python -m compileall -q src tests` — PASS; `git diff --check` — PASS. Windows Python 3.12.10 локально. Реальные Lichess/OAuth и Stockfish — NOT RUN; личная база NOT TOUCHED.
-- Следующий этап C: заполнить `analysis_jobs`, поддержать recent-first enqueue, idempotency, claim/pause/resume/cancel/crash recovery, fake UCI lifecycle и fail-closed fair-play перед каждой работой. UI batch controls остаются на этапе G.
+- Следующий этап D: извлечь versioned move metrics и event candidates из пары before/after assessments (typed mate/CP, правильная перспектива чёрных, unknown без доказательств), расширить сохранение, pure detector registry и regression fixtures.
+
+## Этап C — очередь быстрого анализа (2026-11-01)
+
+- Code commit: `c918e5e49ad531a13530851f5e9bdb7672f709a8`; PR #30 → `main`.
+- Схема поднята до v11 аддитивно: `analysis_jobs` расширена lease owner/expiry и ссылкой на результат; при обнаружении промежуточной v10-таблицы поля добавляются без пересоздания/переноса строк. Проверен v10→v11 backup/integrity и сохранение queued job.
+- Реализованы recent-first selection для завершённых standard games, bounded быстрый профиль (по умолчанию 20k nodes, предел 30k, Threads=1, Hash ≤128 MB), стабильный ключ job (game/revision/hash/pass/engine/config), atomic claim, lease heartbeat/expiry recovery, stale revision rejection, pause/resume/cancel/failure states и связь с analysis_run. Legacy `standard` cache key сохранён без нового `analysis_pass`, чтобы не терять ранее рассчитанные оценки.
+- `BatchAnalysisRunner` использует один явный локальный UCI process последовательно на несколько jobs; не скачивает/не выбирает бинарник сам. Перед каждой job требуется внешний safety snapshot, только `True` пропускает job. False/unknown/exception ставит job на паузу до создания engine. Появившаяся человеческая партия останавливает следующую job. Stop во время текущей позиции не сохраняет незавершённый run; cancel гасит очередь, pause сохраняет последующие queued jobs. Lease recovery тестирует перехват после имитации падения/expiry.
+- Fake UCI / temp SQLite регрессии: idempotent enqueue, recent-first, reuse одного engine и результата, legacy cache reuse, fail-closed unknown/active opponent, появление human game между партиями, interrupt+cancel, pause+resume, lease expiry, stale revision, миграции. Реальный Stockfish — NOT RUN.
+- Полный Windows/Python 3.12.10 headless тестовый набор: `QT_QPA_PLATFORM=offscreen .venv312/Scripts/python.exe -m pytest -q -ra` — exit 0, 228 PASS; compileall — PASS; diff-check — PASS. Личная SQLite/OAuth/Lichess — NOT TOUCHED/NOT RUN. CI для текущего SHA проверяется после публикации.
