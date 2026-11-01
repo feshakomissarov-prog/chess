@@ -82,6 +82,17 @@ def test_opening_conflict_is_visible_and_statistics_are_grouped_by_owner_color(t
         assert len(rows) == 1
         assert rows[0]["my_color"] == "white"
         assert rows[0]["opening_provenance"] == "chess-coach-cc0"
+        assert rows[0]["opening_conflict"] == 1
+        assert rows[0]["lichess_opening_eco"] == "Z99"
+        repo.save_snapshot("lichess-only", "startpos", "d2d4", "white", "Friend", False,
+                           "300+0", "finished", "white")
+        with repo._connection() as db:
+            db.execute("UPDATE games SET opening_eco='D00',opening_name='Lichess Queen Pawn' "
+                       "WHERE game_id='lichess-only'")
+        lichess_only = next(row for row in StatisticsService(repo).opening_statistics()
+                            if row["eco"] == "D00")
+        assert lichess_only["opening_provenance"] == "lichess"
+        assert lichess_only["opening_dataset_revision"] is None
         line = repo.current_line("conflict")
         repo.save_analysis("conflict", line_revision=1, line_hash=line["line_hash"],
             source="stockfish-fast", engine_name="fake", engine_version="1",

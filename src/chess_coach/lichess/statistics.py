@@ -317,6 +317,10 @@ class StatisticsService:
                 "COALESCE(om.name,g.opening_name,'unknown') AS opening,"
                 "COALESCE(om.family,CASE WHEN g.opening_name IS NULL THEN 'unknown' "
                 "ELSE g.opening_name END) AS family,"
+                "om.dataset_revision AS opening_dataset_revision,g.opening_eco AS lichess_opening_eco,"
+                "g.opening_name AS lichess_opening_name,COALESCE(om.lichess_conflict,0) AS opening_conflict,"
+                "CASE WHEN om.dataset_revision IS NOT NULL THEN 'chess-coach-cc0' "
+                "WHEN g.opening_eco IS NOT NULL THEN 'lichess' ELSE 'unknown' END AS opening_provenance,"
                 "COALESCE(ag.color,g.color) AS my_color,g.source AS game_source,"
                 "COALESCE(ag.account_id,'local') AS account_scope,"
                 "COUNT(DISTINCT g.game_id) AS games,"
@@ -338,6 +342,9 @@ class StatisticsService:
                 "WHERE " + " AND ".join(clauses) +
                 " GROUP BY COALESCE(om.eco,g.opening_eco,'unknown'),"
                 "COALESCE(om.name,g.opening_name,'unknown'),COALESCE(om.family,g.opening_name,'unknown'),"
+                "om.dataset_revision,g.opening_eco,g.opening_name,COALESCE(om.lichess_conflict,0),"
+                "CASE WHEN om.dataset_revision IS NOT NULL THEN 'chess-coach-cc0' "
+                "WHEN g.opening_eco IS NOT NULL THEN 'lichess' ELSE 'unknown' END,"
                 "COALESCE(ag.color,g.color),g.source,COALESCE(ag.account_id,'local') "
                 "ORDER BY games DESC,eco,opening,my_color,account_scope "
                 , [*([analysis_source] if analysis_source else []), *params]).fetchall()
@@ -349,7 +356,6 @@ class StatisticsService:
             own_count = int(item["evaluated_own_moves"] or 0)
             errors = int(item["own_errors"] or 0)
             item["own_errors_per_100_evaluated"] = round(100 * errors / own_count, 1) if own_count else None
-            item["opening_provenance"] = "chess-coach-cc0" if item["eco"] != "unknown" else "unknown"
             item["analysis_source"] = analysis_source or "latest-complete-preferred"
             output.append(item)
         return output

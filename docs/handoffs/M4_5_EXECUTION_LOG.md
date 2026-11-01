@@ -274,3 +274,10 @@
 - Regression fixtures: PGN с оценками только 1..N имеет source coverage 4/4, white comparable pairs 1/2 и первый ход `unknown`; контроль с реальным root eval даёт 2/2. Qt offscreen test подтверждает понятную маркировку в окне анализа.
 - Проверено: Windows Python 3.12.10, 3 адресных regression tests PASS. Реальный Lichess PGN/OAuth и пользовательская база не использовались.
 - Далее: R14 provenance дебюта, R15 устаревшие detector events и R16 честная маркировка local accuracy.
+
+## PR #30 second-pass review — R14 (2026-11-01)
+
+- R14: `opening_provenance` теперь определяется отдельно от ECO: наличие `opening_matches.dataset_revision` означает CC0 matcher; ECO/name только из импортированной игры помечается `lichess`; отсутствие обоих источников — `unknown`. В выдаче сохранены исходные Lichess labels, CC0 dataset revision и флаг конфликта; SQL группирует по provenance, чтобы совпавшие ECO не объединяли разные источники.
+- Regression: одна игра только с Lichess ECO и вторая с конфликтующим CC0 match; проверены происхождение и видимые исходные поля.
+- Проверено: Python 3.12.10, `pytest tests/test_m45_openings.py -q` — 7 PASS.
+- Далее: R15 версионированная актуальность detector events.
