@@ -1,3 +1,11 @@
+## Актуализация 01.11.2026 — PR #25 b2ef275: технический GO для ручного offline smoke (текущая)
+
+**Последний проверенный head:** [draft PR #25](https://github.com/feshakomissarov-prog/chess/pull/25) `b2ef2752df027d6ff13fa93ef0ce8e8955c492e2` (base #24, всё ещё НЕ СЛИТ). [CI #41265056278](https://github.com/feshakomissarov-prog/chess/actions/runs/41265056278): **206 PASS за 128.21 с**, Windows/Python 3.12.10/Qt-PySide6-shiboken6 6.12.0, compileall и isolated offscreen GUI PASS.
+
+**Итог независимого повторного ревью:** [PR25_B2EF275_FINAL_REVIEW.md](reviews/PR25_B2EF275_FINAL_REVIEW.md). Ранее найденная инверсия official AI/BOT устранена: `source='ai'` + `opponent.id=null` + `opponent.ai 1..8` — единственное явное исключение; BOT-account и неизвестные признаки fail-closed; серверная идентичность сохраняется после gameStart/account-playing и не подменяется gameFull/gameState. Ранее принятые Cancel, смена аккаунта, 429/лимит snapshot, миграция v9, 35k summary и UCI lifecycle прошли CI без новых регрессий. **Новых блокеров на изменённом SHA не выявлено.**
+
+**Разрешена только следующая ступень: один ручной `--offline` GUI smoke владельца в отдельной Windows/Python3.12+ `.venv312`.** Полные команды и ожидаемые проверки — в ревью. `--offline` не читает OAuth и не открывает постоянную SQLite. Отдельно: пользовательские SQLite, реальные Lichess/OAuth, Stockfish, puzzles и интерактивная проверка обновлённого окна **NOT RUN**; локальный native crash Python3.11/shiboken6 не объяснён. **Не merge** до разрешения PR #8→main (всё ещё mergeable=false), проверки интеграционного SHA, реального пилота/backup и явного разрешения владельца. Дорожная карта M3/M4→M5→M6 не менялась.
+
 ## Актуализация 01.11.2026 — PR #25 SHA b027763, CI 200 PASS, критический fair-play нюанс (текущая)
 
 **Подтверждённый head:** [draft PR #25](https://github.com/feshakomissarov-prog/chess/pull/25) `b027763de71bea6fb655e8a593471c0ae7590ba9`, base PR #24, **все PR #8–#25 не слиты**. [Windows CI run #41263521194](https://github.com/feshakomissarov-prog/chess/actions/runs/41263521194): **200 PASS за 95.92 с**, Python 3.12.10, Qt/PySide6/shiboken6 6.12.0, compileall и offscreen window smoke PASS. Три прежних P1 (Cancel connected, incomplete API list, stale session snapshot) по коду и fake/Qt тестам исправлены.
