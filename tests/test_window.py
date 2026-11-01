@@ -9,7 +9,8 @@ from PySide6.QtGui import QCloseEvent
 from PySide6.QtWidgets import QInputDialog, QMessageBox
 
 from chess_coach.board_view import BoardView
-from chess_coach.window import ActiveGamesDialog, EvaluationGraph, MainWindow, SettingsDialog
+from chess_coach.window import (ActiveGamesDialog, EvaluationGraph, MainWindow,
+                                SettingsDialog, StatisticsDialog, StatisticsGameDialog)
 from chess_coach.lichess.session import LichessGameSession
 from chess_coach.lichess.repository import GameRepository
 
@@ -87,6 +88,51 @@ def test_evaluation_graph_click_emits_nearest_ply(qtbot):
     qtbot.wait(20)
     qtbot.mouseClick(graph, Qt.MouseButton.LeftButton, pos=QPoint(250, 100))
     assert selected == [2]
+
+
+def test_statistics_screen_filters_asynchronously_and_resets(qtbot, tmp_path):
+    repo = GameRepository(tmp_path / "statistics-screen.sqlite3")
+    repo.save_snapshot("screen-win", "startpos", "e2e4", "white", "Alice",
+                       False, "180+2", "finished", "white")
+    repo.save_snapshot("screen-draw", "startpos", "d2d4", "black", "Bob",
+                       False, "600+0", "draw", None)
+    dialog = StatisticsDialog(repo)
+    qtbot.addWidget(dialog)
+    dialog.show()
+    qtbot.waitUntil(lambda: dialog._query_thread is None
+                    and dialog.summary_label.text().startswith("Партии:"), timeout=5000)
+    assert dialog.games.count() == 2
+    dialog.result_filter.setCurrentIndex(dialog.result_filter.findData("draw"))
+    qtbot.waitUntil(lambda: dialog._query_thread is None and dialog.games.count() == 1,
+                    timeout=5000)
+    assert dialog.games.item(0).data(Qt.ItemDataRole.UserRole) == "screen-draw"
+    dialog.reset_filters()
+    qtbot.waitUntil(lambda: dialog._query_thread is None and dialog.games.count() == 2,
+                    timeout=5000)
+    assert "Смешанные локальные аккаунты" in dialog.mixed_warning.text()
+
+
+def test_statistics_game_detail_move_selection_emits_position(qtbot, tmp_path):
+    repo = GameRepository(tmp_path / "statistics-detail.sqlite3")
+    repo.save_snapshot("detail-game", "startpos", "e2e4 e7e5", "white", "Friend",
+                       False, "180+2", "finished", "white")
+    line = repo.current_line("detail-game")
+    repo.save_analysis("detail-game", line_revision=line["line_revision"],
+        line_hash=line["line_hash"], source="stockfish", engine_name="FixtureFish",
+        engine_version="fixture", parameters={"nodes": 1},
+        assessments=[{"ply": 0, "white_cp": 0}, {"ply": 1, "white_cp": 15},
+                     {"ply": 2, "white_cp": 5}],
+        classifications=[{"ply": 1, "mover": "white", "eval_loss_cp": 10,
+                          "label": "good", "phase": "opening",
+                          "algorithm_version": "test"}])
+    dialog = StatisticsGameDialog(repo, repo.get_game("detail-game"))
+    qtbot.addWidget(dialog)
+    selected = []
+    dialog.position_requested.connect(lambda game_id, ply: selected.append((game_id, ply)))
+    dialog.moves.setCurrentRow(1)
+    dialog.open_position.click()
+    assert selected == [("detail-game", 2)]
+    assert dialog.graph.assessments[1]["ply"] == 1
 
 
 def test_free_local_board_moves_both_sides_by_clicks_and_drag(qtbot, tmp_path):

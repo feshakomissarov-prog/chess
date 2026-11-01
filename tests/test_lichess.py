@@ -1053,6 +1053,69 @@ def test_statistics_use_move_denominators_partial_coverage_and_keep_accuracy_sep
     assert filtered["games"] == 1
 
 
+def test_statistics_result_analysis_source_and_game_page_filters_match(tmp_path):
+    from chess_coach.lichess.statistics import StatisticsService
+
+    repo = GameRepository(tmp_path / "statistics-filters.sqlite3")
+    rows = (("win", "white", "finished", "white"),
+            ("loss", "white", "finished", "black"),
+            ("draw", "black", "draw", None),
+            ("unknown", "white", "unknownFinish", None))
+    for game_id, color, status, winner in rows:
+        repo.save_snapshot(game_id, "startpos", "e2e4", color, "Opponent",
+                           False, "180+2", status, winner)
+    line = repo.current_line("win")
+    repo.save_analysis("win", line_revision=1, line_hash=line["line_hash"],
+        source="stockfish", engine_name="Fake", engine_version="fixture", parameters={"nodes": 1},
+        assessments=[{"ply": 1, "white_cp": 25}], classifications=[
+            {"ply": 1, "mover": "white", "eval_loss_cp": 0, "label": "good",
+             "phase": "opening", "algorithm_version": "test"}])
+    service = StatisticsService(repo)
+    assert service.summary(result="win")["games"] == 1
+    assert service.summary(result="loss")["games"] == 1
+    assert service.summary(result="draw")["games"] == 1
+    unknown = service.summary(result="unknown")
+    assert unknown["games"] == unknown["unknown_or_aborted"] == 1
+    assert service.summary(analyzed="yes", analysis_source="stockfish")["games"] == 1
+    assert service.summary(analyzed="no", analysis_source="stockfish")["games"] == 3
+    page = service.game_page(result="draw", clock="180+2", page_size=1)
+    assert page["total"] == 1 and [game["game_id"] for game in page["items"]] == ["draw"]
+    assert service.game_page(analyzed="yes", analysis_source="stockfish")["total"] == 1
+
+
+def test_statistics_page_is_bounded_for_large_archive(tmp_path):
+    from chess_coach.lichess.statistics import StatisticsService
+
+    repo = GameRepository(tmp_path / "statistics-large.sqlite3")
+    for index in range(1_005):
+        repo.save_snapshot(f"large-{index:04}", "startpos", "e2e4", "white", "Fixture",
+                           False, "-", "finished", "white")
+    service = StatisticsService(repo)
+    page = service.game_page(page=10, page_size=100)
+    assert page["total"] == 1_005
+    assert len(page["items"]) == 5
+    assert service.summary(result="win")["games"] == 1_005
+
+
+def test_statistics_query_cache_invalidates_after_game_and_analysis_writes(tmp_path):
+    from chess_coach.lichess.statistics import StatisticsService
+
+    repo = GameRepository(tmp_path / "statistics-cache-invalidation.sqlite3")
+    service = StatisticsService(repo)
+    assert service.summary(result="win")["games"] == 0
+    repo.save_snapshot("cache-game", "startpos", "e2e4", "white", "Fixture",
+                       False, "-", "finished", "white")
+    assert service.summary(result="win")["games"] == 1
+    assert service.summary(analyzed="yes", analysis_source="stockfish")["games"] == 0
+    line = repo.current_line("cache-game")
+    repo.save_analysis("cache-game", line_revision=line["line_revision"],
+        line_hash=line["line_hash"], source="stockfish", engine_name="Fake",
+        engine_version="fixture", parameters={}, assessments=[{"ply": 1, "white_cp": 1}],
+        classifications=[{"ply": 1, "mover": "white", "eval_loss_cp": 0,
+                          "label": "good", "phase": "opening", "algorithm_version": "test"}])
+    assert service.summary(analyzed="yes", analysis_source="stockfish")["games"] == 1
+
+
 def test_statistics_use_account_color_and_do_not_count_unknown_finish_as_draw(tmp_path):
     from chess_coach.lichess.statistics import StatisticsService
     repo = GameRepository(tmp_path / "stats-accounts.sqlite3")

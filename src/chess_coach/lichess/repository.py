@@ -35,7 +35,15 @@ class GameRepository:
         self._pending_writes: dict[str, Future] = {}
         self._write_errors: dict[str, str] = {}
         self._archive_account_cache: dict[str, str] = {}
+        self._statistics_revision = 0
         self._initialize()
+
+    @property
+    def statistics_revision(self) -> int:
+        return self._statistics_revision
+
+    def invalidate_statistics_cache(self) -> None:
+        self._statistics_revision += 1
 
     def _connect(self) -> sqlite3.Connection:
         db = sqlite3.connect(self.path, timeout=5)
@@ -242,6 +250,7 @@ class GameRepository:
                 CREATE INDEX IF NOT EXISTS idx_games_opponent ON games(opponent);
                 CREATE INDEX IF NOT EXISTS idx_game_notes_position ON game_notes(position_uid);
                 CREATE INDEX IF NOT EXISTS idx_analysis_cache ON analysis_runs(game_id,line_revision,source,engine_version,status);
+                CREATE INDEX IF NOT EXISTS idx_analysis_current_source ON analysis_runs(game_id,line_revision,status,source,finished_at DESC);
             """
             for statement in schema_sql.split(";"):
                 if statement.strip():
@@ -402,6 +411,7 @@ class GameRepository:
                        (revision, game_id))
             if transaction_hook is not None:
                 transaction_hook(db, revision, line_hash)
+        self.invalidate_statistics_cache()
 
     @staticmethod
     def _write_revision(db: sqlite3.Connection, row: dict, revision: int,
@@ -873,6 +883,7 @@ class GameRepository:
                 db.execute("UPDATE archive_sync_state SET imported_count=imported_count+?,"
                            "updated_at=? WHERE account_id=?",
                            (int(not existing_account_link), now, account_id))
+        self.invalidate_statistics_cache()
         return (game_id, not bool(existing_account_link)) if _return_inserted else game_id
 
     def begin_archive_backfill(self, account_id: str, started_at_ms: int) -> int:
@@ -934,6 +945,7 @@ class GameRepository:
                              item.get("phase", "unknown"), item.get("eval_loss_cp"),
                              item.get("label", "unknown"), item.get("algorithm_version", ""))
                             for item in classifications])
+        self.invalidate_statistics_cache()
         return run_id
 
     def find_analysis_cache(self, game_id: str, line_revision: int, line_hash: str,
@@ -965,6 +977,25 @@ class GameRepository:
         sql += " ORDER BY finished_at DESC"
         with self._connection() as db:
             return [dict(row) for row in db.execute(sql, params)]
+
+    def latest_analysis_detail(self, game_id: str, line_revision: int) -> dict | None:
+        """Load one current analysis and its plotted points/classifications for a detail view."""
+        with self._connection() as db:
+            run = db.execute(
+                "SELECT ar.* FROM analysis_runs ar JOIN game_revisions gr "
+                "ON gr.game_id=ar.game_id AND gr.line_revision=ar.line_revision "
+                "WHERE ar.game_id=? AND ar.line_revision=? AND gr.is_current=1 "
+                "AND ar.status='complete' ORDER BY ar.finished_at DESC,ar.run_id DESC LIMIT 1",
+                (game_id, line_revision)).fetchone()
+            if not run:
+                return None
+            result = dict(run)
+            result["assessments"] = [dict(row) for row in db.execute(
+                "SELECT * FROM position_assessments WHERE run_id=? ORDER BY ply", (run["run_id"],))]
+            result["classifications"] = [dict(row) for row in db.execute(
+                "SELECT * FROM move_classifications WHERE run_id=? AND ply>0 ORDER BY ply",
+                (run["run_id"],))]
+            return result
 
     def phase_for_ply(self, game_id: str, line_revision: int, ply: int) -> str:
         with self._connection() as db:
