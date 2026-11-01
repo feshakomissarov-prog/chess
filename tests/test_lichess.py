@@ -2413,3 +2413,42 @@ def test_clock_only_duplicate_does_not_reserialize_or_resave_full_pgn(tmp_path, 
     session.apply_event({"type": "gameState", "moves": "e2e4", "status": "started", "wtime": 9_000})
     session.apply_event({"type": "gameState", "moves": "e2e4", "status": "started", "wtime": 8_000})
     assert len(saves) == 1
+
+
+def test_disconnect_cancels_archive_and_puzzle_background_workers(monkeypatch):
+    service = LichessService(client=object(), token_store=object())
+    service._archive_stop = threading.Event()
+    service._puzzle_stop = threading.Event()
+    monkeypatch.setattr(service, "_thread", lambda target, name: None)
+
+    service.disconnect_account()
+
+    assert service._archive_stop.is_set()
+    assert service._puzzle_stop.is_set()
+
+
+def test_automatic_puzzle_sync_never_opens_oauth_without_saved_token(monkeypatch):
+    import chess_coach.lichess.service as service_module
+
+    class EmptyCredentialStore:
+        def __init__(self, **kwargs):
+            pass
+
+        def get(self):
+            return None
+
+    class NoNetworkClient:
+        def get_account(self, token):
+            raise AssertionError("No account requests without an existing puzzle token")
+
+    monkeypatch.setattr(service_module, "WindowsCredentialStore", EmptyCredentialStore)
+    service = LichessService(client=NoNetworkClient(), token_store=object())
+    service.username = "Owner"
+    monkeypatch.setattr(service, "_thread", lambda target, name: target())
+    results = []
+    service.background_sync_finished.connect(lambda kind, status: results.append((kind, status)))
+
+    service.sync_puzzle_activity_background(repository=object())
+
+    assert service._puzzle_stop is None
+    assert results == []
