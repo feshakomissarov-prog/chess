@@ -103,6 +103,40 @@ def test_repository_persists_account_neutral_events_and_reclassification_is_idem
         repository.shutdown()
 
 
+def test_reclassify_hides_superseded_detector_event_but_preserves_history(tmp_path, monkeypatch):
+    import chess_coach.lichess.event_detectors as detectors
+
+    repository = GameRepository(tmp_path / "event-version-history.sqlite3")
+    try:
+        repository.save_snapshot("versioned", "startpos", "e2e4", "white", "Friend",
+                                 False, "300+0", "finished", "white")
+        line = repository.current_line("versioned")
+        run_id = repository.save_analysis(
+            "versioned", line_revision=1, line_hash=line["line_hash"], source="stockfish",
+            engine_name="Synthetic", engine_version="v1", parameters={"nodes": 1},
+            assessments=[{"ply": 0, "white_cp": 0}, {"ply": 1, "white_cp": 0}],
+            classifications=[], status="complete")
+        with repository._connection() as db:
+            db.execute("INSERT INTO analysis_events(event_key,run_id,game_id,line_revision,ply,"
+                       "event_type,confidence_state,source,detector_version,evidence_json) "
+                       "VALUES (?,?,?,?,?,?,?,?,?,?)",
+                       ("old-detector-event", run_id, "versioned", 1, 1, "missed_opportunity",
+                        "candidate", "stockfish", "cc-base-events-v0:opportunity", "{}"))
+            db.execute("INSERT INTO event_tags(event_key,tag,detector_version,confidence_state,"
+                       "evidence_json) VALUES (?,?,?,?,?)",
+                       ("old-detector-event", "historic-tag", "cc-base-events-v0:opportunity",
+                        "candidate", "{}"))
+        monkeypatch.setattr(detectors, "DETECTOR_VERSION", "cc-base-events-v2")
+        monkeypatch.setattr(detectors, "detect_registered_events", lambda *_a, **_k: [])
+        assert repository.reclassify_analysis_events(run_id) == 0
+        with repository._connection() as db:
+            assert db.execute("SELECT COUNT(*) FROM analysis_events WHERE event_key='old-detector-event'").fetchone()[0] == 1
+            assert db.execute("SELECT COUNT(*) FROM event_tags WHERE event_key='old-detector-event'").fetchone()[0] == 1
+            assert repository._load_analysis_events(db, run_id) == []
+    finally:
+        repository.shutdown()
+
+
 def test_selective_review_runs_only_capped_positions_and_persists_multipv_alternatives(tmp_path):
     class FakeReviewResult:
         def __init__(self, board, multipv):

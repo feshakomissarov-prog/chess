@@ -603,6 +603,8 @@ class StatisticsService:
             clauses.append("ag.color=?"); params.append(side)
         analysis_clause = "AND ar.source=? " if analysis_source else ""
         cte_params: list[object] = [analysis_source] if analysis_source else []
+        from .event_detectors import DETECTOR_VERSION
+        active_detector = DETECTOR_VERSION + ":%"
         where = " AND ".join(clauses)
         self.repository._wait_before_read()
         with self.repository._connection() as db:
@@ -640,11 +642,13 @@ class StatisticsService:
                 "AND mm.severity='blunder') own_blunders,"
                 "(SELECT COUNT(*) FROM analysis_events ae WHERE ae.run_id=ar.run_id "
                 "AND ae.event_type='missed_opportunity' AND ae.confidence_state='candidate' "
+                "AND (ae.detector_version NOT LIKE 'cc-base-events-v%' OR ae.detector_version LIKE ?) "
                 "AND EXISTS (SELECT 1 FROM game_moves gm WHERE gm.game_id=ae.game_id "
                 "AND gm.line_revision=ae.line_revision AND gm.ply=ae.ply AND gm.mover=ag.color)) "
                 "opportunity_candidates,"
                 "(SELECT COUNT(*) FROM analysis_events ae WHERE ae.run_id=ar.run_id "
                 "AND ae.event_type='opportunity_used' AND ae.confidence_state='verified' "
+                "AND (ae.detector_version NOT LIKE 'cc-base-events-v%' OR ae.detector_version LIKE ?) "
                 "AND EXISTS (SELECT 1 FROM game_moves gm WHERE gm.game_id=ae.game_id "
                 "AND gm.line_revision=ae.line_revision AND gm.ply=ae.ply AND gm.mover=ag.color)) "
                 "verified_opportunities_used "
@@ -668,7 +672,7 @@ class StatisticsService:
                 "SUM(CASE WHEN started_at IS NULL THEN 1 ELSE 0 END) unknown_date_games "
                 "FROM game_rows GROUP BY period,my_color "
                 "ORDER BY CASE WHEN period='unknown' THEN 1 ELSE 0 END,period,my_color",
-                [*cte_params, *params]).fetchall()
+                [*cte_params, active_detector, active_detector, *params]).fetchall()
         output = []
         for row in rows:
             item = dict(row)

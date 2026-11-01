@@ -281,3 +281,10 @@
 - Regression: одна игра только с Lichess ECO и вторая с конфликтующим CC0 match; проверены происхождение и видимые исходные поля.
 - Проверено: Python 3.12.10, `pytest tests/test_m45_openings.py -q` — 7 PASS.
 - Далее: R15 версионированная актуальность detector events.
+
+## PR #30 second-pass review — R15 (2026-11-01)
+
+- R15: reclassification сохраняет старые строки `analysis_events` и `event_tags` как историческое evidence, но `_load_analysis_events`, review planning и historical opportunity aggregates исключают устаревшие версии семейства `cc-base-events-vN`; текущая версия берётся из `DETECTOR_VERSION`. `reclassify_analysis_events` остаётся idempotent и не запускает UCI. Не затрагиваются чужие event detector families и пользовательские заметки.
+- Regression меняет версию detector, отключает выдачу старого candidate и подтверждает: старый event/tag физически сохранён для истории, но отсутствует в активной выдаче.
+- Проверено: Windows Python 3.12.10, analysis-event/profile/store suites — PASS.
+- Далее: R16 accuracy UX contract и затем полный R17/regression/CI.

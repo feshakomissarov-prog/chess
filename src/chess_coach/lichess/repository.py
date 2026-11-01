@@ -1741,8 +1741,15 @@ class GameRepository:
 
     @staticmethod
     def _load_analysis_events(db: sqlite3.Connection, run_id: str) -> list[dict]:
+        from .event_detectors import DETECTOR_VERSION
+
+        # Retain superseded detector evidence in SQLite for audit, but expose only
+        # the active base-detector version in reports and review planning.
         events = [dict(row) for row in db.execute(
-            "SELECT * FROM analysis_events WHERE run_id=? ORDER BY ply,event_type", (run_id,))]
+            "SELECT * FROM analysis_events WHERE run_id=? AND "
+            "(detector_version NOT LIKE 'cc-base-events-v%' OR detector_version LIKE ?) "
+            "ORDER BY ply,event_type,detector_version",
+            (run_id, DETECTOR_VERSION + ":%"))]
         for event in events:
             event["tags"] = [row[0] for row in db.execute(
                 "SELECT tag FROM event_tags WHERE event_key=? ORDER BY tag",
