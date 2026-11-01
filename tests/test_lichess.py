@@ -13,7 +13,7 @@ import pytest
 
 from chess_coach.lichess.api import HttpResponse, LichessClient, LichessError, RateLimitError
 from chess_coach.lichess.auth import OAuthCallbackServer, create_authorization_request
-from chess_coach.lichess.repository import GameRepository
+from chess_coach.lichess.repository import GameRepository, SCHEMA_VERSION
 from chess_coach.lichess.session import LichessGameSession, classify_lichess_opponent
 from chess_coach.lichess.service import LichessService
 
@@ -617,10 +617,10 @@ def test_m3_migration_preserves_legacy_game_creates_revision_and_backup(tmp_path
     assert row["line_revision"] == 1
     assert row["import_error"] is None
     with repo._connection() as migrated:
-        assert migrated.execute("PRAGMA user_version").fetchone()[0] == 9
+        assert migrated.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION
         assert migrated.execute("SELECT COUNT(*) FROM game_positions").fetchone()[0] == 3
         assert migrated.execute("SELECT san FROM game_moves ORDER BY ply").fetchall()[0][0] == "e4"
-    backup = sqlite3.connect(str(path) + ".pre-m3-v9.bak")
+    backup = sqlite3.connect(str(path) + ".pre-m3-v10.bak")
     try:
         assert backup.execute("PRAGMA integrity_check").fetchone()[0] == "ok"
         assert backup.execute("PRAGMA user_version").fetchone()[0] == 0
@@ -1521,13 +1521,13 @@ def test_v8_puzzle_attempt_migration_deduplicates_legacy_uids_and_preserves_pilo
         attempts = db.execute("SELECT attempt_uid,metadata_json FROM puzzle_attempts").fetchall()
         links = db.execute("SELECT run_id,attempt_uid FROM puzzle_pilot_run_attempts").fetchall()
         run = db.execute("SELECT received_count,new_count FROM puzzle_pilot_runs WHERE run_id=?", (run_id,)).fetchone()
-        assert db.execute("PRAGMA user_version").fetchone()[0] == 9
+        assert db.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION
         assert db.execute("PRAGMA integrity_check").fetchone()[0] == "ok"
     assert len(attempts) == 1
     assert len(links) == 1 and links[0][0] == run_id and links[0][1] == attempts[0][0]
     assert tuple(run) == (2, 2)  # historical run counters are not rewritten
     assert json.loads(attempts[0][1])["puzzle"]["rating"] in {1200, 1220}
-    backup = sqlite3.connect(str(path) + ".pre-m3-v9.bak")
+    backup = sqlite3.connect(str(path) + ".pre-m3-v10.bak")
     try:
         assert backup.execute("PRAGMA integrity_check").fetchone()[0] == "ok"
         assert backup.execute("PRAGMA user_version").fetchone()[0] == 8

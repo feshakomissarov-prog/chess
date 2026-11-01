@@ -18,7 +18,7 @@ import chess
 import chess.pgn
 
 
-SCHEMA_VERSION = 9
+SCHEMA_VERSION = 10
 DEFAULT_PAGE_SIZE = 100
 MAX_PAGE_SIZE = 500
 
@@ -365,7 +365,64 @@ class GameRepository:
                     db.execute(f"RELEASE SAVEPOINT {savepoint}")
                     db.execute("UPDATE games SET import_error=? WHERE game_id=?",
                                (str(exc), row["game_id"]))
+            self._migrate_m45_schema(db)
             db.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
+
+    @staticmethod
+    def _migrate_m45_schema(db: sqlite3.Connection) -> None:
+        """Add the resumable analysis queue and a derived, read-only coverage view.
+
+        The queue describes work; it deliberately does not duplicate PGN, moves,
+        positions, or analysis facts. Existing rows remain untouched.
+        """
+        db.execute("""CREATE TABLE IF NOT EXISTS analysis_jobs (
+            job_id TEXT PRIMARY KEY,
+            game_id TEXT NOT NULL REFERENCES games(game_id) ON DELETE CASCADE,
+            line_revision INTEGER NOT NULL,
+            line_hash TEXT NOT NULL,
+            analysis_pass TEXT NOT NULL CHECK(analysis_pass IN ('fast','review')),
+            engine_version TEXT NOT NULL,
+            parameters_json TEXT NOT NULL,
+            status TEXT NOT NULL CHECK(status IN
+                ('queued','running','paused','complete','failed','cancelled','stale')),
+            attempts INTEGER NOT NULL DEFAULT 0,
+            priority_at TEXT,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            started_at TEXT,
+            finished_at TEXT,
+            error TEXT,
+            UNIQUE(game_id,line_revision,line_hash,analysis_pass,engine_version,parameters_json),
+            FOREIGN KEY(game_id,line_revision)
+                REFERENCES game_revisions(game_id,line_revision) ON DELETE CASCADE
+        )""")
+        db.execute("CREATE INDEX IF NOT EXISTS idx_analysis_jobs_dispatch "
+                   "ON analysis_jobs(status,priority_at DESC,created_at,job_id)")
+        db.execute("CREATE INDEX IF NOT EXISTS idx_analysis_jobs_line "
+                   "ON analysis_jobs(game_id,line_revision,line_hash,status)")
+        db.execute("""CREATE VIEW IF NOT EXISTS analysis_coverage AS
+            SELECT ar.run_id,ar.game_id,ar.line_revision,ar.line_hash,ar.source,
+                   ar.engine_name,ar.engine_version,ar.parameters_json,ar.status,
+                   ar.started_at,ar.finished_at,
+                   (SELECT COUNT(*) FROM game_positions gp
+                    WHERE gp.game_id=ar.game_id AND gp.line_revision=ar.line_revision)
+                       AS total_positions,
+                   (SELECT COUNT(*) FROM position_assessments pa
+                    WHERE pa.run_id=ar.run_id
+                      AND (pa.white_cp IS NOT NULL OR pa.mate_white IS NOT NULL))
+                       AS scored_positions,
+                   (SELECT COUNT(*) FROM game_moves gm
+                    WHERE gm.game_id=ar.game_id AND gm.line_revision=ar.line_revision
+                      AND EXISTS (SELECT 1 FROM position_assessments pre
+                                  WHERE pre.run_id=ar.run_id AND pre.ply=gm.ply-1
+                                    AND (pre.white_cp IS NOT NULL OR pre.mate_white IS NOT NULL))
+                      AND EXISTS (SELECT 1 FROM position_assessments post
+                                  WHERE post.run_id=ar.run_id AND post.ply=gm.ply
+                                    AND (post.white_cp IS NOT NULL OR post.mate_white IS NOT NULL)))
+                       AS comparable_move_pairs
+            FROM analysis_runs ar
+            JOIN game_revisions gr ON gr.game_id=ar.game_id
+                AND gr.line_revision=ar.line_revision AND gr.is_current=1""")
 
     def save_snapshot(self, game_id: str, initial_fen: str, moves: str, color: str,
                       opponent: str, rated: bool, clock: str, status: str,
