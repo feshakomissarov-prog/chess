@@ -319,3 +319,11 @@
 
 - Документальный head `9ca4b32e75744db980bd4540579a3bbcc12eee65`: Windows CI **SUCCESS**, **310 passed in 224.16s**, compileall и offline window initialization PASS; Python 3.12.10/Qt 6.12.0 на Windows Server 2025. [Actions run #87](https://github.com/feshakomissarov-prog/chess/actions/runs/41329890613).
 - Следующий commit только актуализирует журнал результатом #87; для строгого exact-head требования Actions проверяется ещё раз на новом head.
+
+## M4.5.1 U0 — Windows UX symptom reproduction (2026-11-01)
+
+- Осмотрена актуальная реализация и existing Qt coverage на PR #30. `LichessGameSession.render_board` уже рендерил ожидающий собственный ход отдельно от подтверждённой истории, но `MainWindow._refresh_online` выключал всю интерактивность через `not session.input_locked`, пока сохранялся `pending_uci`. Поэтому нельзя было даже выбрать фигуру для предхода в окно ожидания Lichess ACK; это напрямую подтверждается состояниями UI и session, а не предположением о сети/Stockfish.
+- Новые кнопки пилотного импорта партий и полного sync сейчас стоят на главной; доступ к локальной истории задач связан с путём синхронизации; экран Stockfish требует вручную заданный путь. U1/U3/U5/U6/U7/U4/U8 требуют отдельной переработки соответствующих UI-путей; существующий автоматический запуск движка не включается при открытии окна.
+- SQLite и учётные данные на этом этапе не читались. Для контроля используем только временные `tmp_path` базы и fake services/engines.
+- U2 измеримая регрессия добавлена отдельно: после `e2e4` оставлять ACK отложенным на 2 секунды и выполнять premove кликом и drag; проверять число POST, authoritative PGN и последующую отправку только после server moves. Предварительный targeted run: **13 passed** (`test_window.py -k "premove or pending_move_is_rendered"`), включая 2 новых 2-секундных сценария.
+- Следующий checkpoint U2: подтвердить definitive/ambiguous failure, reconnect/gameFull и тесты session, затем коммит.
