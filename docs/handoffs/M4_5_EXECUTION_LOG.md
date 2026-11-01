@@ -335,3 +335,10 @@
 - Регрессии Qt проверяют 2-секундное ожидание ACK с click-click и drag-drop, один POST до подтверждения, запись только подтверждённой истории и отправку после ответа соперника. Session tests дополнительно покрывают underpromotion, capture-premove, castling-premove, ambiguous/definitive отказ, mismatch, reconnect и disconnect.
 - Проверено на Windows Python 3.12.10, Qt offscreen: `pytest tests/test_lichess.py tests/test_window.py -k "speculative_premove or online_premove or pending_move or premove_is_discarded or delayed_ack or definitive_rejection or disconnect_clears_unconfirmed"` — **17 passed, 168 deselected in 6.71s**; compileall и `git diff --check` — PASS. Использованы только временные SQLite/fake Lichess; реальные сетевые запросы не запускались.
 - U2 выполнен для известных ветвей сценария; дополнительно потребуется полный suite в U9. Стрелки/правая кнопка не менялись.
+
+## M4.5.1 U1 — orientation by player color (2026-11-01)
+
+- Для активной/просматриваемой партии default orientation теперь вычисляется из `session.color`; `_open_saved_game` предпочитает `account_color` от выбранного account link и только как fallback использует legacy `games.color`. Цвет хода и текущий ply не влияют на ориентацию.
+- Ручной переворот online/review — runtime override конкретного game ID и не меняет глобальную настройку; следующая игра получает ориентацию своего цвета. Для свободной локальной доски используется отдельная `free_board_flipped` настройка (при первом запуске сохраняется совместимость с прежним `board_flipped`). Premove training ориентирует владельца своего цвета.
+- Проверены Windows Python 3.12.10 Qt offscreen regressions: белые/чёрные, смена ply, текущий ручной override, saved game с конфликтующими legacy/account colors и отдельная ориентация free board — **4 passed**. Использованы временные настройки/SQLite; реальные аккаунты не использовались.
+- Нет смены ориентации при переходе по истории. Правая кнопка/стрелки не затронуты.

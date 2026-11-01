@@ -1387,6 +1387,7 @@ class MainWindow(QMainWindow):
         self.online_sessions: dict[str, LichessGameSession] = {}
         self.online_session: LichessGameSession | None = None
         self._local_board_mode = "free"
+        self._orientation_overrides: dict[str, bool] = {}
         self.online_view_ply: int | None = None
         self._screen_mode = "home"
         self._awaiting_game_start = False
@@ -2520,7 +2521,7 @@ class MainWindow(QMainWindow):
             Path(path).write_text(pgn + "\n", encoding="utf-8")
 
     def _apply_preferences(self) -> None:
-        self.board.set_flipped(self.settings.value("board_flipped", False, type=bool))
+        self.board.set_flipped(self._effective_board_orientation())
         self.board.set_show_legal_moves(self.settings.value("show_legal_moves", True, type=bool))
         self.board.set_show_last_move(self.settings.value("show_last_move", True, type=bool))
         self.board.set_annotations_enabled(
@@ -2632,10 +2633,29 @@ class MainWindow(QMainWindow):
         self.refresh()
 
     def flip_board(self) -> None:
-        flipped = not self.settings.value("board_flipped", False, type=bool)
-        self.settings.setValue("board_flipped", flipped)
-        self.settings.sync()
+        flipped = not self.board._flipped
+        if self.online_session is not None:
+            self._orientation_overrides[self.online_session.game_id] = flipped
+        elif self._screen_mode == "local" and self._local_board_mode == "free":
+            self.settings.setValue("free_board_flipped", flipped)
+            self.settings.sync()
+        else:
+            self._orientation_overrides["local:premove-training"] = flipped
         self.board.set_flipped(flipped)
+
+    def _effective_board_orientation(self) -> bool:
+        """Return the board orientation for the current game, never for the current ply."""
+        if self.online_session is not None:
+            key = self.online_session.game_id
+            return self._orientation_overrides.get(key, self.online_session.color == chess.BLACK)
+        if self._screen_mode == "local" and self._local_board_mode == "premove_training":
+            return self._orientation_overrides.get(
+                "local:premove-training", self.controller.player_color == chess.BLACK)
+        if self._screen_mode == "local" and self._local_board_mode == "free":
+            return self.settings.value(
+                "free_board_flipped",
+                self.settings.value("board_flipped", False, type=bool), type=bool)
+        return self.settings.value("board_flipped", False, type=bool)
 
     def new_game(self) -> None:
         if self.online_session is not None:
@@ -2758,12 +2778,12 @@ class MainWindow(QMainWindow):
             return
         if session is None:
             session = LichessGameSession(str(game_id), self.game_repository)
-            color = game.get("color")
-            if color in {"white", "black"}:
-                session.color = chess.WHITE if color == "white" else chess.BLACK
             session.status = "started"
             session.clock_control = str(game.get("speed") or "-")
             self.online_sessions[session.game_id] = session
+        color = game.get("color")
+        if color in {"white", "black"}:
+            session.color = chess.WHITE if color == "white" else chess.BLACK
         else:
             # A queued premove belongs to an earlier visible session. Viewing a
             # game from the account list must never submit that stale intent.
@@ -3838,7 +3858,8 @@ class MainWindow(QMainWindow):
         session = LichessGameSession(game["game_id"], self.game_repository)
         session.initial_fen = game["initial_fen"]
         session.moves = game["moves"]
-        session.color = chess.WHITE if game["color"] == "white" else chess.BLACK
+        account_color = game.get("account_color") or game.get("color")
+        session.color = chess.WHITE if account_color == "white" else chess.BLACK
         session.opponent = game["opponent"]
         session.status = game["status"]
         session.winner = game["winner"]

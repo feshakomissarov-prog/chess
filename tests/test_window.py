@@ -30,6 +30,62 @@ def select_online(window, session):
     window.screen_stack.setCurrentWidget(window.game_page)
 
 
+@pytest.mark.parametrize(("color", "expected_flipped"), [
+    (chess.WHITE, False), (chess.BLACK, True),
+])
+def test_online_board_orientation_follows_player_color_not_turn_or_global_setting(
+    qtbot, tmp_path, color, expected_flipped
+):
+    settings = QSettings(str(tmp_path / f"orientation-{color}.ini"), QSettings.Format.IniFormat)
+    settings.setValue("board_flipped", not expected_flipped)
+    window = MainWindow(settings, offline_mode=True)
+    qtbot.addWidget(window)
+    session = LichessGameSession(f"orientation-{color}", window.game_repository)
+    session.color = color
+    session.apply_event({"type": "gameFull", "initialFen": "startpos",
+                         "state": {"moves": "", "status": "started"}})
+    select_online(window, session)
+    window.refresh()
+    assert window.board._flipped is expected_flipped
+    for moves in ("e2e4", "e2e4 e7e5"):
+        window._lichess_game_event(session.game_id, {
+            "type": "gameState", "moves": moves, "status": "started"})
+        assert window.board._flipped is expected_flipped
+    window.flip_board()
+    manual = not expected_flipped
+    assert window.board._flipped is manual
+    window.refresh()
+    assert window.board._flipped is manual
+
+
+def test_saved_game_orientation_uses_selected_account_color(qtbot, tmp_path):
+    window = MainWindow(QSettings(str(tmp_path / "saved-orientation.ini"),
+                                  QSettings.Format.IniFormat), offline_mode=True)
+    qtbot.addWidget(window)
+    game = {"game_id": "saved-black", "initial_fen": "startpos", "moves": "e2e4",
+            "color": "white", "account_color": "black", "opponent": "Opponent",
+            "status": "mate", "winner": "white", "clock": "-"}
+    assert window._open_saved_game(game)
+    assert window.online_session.color == chess.BLACK
+    assert window.board._flipped
+
+
+def test_free_board_orientation_is_separate_from_online_auto_orientation(qtbot, tmp_path):
+    window = MainWindow(QSettings(str(tmp_path / "free-orientation.ini"),
+                                  QSettings.Format.IniFormat), offline_mode=True)
+    qtbot.addWidget(window)
+    window.settings.setValue("board_flipped", False)
+    window.start_local_game()
+    assert not window.board._flipped
+    window.flip_board()
+    assert window.board._flipped
+    assert window.settings.value("free_board_flipped", type=bool) is True
+    assert window.settings.value("board_flipped", type=bool) is False
+    window._local_board_mode = "premove_training"
+    window.controller.player_color = chess.BLACK
+    assert window._effective_board_orientation()
+
+
 def test_main_window_smoke_and_game_controller_integration(qtbot, tmp_path) -> None:
     settings = QSettings(str(tmp_path / "app.ini"), QSettings.Format.IniFormat)
     window = MainWindow(settings)
