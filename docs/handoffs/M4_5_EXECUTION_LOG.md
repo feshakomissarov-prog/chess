@@ -180,3 +180,11 @@
 - Синтетические regressions: 15,000 игр идут страницами 10,000 + 5,000 + 0, один engine/settings job на игру; отдельная конфигурация допускается, явный retry переводит failed задачу обратно в queued; изменившийся на не-standard game блокируется до вызова fake UCI.
 - Проверено на Windows Python 3.12.10: `QT_QPA_PLATFORM=offscreen .venv312/Scripts/python.exe -m pytest tests/test_m45_batch.py tests/test_m45_analysis_store.py -q` — **28 PASS**; `compileall` и `git diff --check` — PASS. Сетевые API, реальный движок и пользовательская база не запускались.
 - Остались R2–R9; следующий блок — канонические source-aware Lichess/Stockfish move metrics и accuracy.
+
+## PR #30 deep review — R2 (2026-11-01)
+
+- R2 code commit `2b735b7d064d09d4803b12bb1b861af570cfc9b7`: новый archive PGN eval run теперь сразу материализует versioned `move_metrics` v2 и события внутри транзакции импорта, без legacy classification rows и без UCI. Экран паспорта, summary, library page, historical timeline и opening/phase diagnostics читают одну таблицу v2, join mover из `game_moves`, а unknown pairs не попадают в знаменатель качества.
+- Сохранена source/setting политика выбора единственного run на линию; фильтр `analysis_source` фиксирует источник, иначе выбирается один завершённый run по status/time/id, без суммирования разных движков или official accuracy с локальной метрикой. Точность остаётся только отдельным официальным полем Lichess.
+- Регрессия импортирует synthetic 4-ply Lichess PGN с evals, подтверждает пустую `move_classifications`, severity в `move_metrics`, ошибку в summary и library page и сохранение отдельной официальной accuracy. Synthetic fixtures для профиля/открытий теперь дают проверяемые соседние оценки, а не тестовые labels, подменяющие метрику.
+- Проверено: Windows Python 3.12.10, Qt offscreen, targeted suite (`test_m45_analysis_store`, `test_m45_profiles`, `test_m45_openings`, `test_m45_move_metrics`, `test_m45_batch`) — **успешно, 45 тестов**; `compileall` и `git diff --check` — PASS. Реальный Lichess/Stockfish и user DB — NOT RUN.
+- Остались R3–R9. Следующий этап R3 устраняет потерю официальной accuracy для `source='lichess_archive'` и закрепляет account/color attribution.
