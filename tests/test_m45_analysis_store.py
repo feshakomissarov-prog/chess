@@ -362,6 +362,65 @@ def test_lichess_archive_move_metrics_drive_summary_without_legacy_classificatio
         repository.shutdown()
 
 
+def test_late_lichess_eval_refresh_rebuilds_derived_facts_and_removes_stale_events(tmp_path, monkeypatch):
+    repository = GameRepository(tmp_path / "late-derived-refresh.sqlite3")
+    try:
+        base = ('[Event "Archive"]\n[White "Me"]\n[Black "Friend"]\n[Result "*"]\n\n')
+        initial = base + ('1. e4 { [%eval 0.0] } e5 { [%eval 2.0] } '
+                          '2. Nf3 { [%eval -1.0] } Nc6 *\n')
+        repository.import_archive_record("Me", {"id": "late-derived", "pgn": initial},
+                                         checkpoint_ms=1, backfill=True)
+        run_id = repository.list_analyses("late-derived")[0]["run_id"]
+        with repository._connection() as db:
+            before_metrics = [tuple(row) for row in db.execute(
+                "SELECT ply,severity,cp_loss FROM move_metrics WHERE run_id=? "
+                "AND metric_version='cc-move-metrics-v2' ORDER BY ply", (run_id,))]
+            before_events = [tuple(row) for row in db.execute(
+                "SELECT event_type,confidence_state FROM analysis_events WHERE run_id=? ORDER BY event_type",
+                (run_id,))]
+            assert any(event[0] == "missed_opportunity" for event in before_events)
+        assert any(row[1] in {"mistake", "blunder"} for row in before_metrics)
+        repository.save_note("late-derived", "keep this note", line_revision=1, ply=2)
+
+        refreshed = base + ('1. e4 { [%eval 0.0] } e5 { [%eval 0.0] } '
+                            '2. Nf3 { [%eval 0.0] } Nc6 { [%eval 0.0] } *\n')
+        repository.import_archive_record("Me", {"id": "late-derived", "pgn": refreshed},
+                                         checkpoint_ms=2, backfill=True)
+        repository.import_archive_record("Me", {"id": "late-derived", "pgn": refreshed},
+                                         checkpoint_ms=2, backfill=True)
+        with repository._connection() as db:
+            after_metrics = [tuple(row) for row in db.execute(
+                "SELECT ply,severity,cp_loss FROM move_metrics WHERE run_id=? "
+                "AND metric_version='cc-move-metrics-v2' ORDER BY ply", (run_id,))]
+            after_events = [tuple(row) for row in db.execute(
+                "SELECT event_type,confidence_state FROM analysis_events WHERE run_id=? ORDER BY event_type",
+                (run_id,))]
+            assert db.execute("SELECT COUNT(*) FROM analysis_runs WHERE game_id='late-derived'").fetchone()[0] == 1
+            assert db.execute("SELECT body FROM game_notes WHERE game_id='late-derived'").fetchone()[0] == "keep this note"
+        assert after_metrics != before_metrics
+        assert all(row[1] == "good" for row in after_metrics if row[2] is not None)
+        assert not any(event[0] == "missed_opportunity" for event in after_events)
+        assert len(after_metrics) == len({row[0] for row in after_metrics})
+
+        from chess_coach.lichess import event_detectors
+        def fail_rebuild(*_args, **_kwargs):
+            raise RuntimeError("synthetic derived-fact failure")
+        monkeypatch.setattr(event_detectors, "detect_registered_events", fail_rebuild)
+        rejected = base + ('1. e4 { [%eval 0.0] } e5 { [%eval 2.0] } '
+                           '2. Nf3 { [%eval -1.0] } Nc6 { [%eval 0.0] } *\n')
+        with pytest.raises(RuntimeError, match="synthetic derived-fact failure"):
+            repository.import_archive_record("Me", {"id": "late-derived", "pgn": rejected},
+                                             checkpoint_ms=3, backfill=True)
+        with repository._connection() as db:
+            assert db.execute("SELECT raw_pgn FROM games WHERE game_id='late-derived'").fetchone()[0] == refreshed
+            rollback_metrics = [tuple(row) for row in db.execute(
+                "SELECT ply,severity,cp_loss FROM move_metrics WHERE run_id=? "
+                "AND metric_version='cc-move-metrics-v2' ORDER BY ply", (run_id,))]
+        assert rollback_metrics == after_metrics
+    finally:
+        repository.shutdown()
+
+
 def test_bounded_eval_refresh_only_requests_incomplete_recent_lines_and_keeps_cursors(tmp_path):
     repository = GameRepository(tmp_path / "targeted-refresh.sqlite3")
     try:
