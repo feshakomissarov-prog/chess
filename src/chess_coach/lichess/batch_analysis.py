@@ -85,12 +85,14 @@ class BatchAnalysisRunner:
             progress: Callable[[str, int, int], None] | None = None,
             include_selective_review: bool = False,
             account_id: str | None = None,
+            max_fast_jobs: int | None = None,
             review_budget_per_game: int = 12,
             review_budget_total: int = 100) -> dict[str, int | bool | str | None]:
         if safety_check is None:
             raise ValueError("A fail-closed per-game safety check is required.")
         engine: chess.engine.SimpleEngine | None = None
         processed = failed = 0
+        attempted_fast = 0
         paused = cancelled = False
         stop_reason: str | None = None
         analysis_stop = threading.Event()
@@ -146,6 +148,15 @@ class BatchAnalysisRunner:
                     stop_reason = "paused"
                     break
                 if analysis_pass == "fast":
+                    if max_fast_jobs is not None and attempted_fast >= max(0, int(max_fast_jobs)):
+                        if include_selective_review and not review_scheduled:
+                            review_queued = self.enqueue_selected_reviews(
+                                account_id=account_id, budget_per_game=review_budget_per_game,
+                                budget_total=review_budget_total)
+                            review_scheduled = True
+                            analysis_pass = "review"
+                            continue
+                        break
                     job = self.repository.claim_next_analysis_job(
                         self.worker_id, engine_version=self.engine_key,
                         analysis_pass="fast", parameters=self.parameters,
@@ -164,6 +175,8 @@ class BatchAnalysisRunner:
                         lease_seconds=self.lease_seconds)
                 if job is None:
                     break
+                if analysis_pass == "fast":
+                    attempted_fast += 1
                 safety_failure.clear()
                 safety_lost.clear()
                 if not check_active_safety(job):

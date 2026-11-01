@@ -1889,6 +1889,33 @@ def test_puzzle_sync_handles_2501_descending_attempts_and_restarts_after_page_tw
     assert repo.puzzle_sync_state(account)["backfill_complete"] == 1
 
 
+def test_puzzle_history_sql_paging_search_and_outcome_cover_all_2501_rows(tmp_path):
+    repo = GameRepository(tmp_path / "puzzle-history-page.sqlite3")
+    username = "PageUser"
+    records = [{
+        "date": 1_700_000_000_000 + i,
+        "win": i % 2 == 0,
+        "puzzle": {"id": f"p{i}", "fen": chess.STARTING_FEN,
+                   "solution": ["e2e4"], "themes": ["fork" if i % 2 else "pin"],
+                   "rating": 1500 + i % 100, "plays": 1},
+    } for i in range(2501)]
+    try:
+        imported = repo.import_puzzle_activities(username, records)
+        account = repo.ensure_archive_account(username)
+        assert sum(int(inserted) for _uid, inserted in imported) == 2501
+        pages = [repo.puzzle_history_page(account, page=page, page_size=100)
+                 for page in range(26)]
+        assert sum(len(result["items"]) for result in pages) == 2501
+        assert pages[-1]["pages"] == 26 and len(pages[-1]["items"]) == 1
+        assert repo.puzzle_history_page(account, query="p2500", page_size=10)["total"] == 1
+        assert repo.puzzle_history_page(account, outcome="win", page_size=500)["total"] == 1251
+        trend = repo.puzzle_rating_trend(account, limit=3)
+        assert len(trend) <= 3 and trend == sorted(trend, key=lambda row: row["month"])
+        assert all(row["attempts"] > 0 and row["average_rating"] is not None for row in trend)
+    finally:
+        repo.shutdown()
+
+
 def test_archive_unsupported_variant_preserves_pgn_without_fake_standard_line(tmp_path):
     repo = GameRepository(tmp_path / "variant.sqlite3", async_writes=True)
     pgn = '[Event "Variant"]\n[Variant "Crazyhouse"]\n[White "Me"]\n[Black "Friend"]\n[Result "*"]\n\n1. e4 *\n'
@@ -2056,7 +2083,7 @@ def test_diverging_authoritative_stream_discards_pending_and_premove_without_ret
     assert session.begin_submission(chess.Move.from_uci("e2e4"))
     assert session.queue_premove(chess.Move.from_uci("g1f3"))
     session.apply_event({"type": "gameState", "moves": "d2d4", "status": "started"})
-    assert session.moves == ""
+    assert session.moves == "d2d4"  # authoritative server stream wins over speculation
     assert session.pending_uci is None
     assert session.premove is None
 

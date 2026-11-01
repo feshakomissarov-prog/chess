@@ -6,7 +6,7 @@ import pytest
 from pathlib import Path
 from PySide6.QtCore import QPoint, QSettings, Qt
 from PySide6.QtGui import QCloseEvent
-from PySide6.QtWidgets import QLabel, QInputDialog, QMessageBox, QPushButton
+from PySide6.QtWidgets import QDialog, QLabel, QInputDialog, QMessageBox, QPushButton
 
 from chess_coach.board_view import BoardView
 from chess_coach.window import (ActiveGamesDialog, BatchAnalysisDialog, EvaluationGraph, MainWindow,
@@ -158,7 +158,7 @@ def test_evaluation_graph_keeps_phase_boundaries_for_rendering(qtbot):
     assert graph.phase_boundaries["source"] == "lichess"
 
 
-def test_batch_analysis_controls_are_explicit_and_resume_after_pause(qtbot):
+def test_batch_analysis_controls_are_explicit_and_resume_after_pause(qtbot, tmp_path):
     dialog = BatchAnalysisDialog()
     qtbot.addWidget(dialog)
     started = []
@@ -166,9 +166,13 @@ def test_batch_analysis_controls_are_explicit_and_resume_after_pause(qtbot):
     dialog.run_requested.connect(lambda *args: started.append(args))
     dialog.pause_requested.connect(lambda: paused.append(True))
     assert not dialog.pause_button.isEnabled()
-    assert dialog.resume_button.isEnabled()
+    assert not dialog.resume_button.isEnabled()
+    engine = tmp_path / "stockfish.exe"
+    engine.write_bytes(b"verified synthetic executable")
+    dialog.set_readiness(str(engine), True, True)
+    assert dialog.start_button.isEnabled() and dialog.resume_button.isEnabled()
     qtbot.mouseClick(dialog.start_button, Qt.MouseButton.LeftButton)
-    assert started == [(1000, 20_000, 64, False, False, False)]
+    assert started == [(2, 20_000, 64, False, False, False)]
     dialog.set_running(True)
     assert dialog.close() is False
     qtbot.mouseClick(dialog.pause_button, Qt.MouseButton.LeftButton)
@@ -177,9 +181,40 @@ def test_batch_analysis_controls_are_explicit_and_resume_after_pause(qtbot):
     assert dialog.resume_button.isEnabled()
     dialog.selective_review.setChecked(True)
     qtbot.mouseClick(dialog.resume_button, Qt.MouseButton.LeftButton)
-    assert started[-1] == (1000, 20_000, 64, True, False, True)
+    assert started[-1] == (2, 20_000, 64, True, False, True)
     dialog.worker_finished.emit(False, "Завершено")
     assert not dialog.pause_button.isEnabled()
+
+
+def test_official_engine_install_requires_explicit_confirm_and_persists_verified_path(
+    qtbot, tmp_path, monkeypatch
+):
+    from chess_coach import window as window_module
+
+    window = MainWindow(QSettings(str(tmp_path / "install-ui.ini"), QSettings.Format.IniFormat),
+                        offline_mode=True)
+    qtbot.addWidget(window)
+    dialog = SettingsDialog(window.settings, window)
+    qtbot.addWidget(dialog)
+    monkeypatch.setattr(window_module.QMessageBox, "question",
+                        lambda *args, **kwargs: QMessageBox.StandardButton.Yes)
+    installed = tmp_path / "local" / "ChessCoach" / "engines" / "stockfish" / "19" / "stockfish.exe"
+
+    def fake_install(*, destination, stop_event, progress):
+        path = Path(destination) / "stockfish.exe"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(b"synthetic UCI engine")
+        return {"path": str(path), "name": "Stockfish synthetic", "sha256": "abc123"}
+
+    monkeypatch.setattr(window_module, "install_official_stockfish", fake_install)
+    monkeypatch.setattr(window_module.os, "environ",
+                        {**window_module.os.environ, "LOCALAPPDATA": str(tmp_path / "local")})
+    window._install_official_stockfish(dialog)
+    qtbot.waitUntil(lambda: window._engine_install_thread is None, timeout=3000)
+    assert installed.exists()
+    assert window.settings.value("stockfish_path", type=str) == str(installed)
+    assert window.settings.value("stockfish_verified_path", type=str) == str(installed)
+    assert "Stockfish synthetic" in dialog.engine_test_status.text()
 
 
 def test_batch_analysis_safety_snapshot_fails_closed_and_allows_builtin_ai_only():
@@ -197,8 +232,26 @@ def test_offline_window_never_enables_or_starts_batch_engine(qtbot, tmp_path):
     window = MainWindow(offline_mode=True)
     qtbot.addWidget(window)
     assert window.lichess is None
-    assert not window.home_batch_analysis_button.isEnabled()
+    assert window.home_batch_analysis_button.isEnabled()  # setup/status remains discoverable offline
+    window.show_batch_analysis()
+    assert not window._batch_dialog.start_button.isEnabled()
+    assert "не подключён" in window._batch_dialog.account_status.text().lower()
+    window._batch_dialog.reject()
     assert window._batch_thread is None
+
+
+def test_header_analysis_and_training_navigation_open_real_screens(qtbot, tmp_path, monkeypatch):
+    window = MainWindow(offline_mode=True)
+    qtbot.addWidget(window)
+    window.show()
+    calls = []
+    monkeypatch.setattr(window, "show_batch_analysis", lambda: calls.append("analysis"))
+    monkeypatch.setattr(window, "open_puzzle_history_local", lambda: calls.append("training"))
+    buttons = {button.text(): button for button in window.findChildren(QPushButton)}
+    qtbot.mouseClick(buttons["Анализ"], Qt.MouseButton.LeftButton)
+    qtbot.mouseClick(buttons["Тренировки"], Qt.MouseButton.LeftButton)
+    assert calls == ["analysis", "training"]
+    window.close()
 
 
 def test_batch_queue_pauses_on_new_human_game_but_not_builtin_ai(qtbot):
@@ -261,6 +314,13 @@ def test_statistics_screen_filters_asynchronously_and_resets(qtbot, tmp_path):
     assert "2/2 поз." in win_item.text()
     assert "stockfish" in win_item.text()
     assert dialog.period.currentData() == 90
+    assert [dialog.tabs.tabText(index) for index in range(dialog.tabs.count())] == [
+        "Обзор", "Партии", "Дебюты/фазы", "Критические моменты"]
+    assert dialog.account.currentData() is None  # no known account; mixed view is explicit
+    dialog.resize(1280, 720)
+    assert dialog.size().width() == 1280 and dialog.size().height() == 720
+    dialog.resize(1360, 860)
+    assert dialog.size().width() == 1360 and dialog.size().height() == 860
     dialog.result_filter.setCurrentIndex(dialog.result_filter.findData("draw"))
     qtbot.waitUntil(lambda: dialog._query_thread is None and dialog.games.count() == 1
                     and dialog.games.item(0).data(Qt.ItemDataRole.UserRole) == "screen-draw",
@@ -482,7 +542,47 @@ def test_explicit_offline_window_never_constructs_or_uses_lichess_credentials(qt
     window.start_local_game()
     assert window.controller.ply == 0
     window.close()
-    assert not offline_dir.exists()
+
+
+def test_position_evaluation_is_explicit_offline_only_and_stale_result_is_hidden(
+        qtbot, tmp_path, monkeypatch):
+    engine = tmp_path / "stockfish.exe"
+    engine.write_bytes(b"fake fixture")
+    settings = QSettings(str(tmp_path / "position-eval.ini"), QSettings.Format.IniFormat)
+    settings.setValue("stockfish_path", str(engine))
+    settings.setValue("stockfish_verified_path", str(engine))
+    window = MainWindow(settings, offline_mode=True)
+    qtbot.addWidget(window)
+    window.settings.setValue("stockfish_path", str(engine))
+    window.settings.setValue("stockfish_verified_path", str(engine))
+    window.show()
+    window.start_local_game()
+    assert window.position_eval_button.isVisible()
+    calls = []
+    monkeypatch.setattr("chess_coach.window.evaluate_position",
+                        lambda _path, _board, _stop, _active:
+                        (calls.append("called") or {"score_white_cp": 35,
+                         "mate_white": None, "best_move": "e2e4", "depth": 12}))
+    qtbot.mouseClick(window.position_eval_button, Qt.MouseButton.LeftButton)
+    qtbot.waitUntil(lambda: window._position_eval_thread is None, timeout=3000)
+    assert calls == ["called"]
+    assert "+0.35" in window.position_eval_label.text()
+
+    window._lichess_connected = True
+    window.analyze_local_position()
+    assert calls == ["called"]
+    assert "приостановлена" in window.position_eval_label.text()
+    window.close()
+
+
+def test_position_evaluation_not_exposed_in_normal_connected_capable_mode(qtbot, tmp_path):
+    window = MainWindow(QSettings(str(tmp_path / "position-normal.ini"),
+                                  QSettings.Format.IniFormat))
+    qtbot.addWidget(window)
+    window.show()
+    window.start_local_game()
+    assert not window.position_eval_button.isVisible()
+    window.close()
 
 
 def test_manual_connect_defers_lichess_and_credentials_until_button(qtbot, tmp_path, monkeypatch):
@@ -576,7 +676,9 @@ def test_archive_pilot_ui_requires_confirmation_and_shows_received_vs_new(qtbot,
     messages = []
     monkeypatch.setattr(QMessageBox, "information", lambda *args: messages.append(args[-1]))
 
-    qtbot.mouseClick(window.home_pilot_import_button, Qt.MouseButton.LeftButton)
+    # Pilot import remains available as a bounded advanced action, but no longer
+    # occupies a permanent home-screen button.
+    window.start_archive_pilot()
     assert calls == [("pilot", 5)]
     window._archive_pilot_progress(5, 3, "pilot-4")
     assert "Получено: 5 · новых: 3" in window._archive_progress_dialog.labelText()
@@ -594,7 +696,13 @@ def test_archive_status_discloses_offline_database_and_local_count_on_request(qt
     window.game_repository.save_snapshot("local-status-game", "startpos", "", "white",
                                         "Local", False, "-", "playing")
     messages = []
-    monkeypatch.setattr(QMessageBox, "information", lambda *args: messages.append(args[-1]))
+    def inspect_dialog(dialog):
+        messages.append(dialog.findChild(QLabel).text())
+        sync = next(button for button in dialog.findChildren(QPushButton)
+                    if button.text().startswith("Синхронизировать"))
+        assert not sync.isEnabled()
+        return QDialog.DialogCode.Accepted
+    monkeypatch.setattr(QDialog, "exec", inspect_dialog)
 
     window.show_archive_status()
 
@@ -644,7 +752,7 @@ def test_puzzle_pilot_ui_requires_bounded_choice_and_confirmation(qtbot, tmp_pat
     assert "Получено попыток: 10 · новых: 6" in window._puzzle_pilot_progress_dialog.labelText()
     window._puzzle_pilot_finished(10, 6, "pilot-run", "Пробная загрузка задач завершена.")
     assert "Курсор полной синхронизации не изменён" in messages[0]
-    assert calls[-1] == ("history", "lichess:pilotuser", "pilot-run")
+    assert calls[-1] == ("history", "lichess:pilotuser", None)
     window.close()
 
 
@@ -659,6 +767,62 @@ def test_puzzle_history_summary_uses_attempt_denominators_and_available_fields()
     assert "fork: 1/2 (50%)" in summary
     assert "pin: 2/2 (100%)" in summary
     assert "учитываются отдельно" in summary
+
+
+def test_my_puzzles_home_action_opens_local_history_without_network_or_oauth(
+    qtbot, tmp_path, monkeypatch
+):
+    window = MainWindow(QSettings(str(tmp_path / "puzzle-local-nav.ini"),
+                                  QSettings.Format.IniFormat), offline_mode=True)
+    qtbot.addWidget(window)
+    window.game_repository.import_puzzle_activities("LocalUser", [{
+        "date": 1_700_000_000_000, "win": True,
+        "puzzle": {"id": "local-puzzle", "fen": chess.STARTING_FEN,
+                   "solution": ["e2e4"], "themes": ["fork"], "rating": 1500, "plays": 1},
+    }])
+    opened = []
+    monkeypatch.setattr(window, "show_puzzle_history", lambda account, **kwargs: opened.append(account))
+    window.open_puzzle_history_local()
+    assert opened == ["lichess:localuser"]
+    assert window.lichess is None
+    assert window._puzzle_progress_dialog is None
+    window.close()
+
+
+def test_puzzle_replay_is_local_legal_and_does_not_change_history_or_send_requests(
+    qtbot, tmp_path, monkeypatch
+):
+    window = MainWindow(QSettings(str(tmp_path / "puzzle-replay.ini"),
+                                  QSettings.Format.IniFormat), offline_mode=True)
+    qtbot.addWidget(window)
+    window.game_repository.import_puzzle_activities("ReplayUser", [{
+        "date": 1_700_000_000_000, "win": False,
+        "puzzle": {"id": "replay-puzzle", "fen": chess.STARTING_FEN,
+                   "solution": ["d2d4", "e7e5"], "themes": ["fork"],
+                   "rating": 1600, "plays": 3},
+    }])
+    before = window.game_repository.puzzle_statistics("lichess:replayuser")["attempts"]
+    calls = []
+    monkeypatch.setattr("chess_coach.lichess.api.LichessClient.stream_puzzle_activity",
+                        lambda *args, **kwargs: calls.append(args))
+
+    def exercise(dialog):
+        replay = next(button for button in dialog.findChildren(QPushButton)
+                      if button.text() == "Решить снова офлайн")
+        board = dialog.findChild(BoardView)
+        replay.click()
+        assert board._interaction_enabled
+        board.move_intent.emit(chess.Move.from_uci("e7e5"))
+        labels = [label.text() for label in dialog.findChildren(QLabel)]
+        assert any("Вариант завершён" in label for label in labels)
+        assert not board._interaction_enabled
+        return QDialog.DialogCode.Accepted
+
+    monkeypatch.setattr(QDialog, "exec", exercise)
+    window.show_puzzle_history("lichess:replayuser")
+    assert window.game_repository.puzzle_statistics("lichess:replayuser")["attempts"] == before
+    assert not calls
+    window.close()
 
 
 def test_active_games_dialog_shows_server_confirmed_turn_and_game_type(qtbot):
@@ -1050,6 +1214,9 @@ def test_stockfish_uci_probe_quits_gracefully_and_close_waits_for_delayed_finish
     process = created[0]
     process.output = b"id name FakeFish\nuciok\n"
     process.readyReadStandardOutput.emit()
+    assert process.writes[-1] == b"isready\n"
+    process.output = b"readyok\n"
+    process.readyReadStandardOutput.emit()
     assert process.writes[-1] == b"quit\n"
     assert dialog._engine_process is process and not process.deleted
     assert not dialog.engine_test.isEnabled()
@@ -1059,7 +1226,7 @@ def test_stockfish_uci_probe_quits_gracefully_and_close_waits_for_delayed_finish
     process.complete()
     assert dialog._engine_process is None and process.deleted
     assert dialog.engine_test.isEnabled()
-    assert dialog.engine_test_status.text() == "UCI отвечает: FakeFish"
+    assert dialog.engine_test_status.text() == "UCI готов: FakeFish"
 
     dialog.engine_test.click()
     second = created[1]

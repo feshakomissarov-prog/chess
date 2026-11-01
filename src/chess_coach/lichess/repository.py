@@ -2329,6 +2329,43 @@ class GameRepository:
                                "LIMIT ? OFFSET ?", (account_id, limit, offset)).fetchall()
             return [dict(row) for row in rows]
 
+    def list_puzzle_accounts(self) -> list[dict]:
+        """List only accounts with locally saved puzzle attempts."""
+        with self._connection() as db:
+            rows = db.execute(
+                "SELECT a.account_id,a.username,COUNT(pu.attempt_uid) AS attempts "
+                "FROM accounts a JOIN puzzle_attempts pu ON pu.account_id=a.account_id "
+                "GROUP BY a.account_id,a.username ORDER BY lower(a.username),a.account_id").fetchall()
+        return [dict(row) for row in rows]
+
+    def puzzle_history_page(self, account_id: str, *, query: str = "",
+                            outcome: str | None = None, page: int = 0,
+                            page_size: int = 100) -> dict:
+        """Read a bounded, filterable local puzzle history page."""
+        page = max(0, int(page))
+        page_size = min(MAX_PAGE_SIZE, max(1, int(page_size)))
+        clauses = ["a.account_id=?"]
+        params: list[object] = [account_id]
+        if outcome in {"win", "loss"}:
+            clauses.append("a.win=?")
+            params.append(int(outcome == "win"))
+        term = query.strip()
+        if term:
+            clauses.append("(a.puzzle_id LIKE ? OR p.themes_json LIKE ? OR "
+                            "CAST(p.puzzle_rating AS TEXT) LIKE ? OR "
+                            "CAST(a.attempt_date_ms AS TEXT) LIKE ?)")
+            params.extend([f"%{term}%"] * 4)
+        where = " WHERE " + " AND ".join(clauses)
+        with self._connection() as db:
+            total = int(db.execute("SELECT COUNT(*) FROM puzzle_attempts a JOIN puzzles p USING(puzzle_id)"
+                                   + where, params).fetchone()[0])
+            rows = db.execute("SELECT a.*,p.fen,p.solution_json,p.themes_json,p.puzzle_rating,p.plays "
+                              "FROM puzzle_attempts a JOIN puzzles p USING(puzzle_id)" + where +
+                              " ORDER BY a.attempt_date_ms DESC,a.attempt_uid LIMIT ? OFFSET ?",
+                              [*params, page_size, page * page_size]).fetchall()
+        return {"items": [dict(row) for row in rows], "total": total, "page": page,
+                "page_size": page_size, "pages": (total + page_size - 1) // page_size}
+
     def puzzle_statistics(self, account_id: str) -> dict:
         with self._connection() as db:
             row = db.execute("SELECT COUNT(*) total,COALESCE(SUM(win),0) wins, "
@@ -2356,6 +2393,21 @@ class GameRepository:
                 "themes": {theme: {"attempts": values[0], "wins": values[1],
                                    "success_percent": round(100 * values[1] / values[0], 1)}
                            for theme, values in counts.items()}}
+
+    def puzzle_rating_trend(self, account_id: str, *, limit: int = 12) -> list[dict]:
+        """Return a bounded monthly local puzzle-rating trend, newest month last."""
+        limit = max(1, min(int(limit), 60))
+        with self._connection() as db:
+            rows = db.execute(
+                "SELECT strftime('%Y-%m',a.attempt_date_ms/1000,'unixepoch') AS month, "
+                "COUNT(*) AS attempts,AVG(p.puzzle_rating) AS average_rating, "
+                "SUM(a.win) AS wins FROM puzzle_attempts a JOIN puzzles p USING(puzzle_id) "
+                "WHERE a.account_id=? GROUP BY month ORDER BY month DESC LIMIT ?",
+                (account_id, limit)).fetchall()
+        return [{"month": row["month"], "attempts": int(row["attempts"]),
+                 "average_rating": round(float(row["average_rating"]), 1)
+                    if row["average_rating"] is not None else None,
+                 "wins": int(row["wins"] or 0)} for row in reversed(rows)]
 
     def save_puzzle_dashboard(self, account_id: str, days: int, payload: dict) -> None:
         now = datetime.now(timezone.utc).isoformat()

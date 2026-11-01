@@ -137,6 +137,27 @@ def test_batch_queue_pages_past_existing_jobs_and_retries_only_explicitly(tmp_pa
         repository.shutdown()
 
 
+def test_guided_batch_run_has_a_hard_two_game_cap_even_with_a_larger_saved_queue(tmp_path):
+    repository = GameRepository(tmp_path / "guided-cap.sqlite3")
+    engines = []
+    try:
+        for name, day in (("a", "03"), ("b", "02"), ("c", "01")):
+            _save_game(repository, name, f"2026-10-{day}T00:00:00+00:00")
+        runner = _runner(repository, tmp_path, engines)
+        assert runner.enqueue_missing(limit=3)["queued"] == 3
+        safety_calls = []
+        result = runner.run(stop_event=threading.Event(),
+                            safety_check=lambda job: safety_calls.append(job["game_id"]) or True,
+                            max_fast_jobs=2)
+        assert result["processed"] == 2
+        assert safety_calls == ["a", "b"]
+        assert result["queue"].get("queued") == 1
+        assert len(repository.list_analyses("c")) == 0
+        assert len(engines) == 1 and engines[0].quit_calls == 1
+    finally:
+        repository.shutdown()
+
+
 def test_batch_queue_pages_15000_synthetic_games_exactly_once_per_configuration(tmp_path):
     repository = GameRepository(tmp_path / "large-queue.sqlite3")
     engines = []
