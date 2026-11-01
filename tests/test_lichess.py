@@ -524,10 +524,10 @@ def test_m3_migration_preserves_legacy_game_creates_revision_and_backup(tmp_path
     assert row["line_revision"] == 1
     assert row["import_error"] is None
     with repo._connection() as migrated:
-        assert migrated.execute("PRAGMA user_version").fetchone()[0] == 7
+        assert migrated.execute("PRAGMA user_version").fetchone()[0] == 8
         assert migrated.execute("SELECT COUNT(*) FROM game_positions").fetchone()[0] == 3
         assert migrated.execute("SELECT san FROM game_moves ORDER BY ply").fetchall()[0][0] == "e4"
-    backup = sqlite3.connect(str(path) + ".pre-m3-v7.bak")
+    backup = sqlite3.connect(str(path) + ".pre-m3-v8.bak")
     try:
         assert backup.execute("PRAGMA integrity_check").fetchone()[0] == "ok"
         assert backup.execute("PRAGMA user_version").fetchone()[0] == 0
@@ -1251,6 +1251,113 @@ def test_puzzle_sync_backfills_repeated_puzzle_ids_and_empty_archive(tmp_path):
         "Empty", "token", threading.Event()) == 0
     empty_account = empty_repo.ensure_archive_account("Empty")
     assert empty_repo.puzzle_statistics(empty_account)["attempts"] == 0
+
+
+def test_puzzle_pilot_is_bounded_idempotent_and_does_not_move_full_sync_cursor(tmp_path):
+    from chess_coach.lichess.puzzles import PuzzleActivitySync
+
+    records = [{"date": LICHESS_MIN_MS + i, "win": i % 2 == 0,
+                "puzzle": {"id": f"pilot-{i % 3}", "fen": chess.STARTING_FEN,
+                           "solution": ["e2e4"], "themes": ["fork"],
+                           "rating": 1400, "plays": i}}
+               for i in range(1, 14)]
+
+    class Client:
+        calls = []
+        def stream_puzzle_activity(self, token, stop, *, since=None, before=None, max_items=1000):
+            self.calls.append((since, before, max_items))
+            yield from sorted(records, key=lambda item: item["date"], reverse=True)[:max_items]
+
+    path = tmp_path / "puzzle-pilot.sqlite3"
+    repo = GameRepository(path)
+    account_id = repo.ensure_archive_account("PilotUser")
+    repo.finish_puzzle_backfill(account_id)
+    repo.set_puzzle_incremental_progress(account_id, 1_357_000_000_000,
+                                         1_357_000_100_000)
+    before = repo.puzzle_sync_state(account_id)
+    client = Client()
+    sync = PuzzleActivitySync(client, repo)
+
+    first = sync.run_pilot("PilotUser", "fake", threading.Event(), limit=5)
+    assert first["status"] == "complete"
+    assert first["received_count"] == 5 and first["new_count"] == 5
+    assert client.calls[0][0] is None and client.calls[0][2] == 5
+    assert repo.puzzle_sync_state(account_id) == before
+    first_history = repo.puzzle_pilot_history(account_id, run_id=first["run_id"], limit=20)
+    assert len(first_history) == 5
+    assert len({entry["attempt_uid"] for entry in first_history}) == 5
+
+    second = sync.run_pilot("PilotUser", "fake", threading.Event(), limit=10)
+    assert second["received_count"] == 10 and second["new_count"] == 5
+    assert repo.puzzle_sync_state(account_id) == before
+    assert repo.puzzle_statistics(account_id)["attempts"] == 10
+    assert len(repo.puzzle_pilot_history(account_id, run_id=second["run_id"], limit=20)) == 10
+    assert repo.puzzle_pilot_history(account_id, limit=30)[0]["run_id"] == second["run_id"]
+    with sqlite3.connect(path) as db:
+        assert db.execute("PRAGMA user_version").fetchone()[0] >= 8
+        assert db.execute("SELECT COUNT(*) FROM puzzle_pilot_runs").fetchone()[0] == 2
+    repo.shutdown()
+
+
+def test_puzzle_pilot_rejects_unbounded_limits_and_records_cancelled_run(tmp_path):
+    from chess_coach.lichess.puzzles import PuzzleActivitySync
+
+    repo = GameRepository(tmp_path / "puzzle-pilot-cancel.sqlite3")
+    account_id = repo.ensure_archive_account("CancelUser")
+    before = repo.puzzle_sync_state(account_id)
+    with pytest.raises(ValueError):
+        repo.start_puzzle_pilot(account_id, 1000)
+
+    class Client:
+        def stream_puzzle_activity(self, token, stop, **kwargs):
+            yield {"date": LICHESS_MIN_MS + 1, "win": True,
+                   "puzzle": {"id": "cancel-p", "fen": chess.STARTING_FEN,
+                              "solution": ["e2e4"], "themes": [], "rating": 1200}}
+            stop.set()
+
+    result = PuzzleActivitySync(Client(), repo).run_pilot(
+        "CancelUser", "fake", threading.Event(), limit=5)
+    assert result["status"] == "cancelled"
+    assert result["received_count"] == 1 and result["new_count"] == 1
+    assert repo.puzzle_sync_state(account_id) == before
+    assert len(repo.puzzle_pilot_history(account_id, run_id=result["run_id"])) == 1
+    repo.shutdown()
+
+
+def test_puzzle_pilot_service_uses_separate_stored_credential_and_never_runs_full_sync(tmp_path):
+    repo = GameRepository(tmp_path / "puzzle-pilot-service.sqlite3")
+    record = {"date": LICHESS_MIN_MS + 50, "win": True,
+              "puzzle": {"id": "service-p", "fen": chess.STARTING_FEN,
+                         "solution": ["e2e4"], "themes": ["fork"], "rating": 1300}}
+
+    class Client:
+        def __init__(self): self.calls = []
+        def get_account(self, token):
+            self.calls.append(("account", token))
+            return {"username": "ServicePilot"}
+        def stream_puzzle_activity(self, token, stop, **kwargs):
+            self.calls.append(("activity", token, kwargs["max_items"]))
+            yield record
+        def get_puzzle_dashboard(self, *args):
+            raise AssertionError("Pilot must not request a full-sync dashboard")
+
+    class TokenStore:
+        def get(self): return "separate-puzzle-token"
+        def set(self, _token): raise AssertionError("Existing token must not be replaced")
+
+    client = Client()
+    service = LichessService(client=client, token_store=TokenStore(), repository=repo)
+    # Keep the orchestration deterministic; network methods above are local fakes.
+    service._thread = lambda target, name: target()
+    service.pilot_puzzle_activity(5, repo, TokenStore())
+    account_id = repo.ensure_archive_account("ServicePilot")
+    assert service.puzzle_username == "ServicePilot"
+    assert client.calls == [("account", "separate-puzzle-token"),
+                            ("activity", "separate-puzzle-token", 5)]
+    assert repo.puzzle_statistics(account_id)["attempts"] == 1
+    assert repo.puzzle_sync_state(account_id) == {}
+    service.close()
+    repo.shutdown()
 
 
 def test_puzzle_incremental_sync_pages_more_than_one_page(tmp_path):

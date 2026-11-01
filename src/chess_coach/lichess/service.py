@@ -36,6 +36,8 @@ class LichessService(QObject):
     archive_game_refresh_finished = Signal(str, str)
     puzzles_progress = Signal(int)
     puzzles_finished = Signal(int, str)
+    puzzle_pilot_progress = Signal(int, int)
+    puzzle_pilot_finished = Signal(int, int, str, str)
 
     def __init__(self, client: LichessClient | None = None, token_store=None,
                  repository=None, parent=None):
@@ -209,6 +211,68 @@ class LichessService(QObject):
             self._puzzle_stop.set()
         if self._puzzle_callback is not None:
             self._puzzle_callback.cancel()
+
+    def pilot_puzzle_activity(self, limit: int, repository=None,
+                              puzzle_token_store=None) -> None:
+        """Explicitly import a bounded sample using the separate puzzle:read token."""
+        repo = repository or self.repository
+        if repo is None:
+            self.puzzle_pilot_finished.emit(0, 0, "", "Хранилище архива не подключено.")
+            return
+        if limit not in (5, 10):
+            self.puzzle_pilot_finished.emit(0, 0, "", "Можно загрузить только 5 или 10 попыток.")
+            return
+        if self._puzzle_stop is not None and not self._puzzle_stop.is_set():
+            self.puzzle_pilot_finished.emit(0, 0, "", "Загрузка истории задач уже выполняется.")
+            return
+        stop = threading.Event()
+        self._puzzle_stop = stop
+
+        def work():
+            callback = None
+            received = new_count = 0
+            run_id = ""
+            try:
+                store = puzzle_token_store
+                if store is None:
+                    from .auth import WindowsCredentialStore
+                    store = WindowsCredentialStore(service="ChessCoach.Lichess.Puzzles",
+                                                   user="puzzle-activity-token")
+                puzzle_token = store.get()
+                if puzzle_token:
+                    username = str(self.client.get_account(puzzle_token)["username"])
+                else:
+                    callback = OAuthCallbackServer()
+                    self._puzzle_callback = callback
+                    request = create_authorization_request(callback.redirect_uri, CLIENT_ID,
+                                                           scopes="puzzle:read")
+                    if not webbrowser.open(request.url):
+                        raise LichessError("Не удалось открыть браузер для разрешения puzzle:read.")
+                    puzzle_token, username = authorize_and_store(self.client, store, callback, request)
+                if stop.is_set():
+                    self.puzzle_pilot_finished.emit(0, 0, "", "Пробный импорт отменён.")
+                    return
+                self.puzzle_username = username
+                sync = PuzzleActivitySync(self.client, repo)
+                result = sync.run_pilot(
+                    username, puzzle_token, stop, limit=limit,
+                    progress=lambda count, added: self.puzzle_pilot_progress.emit(count, added))
+                received = int(result["received_count"])
+                new_count = int(result["new_count"])
+                run_id = str(result["run_id"])
+                status = str(result["status"])
+                message = {"complete": "Пробная загрузка задач завершена.",
+                           "cancelled": "Пробная загрузка задач отменена.",
+                           "error": "Пробная загрузка завершилась ошибкой."}.get(status, status)
+                self.puzzle_pilot_finished.emit(received, new_count, run_id, message)
+            except Exception as exc:
+                self.puzzle_pilot_finished.emit(received, new_count, run_id, str(exc))
+            finally:
+                self._puzzle_stop = None
+                self._puzzle_callback = None
+                if callback:
+                    callback.close()
+        self._thread(work, "chess-coach-puzzle-pilot")
 
     @property
     def token(self) -> str | None:

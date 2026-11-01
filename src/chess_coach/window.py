@@ -983,6 +983,8 @@ class MainWindow(QMainWindow):
         service.archive_game_refresh_finished.connect(self._archive_game_refresh_finished)
         service.puzzles_progress.connect(self._puzzles_progress)
         service.puzzles_finished.connect(self._puzzles_finished)
+        service.puzzle_pilot_progress.connect(self._puzzle_pilot_progress)
+        service.puzzle_pilot_finished.connect(self._puzzle_pilot_finished)
 
     def _disable_online_controls(self) -> None:
         self.connection.setText("●  Офлайн-режим · Lichess отключён")
@@ -993,6 +995,7 @@ class MainWindow(QMainWindow):
             self.friend_link_button, self.username_button, self.ai_button,
             self.home_ai_button, self.home_friend_button, self.home_username_button,
             self.cancel_challenge_button, self.active_games_button, self.home_pilot_import_button,
+            self.home_puzzles_pilot_button,
         ):
             button.setEnabled(False)
             button.setVisible(False)
@@ -1232,6 +1235,9 @@ class MainWindow(QMainWindow):
         self.home_puzzles_button = QPushButton("Моя история задач Lichess")
         self.home_puzzles_button.clicked.connect(self.start_puzzle_sync)
         self.home_puzzles_button.setEnabled(False)
+        self.home_puzzles_pilot_button = QPushButton("Пробно загрузить 5–10 попыток задач")
+        self.home_puzzles_pilot_button.clicked.connect(self.start_puzzle_pilot)
+        self.home_puzzles_pilot_button.setEnabled(False)
         self.home_settings_button = QPushButton("Настройки")
         self.home_settings_button.clicked.connect(self.open_settings)
         self.resume_game_button = QPushButton("Вернуться в текущую партию")
@@ -1242,7 +1248,7 @@ class MainWindow(QMainWindow):
                        self.home_games_button, self.home_archive_status_button,
                        self.home_pilot_import_button,
                        self.home_archive_button, self.home_stats_button,
-                       self.home_puzzles_button,
+                       self.home_puzzles_button, self.home_puzzles_pilot_button,
                        self.home_settings_button,
                        self.resume_game_button):
             layout.addWidget(button)
@@ -1375,6 +1381,7 @@ class MainWindow(QMainWindow):
         self.home_archive_button.setEnabled(self._online_actions_allowed())
         self.home_pilot_import_button.setEnabled(self._online_actions_allowed())
         self.home_puzzles_button.setEnabled(self._online_actions_allowed())
+        self.home_puzzles_pilot_button.setEnabled(self._online_actions_allowed())
 
     def start_archive_sync(self) -> None:
         if not self._online_actions_allowed():
@@ -1551,6 +1558,53 @@ class MainWindow(QMainWindow):
         dialog.show()
         self.lichess.connect_and_sync_puzzle_activity(self.game_repository)
 
+    def start_puzzle_pilot(self) -> None:
+        if not self._online_actions_allowed():
+            return
+        value, accepted = QInputDialog.getItem(
+            self, "Пробная загрузка задач", "Сколько последних попыток загрузить?",
+            ["5", "10"], 0, False)
+        if not accepted:
+            return
+        limit = int(value)
+        answer = QMessageBox.question(
+            self, "Пробная загрузка задач Lichess",
+            f"Chess Coach запросит отдельное разрешение Lichess puzzle:read и загрузит не более "
+            f"{limit} последних попыток. Полный курсор синхронизации и токен для партий "
+            "не изменятся. Запросы будут выполняться только после подтверждения. Продолжить?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel,
+            QMessageBox.StandardButton.Cancel)
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+        dialog = QProgressDialog("Ожидание OAuth и загрузка ограниченной выборки…",
+                                 "Отменить", 0, 0, self)
+        dialog.setWindowTitle("Пробная история задач")
+        dialog.setMinimumDuration(0)
+        dialog.canceled.connect(self.lichess.cancel_puzzle_sync)
+        self._puzzle_pilot_progress_dialog = dialog
+        dialog.show()
+        self.lichess.pilot_puzzle_activity(limit, self.game_repository)
+
+    def _puzzle_pilot_progress(self, received: int, new_count: int) -> None:
+        dialog = getattr(self, "_puzzle_pilot_progress_dialog", None)
+        if dialog:
+            dialog.setLabelText(f"Получено попыток: {received} · новых: {new_count}")
+
+    def _puzzle_pilot_finished(self, received: int, new_count: int,
+                               run_id: str, message: str) -> None:
+        dialog = getattr(self, "_puzzle_pilot_progress_dialog", None)
+        if dialog:
+            dialog.close()
+            self._puzzle_pilot_progress_dialog = None
+        account_id = (f"lichess:{self.lichess.puzzle_username.strip().lower()}"
+                      if self.lichess and self.lichess.puzzle_username else "")
+        QMessageBox.information(
+            self, "Пробная история задач",
+            f"Получено попыток: {received}\nНовых: {new_count}\n"
+            "Курсор полной синхронизации не изменён.\n" + message)
+        if account_id and run_id:
+            self.show_puzzle_history(account_id, pilot_run_id=run_id)
+
     def _puzzles_progress(self, count: int) -> None:
         if self._puzzle_progress_dialog:
             self._puzzle_progress_dialog.setLabelText(f"Обработано попыток: {count}")
@@ -1587,7 +1641,7 @@ class MainWindow(QMainWindow):
             puzzle_username = self.lichess.puzzle_username or self.lichess.username
             self.show_puzzle_history(f"lichess:{puzzle_username.strip().lower()}")
 
-    def show_puzzle_history(self, account_id: str) -> None:
+    def show_puzzle_history(self, account_id: str, *, pilot_run_id: str | None = None) -> None:
         dialog = QDialog(self)
         dialog.setWindowTitle("Моя история задач Lichess · локально")
         dialog.resize(850, 540)
@@ -1604,8 +1658,11 @@ class MainWindow(QMainWindow):
         detail_widget = QWidget(dialog)
         detail_widget.setLayout(detail)
         layout.addWidget(detail_widget, 2)
-        attempts = self.game_repository.puzzle_history(account_id, limit=500)
+        attempts = (self.game_repository.puzzle_pilot_history(
+            account_id, run_id=pilot_run_id, limit=500) if pilot_run_id
+            else self.game_repository.puzzle_history(account_id, limit=500))
         import json
+        attempts = [attempt for attempt in attempts if attempt.get("attempt_uid")]
         for attempt in attempts:
             date = datetime.fromtimestamp(attempt["attempt_date_ms"] / 1000).strftime("%Y-%m-%d %H:%M")
             themes = ", ".join(json.loads(attempt["themes_json"]))
@@ -2038,6 +2095,7 @@ class MainWindow(QMainWindow):
         self.home_archive_button.setEnabled(online_allowed)
         self.home_pilot_import_button.setEnabled(online_allowed)
         self.home_puzzles_button.setEnabled(online_allowed)
+        self.home_puzzles_pilot_button.setEnabled(online_allowed)
         if status.startswith("Ограничение Lichess"):
             self.home_status.setText(status + ". Автоматические запросы приостановлены.")
 

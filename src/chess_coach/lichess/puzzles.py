@@ -30,6 +30,35 @@ class PuzzleActivitySync:
             self.repository.record_puzzle_error(account_id, str(exc))
             raise
 
+    def run_pilot(self, username: str, token: str, stop_event: threading.Event, *,
+                  limit: int, progress: Callable[[int, int], None] | None = None) -> dict:
+        """Import one bounded latest-attempt sample without touching full-sync state."""
+        if limit not in (5, 10):
+            raise ValueError("Пробный импорт задач поддерживает только 5 или 10 попыток.")
+        account_id = self.repository.ensure_archive_account(username)
+        run_id = self.repository.start_puzzle_pilot(account_id, limit)
+        received = new_count = 0
+        try:
+            records = list(self.client.stream_puzzle_activity(
+                token, stop_event, before=int(time.time() * 1000) + 1,
+                max_items=limit))
+            # The endpoint is descending; sorting the bounded response also makes the
+            # stored sample deterministic with test transports and timestamp ties.
+            records.sort(key=lambda record: int(record.get("date", 0)), reverse=True)
+            records = records[:limit]
+            received = len(records)
+            if records:
+                results = self.repository.import_puzzle_activities(
+                    username, records, pilot_run_id=run_id)
+                new_count = sum(int(inserted) for _uid, inserted in results)
+            if progress:
+                progress(received, new_count)
+            status = "cancelled" if stop_event.is_set() else "complete"
+            return self.repository.finish_puzzle_pilot(run_id, status)
+        except Exception as exc:
+            self.repository.finish_puzzle_pilot(run_id, "error", str(exc))
+            raise
+
     def _run(self, username: str, token: str, stop_event: threading.Event, *,
              page_size: int, progress: Callable[[int], None] | None) -> int:
         account_id = self.repository.ensure_archive_account(username)

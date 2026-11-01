@@ -330,7 +330,9 @@ def test_archive_pilot_ui_requires_confirmation_and_shows_received_vs_new(qtbot,
     window._lichess_connected = True
     window.show_home()
     monkeypatch.setattr(QInputDialog, "getItem", lambda *args, **kwargs: ("5", True))
-    monkeypatch.setattr(QMessageBox, "question", lambda *args, **kwargs: QMessageBox.StandardButton.Yes)
+    confirmations = []
+    monkeypatch.setattr(QMessageBox, "question", lambda *args, **kwargs:
+                        (confirmations.append(args[2]) or QMessageBox.StandardButton.Yes))
     messages = []
     monkeypatch.setattr(QMessageBox, "information", lambda *args: messages.append(args[-1]))
 
@@ -360,6 +362,46 @@ def test_archive_status_discloses_offline_database_and_local_count_on_request(qt
     assert "Локальных партий: 1" in messages[0]
     assert window.game_repository.path in messages[0]
     assert "Lichess аккаунт: не подключён" in messages[0]
+    window.close()
+
+
+def test_puzzle_pilot_ui_requires_bounded_choice_and_confirmation(qtbot, tmp_path, monkeypatch):
+    window = MainWindow(QSettings(str(tmp_path / "puzzle-pilot-ui.ini"), QSettings.Format.IniFormat))
+    qtbot.addWidget(window)
+    calls = []
+
+    class Client:
+        rate_limit_remaining = 0
+
+    class Service:
+        client = Client()
+        puzzle_username = "PilotUser"
+        username = None
+        def pilot_puzzle_activity(self, limit, repository):
+            calls.append((limit, repository))
+        def cancel_puzzle_sync(self):
+            calls.append(("cancel",))
+        def close(self, timeout=None): return True
+
+    window.lichess = Service()
+    window._lichess_connected = True
+    monkeypatch.setattr(QInputDialog, "getItem", lambda *args, **kwargs: ("10", True))
+    confirmations = []
+    monkeypatch.setattr(QMessageBox, "question", lambda *args, **kwargs:
+                        (confirmations.append(args[2]) or QMessageBox.StandardButton.Yes))
+    messages = []
+    monkeypatch.setattr(QMessageBox, "information", lambda *args: messages.append(args[-1]))
+    monkeypatch.setattr(window, "show_puzzle_history", lambda account, **kwargs:
+                        calls.append(("history", account, kwargs.get("pilot_run_id"))))
+
+    window.start_puzzle_pilot()
+    assert calls == [(10, window.game_repository)]
+    assert "курсор полной синхронизации" in confirmations[0].lower()
+    window._puzzle_pilot_progress(10, 6)
+    assert "Получено попыток: 10 · новых: 6" in window._puzzle_pilot_progress_dialog.labelText()
+    window._puzzle_pilot_finished(10, 6, "pilot-run", "Пробная загрузка задач завершена.")
+    assert "Курсор полной синхронизации не изменён" in messages[0]
+    assert calls[-1] == ("history", "lichess:pilotuser", "pilot-run")
     window.close()
 
 

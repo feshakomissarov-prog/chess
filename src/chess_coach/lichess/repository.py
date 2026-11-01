@@ -18,7 +18,7 @@ import chess
 import chess.pgn
 
 
-SCHEMA_VERSION = 7
+SCHEMA_VERSION = 8
 DEFAULT_PAGE_SIZE = 100
 MAX_PAGE_SIZE = 500
 
@@ -243,6 +243,22 @@ class GameRepository:
                 CREATE TABLE IF NOT EXISTS puzzle_dashboard_snapshots (
                     snapshot_id TEXT PRIMARY KEY, account_id TEXT NOT NULL REFERENCES accounts(account_id),
                     days INTEGER NOT NULL, fetched_at TEXT NOT NULL, payload_json TEXT NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS puzzle_pilot_runs (
+                    run_id TEXT PRIMARY KEY,
+                    account_id TEXT NOT NULL REFERENCES accounts(account_id) ON DELETE CASCADE,
+                    requested_limit INTEGER NOT NULL CHECK(requested_limit IN (5,10)),
+                    received_count INTEGER NOT NULL DEFAULT 0,
+                    new_count INTEGER NOT NULL DEFAULT 0,
+                    status TEXT NOT NULL,
+                    started_at TEXT NOT NULL,
+                    finished_at TEXT,
+                    last_error TEXT
+                );
+                CREATE TABLE IF NOT EXISTS puzzle_pilot_run_attempts (
+                    run_id TEXT NOT NULL REFERENCES puzzle_pilot_runs(run_id) ON DELETE CASCADE,
+                    attempt_uid TEXT NOT NULL REFERENCES puzzle_attempts(attempt_uid) ON DELETE CASCADE,
+                    PRIMARY KEY(run_id,attempt_uid)
                 );
                 CREATE INDEX IF NOT EXISTS idx_puzzle_attempt_date ON puzzle_attempts(account_id,attempt_date_ms);
                 CREATE INDEX IF NOT EXISTS idx_puzzle_attempt_puzzle ON puzzle_attempts(puzzle_id,attempt_date_ms);
@@ -1021,7 +1037,8 @@ class GameRepository:
         return result if _return_inserted else result[0]
 
     def import_puzzle_activities(self, username: str, records: list[dict], *,
-                                 backfill: bool = False) -> list[tuple[str, bool]]:
+                                 backfill: bool = False,
+                                 pilot_run_id: str | None = None) -> list[tuple[str, bool]]:
         """Persist one API page of puzzle attempts in a single SQLite transaction."""
         account_id = self.ensure_archive_account(username)
         prepared: list[tuple[str, str, int, dict, str]] = []
@@ -1057,18 +1074,73 @@ class GameRepository:
                 inserted = db.execute("INSERT OR IGNORE INTO puzzle_attempts VALUES (?,?,?,?,?,?,?,?)",
                                       (attempt_uid, account_id, puzzle_id, attempt_date,
                                        int(bool(record.get("win"))), "lichess", stable, now)).rowcount
-                db.execute("INSERT OR IGNORE INTO puzzle_sync_state(account_id,updated_at) VALUES (?,?)",
-                           (account_id, now))
-                if backfill:
-                    db.execute("UPDATE puzzle_sync_state SET backfill_before=?, "
-                               "imported_count=imported_count+?,updated_at=? WHERE account_id=?",
-                               (attempt_date + 1, int(bool(inserted)), now, account_id))
+                if pilot_run_id is not None:
+                    run = db.execute("SELECT account_id,status FROM puzzle_pilot_runs WHERE run_id=?",
+                                     (pilot_run_id,)).fetchone()
+                    if run is None or run["account_id"] != account_id or run["status"] != "running":
+                        raise ValueError("Пробная загрузка задач не активна для этого аккаунта.")
+                    # Associate even an already-known attempt with this pilot run, but do
+                    # not touch the full-sync cursor or imported_count.
+                    db.execute("INSERT OR IGNORE INTO puzzle_pilot_run_attempts VALUES (?,?)",
+                               (pilot_run_id, attempt_uid))
+                    db.execute("UPDATE puzzle_pilot_runs SET received_count=received_count+1, "
+                               "new_count=new_count+?,finished_at=NULL WHERE run_id=?",
+                               (int(bool(inserted)), pilot_run_id))
                 else:
-                    db.execute("UPDATE puzzle_sync_state SET imported_count=imported_count+?, "
-                               "last_error=NULL,updated_at=? WHERE account_id=?",
-                               (int(bool(inserted)), now, account_id))
+                    db.execute("INSERT OR IGNORE INTO puzzle_sync_state(account_id,updated_at) VALUES (?,?)",
+                               (account_id, now))
+                    if backfill:
+                        db.execute("UPDATE puzzle_sync_state SET backfill_before=?, "
+                                   "imported_count=imported_count+?,updated_at=? WHERE account_id=?",
+                                   (attempt_date + 1, int(bool(inserted)), now, account_id))
+                    else:
+                        db.execute("UPDATE puzzle_sync_state SET imported_count=imported_count+?, "
+                                   "last_error=NULL,updated_at=? WHERE account_id=?",
+                                   (int(bool(inserted)), now, account_id))
                 results.append((attempt_uid, bool(inserted)))
         return results
+
+    def start_puzzle_pilot(self, account_id: str, requested_limit: int) -> str:
+        if requested_limit not in (5, 10):
+            raise ValueError("Пробная загрузка допускает только 5 или 10 попыток.")
+        run_id = uuid.uuid4().hex
+        now = datetime.now(timezone.utc).isoformat()
+        with self._connection() as db:
+            db.execute("INSERT INTO puzzle_pilot_runs(run_id,account_id,requested_limit,status,started_at) "
+                       "VALUES (?,?,?,'running',?)", (run_id, account_id, requested_limit, now))
+        return run_id
+
+    def finish_puzzle_pilot(self, run_id: str, status: str, error: str | None = None) -> dict:
+        if status not in {"complete", "cancelled", "error"}:
+            raise ValueError("Недопустимый итог пробной загрузки задач.")
+        now = datetime.now(timezone.utc).isoformat()
+        with self._connection() as db:
+            db.execute("UPDATE puzzle_pilot_runs SET status=?,finished_at=?,last_error=? WHERE run_id=?",
+                       (status, now, error[:500] if error else None, run_id))
+            row = db.execute("SELECT * FROM puzzle_pilot_runs WHERE run_id=?", (run_id,)).fetchone()
+            if row is None:
+                raise KeyError(run_id)
+            return dict(row)
+
+    def puzzle_pilot_history(self, account_id: str, *, run_id: str | None = None,
+                             limit: int = 100) -> list[dict]:
+        limit = min(MAX_PAGE_SIZE, max(1, int(limit)))
+        with self._connection() as db:
+            query = ("SELECT r.run_id,r.status,r.requested_limit,r.received_count,"
+                     "r.new_count,r.started_at,r.finished_at,r.last_error,"
+                     "a.attempt_uid,a.puzzle_id,a.attempt_date_ms,a.win,"
+                     "p.fen,p.solution_json,p.themes_json,p.puzzle_rating,p.plays "
+                     "FROM puzzle_pilot_runs r LEFT JOIN puzzle_pilot_run_attempts x USING(run_id) "
+                     "LEFT JOIN puzzle_attempts a USING(attempt_uid) "
+                     "LEFT JOIN puzzles p USING(puzzle_id) WHERE r.account_id=? ")
+            params: list[object] = [account_id]
+            if run_id is not None:
+                query += "AND r.run_id=? "
+                params.append(run_id)
+            query += "ORDER BY r.started_at DESC,a.attempt_date_ms DESC,a.attempt_uid LIMIT ?"
+            params.append(limit)
+            rows = db.execute(query, params).fetchall()
+            return [dict(row) for row in rows]
 
     def has_puzzle_attempt(self, username: str, record: dict) -> bool:
         stable = json.dumps(record, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
