@@ -2,7 +2,17 @@
 
 **Основа проекта от 31.10.2026; последние обновления — 01.11.2026.** Репозиторий: https://github.com/feshakomissarov-prog/chess  
 **Локальный путь владельца:** `G:\project\chess`. У других исполнителей он может быть иным.  
-**Код M0/M1 работает из `main`; функции M3/M4 — только в draft-цепочке PR #8–#17, не слиты.** Вся история и документация GitHub доступны следующему Codex и следующему чату без данного диалога.
+**Код M0/M1/M2 работает из `main`; функции M3/M4 — только в draft-цепочке PR #8–#24, не слиты.** Вся история и документация GitHub доступны следующему Codex и следующему чату без данного диалога.
+
+## Актуализация 01.11.2026 — полный тренер и аудит PR #24 (текущая)
+
+**Продуктовая цель уточнена владельцем:** [PRODUCT_VISION.md](PRODUCT_VISION.md). Chess Coach должен быть **полноценным адаптивным тренером, снимающим непонимание во всех областях шахмат**, а не продуктом ради одной уникальной функции. Чужие проекты из [исследовательского каталога](research/OPEN_SOURCE_CHESS_PROJECTS.md) — технические образцы и идеи с учётом лицензий. Четыре волны ссылок уже включены в каталог.
+
+**Новый код M3–M4:** последовательные draft PR [#18](https://github.com/feshakomissarov-prog/chess/pull/18)→[#19](https://github.com/feshakomissarov-prog/chess/pull/19)→[#20](https://github.com/feshakomissarov-prog/chess/pull/20)→[#21](https://github.com/feshakomissarov-prog/chess/pull/21)→[#22](https://github.com/feshakomissarov-prog/chess/pull/22)→[#23](https://github.com/feshakomissarov-prog/chess/pull/23)→[#24](https://github.com/feshakomissarov-prog/chess/pull/24). **Последний SHA:** `e57926b976d31ec198add0da8373570ac26d1d17`, branch `codex/m3-windows-diagnostics`, base `codex/m3-puzzle-pilot`, draft. Не слит. В базе PR #8–#17; PR #15 закрыт как заменённый. Реальные Lichess/OAuth/Stockfish ещё NOT RUN.
+
+**CI проверен по GitHub run #41258443123:** Windows Server 2025, Python 3.12.10, PySide6/Qt/shiboken6 6.12.0, **184 passed**, compileall и offline window PASS. Локальный crash Python 3.11.5/shiboken6 не диагностирован. Владельцем GUI на head #24 пока не проверен; ранее head #17 offline smoke 7/7 PASS, но без новой свободной доски.
+
+**Углублённое ревью:** [PR24_REVIEW_FIXES_AND_MERGE_GATES.md](specs/PR24_REVIEW_FIXES_AND_MERGE_GATES.md), комментарий в [PR #24](https://github.com/feshakomissarov-prog/chess/pull/24). **Остались блокеры/замечания до merge:** `StatisticsService.summary` материализует весь архив и создаёт гигантские `IN` списки, тест 1005 недостаточен; `analysis_source` не всегда фильтрует список игр, если `analyzed=any`; fair-play guard движка видит только локальные `online_sessions`; `SettingsDialog` может уничтожить QProcess probe до подтверждения выхода; конфликт PR #8→main `mergeable=false` из-за параллельных docs. **Не merge.** Следующее Codex задание — компактный fix PR поверх #24 с тестами, затем безопасная интеграция документации и контролируемый ручной пилот владельца с backup, только по его решению.
 
 ## Актуализация 01.11.2026 — ручной smoke владельца и следующий большой блок (текущая)
 
