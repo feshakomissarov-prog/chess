@@ -6,6 +6,7 @@ import pytest
 from pathlib import Path
 from PySide6.QtCore import QPoint, QSettings, Qt
 from PySide6.QtGui import QCloseEvent
+from PySide6.QtWidgets import QInputDialog, QMessageBox
 
 from chess_coach.board_view import BoardView
 from chess_coach.window import ActiveGamesDialog, EvaluationGraph, MainWindow, SettingsDialog
@@ -259,6 +260,60 @@ def test_manual_connect_restores_saved_token_only_after_explicit_button(qtbot, t
     window.connect_lichess()
 
     assert calls == ["attach", "restore"]
+    window.close()
+
+
+def test_archive_pilot_ui_requires_confirmation_and_shows_received_vs_new(qtbot, tmp_path, monkeypatch):
+    window = MainWindow(QSettings(str(tmp_path / "pilot-ui.ini"), QSettings.Format.IniFormat),
+                        offline_mode=True)
+    qtbot.addWidget(window)
+    calls = []
+
+    class Client:
+        rate_limit_remaining = 0
+
+    class Service:
+        client = Client()
+        username = "Alice"
+        def pilot_import_archive(self, *, max_games): calls.append(("pilot", max_games))
+        def cancel_archive_sync(self): calls.append(("cancel",))
+        def close(self, timeout=None): return True
+
+    window.lichess = Service()
+    window.offline_mode = False
+    window._lichess_connected = True
+    window.show_home()
+    monkeypatch.setattr(QInputDialog, "getItem", lambda *args, **kwargs: ("5", True))
+    monkeypatch.setattr(QMessageBox, "question", lambda *args, **kwargs: QMessageBox.StandardButton.Yes)
+    messages = []
+    monkeypatch.setattr(QMessageBox, "information", lambda *args: messages.append(args[-1]))
+
+    qtbot.mouseClick(window.home_pilot_import_button, Qt.MouseButton.LeftButton)
+    assert calls == [("pilot", 5)]
+    window._archive_pilot_progress(5, 3, "pilot-4")
+    assert "Получено: 5 · новых: 3" in window._archive_progress_dialog.labelText()
+    window._archive_pilot_finished(5, 3, "Пробный импорт завершён.")
+    assert "Записей получено: 5" in messages[0]
+    assert "Новых партий: 3" in messages[0]
+    assert "Курсор полной синхронизации не изменён" in messages[0]
+    assert window._archive_progress_dialog is None
+    window.close()
+
+
+def test_archive_status_discloses_offline_database_and_local_count_on_request(qtbot, monkeypatch):
+    window = MainWindow(offline_mode=True)
+    qtbot.addWidget(window)
+    window.game_repository.save_snapshot("local-status-game", "startpos", "", "white",
+                                        "Local", False, "-", "playing")
+    messages = []
+    monkeypatch.setattr(QMessageBox, "information", lambda *args: messages.append(args[-1]))
+
+    window.show_archive_status()
+
+    assert "Изолированная временная база --offline" in messages[0]
+    assert "Локальных партий: 1" in messages[0]
+    assert window.game_repository.path in messages[0]
+    assert "Lichess аккаунт: не подключён" in messages[0]
     window.close()
 
 

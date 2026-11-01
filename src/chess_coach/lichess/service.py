@@ -31,6 +31,8 @@ class LichessService(QObject):
     authenticated = Signal(str)
     archive_progress = Signal(int, str)
     archive_finished = Signal(int, str)
+    archive_pilot_progress = Signal(int, int, str)
+    archive_pilot_finished = Signal(int, int, str)
     archive_game_refresh_finished = Signal(str, str)
     puzzles_progress = Signal(int)
     puzzles_finished = Signal(int, str)
@@ -88,6 +90,41 @@ class LichessService(QObject):
             finally:
                 self._archive_stop = None
         self._thread(work, "chess-coach-archive-sync")
+
+    def pilot_import_archive(self, *, max_games: int = 5) -> None:
+        """Run one explicitly requested 5–10 game sample, separate from backfill."""
+        if self.repository is None:
+            self.archive_pilot_finished.emit(0, 0, "Локальное хранилище архива недоступно.")
+            return
+        if self._archive_stop is not None and not self._archive_stop.is_set():
+            self.archive_pilot_finished.emit(0, 0, "Синхронизация архива уже выполняется.")
+            return
+        stop = threading.Event()
+        self._archive_stop = stop
+        def work():
+            try:
+                token = self.token_store.get()
+                if not token:
+                    raise LichessError("Сначала подключите аккаунт Lichess.")
+                username = self.username or str(self.client.get_account(token)["username"])
+                result = ArchiveSync(self.client, self.repository).run_pilot(
+                    username, token, stop, max_games=max_games,
+                    progress=lambda received, new, game_id:
+                    self.archive_pilot_progress.emit(received, new, game_id))
+                message = ("Пробный импорт отменён; уже записанные партии сохранены."
+                           if result["status"] == "interrupted" else "Пробный импорт завершён.")
+                self.archive_pilot_finished.emit(int(result["received"]), int(result["new"]), message)
+            except Exception as exc:
+                received = new = 0
+                if self.username:
+                    account_id = f"lichess:{self.username.strip().lower()}"
+                    runs = self.repository.list_archive_pilot_runs(account_id, limit=1)
+                    if runs:
+                        received, new = int(runs[0]["received_count"]), int(runs[0]["new_count"])
+                self.archive_pilot_finished.emit(received, new, f"Пробный импорт завершился ошибкой: {exc}")
+            finally:
+                self._archive_stop = None
+        self._thread(work, "chess-coach-archive-pilot")
 
     def cancel_archive_sync(self) -> None:
         if self._archive_stop is not None:

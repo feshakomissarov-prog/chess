@@ -128,3 +128,11 @@
 - Windows Python 3.11.5: целевые launcher/manual-connect/offline Qt-тесты — **6 passed**; `compileall -q src tests` и `git diff --check` — PASS. Полный Qt-набор не запускался.
 - Windows GitHub Actions Server 2025 / Python 3.12.10, run **#41254254807 (#25)**: **SUCCESS, 164 passed**, compileall и isolated offline-window smoke PASS. CI headless, реальный OAuth не запускался.
 - Настоящий OAuth и Lichess не запускались; Windows интерактивный ручной тест не выполнен. Native access violation остаётся нерешённой диагностической проблемой.
+
+## Pilot C — отдельный импорт выборки партий
+
+- В SQLite v7 добавлен журнал `archive_pilot_runs` с лимитом, количеством полученных записей, числом новых партий и статусом. Миграция остаётся добавочной; перед изменением существующей БД создаётся SQLite backup, и миграция проверяет копию через `PRAGMA integrity_check`.
+- Добавлен `ArchiveSync.run_pilot` и отдельный service/UI action: выбор 5 или 10 партий, явное подтверждение, прогресс «получено / новых», отмена и итоговое сообщение. Запрашивается descending список завершённых партий через существующий `/api/games/user/{username}` streaming client. Pilot использует тот же atomic upsert и raw PGN, но не меняет `archive_sync_state` и не обновляет full/incremental cursor или полноархивный счётчик.
+- Добавлен запросный экран «Хранилище и статус архива»: тип/путь SQLite, локальный объём, аккаунт, стадия полной синхронизации, новые записи, успешное время, возобновляемость, ошибка и последний pilot. Путь показывается только по явному нажатию; офлайн-режим маркируется как временная изолированная база.
+- Тесты с временной file-backed SQLite покрывают повтор 5 записей (5 новых затем 0), выборку 10 для пустого архива, неизменность курсора, отсутствие дубликатов при последующем full backfill, сохранность заметки/PGN, остановку между записями и сбой до COMMIT. Миграционный backup проверяется `integrity_check`; большой full-import paging regression на 2501 игру остаётся в наборе. UI-тест подтверждает выбор/подтверждение и разделение двух счётчиков.
+- Windows Python 3.11.5: целевой набор Pilot/SQLite/API/UI — **9 passed**; `compileall -q src tests` и `git diff --check` — PASS. Полный локальный Qt suite не запускался из-за прежней native access violation; сеть и данные владельца не использовались.

@@ -18,7 +18,7 @@ import chess
 import chess.pgn
 
 
-SCHEMA_VERSION = 6
+SCHEMA_VERSION = 7
 DEFAULT_PAGE_SIZE = 100
 MAX_PAGE_SIZE = 500
 
@@ -76,6 +76,13 @@ class GameRepository:
                             destination.close()
                     finally:
                         source.close()
+                backup_db = sqlite3.connect(f"{backup.as_uri()}?mode=ro", uri=True)
+                try:
+                    integrity = backup_db.execute("PRAGMA integrity_check").fetchone()[0]
+                    if integrity != "ok":
+                        raise RuntimeError(f"SQLite migration backup failed integrity_check: {integrity}")
+                finally:
+                    backup_db.close()
         with self._connection() as db:
             db.execute("BEGIN IMMEDIATE")
             version = db.execute("PRAGMA user_version").fetchone()[0]
@@ -133,6 +140,17 @@ class GameRepository:
                     incremental_since INTEGER, last_success_at TEXT, imported_count INTEGER NOT NULL DEFAULT 0,
                     last_sync_new_count INTEGER NOT NULL DEFAULT 0,
                     last_error TEXT, updated_at TEXT NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS archive_pilot_runs (
+                    run_id TEXT PRIMARY KEY,
+                    account_id TEXT NOT NULL REFERENCES accounts(account_id) ON DELETE CASCADE,
+                    requested_limit INTEGER NOT NULL,
+                    received_count INTEGER NOT NULL DEFAULT 0,
+                    new_count INTEGER NOT NULL DEFAULT 0,
+                    status TEXT NOT NULL,
+                    started_at TEXT NOT NULL,
+                    finished_at TEXT,
+                    last_error TEXT
                 );
                 CREATE TABLE IF NOT EXISTS game_revisions (
                     game_id TEXT NOT NULL REFERENCES games(game_id) ON DELETE CASCADE,
@@ -607,8 +625,38 @@ class GameRepository:
                              (account_id,)).fetchone()
             return dict(row) if row else {}
 
+    def begin_archive_pilot_run(self, account_id: str, requested_limit: int) -> str:
+        if not 5 <= int(requested_limit) <= 10:
+            raise ValueError("Пробный импорт должен быть ограничен 5–10 партиями.")
+        run_id = uuid.uuid4().hex
+        with self._connection() as db:
+            db.execute("INSERT INTO archive_pilot_runs(run_id,account_id,requested_limit,status,started_at) "
+                       "VALUES (?,?,?,'running',?)",
+                       (run_id, account_id, int(requested_limit), datetime.now(timezone.utc).isoformat()))
+        return run_id
+
+    def record_archive_pilot_received(self, run_id: str) -> None:
+        with self._connection() as db:
+            db.execute("UPDATE archive_pilot_runs SET received_count=received_count+1 WHERE run_id=?",
+                       (run_id,))
+
+    def finish_archive_pilot_run(self, run_id: str, status: str, error: str | None = None) -> None:
+        if status not in {"completed", "interrupted", "error"}:
+            raise ValueError("Unknown pilot run status")
+        with self._connection() as db:
+            db.execute("UPDATE archive_pilot_runs SET status=?,finished_at=?,last_error=? WHERE run_id=?",
+                       (status, datetime.now(timezone.utc).isoformat(),
+                        error[:500] if error else None, run_id))
+
+    def list_archive_pilot_runs(self, account_id: str, limit: int = 10) -> list[dict]:
+        with self._connection() as db:
+            return [dict(row) for row in db.execute(
+                "SELECT * FROM archive_pilot_runs WHERE account_id=? ORDER BY started_at DESC LIMIT ?",
+                (account_id, max(1, min(int(limit), 100))))]
+
     def import_archive_record(self, username: str, record: dict, *, checkpoint_ms: int | None,
-                              backfill: bool, _return_inserted: bool = False) -> str | tuple[str, bool]:
+                              backfill: bool, pilot_run_id: str | None = None,
+                              _return_inserted: bool = False) -> str | tuple[str, bool]:
         """Upsert one exported PGN, link it to its account, then advance the durable cursor."""
         import io
 
@@ -624,6 +672,7 @@ class GameRepository:
             error = "Malformed PGN quarantined" + (f": {details[:300]}" if details else "")
             return self._import_raw_only_record(username, record, parsed, variant, raw_pgn,
                                                 error, checkpoint_ms, backfill,
+                                                pilot_run_id=pilot_run_id,
                                                 _return_inserted=_return_inserted)
         if variant != "standard":
             # Keep non-standard games searchable/exportable without pretending their
@@ -631,7 +680,8 @@ class GameRepository:
             return self._import_raw_only_record(
                 username, record, parsed, variant, raw_pgn,
                 f"Unsupported variant: {variant}; board viewing and analysis disabled",
-                checkpoint_ms, backfill, _return_inserted=_return_inserted)
+                checkpoint_ms, backfill, pilot_run_id=pilot_run_id,
+                _return_inserted=_return_inserted)
         initial_fen = parsed.headers.get("FEN", "startpos")
         uci_moves = []
         for move in parsed.mainline_moves():
@@ -728,7 +778,10 @@ class GameRepository:
                            "middle_start_ply=excluded.middle_start_ply,end_start_ply=excluded.end_start_ply,"
                            "source=excluded.source,method_version=excluded.method_version",
                            (game_id, revision, middle_start, end_start, "lichess", "lichess-division-v1"))
-            if backfill and checkpoint_ms is not None:
+            if pilot_run_id:
+                db.execute("UPDATE archive_pilot_runs SET new_count=new_count+? WHERE run_id=?",
+                           (int(not existing_account_link), pilot_run_id))
+            elif backfill and checkpoint_ms is not None:
                 db.execute("UPDATE archive_sync_state SET backfill_before=?,"
                            "imported_count=imported_count+?,updated_at=? WHERE account_id=?",
                            (checkpoint_ms + 1, int(not existing_account_link), imported_at, account_id))
@@ -752,9 +805,10 @@ class GameRepository:
     def _import_raw_only_record(self, username: str, record: dict, parsed,
                                 variant: str, raw_pgn: str, import_error: str,
                                 checkpoint_ms: int | None, backfill: bool, *,
+                                pilot_run_id: str | None = None,
                                 _return_inserted: bool = False) -> str | tuple[str, bool]:
         args = (username, record, parsed, variant, raw_pgn, import_error,
-                checkpoint_ms, backfill)
+                checkpoint_ms, backfill, pilot_run_id)
         if self._writer is not None:
             return self._submit_writer(self._import_raw_only_record_sync, *args,
                                        _return_inserted=_return_inserted, wait=True)
@@ -762,7 +816,8 @@ class GameRepository:
 
     def _import_raw_only_record_sync(self, username: str, record: dict, parsed,
                                      variant: str, raw_pgn: str, import_error: str,
-                                     checkpoint_ms: int | None, backfill: bool, *,
+                                     checkpoint_ms: int | None, backfill: bool,
+                                     pilot_run_id: str | None = None, *,
                                      _return_inserted: bool = False) -> str | tuple[str, bool]:
         game_id = str(record.get("id") or "").strip()
         if not game_id or not raw_pgn:
@@ -807,7 +862,10 @@ class GameRepository:
                         white_rating if color == "white" else black_rating,
                         black_rating if color == "white" else white_rating, opponent,
                         white if color == "white" else black))
-            if backfill and checkpoint_ms is not None:
+            if pilot_run_id:
+                db.execute("UPDATE archive_pilot_runs SET new_count=new_count+? WHERE run_id=?",
+                           (int(not existing_account_link), pilot_run_id))
+            elif backfill and checkpoint_ms is not None:
                 db.execute("UPDATE archive_sync_state SET backfill_before=?,imported_count=imported_count+?,"
                            "updated_at=? WHERE account_id=?",
                            (checkpoint_ms + 1, int(not existing_account_link), now, account_id))

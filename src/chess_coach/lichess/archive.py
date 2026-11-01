@@ -119,6 +119,36 @@ class ArchiveSync:
                 finish_incremental(account_id, target_ms)
         return imported
 
+    def run_pilot(self, username: str, token: str, stop_event: threading.Event, *,
+                  max_games: int = 5,
+                  progress: Callable[[int, int, str], None] | None = None) -> dict[str, int | str]:
+        """Import a bounded newest-games sample without moving full-sync cursors."""
+        if not 5 <= int(max_games) <= 10:
+            raise ValueError("Пробный импорт ограничен 5–10 партиями.")
+        account_id = self.repository.ensure_archive_account(username)
+        run_id = self.repository.begin_archive_pilot_run(account_id, max_games)
+        received = new = 0
+        try:
+            for record in self.client.stream_user_games(
+                    token, username, stop_event, max_games=max_games):
+                if stop_event.is_set() or received >= max_games:
+                    break
+                received += 1
+                self.repository.record_archive_pilot_received(run_id)
+                result = self.repository.import_archive_record(
+                    username, record, checkpoint_ms=None, backfill=False,
+                    pilot_run_id=run_id, _return_inserted=True)
+                inserted = result[1] if isinstance(result, tuple) else True
+                new += int(inserted)
+                if progress:
+                    progress(received, new, str(record.get("id", "")))
+            status = "interrupted" if stop_event.is_set() else "completed"
+            self.repository.finish_archive_pilot_run(run_id, status)
+            return {"received": received, "new": new, "status": status}
+        except Exception as exc:
+            self.repository.finish_archive_pilot_run(run_id, "error", str(exc))
+            raise
+
     def refresh_game(self, username: str, token: str, game_id: str) -> bool:
         """Refresh one previously imported completed game by its Lichess ID."""
         account_id = self.repository.ensure_archive_account(username)

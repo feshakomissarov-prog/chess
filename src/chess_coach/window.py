@@ -379,6 +379,8 @@ class MainWindow(QMainWindow):
         service.active_games_error.connect(self._active_games_error)
         service.archive_progress.connect(self._archive_progress)
         service.archive_finished.connect(self._archive_finished)
+        service.archive_pilot_progress.connect(self._archive_pilot_progress)
+        service.archive_pilot_finished.connect(self._archive_pilot_finished)
         service.archive_game_refresh_finished.connect(self._archive_game_refresh_finished)
         service.puzzles_progress.connect(self._puzzles_progress)
         service.puzzles_finished.connect(self._puzzles_finished)
@@ -391,7 +393,7 @@ class MainWindow(QMainWindow):
         for button in (
             self.friend_link_button, self.username_button, self.ai_button,
             self.home_ai_button, self.home_friend_button, self.home_username_button,
-            self.cancel_challenge_button, self.active_games_button,
+            self.cancel_challenge_button, self.active_games_button, self.home_pilot_import_button,
         ):
             button.setEnabled(False)
             button.setVisible(False)
@@ -618,7 +620,12 @@ class MainWindow(QMainWindow):
         self.home_local_button.clicked.connect(self.start_local_game)
         self.home_games_button = QPushButton("Завершённые партии")
         self.home_games_button.clicked.connect(self.show_saved_games)
-        self.home_archive_button = QPushButton("Синхронизировать архив Lichess")
+        self.home_archive_status_button = QPushButton("Хранилище и статус архива")
+        self.home_archive_status_button.clicked.connect(self.show_archive_status)
+        self.home_pilot_import_button = QPushButton("Пробно импортировать 5–10 последних партий")
+        self.home_pilot_import_button.clicked.connect(self.start_archive_pilot)
+        self.home_pilot_import_button.setEnabled(False)
+        self.home_archive_button = QPushButton("Полная синхронизация архива Lichess")
         self.home_archive_button.clicked.connect(self.start_archive_sync)
         self.home_archive_button.setEnabled(False)
         self.home_stats_button = QPushButton("Статистика партий")
@@ -633,7 +640,9 @@ class MainWindow(QMainWindow):
         for button in (self.home_ai_button, self.home_friend_button,
                        self.home_username_button, self.active_games_button,
                        self.home_local_button,
-                       self.home_games_button, self.home_archive_button, self.home_stats_button,
+                       self.home_games_button, self.home_archive_status_button,
+                       self.home_pilot_import_button,
+                       self.home_archive_button, self.home_stats_button,
                        self.home_puzzles_button,
                        self.home_settings_button,
                        self.resume_game_button):
@@ -765,6 +774,7 @@ class MainWindow(QMainWindow):
             button.setEnabled(self._online_actions_allowed())
         self.active_games_button.setEnabled(self._online_actions_allowed())
         self.home_archive_button.setEnabled(self._online_actions_allowed())
+        self.home_pilot_import_button.setEnabled(self._online_actions_allowed())
         self.home_puzzles_button.setEnabled(self._online_actions_allowed())
 
     def start_archive_sync(self) -> None:
@@ -786,6 +796,46 @@ class MainWindow(QMainWindow):
         self._archive_progress_dialog = dialog
         dialog.show()
         self.lichess.sync_archive()
+
+    def start_archive_pilot(self) -> None:
+        if not self._online_actions_allowed():
+            return
+        choice, accepted = QInputDialog.getItem(
+            self, "Пробный импорт архива", "Сколько последних завершённых партий импортировать?",
+            ["5", "10"], 0, False)
+        if not accepted:
+            return
+        limit = int(choice)
+        answer = QMessageBox.question(
+            self, "Подтвердите пробный импорт",
+            f"Будут запрошены последние {limit} завершённых партий аккаунта Lichess "
+            "и сохранены в существующую локальную SQLite. Пробный импорт не меняет "
+            "курсор полной синхронизации. Продолжить?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel,
+            QMessageBox.StandardButton.Cancel)
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+        dialog = QProgressDialog("Получено: 0 · новых: 0", "Отменить", 0, 0, self)
+        dialog.setWindowTitle("Пробный импорт Lichess")
+        dialog.setMinimumDuration(0)
+        dialog.canceled.connect(self.lichess.cancel_archive_sync)
+        self._archive_progress_dialog = dialog
+        dialog.show()
+        self.lichess.pilot_import_archive(max_games=limit)
+
+    def _archive_pilot_progress(self, received: int, new: int, game_id: str) -> None:
+        if self._archive_progress_dialog:
+            self._archive_progress_dialog.setLabelText(
+                f"Получено: {received} · новых: {new}\nТекущая партия: {game_id}")
+
+    def _archive_pilot_finished(self, received: int, new: int, message: str) -> None:
+        if self._archive_progress_dialog:
+            self._archive_progress_dialog.close()
+            self._archive_progress_dialog = None
+        QMessageBox.information(
+            self, "Пробный импорт Lichess",
+            f"Записей получено: {received}\nНовых партий: {new}\n"
+            f"Курсор полной синхронизации не изменён.\n\n{message}")
 
     def _archive_progress(self, count: int, game_id: str) -> None:
         if self._archive_progress_dialog:
@@ -813,6 +863,37 @@ class MainWindow(QMainWindow):
             return {}
         account_id = f"lichess:{self.lichess.username.strip().lower()}"
         return self.game_repository.archive_sync_state(account_id)
+
+    def show_archive_status(self) -> None:
+        username = self.lichess.username if self.lichess and self.lichess.username else None
+        account_id = f"lichess:{username.strip().lower()}" if username else None
+        count = self.game_repository.search_games(
+            completed_only=False, account_id=account_id, page_size=1)["total"]
+        store_type = "Изолированная временная база --offline" if self.offline_mode else "Пользовательская SQLite"
+        details = [
+            f"Хранилище: {store_type}",
+            f"Путь к базе (показан по явному запросу): {self.game_repository.path}",
+            f"Локальных партий: {count}",
+            f"Lichess аккаунт: {username or 'не подключён'}",
+        ]
+        if account_id:
+            state = self.game_repository.archive_sync_state(account_id)
+            stage = "Полная выгрузка завершена" if state.get("backfill_complete") else "Полная выгрузка не завершена"
+            details.append(f"Этап архива: {stage}")
+            details.append(f"Последняя полная/инкрементальная синхронизация: "
+                           f"{self._format_sync_time(state.get('last_success_at')) if state.get('last_success_at') else 'нет'}")
+            details.append(f"Новых партий при последней синхронизации: {state.get('last_sync_new_count', 0)}")
+            details.append(f"Можно продолжить: {'да' if state.get('last_error') or not state.get('backfill_complete') else 'нет'}")
+            runs = self.game_repository.list_archive_pilot_runs(account_id, limit=1)
+            if runs:
+                pilot = runs[0]
+                details.append(f"Последний пробный импорт: получено {pilot['received_count']}, "
+                               f"новых {pilot['new_count']} · {pilot['status']}")
+            if state.get("last_error"):
+                details.append(f"Последняя ошибка/прерывание: {state['last_error']}")
+        else:
+            details.append("Подключите Lichess, чтобы увидеть статус архива по аккаунту.")
+        QMessageBox.information(self, "Хранилище и статус архива", "\n".join(details))
 
     @staticmethod
     def _format_sync_time(value: str) -> str:
@@ -1352,6 +1433,7 @@ class MainWindow(QMainWindow):
             button.setEnabled(online_allowed)
         self.active_games_button.setEnabled(online_allowed)
         self.home_archive_button.setEnabled(online_allowed)
+        self.home_pilot_import_button.setEnabled(online_allowed)
         self.home_puzzles_button.setEnabled(online_allowed)
         if status.startswith("Ограничение Lichess"):
             self.home_status.setText(status + ". Автоматические запросы приостановлены.")
@@ -1381,7 +1463,8 @@ class MainWindow(QMainWindow):
             return
         for button in (self.friend_link_button, self.username_button, self.ai_button,
                        self.home_ai_button, self.home_friend_button, self.home_username_button,
-                       self.active_games_button, self.home_archive_button, self.home_puzzles_button):
+                       self.active_games_button, self.home_archive_button,
+                       self.home_pilot_import_button, self.home_puzzles_button):
             button.setEnabled(True)
 
     def _lichess_authenticated(self, username: str) -> None:

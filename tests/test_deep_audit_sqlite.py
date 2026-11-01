@@ -105,6 +105,110 @@ def test_archive_file_sqlite_resume_preserves_fixed_backfill_anchor_and_late_gam
     repo.shutdown()
 
 
+def test_archive_pilot_import_is_bounded_repeatable_and_does_not_move_full_cursor(tmp_path):
+    records = [archive_record(f"pilot-{index}", 1_735_689_600_000 + index)
+               for index in range(5)]
+
+    class PilotClient:
+        calls = []
+        def stream_user_games(self, token, username, stop_event, *, since=None,
+                              until_ms=None, max_games=1000):
+            self.calls.append((token, username, since, until_ms, max_games))
+            selected = [record for record in records
+                        if (since is None or record["createdAt"] >= since)
+                        and (until_ms is None or record["createdAt"] <= until_ms)]
+            selected.sort(key=lambda record: record["createdAt"], reverse=since is None)
+            yield from selected[:max_games]
+
+    client = PilotClient()
+    repo = GameRepository(tmp_path / "pilot.sqlite3", async_writes=True)
+    account = repo.ensure_archive_account("Alice")
+    before = repo.archive_sync_state(account)
+
+    first = ArchiveSync(client, repo).run_pilot(
+        "Alice", "fake", threading.Event(), max_games=5)
+
+    assert first == {"received": 5, "new": 5, "status": "completed"}
+    repo.save_note("pilot-0", "Keep this note across archive pilot upserts")
+    second = ArchiveSync(client, repo).run_pilot(
+        "Alice", "fake", threading.Event(), max_games=5)
+
+    assert second == {"received": 5, "new": 0, "status": "completed"}
+    assert client.calls == [("fake", "Alice", None, None, 5)] * 2
+    assert repo.archive_sync_state(account) == before
+    assert repo.list_notes("pilot-0")[0]["body"] == "Keep this note across archive pilot upserts"
+    assert repo.export_pgn("pilot-0") == records[0]["pgn"]
+    assert len(repo.list_games(completed_only=False)) == 5
+    runs = repo.list_archive_pilot_runs(account)
+    assert [(row["received_count"], row["new_count"], row["status"]) for row in runs] == [
+        (5, 0, "completed"), (5, 5, "completed")]
+    assert ArchiveSync(client, repo).run(
+        "Alice", "fake", threading.Event(), full=True, page_size=5) == 0
+    assert repo.archive_sync_state(account)["backfill_complete"] == 1
+    assert len(repo.list_games(completed_only=False)) == 5
+    assert repo.list_notes("pilot-0")[0]["body"] == "Keep this note across archive pilot upserts"
+    with repo._connection() as db:
+        assert db.execute("SELECT COUNT(*) FROM account_games WHERE account_id=?",
+                          (account,)).fetchone()[0] == 5
+        assert db.execute("SELECT COUNT(*) FROM archive_pilot_runs WHERE account_id=?",
+                          (account,)).fetchone()[0] == 2
+        assert db.execute("PRAGMA integrity_check").fetchone()[0] == "ok"
+    repo.shutdown()
+
+
+def test_archive_pilot_import_rejects_unbounded_sample_and_records_empty_archive(tmp_path):
+    repo = GameRepository(tmp_path / "pilot-empty.sqlite3")
+    account = repo.ensure_archive_account("Alice")
+
+    class EmptyClient:
+        def stream_user_games(self, _token, _username, _stop, *, max_games=1000, **_kwargs):
+            assert max_games == 10
+            return iter(())
+
+    sync = ArchiveSync(EmptyClient(), repo)
+    with pytest.raises(ValueError):
+        sync.run_pilot("Alice", "fake", threading.Event(), max_games=100)
+    assert sync.run_pilot("Alice", "fake", threading.Event(), max_games=10) == {
+        "received": 0, "new": 0, "status": "completed"}
+    assert repo.archive_sync_state(account)["backfill_complete"] == 0
+    assert repo.list_archive_pilot_runs(account)[0]["received_count"] == 0
+    repo.shutdown()
+
+
+def test_archive_pilot_interruption_and_sqlite_failure_keep_full_cursor_and_atomic_games(
+        tmp_path, monkeypatch):
+    records = [archive_record(f"pilot-stop-{index}", 1_735_689_600_000 + index)
+               for index in range(5)]
+    client = FileArchiveClient(records)
+    repo = GameRepository(tmp_path / "pilot-interruption.sqlite3", async_writes=True)
+    account = repo.ensure_archive_account("Alice")
+    before = repo.archive_sync_state(account)
+    stop = threading.Event()
+
+    def cancel_after_first(_received, _new, _game_id):
+        stop.set()
+
+    interrupted = ArchiveSync(client, repo).run_pilot(
+        "Alice", "fake", stop, max_games=5, progress=cancel_after_first)
+    assert interrupted == {"received": 1, "new": 1, "status": "interrupted"}
+    assert repo.archive_sync_state(account) == before
+    assert repo.get_game("pilot-stop-4") is not None
+    client.records = [archive_record("pilot-failed", 1_735_689_600_100)]
+
+    def fail_before_commit(*_args, **_kwargs):
+        raise sqlite3.OperationalError("simulated pilot write failure")
+
+    monkeypatch.setattr(repo, "_save_snapshot_sync", fail_before_commit)
+    with pytest.raises(sqlite3.OperationalError, match="simulated pilot write failure"):
+        ArchiveSync(client, repo).run_pilot("Alice", "fake", threading.Event(), max_games=5)
+    assert repo.archive_sync_state(account) == before
+    assert repo.get_game("pilot-failed") is None
+    failed_run = repo.list_archive_pilot_runs(account)[0]
+    assert failed_run["status"] == "error"
+    assert failed_run["received_count"] == 1 and failed_run["new_count"] == 0
+    repo.shutdown()
+
+
 @pytest.mark.parametrize("order", [("Alice", "Bob"), ("Bob", "Alice")])
 def test_account_relative_opponent_result_rating_search_and_notes_are_order_independent(
         tmp_path, order):
@@ -182,15 +286,16 @@ def test_schema_v5_migrates_account_identity_and_keeps_backup_and_existing_rows(
     assert repo.get_game("old-game")["moves"] == "e2e4"
     assert repo.current_line("old-game")["moves"] == "e2e4"
     with repo._connection() as migrated:
-        assert migrated.execute("PRAGMA user_version").fetchone()[0] == 6
+        assert migrated.execute("PRAGMA user_version").fetchone()[0] == 7
         identity = migrated.execute("SELECT opponent,player_name FROM account_games "
                                     "WHERE account_id=?", (account,)).fetchone()
         assert tuple(identity) == ("Bob", "Alice")
         state = migrated.execute("SELECT backfill_started_at FROM archive_sync_state "
                                  "WHERE account_id=?", (account,)).fetchone()
         assert state[0] == 50
-    backup = sqlite3.connect(str(path) + ".pre-m3-v6.bak")
+    backup = sqlite3.connect(str(path) + ".pre-m3-v7.bak")
     try:
+        assert backup.execute("PRAGMA integrity_check").fetchone()[0] == "ok"
         assert backup.execute("PRAGMA user_version").fetchone()[0] == 5
         assert backup.execute("SELECT game_id FROM games").fetchone()[0] == "old-game"
         assert {row[1] for row in backup.execute("PRAGMA table_info(account_games)")} == {
