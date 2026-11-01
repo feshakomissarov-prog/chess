@@ -193,6 +193,15 @@
 - Проверено: Python 3.12.10 offscreen targeted — **7 PASS**, compileall и diff-check — PASS. Реальные учётные записи/пользовательская БД не использовались.
 - Остались R4–R9; следующий этап атомарно пересобирает derived metrics/events при изменении PGN evaluations.
 
+## PR #30 deep review — R5 (2026-11-01)
+
+- R5 code commit `3b4579b611fb467f72045de0b499e6e69798b890`: opt-in pipeline использует существующий `review_selected_positions`; source run выбирается отдельно из completed exact-config fast result либо готового Lichess PGN run. Позиции выбираются из persisted candidates, ограничены до 12 на игру и 100 на запуск, затем создаются долговечные `analysis_jobs` с line revision/hash, review binary SHA-256 и exact selection/settings. Queue claim для review ограничен этим binary key, но поддерживает разные per-game `parameters_json`.
+- Worker выполняет Review jobs после Fast queue, использует те же bounded fair-play preflight/TTL monitor и stop event для активного UCI; resume/cancel работают по review binary identity. Lichess check не вызывается на каждый выбранный ход. No-candidate path не стартует review UCI; sparse review run остаётся отдельным `partial` и не заменяет completed fast run.
+- UI даёт явный checkbox (default off), показывает fast/review queue counts и отдельно отображает сколько выбранных review ходов оценено относительно общего числа ходов, с пометкой, что это не полное покрытие.
+- Synthetic regressions проверяют fast→review и Lichess→review flow, capped/idempotent enqueue, persisted PV alternatives, restart без повторного UCI, empty candidates без engine, mid-review safety loss -> paused/no saved review, и UI opt-in signal.
+- Проверено на Windows Python 3.12.10 offscreen: `pytest tests/test_m45_batch.py tests/test_m45_analysis_store.py tests/test_window.py::test_batch_analysis_controls_are_explicit_and_resume_after_pause -q` — PASS; compileall/diff-check — PASS. Реальный Stockfish/Lichess/user DB не запускались.
+- Остались R6–R9; следующий блок исправляет PV для missed-opportunity и проверяет legal mover/позицию ответа.
+
 ## PR #30 deep review — R4 (2026-11-01)
 
 - R4 code commit `8c2bb074c23bfe5b0c03dcfca2a880acabce0c10`: изменения/дозагрузка Lichess eval теперь перестраивают `move_metrics` v2 и управляемые opportunity/base-detector events только для этого `analysis_run`, внутри той же SQLite transaction что PGN assessments. Прежние derived rows удаляются перед детерминированной заменой; каскадно удаляются только теги управляемых events. Notes, исходные PGN/ходы, другие runs и другие metric versions сохраняются.
