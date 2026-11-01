@@ -18,7 +18,7 @@ import chess
 import chess.pgn
 
 
-SCHEMA_VERSION = 11
+SCHEMA_VERSION = 12
 DEFAULT_PAGE_SIZE = 100
 MAX_PAGE_SIZE = 500
 
@@ -370,10 +370,10 @@ class GameRepository:
 
     @staticmethod
     def _migrate_m45_schema(db: sqlite3.Connection) -> None:
-        """Add the resumable analysis queue and a derived, read-only coverage view.
+        """Add resumable analysis, derived coverage, and versioned move/event facts.
 
-        The queue describes work; it deliberately does not duplicate PGN, moves,
-        positions, or analysis facts. Existing rows remain untouched.
+        The queue describes work; metrics/events reference existing run and move facts.
+        Existing raw games, PGN, moves, positions, and v1 classifications remain untouched.
         """
         db.execute("""CREATE TABLE IF NOT EXISTS analysis_jobs (
             job_id TEXT PRIMARY KEY,
@@ -408,6 +408,37 @@ class GameRepository:
                                  ("result_run_id", "TEXT REFERENCES analysis_runs(run_id) ON DELETE SET NULL")):
             if name not in job_columns:
                 db.execute(f"ALTER TABLE analysis_jobs ADD COLUMN {name} {definition}")
+        # Versioned derived facts are additive: v1 classifications and all raw
+        # games/positions remain intact and can be reclassified without UCI.
+        db.execute("""CREATE TABLE IF NOT EXISTS move_metrics (
+            run_id TEXT NOT NULL REFERENCES analysis_runs(run_id) ON DELETE CASCADE,
+            game_id TEXT NOT NULL, line_revision INTEGER NOT NULL, ply INTEGER NOT NULL,
+            metric_version TEXT NOT NULL, source TEXT NOT NULL,
+            white_cp_before INTEGER, mate_white_before INTEGER,
+            white_cp_after INTEGER, mate_white_after INTEGER,
+            cp_loss INTEGER, mate_discontinuity INTEGER NOT NULL DEFAULT 0,
+            wdl_before_json TEXT, wdl_after_json TEXT, wdl_model TEXT,
+            accuracy REAL, accuracy_source TEXT, accuracy_formula_id TEXT,
+            severity TEXT NOT NULL, severity_policy_version TEXT NOT NULL,
+            legacy_label TEXT,
+            PRIMARY KEY(run_id,ply,metric_version),
+            FOREIGN KEY(game_id,line_revision,ply)
+                REFERENCES game_moves(game_id,line_revision,ply) ON DELETE CASCADE
+        )""")
+        db.execute("CREATE INDEX IF NOT EXISTS idx_move_metrics_scope "
+                   "ON move_metrics(game_id,line_revision,source,metric_version,ply)")
+        db.execute("""CREATE TABLE IF NOT EXISTS analysis_events (
+            event_key TEXT PRIMARY KEY,
+            run_id TEXT NOT NULL REFERENCES analysis_runs(run_id) ON DELETE CASCADE,
+            game_id TEXT NOT NULL, line_revision INTEGER NOT NULL, ply INTEGER NOT NULL,
+            event_type TEXT NOT NULL, confidence_state TEXT NOT NULL
+                CHECK(confidence_state IN ('verified','candidate','unknown','rejected')),
+            source TEXT NOT NULL, detector_version TEXT NOT NULL, evidence_json TEXT NOT NULL,
+            FOREIGN KEY(game_id,line_revision,ply)
+                REFERENCES game_moves(game_id,line_revision,ply) ON DELETE CASCADE
+        )""")
+        db.execute("CREATE INDEX IF NOT EXISTS idx_analysis_events_scope "
+                   "ON analysis_events(game_id,line_revision,event_type,confidence_state,ply)")
         db.execute("DROP VIEW IF EXISTS analysis_coverage")
         db.execute("""CREATE VIEW IF NOT EXISTS analysis_coverage AS
             SELECT ar.run_id,ar.game_id,ar.line_revision,ar.line_hash,ar.source,
@@ -420,6 +451,12 @@ class GameRepository:
                     WHERE pa.run_id=ar.run_id
                       AND (pa.white_cp IS NOT NULL OR pa.mate_white IS NOT NULL))
                        AS scored_positions,
+                   (SELECT COUNT(*) FROM move_metrics mm
+                    WHERE mm.run_id=ar.run_id AND mm.metric_version='cc-move-metrics-v2')
+                       AS measured_moves,
+                   (SELECT COUNT(*) FROM analysis_events ae
+                    WHERE ae.run_id=ar.run_id AND ae.confidence_state='candidate')
+                       AS candidate_events,
                    (SELECT COUNT(*) FROM game_moves gm
                     WHERE gm.game_id=ar.game_id AND gm.line_revision=ar.line_revision
                       AND EXISTS (SELECT 1 FROM position_assessments pre
@@ -1277,6 +1314,8 @@ class GameRepository:
                       parameters: dict, assessments: list[dict],
                       classifications: list[dict], status: str = "complete",
                       error: str | None = None) -> str:
+        from .move_metrics import build_move_facts
+
         self._wait_before_read(game_id)
         run_id = uuid.uuid4().hex
         now = datetime.now(timezone.utc).isoformat()
@@ -1294,6 +1333,33 @@ class GameRepository:
                              item.get("phase", "unknown"), item.get("eval_loss_cp"),
                              item.get("label", "unknown"), item.get("algorithm_version", ""))
                             for item in classifications])
+            moves = [dict(row) for row in db.execute(
+                "SELECT ply,mover FROM game_moves WHERE game_id=? AND line_revision=? ORDER BY ply",
+                (game_id, line_revision))]
+            metrics, events = build_move_facts(
+                assessments, moves, source=source, run_id=run_id,
+                classifications=classifications)
+            db.executemany("""INSERT INTO move_metrics (
+                run_id,game_id,line_revision,ply,metric_version,source,
+                white_cp_before,mate_white_before,white_cp_after,mate_white_after,
+                cp_loss,mate_discontinuity,wdl_before_json,wdl_after_json,wdl_model,
+                accuracy,accuracy_source,accuracy_formula_id,severity,
+                severity_policy_version,legacy_label
+            ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                [(run_id, game_id, line_revision, row["ply"], row["metric_version"], row["source"],
+                  row["white_cp_before"], row["mate_white_before"], row["white_cp_after"],
+                  row["mate_white_after"], row["cp_loss"], row["mate_discontinuity"],
+                  row["wdl_before_json"], row["wdl_after_json"], row["wdl_model"],
+                  row["accuracy"], row["accuracy_source"], row["accuracy_formula_id"],
+                  row["severity"], row["severity_policy_version"], row["legacy_label"])
+                 for row in metrics])
+            db.executemany("""INSERT INTO analysis_events (
+                event_key,run_id,game_id,line_revision,ply,event_type,confidence_state,
+                source,detector_version,evidence_json
+            ) VALUES (?,?,?,?,?,?,?,?,?,?)""",
+                [(row["event_key"], run_id, game_id, line_revision, row["ply"],
+                  row["event_type"], row["confidence_state"], row["source"],
+                  row["detector_version"], row["evidence_json"]) for row in events])
         self.invalidate_statistics_cache()
         return run_id
 
@@ -1316,6 +1382,27 @@ class GameRepository:
                 "SELECT * FROM position_assessments WHERE run_id=? ORDER BY ply", (run["run_id"],))]
             result["classifications"] = [dict(row) for row in db.execute(
                 "SELECT * FROM move_classifications WHERE run_id=? ORDER BY ply", (run["run_id"],))]
+            result["move_metrics"] = [dict(row) for row in db.execute(
+                "SELECT * FROM move_metrics WHERE run_id=? ORDER BY ply", (run["run_id"],))]
+            result["events"] = [dict(row) for row in db.execute(
+                "SELECT * FROM analysis_events WHERE run_id=? ORDER BY ply,event_type", (run["run_id"],))]
+            coverage = db.execute("SELECT * FROM analysis_coverage WHERE run_id=?",
+                                  (run["run_id"],)).fetchone()
+            game = db.execute("SELECT source,color,lichess_accuracy_white,lichess_accuracy_black "
+                              "FROM games WHERE game_id=?", (game_id,)).fetchone()
+            result["coverage"] = dict(coverage) if coverage else None
+            selected_accuracy = None
+            if game and game["source"] == "lichess":
+                accuracy_column = ("lichess_accuracy_white" if game["color"] == "white"
+                                   else "lichess_accuracy_black" if game["color"] == "black"
+                                   else None)
+                if accuracy_column:
+                    selected_accuracy = game[accuracy_column]
+            result["official_game_accuracy"] = selected_accuracy
+            result["official_game_accuracy_source"] = "lichess" if selected_accuracy is not None else None
+            result["official_game_accuracy_color"] = game["color"] if game else None
+            result["local_game_accuracy"] = None
+            result["local_game_accuracy_formula_id"] = None
             return result
 
     def list_analyses(self, game_id: str, line_revision: int | None = None) -> list[dict]:
@@ -1330,6 +1417,21 @@ class GameRepository:
 
     def latest_analysis_detail(self, game_id: str, line_revision: int) -> dict | None:
         """Load one current analysis and its plotted points/classifications for a detail view."""
+        with self._connection() as db:
+            materialize = db.execute(
+                "SELECT ar.run_id FROM analysis_runs ar JOIN game_revisions gr "
+                "ON gr.game_id=ar.game_id AND gr.line_revision=ar.line_revision "
+                "WHERE ar.game_id=? AND ar.line_revision=? AND gr.is_current=1 "
+                "AND ar.status IN ('complete','partial') ORDER BY ar.finished_at DESC,"
+                "ar.run_id DESC LIMIT 1", (game_id, line_revision)).fetchone()
+            if materialize:
+                has_metrics = db.execute("SELECT 1 FROM move_metrics WHERE run_id=? LIMIT 1",
+                                         (materialize["run_id"],)).fetchone()
+            else:
+                has_metrics = True
+        if materialize and not has_metrics:
+            # Legacy reports are hydrated from saved assessments only; this never opens UCI.
+            self.materialize_analysis_metrics(materialize["run_id"])
         with self._connection() as db:
             run = db.execute(
                 "SELECT ar.* FROM analysis_runs ar JOIN game_revisions gr "
@@ -1346,7 +1448,73 @@ class GameRepository:
             result["classifications"] = [dict(row) for row in db.execute(
                 "SELECT * FROM move_classifications WHERE run_id=? AND ply>0 ORDER BY ply",
                 (run["run_id"],))]
+            result["move_metrics"] = [dict(row) for row in db.execute(
+                "SELECT * FROM move_metrics WHERE run_id=? ORDER BY ply", (run["run_id"],))]
+            result["events"] = [dict(row) for row in db.execute(
+                "SELECT * FROM analysis_events WHERE run_id=? ORDER BY ply,event_type", (run["run_id"],))]
+            coverage = db.execute("SELECT * FROM analysis_coverage WHERE run_id=?",
+                                  (run["run_id"],)).fetchone()
+            game = db.execute("SELECT source,color,lichess_accuracy_white,lichess_accuracy_black "
+                              "FROM games WHERE game_id=?", (game_id,)).fetchone()
+            result["coverage"] = dict(coverage) if coverage else None
+            selected_accuracy = None
+            if game and game["source"] == "lichess":
+                accuracy_column = ("lichess_accuracy_white" if game["color"] == "white"
+                                   else "lichess_accuracy_black" if game["color"] == "black"
+                                   else None)
+                if accuracy_column:
+                    selected_accuracy = game[accuracy_column]
+            result["official_game_accuracy"] = selected_accuracy
+            result["official_game_accuracy_source"] = "lichess" if selected_accuracy is not None else None
+            result["official_game_accuracy_color"] = game["color"] if game else None
+            result["local_game_accuracy"] = None
+            result["local_game_accuracy_formula_id"] = None
             return result
+
+    def materialize_analysis_metrics(self, run_id: str) -> int:
+        """Idempotently derive v2 facts from persisted assessments; no engine is started."""
+        from .move_metrics import build_move_facts
+
+        with self._connection() as db:
+            run = db.execute("SELECT * FROM analysis_runs WHERE run_id=?", (run_id,)).fetchone()
+            if not run:
+                return 0
+            assessments = [dict(row) for row in db.execute(
+                "SELECT * FROM position_assessments WHERE run_id=? ORDER BY ply", (run_id,))]
+            for row in assessments:
+                row["pv"] = row.get("pv_uci", "").split()
+            moves = [dict(row) for row in db.execute(
+                "SELECT ply,mover FROM game_moves WHERE game_id=? AND line_revision=? ORDER BY ply",
+                (run["game_id"], run["line_revision"]))]
+            classifications = [dict(row) for row in db.execute(
+                "SELECT * FROM move_classifications WHERE run_id=? ORDER BY ply", (run_id,))]
+        metrics, events = build_move_facts(
+            assessments, moves, source=run["source"], run_id=run_id,
+            classifications=classifications)
+        with self._connection() as db:
+            db.execute("BEGIN IMMEDIATE")
+            db.executemany("""INSERT OR IGNORE INTO move_metrics (
+                run_id,game_id,line_revision,ply,metric_version,source,
+                white_cp_before,mate_white_before,white_cp_after,mate_white_after,
+                cp_loss,mate_discontinuity,wdl_before_json,wdl_after_json,wdl_model,
+                accuracy,accuracy_source,accuracy_formula_id,severity,
+                severity_policy_version,legacy_label
+            ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                [(run_id, run["game_id"], run["line_revision"], row["ply"],
+                  row["metric_version"], row["source"], row["white_cp_before"],
+                  row["mate_white_before"], row["white_cp_after"], row["mate_white_after"],
+                  row["cp_loss"], row["mate_discontinuity"], row["wdl_before_json"],
+                  row["wdl_after_json"], row["wdl_model"], row["accuracy"],
+                  row["accuracy_source"], row["accuracy_formula_id"], row["severity"],
+                  row["severity_policy_version"], row["legacy_label"]) for row in metrics])
+            db.executemany("""INSERT OR IGNORE INTO analysis_events (
+                event_key,run_id,game_id,line_revision,ply,event_type,confidence_state,
+                source,detector_version,evidence_json
+            ) VALUES (?,?,?,?,?,?,?,?,?,?)""",
+                [(row["event_key"], run_id, run["game_id"], run["line_revision"],
+                  row["ply"], row["event_type"], row["confidence_state"], row["source"],
+                  row["detector_version"], row["evidence_json"]) for row in events])
+        return len(metrics)
 
     def phase_for_ply(self, game_id: str, line_revision: int, ply: int) -> str:
         with self._connection() as db:

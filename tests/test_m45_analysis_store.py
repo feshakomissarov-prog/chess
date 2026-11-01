@@ -42,15 +42,17 @@ def _seed_repository(path) -> tuple[GameRepository, str]:
 def _mark_as_v9(path) -> None:
     with sqlite3.connect(path) as db:
         db.execute("DROP VIEW IF EXISTS analysis_coverage")
+        db.execute("DROP TABLE IF EXISTS analysis_events")
+        db.execute("DROP TABLE IF EXISTS move_metrics")
         db.execute("DROP TABLE IF EXISTS analysis_jobs")
         db.execute("PRAGMA user_version=9")
 
 
-def test_schema_v11_adds_queue_and_derived_coverage_without_copying_game_facts(tmp_path):
+def test_schema_v12_adds_derived_metrics_without_copying_game_facts(tmp_path):
     path = tmp_path / "synthetic.sqlite3"
     repository, line_hash = _seed_repository(path)
     try:
-        assert SCHEMA_VERSION == 11
+        assert SCHEMA_VERSION == 12
         with repository._connection() as db:
             version = db.execute("PRAGMA user_version").fetchone()[0]
             game = db.execute("SELECT game_id,pgn,moves FROM games WHERE game_id=?",
@@ -61,14 +63,16 @@ def test_schema_v11_adds_queue_and_derived_coverage_without_copying_game_facts(t
                                   ("synthetic-game",)).fetchone()
             tables = {row[0] for row in db.execute(
                 "SELECT name FROM sqlite_master WHERE type='table'")}
-        assert version == 11
+        assert version == 12
         assert game["game_id"] == "synthetic-game" and game["moves"] == "e2e4 e7e5"
         assert game["pgn"]
         assert revision["line_hash"] == line_hash
         assert coverage["total_positions"] == 3
         assert coverage["scored_positions"] == 3
         assert coverage["comparable_move_pairs"] == 2
-        assert "games" in tables and "game_revisions" in tables and "analysis_jobs" in tables
+        assert {"games", "game_revisions", "analysis_jobs", "move_metrics",
+                "analysis_events"} <= tables
+        assert coverage["measured_moves"] == 2
     finally:
         repository.shutdown()
 
@@ -81,7 +85,7 @@ def test_v9_upgrade_creates_verified_backup_and_preserves_existing_records(tmp_p
 
     upgraded = GameRepository(path)
     try:
-        backup = path.with_name(path.name + ".pre-m3-v11.bak")
+        backup = path.with_name(path.name + ".pre-m3-v12.bak")
         assert backup.exists()
         with sqlite3.connect(backup) as backup_db:
             assert backup_db.execute("PRAGMA integrity_check").fetchone()[0] == "ok"
@@ -90,7 +94,7 @@ def test_v9_upgrade_creates_verified_backup_and_preserves_existing_records(tmp_p
             assert backup_db.execute("SELECT COUNT(*) FROM game_notes").fetchone()[0] == 1
             assert backup_db.execute("SELECT COUNT(*) FROM analysis_runs").fetchone()[0] == 1
         with upgraded._connection() as db:
-            assert db.execute("PRAGMA user_version").fetchone()[0] == 11
+            assert db.execute("PRAGMA user_version").fetchone()[0] == 12
             assert db.execute("SELECT COUNT(*) FROM games").fetchone()[0] == 1
             assert db.execute("SELECT COUNT(*) FROM game_moves").fetchone()[0] == 2
             assert db.execute("SELECT COUNT(*) FROM game_positions").fetchone()[0] == 3
@@ -115,21 +119,49 @@ def test_v10_database_with_preexisting_analysis_jobs_is_upgraded_additively(tmp_
         db.execute("ALTER TABLE analysis_jobs DROP COLUMN result_run_id")
         db.execute("ALTER TABLE analysis_jobs DROP COLUMN lease_until")
         db.execute("ALTER TABLE analysis_jobs DROP COLUMN lease_owner")
+        db.execute("DROP TABLE IF EXISTS analysis_events")
+        db.execute("DROP TABLE IF EXISTS move_metrics")
         db.execute("PRAGMA user_version=10")
 
     upgraded = GameRepository(path)
     try:
-        backup = path.with_name(path.name + ".pre-m3-v11.bak")
+        backup = path.with_name(path.name + ".pre-m3-v12.bak")
         with sqlite3.connect(backup) as db:
             assert db.execute("PRAGMA integrity_check").fetchone()[0] == "ok"
             assert db.execute("PRAGMA user_version").fetchone()[0] == 10
             assert db.execute("SELECT COUNT(*) FROM analysis_jobs").fetchone()[0] == 1
         with upgraded._connection() as db:
-            assert db.execute("PRAGMA user_version").fetchone()[0] == 11
+            assert db.execute("PRAGMA user_version").fetchone()[0] == 12
             columns = {row[1] for row in db.execute("PRAGMA table_info(analysis_jobs)")}
             assert {"lease_owner", "lease_until", "result_run_id"} <= columns
             job = db.execute("SELECT status,game_id FROM analysis_jobs").fetchone()
         assert tuple(job) == ("queued", "synthetic-game")
+    finally:
+        upgraded.shutdown()
+
+
+def test_v11_database_upgrades_additively_to_move_metrics_and_events(tmp_path):
+    path = tmp_path / "upgrade-v11.sqlite3"
+    repository, line_hash = _seed_repository(path)
+    repository.shutdown()
+    with sqlite3.connect(path) as db:
+        db.execute("DROP TABLE analysis_events")
+        db.execute("DROP TABLE move_metrics")
+        db.execute("DROP VIEW analysis_coverage")
+        db.execute("PRAGMA user_version=11")
+    upgraded = GameRepository(path)
+    try:
+        backup = path.with_name(path.name + ".pre-m3-v12.bak")
+        with sqlite3.connect(backup) as db:
+            assert db.execute("PRAGMA user_version").fetchone()[0] == 11
+            assert db.execute("PRAGMA integrity_check").fetchone()[0] == "ok"
+        with upgraded._connection() as db:
+            assert db.execute("PRAGMA user_version").fetchone()[0] == 12
+            assert db.execute("SELECT line_hash FROM game_revisions").fetchone()[0] == line_hash
+            assert db.execute("SELECT COUNT(*) FROM games").fetchone()[0] == 1
+            assert db.execute("SELECT COUNT(*) FROM analysis_runs").fetchone()[0] == 1
+            assert db.execute("SELECT COUNT(*) FROM move_metrics").fetchone()[0] == 0
+            assert db.execute("SELECT COUNT(*) FROM analysis_events").fetchone()[0] == 0
     finally:
         upgraded.shutdown()
 
@@ -157,8 +189,10 @@ def test_v9_migration_failure_rolls_back_new_ddl_and_keeps_backup_and_facts(
         assert db.execute("SELECT COUNT(*) FROM game_notes").fetchone()[0] == 1
         assert db.execute("SELECT COUNT(*) FROM analysis_runs").fetchone()[0] == 1
         assert db.execute("SELECT name FROM sqlite_master WHERE name='analysis_jobs'").fetchone() is None
+        assert db.execute("SELECT name FROM sqlite_master WHERE name='move_metrics'").fetchone() is None
+        assert db.execute("SELECT name FROM sqlite_master WHERE name='analysis_events'").fetchone() is None
         assert db.execute("PRAGMA integrity_check").fetchone()[0] == "ok"
-    backup = path.with_name(path.name + ".pre-m3-v11.bak")
+    backup = path.with_name(path.name + ".pre-m3-v12.bak")
     with sqlite3.connect(backup) as db:
         assert db.execute("PRAGMA integrity_check").fetchone()[0] == "ok"
 
@@ -167,7 +201,7 @@ def test_v9_migration_failure_rolls_back_new_ddl_and_keeps_backup_and_facts(
     try:
         assert len(recovered.list_games()) == 1
         with recovered._connection() as db:
-            assert db.execute("PRAGMA user_version").fetchone()[0] == 11
+            assert db.execute("PRAGMA user_version").fetchone()[0] == 12
             assert db.execute("SELECT COUNT(*) FROM analysis_jobs").fetchone()[0] == 0
     finally:
         recovered.shutdown()
