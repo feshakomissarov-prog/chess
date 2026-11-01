@@ -32,6 +32,7 @@ def test_history_snapshots_do_not_rewind_live_game() -> None:
 
 def test_premove_is_separate_until_rechecked_and_applied() -> None:
     game = GameController(chess.WHITE)
+    game.set_premove_training(True)
     game.apply_move_intent(chess.Move.from_uci("e2e4"))
     confirmed_fen = game.board.fen()
     assert game.queue_premove(chess.Move.from_uci("g1f3"))
@@ -46,6 +47,7 @@ def test_premove_is_separate_until_rechecked_and_applied() -> None:
 
 def test_invalid_premove_is_removed_after_opponent_captures_piece() -> None:
     game = GameController(chess.WHITE)
+    game.set_premove_training(True)
     game.board = chess.Board("4k3/8/8/8/8/4r3/4P3/4K3 b - - 0 1")
     assert game.queue_premove(chess.Move.from_uci("e2e4"))
     accepted, message = game.apply_test_opponent_move(chess.Move.from_uci("e3e2"))
@@ -58,6 +60,7 @@ def test_invalid_premove_is_removed_after_opponent_captures_piece() -> None:
 
 def test_illegal_test_opponent_move_keeps_position_and_premove() -> None:
     game = GameController(chess.WHITE)
+    game.set_premove_training(True)
     game.apply_move_intent(chess.Move.from_uci("e2e4"))
     assert game.queue_premove(chess.Move.from_uci("g1f3"))
     before = game.board.fen()
@@ -94,6 +97,7 @@ def test_castling_and_en_passant_follow_python_chess_rules() -> None:
 
 def test_new_game_clears_moves_history_and_premove() -> None:
     game = GameController()
+    game.set_premove_training(True)
     game.apply_move_intent(chess.Move.from_uci("e2e4"))
     game.queue_premove(chess.Move.from_uci("g1f3"))
     game.new_game()
@@ -103,8 +107,31 @@ def test_new_game_clears_moves_history_and_premove() -> None:
     assert game.board == chess.Board()
 
 
+def test_free_local_controller_rejects_premove_but_accepts_both_colors() -> None:
+    game = GameController(chess.WHITE)
+    assert game.apply_move_intent(chess.Move.from_uci("e2e4"))
+    assert not game.queue_premove(chess.Move.from_uci("g1f3"))
+    assert game.apply_move_intent(chess.Move.from_uci("e7e5"))
+    assert game.san_moves() == [(1, "e4", "e5")]
+
+
+def test_switching_out_of_premove_training_clears_intent_without_resetting_line() -> None:
+    game = GameController(chess.WHITE)
+    game.set_premove_training(True)
+    assert game.apply_move_intent(chess.Move.from_uci("e2e4"))
+    assert game.queue_premove(chess.Move.from_uci("g1f3"))
+
+    assert game.set_premove_training(False)
+
+    assert game.premove is None
+    assert game.ply == 1
+    assert game.board.peek() == chess.Move.from_uci("e2e4")
+    assert game.apply_move_intent(chess.Move.from_uci("e7e5"))
+
+
 def test_local_undo_removes_one_confirmed_ply_and_clears_queued_premove() -> None:
     game = GameController(chess.WHITE)
+    game.set_premove_training(True)
     assert game.apply_move_intent(chess.Move.from_uci("e2e4"))
     assert game.apply_move_intent(chess.Move.from_uci("e7e5"))
     game.premove = chess.Move.from_uci("g1f3")

@@ -212,6 +212,11 @@ class LichessClient:
         if deadline > 0:
             raise RateLimitError(max(1, int(deadline + 0.999)))
 
+    @property
+    def rate_limit_remaining(self) -> int:
+        with self._request_lock:
+            return max(0, int(self._rate_limited_until - time.monotonic() + 0.999))
+
     def _json_call(self, *args, **kwargs) -> dict:
         data = self._call(*args, **kwargs).json()
         if not isinstance(data, dict):
@@ -220,6 +225,91 @@ class LichessClient:
 
     def get_account(self, token: str) -> dict:
         return self._json_call("GET", "/api/account", token=token)
+
+    def get_playing_games(self, token: str, limit: int = 50) -> list[dict]:
+        """Return one validated snapshot of active games or fail closed.
+
+        The endpoint has a bounded response. Reaching the requested limit does
+        not prove the snapshot is complete, so callers must not use it as
+        evidence that no human game is active.
+        """
+        if not 1 <= limit <= 50:
+            raise ValueError("Количество активных партий должно быть от 1 до 50.")
+        payload = self._json_call(
+            "GET", "/api/account/playing", token=token, query={"nb": limit}
+        )
+        games = payload.get("nowPlaying")
+        if not isinstance(games, list):
+            raise LichessError("Lichess вернул неожиданный список активных партий.")
+        if len(games) >= limit:
+            raise LichessError(
+                "Список активных партий достиг лимита и может быть неполным."
+            )
+        validated = []
+        for index, game in enumerate(games):
+            if not isinstance(game, dict):
+                raise LichessError(
+                    f"Некорректная запись активной партии Lichess (элемент {index + 1})."
+                )
+            game_id = game.get("gameId")
+            opponent = game.get("opponent")
+            if (not isinstance(game_id, str) or not game_id.strip()
+                    or not isinstance(opponent, dict)
+                    or not isinstance(opponent.get("username"), str)
+                    or not opponent["username"].strip()
+                    or ("title" in opponent and not isinstance(opponent["title"], str))):
+                raise LichessError(
+                    f"Неполная запись активной партии Lichess (элемент {index + 1})."
+                )
+            validated.append(game)
+        return validated
+
+    def export_game_pgn(self, token: str, game_id: str) -> str:
+        """Fetch one explicitly selected game without requesting the user's archive."""
+        if not game_id or any(char not in "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-" for char in game_id):
+            raise ValueError("Invalid Lichess game ID")
+        response = self._call("GET", f"/game/export/{quote(game_id, safe='')}", token=token,
+                              accept="application/x-chess-pgn")
+        try:
+            return response.body.decode("utf-8")
+        except UnicodeDecodeError as exc:
+            raise LichessError("Lichess returned a PGN that is not valid UTF-8.") from exc
+
+    def stream_user_games(self, token: str, username: str, stop_event: threading.Event,
+                          *, since: int | None = None, until_ms: int | None = None,
+                          max_games: int = 1000) -> Iterator[dict]:
+        """Stream a bounded export page; callers persist each record before checkpointing."""
+        if not 1 <= max_games <= 10_000:
+            raise ValueError("Размер страницы архива должен быть от 1 до 10000.")
+        query: dict[str, object] = {
+            "max": max_games, "sort": "dateAsc" if since is not None else "dateDesc",
+            "pgnInJson": "true", "clocks": "true", "evals": "true",
+            "accuracy": "true", "opening": "true", "division": "true",
+            "finished": "true", "ongoing": "false",
+        }
+        if since is not None:
+            query["since"] = since
+        if until_ms is not None:
+            query["until"] = until_ms
+        path = f"/api/games/user/{quote(username, safe='')}?{urlencode(query)}"
+        yield from self.stream_ndjson(path, token, stop_event)
+
+    def stream_puzzle_activity(self, token: str, stop_event: threading.Event, *,
+                               since: int | None = None, before: int | None = None,
+                               max_items: int = 1000) -> Iterator[dict]:
+        if not 1 <= max_items <= 10_000:
+            raise ValueError("Размер страницы задач должен быть от 1 до 10000.")
+        query: dict[str, object] = {"max": max_items}
+        if since is not None:
+            query["since"] = since
+        if before is not None:
+            query["before"] = before
+        yield from self.stream_ndjson("/api/puzzle/activity?" + urlencode(query), token, stop_event)
+
+    def get_puzzle_dashboard(self, token: str, days: int = 30) -> dict:
+        if not 1 <= int(days) <= 365:
+            raise ValueError("Период статистики задач должен быть от 1 до 365 дней.")
+        return self._json_call("GET", f"/api/puzzle/dashboard/{int(days)}", token=token)
 
     def exchange_code(
         self,

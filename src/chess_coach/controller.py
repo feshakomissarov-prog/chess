@@ -24,6 +24,7 @@ class GameController:
         self.view_ply: Optional[int] = None
         self.premove: Optional[chess.Move] = None
         self.last_premove_result: Optional[str] = None
+        self.premove_training = False
 
     @property
     def ply(self) -> int:
@@ -51,7 +52,8 @@ class GameController:
 
     def queue_premove(self, move: chess.Move) -> bool:
         """Queue one intent for player's color while the opponent is to move."""
-        if self.viewing_live_position and self.board.turn != self.player_color:
+        if (self.premove_training and self.viewing_live_position
+                and self.board.turn != self.player_color):
             piece = self.board.piece_at(move.from_square)
             if piece is None or piece.color != self.player_color:
                 return False
@@ -65,6 +67,18 @@ class GameController:
     def cancel_premove(self) -> None:
         self.premove = None
 
+    def set_premove_training(self, enabled: bool) -> bool:
+        """Toggle the local premove exercise without changing the played line.
+
+        Returns whether a queued intent was discarded by the mode change.
+        """
+        enabled = bool(enabled)
+        discarded = not enabled and self.premove is not None
+        self.premove_training = enabled
+        if not enabled:
+            self.cancel_premove()
+        return discarded
+
     def undo_last_move(self) -> bool:
         """Undo one confirmed local ply; online history is server-owned."""
         if not self.board.move_stack:
@@ -77,7 +91,8 @@ class GameController:
 
     def apply_test_opponent_move(self, move: chess.Move) -> tuple[bool, str]:
         """Apply a user-selected legal opponent move, then revalidate premove."""
-        if not self.viewing_live_position or self.board.turn == self.player_color:
+        if (not self.premove_training or not self.viewing_live_position
+                or self.board.turn == self.player_color):
             return False, "Сейчас не ход соперника в тестовом режиме."
         if move not in self.board.legal_moves:
             return False, "Этот ход соперника недопустим."

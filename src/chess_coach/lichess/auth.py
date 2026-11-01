@@ -36,7 +36,10 @@ class WindowsCredentialStore:
     SERVICE = "ChessCoach.Lichess"
     USER = "oauth-access-token"
 
-    def __init__(self, keyring_module=None) -> None:
+    def __init__(self, keyring_module=None, *, service: str | None = None,
+                 user: str | None = None) -> None:
+        self._service = service or self.SERVICE
+        self._user = user or self.USER
         if keyring_module is None:
             try:
                 import keyring as keyring_module
@@ -48,7 +51,7 @@ class WindowsCredentialStore:
 
     def get(self) -> str | None:
         try:
-            return self._keyring.get_password(self.SERVICE, self.USER)
+            return self._keyring.get_password(self._service, self._user)
         except Exception as exc:
             raise CredentialStorageError(
                 "Не удалось прочитать токен из Windows Credential Manager."
@@ -56,7 +59,7 @@ class WindowsCredentialStore:
 
     def set(self, token: str) -> None:
         try:
-            self._keyring.set_password(self.SERVICE, self.USER, token)
+            self._keyring.set_password(self._service, self._user, token)
         except Exception as exc:
             raise CredentialStorageError(
                 "Не удалось сохранить токен в Windows Credential Manager."
@@ -64,7 +67,7 @@ class WindowsCredentialStore:
 
     def delete(self) -> None:
         try:
-            self._keyring.delete_password(self.SERVICE, self.USER)
+            self._keyring.delete_password(self._service, self._user)
         except self._keyring.errors.PasswordDeleteError:
             return
         except Exception as exc:
