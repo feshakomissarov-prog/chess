@@ -1,6 +1,6 @@
 # M4.5 — журнал исполнения и восстановление контекста Codex
 
-**Дата создания:** 2026-11-01. **Статус:** IN PROGRESS. **Спецификация:** [M4_5_BATCH_ANALYSIS_PERSONAL_DIAGNOSTICS.md](../specs/M4_5_BATCH_ANALYSIS_PERSONAL_DIAGNOSTICS.md) v2.0. **Эпик:** [#28](https://github.com/feshakomissarov-prog/chess/issues/28).
+**Дата создания:** 2026-11-01. **Статус:** IMPLEMENTED; отдельные пункты DoD остаются PARTIAL/NOT RUN, PR #30 остаётся draft для ревью. **Спецификация:** [M4_5_BATCH_ANALYSIS_PERSONAL_DIAGNOSTICS.md](../specs/M4_5_BATCH_ANALYSIS_PERSONAL_DIAGNOSTICS.md) v2.0. **Эпик:** [#28](https://github.com/feshakomissarov-prog/chess/issues/28).
 
 ## Источник истины для возобновления
 
@@ -19,10 +19,10 @@
 | C | Быстрая очередь Stockfish, recent-first | DONE | `c918e5e49ad531a13530851f5e9bdb7672f709a8`, PR #30 | schema v11; 228 pytest PASS; fake UCI/lease/fair-play PASS |
 | D | Метрики, severity, события и возможности | DONE | `f9ae45f1e407099350f13103f416594e20f49d1b`, PR #30 | schema v12; 233 pytest PASS; synthetic CP/mate/WDL/source/opportunity tests PASS |
 | E | Выборочное уточнение, тактические мотивы | DONE | `366635f7a67ca6cb3c12f5b323fb3d64d0dc8c57`, PR #30 | schema v14; 243 pytest PASS; fake UCI MultiPV/cancel/cache PASS |
-| F | CC0 дебюты, фазы игры | TODO | — | — |
-| G | Паспорт партии, список и графики | TODO | — | — |
-| H | Агрегаты, точность, текущая и историческая статистика | TODO | — | — |
-| I | Нагрузочные тесты, Windows CI, итоговый PR | TODO | — | — |
+| F | CC0 дебюты, фазы игры | DONE | `928846588f996b9505435160c26857d0b3aa71c8`, PR #30 | CC0/транспозиции/фазы и миграции покрыты synthetic tests; сети NOT RUN |
+| G | Паспорт партии, список и графики | DONE | `0443dd43c4b79fbe5f0eb00ed61f66c579c647ff`, PR #30 | пагинация, evidence-position, source, phase graph, Qt worker regressions PASS |
+| H | Агрегаты, точность, текущая и историческая статистика | DONE WITH PARTIALS | `6e23f4bf41b7239216f18350bfcf775a69937738`, PR #30 | recent/historical per-color profile и SQL evidence; verified opportunity conversion отсутствует |
+| I | Нагрузочные тесты, Windows CI, итоговый PR | DONE WITH PARTIALS | `415c9e1c7fa8cb0c3da1170ff2176bc87cd0e495`, PR #30 | 285 local PASS; 20 hand-authored mini-reports; CI run 75 PASS на кодовом SHA 74f24c8, CI нового корпуса ожидается; ручной GUI и real engine/OAuth NOT RUN |
 
 ## Формат следующего чекпойнта
 
@@ -153,3 +153,13 @@
 - Opportunity conversion теперь всегда `null` с явной причиной: существующие candidate missed-opportunity и verified `opportunity_used` не имеют подтверждённой связи «кандидат → последующее действие». Синтетический тест фиксирует это, исключая ложный процент. В `docs/reports/M4_5_SYNTHETIC_SAMPLE_REPORTS.md` приведены паспорт, candidate opportunity, deferred motif, recent-vs-archive profile и accuracy/error denominators; прямо отмечено, что пример verified missed opportunity отсутствует, потому что детектор пока не реализован.
 - Windows Python 3.12.10 full offline suite: `QT_QPA_PLATFORM=offscreen .venv312/Scripts/python.exe -m pytest -q -ra` — **257 PASS**; targeted profile + deep audit: **11 PASS**; combined 35k statistics + profile/deep-audit workloads завершились exit 0 за ~52.3 s; compileall/diff-check — PASS. CI ещё ждёт отправки финального I SHA. Личная БД/PGN, живые Lichess/OAuth, настоящий Stockfish — NOT TOUCHED/NOT RUN.
 - На этот checkpoint остались: push и подтверждение GitHub Windows CI, повтор проверки diff/package/worktree, при необходимости устранить обнаруженное CI. Затем внести точный CI status и финальную таблицу приёмки. Ручной визуальный GUI smoke не запускался.
+
+## Этап I — пользовательский запуск очереди и проверяемые sample reports (2026-11-01)
+
+- Stage I code checkpoint `74f24c8de48edab2dc28e17c9d152a547f1d1ee8` добавляет явный Qt workflow массового анализа: limit/nodes/hash, start, pause, resume, cancel, live status/errors/unknown state; кнопка доступна только при подключении Lichess, существующий Stockfish binary выбирается владельцем, не скачивается автоматически. Per-game fair-play preflight остаётся fail-closed; reconnect/disconnect и появление живой человеческой партии приостанавливают очередь.
+- Возобновление после перезапуска не полагается на память UI: paused jobs отбираются только по точному `engine_version` (binary SHA-256) и canonical `parameters_json`; cancel также ограничивается той же конфигурацией, чтобы не отменять соседний budget. Qt и repository regressions покрывают restart-equivalent resume, конкурирующие параметры, cancel внутри preflight, dialog controls/offline disable, built-in AI vs human and shutdown.
+- Code/sample-report commit `415c9e1c7fa8cb0c3da1170ff2176bc87cd0e495` добавляет 20 параметризованных hand-authored synthetic mini-reports с ожидаемыми source/coverage/CP-loss/severity/official accuracy and candidate event. Таблица/значения сохранены в [M4_5_SYNTHETIC_SAMPLE_REPORTS.md](../reports/M4_5_SYNTHETIC_SAMPLE_REPORTS.md). `python -m pytest -q` на Windows Python 3.12.10: **285 PASS**; `compileall`, `pip check`, `git diff --check` — PASS. Дополнительный corpus test сам по себе — 20 PASS.
+- Предыдущий Windows CI #75 на кодовом SHA `74f24c8de48edab2dc28e17c9d152a547f1d1ee8`: [SUCCESS](https://github.com/feshakomissarov-prog/chess/actions/runs/41282421304), Windows Server 2025, Python 3.12.10, Qt/PySide6/shiboken6 6.12.0, **265 passed за 113.27 s**, compileall/offline Qt window init PASS. CI на SHA `415c9e1c7fa8cb0c3da1170ff2176bc87cd0e495` ещё ожидается.
+- Для прозрачности: перед исправлением CRLF checksum первый run #73 упал на двух открывающих тестах; переносы нормализованы перед вычислением pinned dataset hash. Run #74 после исправления был SUCCESS. Ошибка тестов была платформенной разницей TSV, не отключалась проверка целостности.
+- Полный GUI вручную, реальный Lichess/OAuth, пользовательская SQLite/PGN и настоящий Stockfish не запускались. Fair-play по-прежнему требует подключения Lichess перед стартом; за uncaptured candidate opportunity не считается verified conversion, значение conversion остаётся null. Не все 20-case fixtures являются независимыми реальными эталонными партиями; они synthetic boundary reports.
+- Текущая ветка `codex/m45-batch-analysis`, draft [PR #30](https://github.com/feshakomissarov-prog/chess/pull/30), base `main`. Ничего не слито. Следующий action: дождаться Windows CI на `415c9e1`, исправить возможные сбои, затем обновить PROJECT_STATUS/PR summary точными SHA и итогом.
