@@ -13,7 +13,7 @@
 
 | Этап | Цель | Статус | SHA/PR | Тесты/ограничения |
 | --- | --- | --- | --- | --- |
-| 0 | Аудит схемы v9 и договоры о метриках | TODO | — | — |
+| 0 | Аудит схемы v9 и договоры о метриках | DONE | `6bf0078fff22977869f3be786c19b492e4ece39a`, PR #30 | 212 pytest PASS; compileall PASS; baseline main `6c3692c`; личные данные NOT TOUCHED |
 | A | Аддитивные миграции, coverage | TODO | — | — |
 | B | Частичные и поздние оценки Lichess | TODO | — | — |
 | C | Быстрая очередь Stockfish, recent-first | TODO | — | — |
@@ -53,10 +53,10 @@
 
 ## Этап 0 — аудит и контракт (2026-11-01)
 
-- Ветка: `codex/m45-batch-analysis`, база `origin/main` `6c3692c827294386fd070da9f9e7f086429320d9`; PR создаётся после исходного commit.
+- Ветка: `codex/m45-batch-analysis`, база `origin/main` `6c3692c827294386fd070da9f9e7f086429320d9`; draft [PR #30](https://github.com/feshakomissarov-prog/chess/pull/30) → `main`. Audit commit: `6bf0078fff22977869f3be786c19b492e4ece39a`.
 - Карта схемы: `GameRepository` в `src/chess_coach/lichess/repository.py`, `SCHEMA_VERSION=9`. Основные связи: `games` → `game_revisions` → `game_moves`/`game_positions`; `analysis_runs` → `position_assessments`/`move_classifications`; аккаунты связаны через `account_games`. `game_phase_boundaries` уже хранит provenance. `games` и нормализованные линии остаются источником истины; существующие строки и revisions не перестраивать.
 - Подтверждён дефект поздних Lichess eval: `import_archive_record()` строит новый `lichess-pgn` run только при наличии хотя бы одной оценки и пропускает импорт, если уже существует любой `status='complete'` для той же линии. Неполный набор размечается `complete`, а последующая дозагрузка не объединяется. Исправление: хранить фактический partial/complete coverage и делать idempotent union оценок той же линии/источника; не заменять известную позицию NULL и не смешивать source/configuration.
 - Контракт: `analysis_runs` и позиции остаются versioned facts. Покрытие выводится по line_hash/run/source/position count; отдельную coverage-таблицу не создавать без измеренной причины. Персистентная очередь требует минимальной additive-таблицы: текущие `analysis_runs` описывают результат, не lease/retry/pause job. Для множественных тегов/событий нужна компактная additive-модель с FK на существующие ходы/позиции; DDL — после backup/rollback тестов.
 - Fair-play gate сохраняется перед каждым запуском/возобновлением и при изменении активных игр; неизвестное состояние — fail-closed. OAuth и пользовательская БД в этой задаче не читаются/изменяются.
 - Этап 0 PASS: `QT_QPA_PLATFORM=offscreen .venv312/Scripts/python.exe -m pytest -q` — exit 0; 212 тестов (подтверждено `--collect-only`). `python -m compileall -q src tests` — exit 0. База/PGN владельца — NOT TOUCHED, Lichess/OAuth/Stockfish — NOT RUN. Baseline относится к `main` SHA выше.
-- Известные baseline риски: одиночный analyzer использует до 100k nodes/position и не подходит как неограниченный batch default; выбор анализа в статистике чувствителен к provenance/settings. Следующий этап сначала добавит coverage/queue contract и SQLite migration fixtures. Финальный Windows CI ветки ещё NOT RUN.
+- Известные baseline риски: одиночный analyzer использует до 100k nodes/position и не подходит как неограниченный batch default; выбор анализа в статистике чувствителен к provenance/settings. Следующий этап — Stage A с синтетическими SQLite fixtures и additive DDL. GitHub Windows CI для audit commit проверяется отдельно; финальный CI ветки ещё NOT RUN.
