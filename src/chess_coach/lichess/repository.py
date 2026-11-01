@@ -479,8 +479,16 @@ class GameRepository:
         )""")
         db.execute("CREATE INDEX IF NOT EXISTS idx_analysis_alternatives_game "
                    "ON analysis_alternatives(game_id,line_revision,ply,run_id)")
-        db.execute("DROP VIEW IF EXISTS analysis_coverage")
-        db.execute("""CREATE VIEW IF NOT EXISTS analysis_coverage AS
+        # The coverage view is a schema object, not startup-time cache. Rebuild it
+        # only while migrating an older schema; current v16 restarts are read-only
+        # with respect to sqlite_master.
+        schema_version = int(db.execute("PRAGMA user_version").fetchone()[0])
+        coverage_view_exists = db.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='view' AND name='analysis_coverage'").fetchone()
+        if schema_version < SCHEMA_VERSION:
+            db.execute("DROP VIEW IF EXISTS analysis_coverage")
+        if schema_version < SCHEMA_VERSION or not coverage_view_exists:
+            db.execute("""CREATE VIEW IF NOT EXISTS analysis_coverage AS
             SELECT ar.run_id,ar.game_id,ar.line_revision,ar.line_hash,ar.source,
                    ar.engine_name,ar.engine_version,ar.parameters_json,ar.status,
                    ar.started_at,ar.finished_at,
@@ -1345,9 +1353,12 @@ class GameRepository:
                     "SELECT COUNT(*) FROM game_moves WHERE game_id=? AND line_revision=?",
                     (game_id, revision)).fetchone()[0]
                 scored_positions = db.execute(
-                    "SELECT COUNT(*) FROM position_assessments WHERE run_id=? "
+                    "SELECT COUNT(*) FROM position_assessments pa JOIN game_positions gp "
+                    "ON gp.game_id=pa.game_id AND gp.line_revision=pa.line_revision AND gp.ply=pa.ply "
+                    "WHERE pa.run_id=? AND pa.ply>0 "
                     "AND (white_cp IS NOT NULL OR mate_white IS NOT NULL)", (run_id,)).fetchone()[0]
-                eval_status = "complete" if expected_positions and scored_positions >= expected_positions else "partial"
+                eval_status = ("complete" if expected_positions and
+                               scored_positions >= expected_positions else "partial")
                 if existing_eval_run and existing_eval_run["status"] != eval_status:
                     changed = True
                 if changed:
@@ -1755,7 +1766,9 @@ class GameRepository:
                 "SELECT ar.run_id FROM analysis_runs ar JOIN game_revisions gr "
                 "ON gr.game_id=ar.game_id AND gr.line_revision=ar.line_revision "
                 "WHERE ar.game_id=? AND ar.line_revision=? AND gr.is_current=1 "
-                "AND ar.status IN ('complete','partial') ORDER BY "
+                "AND ar.status IN ('complete','partial') AND NOT EXISTS "
+                "(SELECT 1 FROM analysis_jobs aj WHERE aj.result_run_id=ar.run_id "
+                "AND aj.analysis_pass='review') ORDER BY "
                 "CASE WHEN ar.status='complete' THEN 0 ELSE 1 END,ar.finished_at DESC,"
                 "ar.run_id DESC LIMIT 1", (game_id, line_revision)).fetchone()
             if materialize:
@@ -1771,7 +1784,9 @@ class GameRepository:
                 "SELECT ar.* FROM analysis_runs ar JOIN game_revisions gr "
                 "ON gr.game_id=ar.game_id AND gr.line_revision=ar.line_revision "
                 "WHERE ar.game_id=? AND ar.line_revision=? AND gr.is_current=1 "
-                "AND ar.status IN ('complete','partial') "
+                "AND ar.status IN ('complete','partial') AND NOT EXISTS "
+                "(SELECT 1 FROM analysis_jobs aj WHERE aj.result_run_id=ar.run_id "
+                "AND aj.analysis_pass='review') "
                 "ORDER BY CASE WHEN ar.status='complete' THEN 0 ELSE 1 END,"
                 "ar.finished_at DESC,ar.run_id DESC LIMIT 1",
                 (game_id, line_revision)).fetchone()

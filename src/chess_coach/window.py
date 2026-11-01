@@ -706,6 +706,8 @@ class StatisticsDialog(QDialog):
                 eco = game.get("matched_opening_eco") or game.get("opening_eco") or "ECO —"
                 opening_name = game.get("matched_opening_name") or game.get("opening_name") or "дебют неизвестен"
                 coverage = (f"{game.get('scored_positions') or 0}/{game.get('total_positions') or 0} поз. "
+                            f"· сравнимые свои ходы {game.get('own_assessed_moves') or 0}/"
+                            f"{game.get('total_own_moves') or 0} "
                             f"({game.get('analysis_status')})"
                             if game.get("analysis_status") else "анализ не запускался")
                 error_counts = (f"н/о/з {game.get('own_inaccuracies') or 0}/"
@@ -723,7 +725,9 @@ class StatisticsDialog(QDialog):
             total = summary["games"]
             coverage = summary["move_coverage_percent"]
             coverage_text = ("нет данных" if coverage is None else
-                             f"{summary['evaluated_moves']}/{summary['confirmed_moves']} ходов ({coverage}%)")
+                             f"сравнимые собственные ходы {summary['evaluated_moves']}/"
+                             f"{summary['total_own_moves']} ({coverage}%) · оценено позиций: "
+                             f"{summary['scored_positions']}")
             errors = summary["classifications_by_phase"]
             classified = {kind: sum(side_counts.get(kind, 0)
                                     for phase in errors.values()
@@ -761,7 +765,8 @@ class StatisticsDialog(QDialog):
                                       f"{stats['avg_mistakes_per_analyzed_game']} ошибок + "
                                       f"{stats['avg_blunders_per_analyzed_game']} зевков "
                                       f"(N={stats['analyzed_games_with_classifications']})")
-                    confidence = "предварительно (<30 полных партий)" if segment["provisional"] else "выборка >=30 полных партий"
+                    confidence = (f"предварительно: {segment['provisional_reason']}"
+                                  if segment["provisional"] else "выборка >=30 полных партий")
                     sections.append(f"{('Белые' if color == 'white' else 'Чёрные')}, "
                                     f"{segment['current_window']}: игр {stats['games']}, "
                                     f"полных анализов {segment['complete_games']}, {confidence}; "
@@ -795,6 +800,11 @@ class StatisticsDialog(QDialog):
                     for color, value in comparison.items())
                 self.summary_label.setText(self.summary_label.text() + "\n\nТЕКУЩИЙ ПРОФИЛЬ "
                     f"(аккаунт; контроль: {profile['clock_scope']})\n" + "\n".join(sections) + "\n"
+                    + ("Профиль предварительный при смешанных контролях. Выберите конкретный контроль времени.\n"
+                       + "Контроли: " + "; ".join(f"{item['clock']}: {item['games']} игр, "
+                           f"покрытие {item['coverage_percent'] if item['coverage_percent'] is not None else 'н/д'}%"
+                           for item in profile.get("time_control_buckets", [])) + "\n"
+                       if profile.get("time_control_buckets") else "")
                     + comparison_text + "\nИСТОРИЯ ПО МЕСЯЦАМ\n"
                     + ("\n".join(history_lines) if history_lines else "Исторических партий нет."))
             elif not self.account.currentData():

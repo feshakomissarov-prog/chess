@@ -82,6 +82,24 @@ def test_schema_v16_includes_openings_and_date_precision_without_copying_game_fa
         repository.shutdown()
 
 
+def test_opening_v16_database_does_not_rewrite_coverage_view(tmp_path):
+    path = tmp_path / "stable-schema.sqlite3"
+    first = GameRepository(path)
+    first.shutdown()
+    with sqlite3.connect(path) as db:
+        schema_version_before = db.execute("PRAGMA schema_version").fetchone()[0]
+        view_sql_before = db.execute(
+            "SELECT sql FROM sqlite_master WHERE type='view' AND name='analysis_coverage'").fetchone()[0]
+    reopened = GameRepository(path)
+    reopened.shutdown()
+    with sqlite3.connect(path) as db:
+        schema_version_after = db.execute("PRAGMA schema_version").fetchone()[0]
+        view_sql_after = db.execute(
+            "SELECT sql FROM sqlite_master WHERE type='view' AND name='analysis_coverage'").fetchone()[0]
+    assert schema_version_after == schema_version_before
+    assert view_sql_after == view_sql_before
+
+
 def test_v9_upgrade_creates_verified_backup_and_preserves_existing_records(tmp_path):
     path = tmp_path / "upgrade.sqlite3"
     repository, line_hash = _seed_repository(path)
@@ -280,7 +298,8 @@ def test_late_lichess_pgn_evaluations_merge_into_one_partial_run_without_erasing
         from chess_coach.lichess.statistics import StatisticsService
         partial_summary = StatisticsService(repository).summary(analysis_source="lichess-pgn")
         assert partial_summary["analysis_games"] == 1
-        assert partial_summary["evaluated_moves"] == 1
+        assert partial_summary["evaluated_moves"] == 0
+        assert partial_summary["scored_positions"] == 1
         first_run_id = first_runs[0]["run_id"]
         first = repository.find_analysis_cache(
             "late-eval-game", 1, first_runs[0]["line_hash"], "lichess-pgn", None,

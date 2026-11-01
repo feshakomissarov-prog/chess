@@ -275,6 +275,6 @@ def test_partial_review_run_does_not_replace_complete_analysis_for_statistics(tm
         detail = repository.latest_analysis_detail("review-priority", 1)
         assert detail and detail["status"] == "complete"
         summary = StatisticsService(repository).summary(analysis_source="stockfish")
-        assert summary["evaluated_moves"] == 2
+        assert summary["evaluated_moves"] == 1
     finally:
         repository.shutdown()

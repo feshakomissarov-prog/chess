@@ -153,6 +153,13 @@ def test_period_comparison_requires_large_samples_and_similar_analysis_coverage(
         assert not result["eligible_for_comparison"]
         assert result["differences"] is None
         assert "предварительное" in result["explanation"]
+        mixed = service.compare_periods(
+            account_id=account,
+            current_since=(now - timedelta(days=30)).isoformat(), current_until=now.isoformat(),
+            previous_since=(now - timedelta(days=60)).isoformat(),
+            previous_until=(now - timedelta(days=30)).isoformat(), side="white")
+        assert not mixed["eligible_for_comparison"]
+        assert "контроль времени" in mixed["explanation"]
     finally:
         repo.shutdown()
 
@@ -219,5 +226,64 @@ def test_personal_profile_and_page_remain_bounded_on_10000_synthetic_games(tmp_p
         assert page["total"] == 10_000 and len(page["items"]) == 50
         with repo._connection() as db:
             assert db.execute("PRAGMA integrity_check").fetchone()[0] == "ok"
+    finally:
+        repo.shutdown()
+
+
+def test_mixed_time_control_profile_is_provisional_and_reports_separate_buckets(tmp_path):
+    repo = GameRepository(tmp_path / "mixed-time-controls.sqlite3")
+    try:
+        account = repo.ensure_archive_account("MixedControls")
+        now = datetime(2026, 11, 1, 12, tzinfo=timezone.utc)
+        _add_account_game(repo, account, 1, "white", (now - timedelta(days=1)).isoformat(),
+                          time_control="300+0")
+        _add_account_game(repo, account, 2, "white", (now - timedelta(days=2)).isoformat(),
+                          time_control="600+5")
+        profile = StatisticsService(repo).personal_profile(account_id=account, now=now)
+        white = profile["color_segments"]["white"]
+        assert white["provisional"]
+        assert "разные контроли" in white["provisional_reason"]
+        assert {row["clock"] for row in profile["time_control_buckets"]} == {"300+0", "600+5"}
+    finally:
+        repo.shutdown()
+
+
+def test_missing_comparison_position_is_unknown_not_complete_own_move_coverage(tmp_path):
+    repo = GameRepository(tmp_path / "incomplete-comparison.sqlite3")
+    try:
+        account = repo.ensure_archive_account("CoverageOwner")
+        now = datetime(2026, 11, 1, 12, tzinfo=timezone.utc)
+        game_id = "coverage-missing-root"
+        repo.save_snapshot(game_id, "startpos", "e2e4", "white", "Synthetic", False,
+                           "300+0", "finished", "white", started_at=(now - timedelta(days=1)).isoformat())
+        with repo._connection() as db:
+            db.execute("INSERT INTO account_games(account_id,game_id,remote_id,imported_at,color,"
+                       "player_rating,opponent_rating,opponent,player_name) VALUES (?,?,?,?,?,?,?,?,?)",
+                       (account, game_id, game_id, now.isoformat(), "white", 1500, 1500, "Synthetic", "Owner"))
+        line = repo.current_line(game_id)
+        assert line
+        repo.save_analysis(game_id, line_revision=1, line_hash=line["line_hash"],
+            source="stockfish", engine_name="Fake", engine_version="fake-v1",
+            parameters={"nodes": 1}, assessments=[{"ply": 1, "white_cp": 50}],
+            classifications=[], status="complete")
+        run_id = repo.list_analyses(game_id)[0]["run_id"]
+        repo.materialize_analysis_metrics(run_id)
+        service = StatisticsService(repo)
+        summary = service.summary(account_id=account, clock="300+0", analysis_source="stockfish")
+        assert summary["scored_positions"] == 1
+        assert summary["evaluated_moves"] == 0
+        assert summary["total_own_moves"] == 1
+        assert summary["move_coverage_percent"] == 0.0
+        with repo._connection() as db:
+            metric = db.execute("SELECT cp_loss,severity FROM move_metrics WHERE game_id=?",
+                                (game_id,)).fetchone()
+            unknown_event = db.execute("SELECT confidence_state FROM analysis_events WHERE game_id=? "
+                                       "AND event_type='outcome_unknown'", (game_id,)).fetchone()
+        assert tuple(metric) == (None, "unknown")
+        assert unknown_event[0] == "unknown"
+        assert service._fully_covered_games(account, since="2026-10-01T00:00:00+00:00",
+            until=now.isoformat(), clock="300+0", side="white", analysis_source="stockfish") == 0
+        game = service.game_page(account_id=account, clock="300+0", analysis_source="stockfish")["items"][0]
+        assert game["own_assessed_moves"] == 0 and game["total_own_moves"] == 1
     finally:
         repo.shutdown()

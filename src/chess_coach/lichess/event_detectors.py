@@ -103,8 +103,10 @@ def detect_registered_events(assessments: list[dict[str, Any]], moves: list[dict
         ply = int(move["ply"])
         metric = metric_by_ply.get(ply)
         before, after = by_ply.get(ply - 1), by_ply.get(ply)
-        if not metric or not before or not after:
+        if not metric:
             continue
+        before = before or {}
+        after = after or {}
         played = move.get("uci")
         mover = str(move.get("mover") or "unknown")
         evidence = {
@@ -122,6 +124,8 @@ def detect_registered_events(assessments: list[dict[str, Any]], moves: list[dict
             emit(ply, "large_eval_swing", "candidate", evidence, ["evaluation", "blunder"])
         if metric.get("cp_loss") is None:
             emit(ply, "outcome_unknown", "unknown", evidence, ["coverage"])
+        if not before or not after:
+            continue
         best = evidence["best_move_uci"]
         if played and best and played == best:
             emit(ply, "best_move_confirmed", "candidate", evidence, ["positive", "best-move"])

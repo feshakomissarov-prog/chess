@@ -79,9 +79,10 @@ def build_move_facts(assessments: list[dict[str, Any]], moves: list[dict[str, An
     facts: list[dict] = []
     for move in moves:
         ply = int(move["ply"])
-        before, after = by_ply.get(ply - 1), by_ply.get(ply)
-        if before is None or after is None:
-            continue
+        # Keep one derived row per confirmed move even when either adjacent
+        # evaluation is missing. The resulting severity is unknown, never good.
+        before = by_ply.get(ply - 1) or {}
+        after = by_ply.get(ply) or {}
         mover = str(move.get("mover") or ("white" if (ply - 1) % 2 == 0 else "black"))
         has_mate = before.get("mate_white") is not None or after.get("mate_white") is not None
         cp_loss = None
