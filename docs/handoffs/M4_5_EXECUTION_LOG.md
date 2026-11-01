@@ -209,3 +209,11 @@
 - Регрессия: synthetic PGN создаёт candidate missed opportunity, обновлённые eval меняют severity и удаляют stale event, повтор не дублирует metrics/runs, пользовательская note сохраняется. Injected failure derived-detector внутри import подтверждает rollback сырого PGN и derived rows целиком.
 - Проверено на Windows Python 3.12.10 offscreen: `pytest tests/test_m45_analysis_store.py tests/test_m45_move_metrics.py -q` — **16 PASS**, compileall/diff-check — PASS. Не запускались UCI/сеть/пользовательская SQLite.
 - Остались R5–R9; следующий блок — orchestrated selective review (fast → capped selected positions → persisted review jobs/coverage).
+
+## PR #30 deep review — R6 (2026-11-01)
+
+- R6 code commit `8eec9e226f725aae6fa35b36c23090af044ebe76`: missed-opportunity now reads expected reply PV at `ply=opponent_move.ply`, i.e. the position after opponent has moved, and stores this exact `best_move_position_ply`. Derived metrics reconstruct legal positions from the saved initial FEN + current UCI line; candidate PV is emitted only if legal for the responding side. Missing/illegal PV retains a candidate event with `best_move_uci=null` rather than substituting a move from the previous position.
+- `build_move_facts` now accepts the authoritative initial FEN; analysis and Lichess materialization provide it. No change to arrow/board controls; no candidate is promoted to verified solely from one PV.
+- Synthetic test has distinct PVs before/after opponent move and confirms the answer-side legal move is selected; negative fixture supplies an illegal/wrong-side PV and confirms null; existing missed-opportunity chain remains candidate-only.
+- Проверено: Windows Python 3.12.10 offscreen, `pytest tests/test_m45_move_metrics.py tests/test_m45_event_detectors.py tests/test_m45_analysis_store.py -q` — **25 PASS**, compileall/diff-check — PASS. Реальный движок не запускался.
+- Остались R7–R9; следующий блок — phase boundaries и assignment после phase hydration.
