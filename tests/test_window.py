@@ -4,7 +4,7 @@ import threading
 import time
 import pytest
 from pathlib import Path
-from PySide6.QtCore import QPoint, QSettings, Qt
+from PySide6.QtCore import QPoint, QSettings, QStandardPaths, Qt
 from PySide6.QtGui import QCloseEvent
 from PySide6.QtWidgets import QComboBox, QDialog, QLabel, QInputDialog, QMessageBox, QPushButton
 
@@ -17,9 +17,12 @@ from chess_coach.lichess.repository import GameRepository
 
 
 @pytest.fixture(autouse=True)
-def avoid_background_auth_restore(monkeypatch):
+def avoid_background_auth_restore(monkeypatch, tmp_path):
     # Window tests exercise presentation and event handling, not stored credentials.
     monkeypatch.setattr("chess_coach.lichess.service.LichessService.restore", lambda self: None)
+    # Never let GUI tests initialize or migrate the owner's persistent SQLite.
+    monkeypatch.setattr(QStandardPaths, "writableLocation",
+                        lambda _location: str(tmp_path / "ChessCoach"))
 
 
 def select_online(window, session):
@@ -884,9 +887,20 @@ def test_manual_connect_defers_lichess_and_credentials_until_button(qtbot, tmp_p
 
     calls = []
 
+    class Signal:
+        def connect(self, _callback): pass
+
+    class Store:
+        def get(self): return None
+
     class ExplicitlyCreatedService:
-        token = None
+        oauth_token_store = Store()
+        personal_token_store = Store()
+        selected_token_store = oauth_token_store
+        auth_method = "oauth"
+        status_changed = Signal()
         def connect_account(self): calls.append("oauth")
+        def set_auth_method(self, method): self.auth_method = method
         def close(self, timeout=None): return True
 
     service = ExplicitlyCreatedService()
@@ -895,6 +909,9 @@ def test_manual_connect_defers_lichess_and_credentials_until_button(qtbot, tmp_p
     qtbot.mouseClick(window.connect_button, Qt.MouseButton.LeftButton)
 
     assert window.lichess is service
+    assert calls == ["attach"]
+    assert window._connection_dialog is not None
+    window._connection_dialog.oauth_button.click()
     assert calls == ["attach", "oauth"]
     window.close()
 
@@ -902,8 +919,27 @@ def test_manual_connect_defers_lichess_and_credentials_until_button(qtbot, tmp_p
 def test_manual_connect_restores_saved_token_only_after_explicit_button(qtbot, tmp_path, monkeypatch):
     calls = []
 
+    class Signal:
+        def connect(self, _callback): pass
+
+    class Store:
+        def __init__(self, value): self.value = value
+        def get(self): return self.value
+
     class SavedTokenService:
-        token = "stored-token"
+        def __init__(self):
+            self.oauth_token_store = Store("stored-token")
+            self.personal_token_store = Store(None)
+            self.selected_token_store = self.oauth_token_store
+            self.auth_method = "oauth"
+            self.status_changed = Signal()
+            self.client = type("Client", (), {"rate_limit_remaining": 0})()
+        @property
+        def token(self): return self.selected_token_store.get()
+        def set_auth_method(self, method):
+            self.auth_method = method
+            self.selected_token_store = (self.personal_token_store if method == "personal_token"
+                                         else self.oauth_token_store)
         def restore(self): calls.append("restore")
         def connect_account(self): calls.append("oauth")
         def close(self, timeout=None): return True
@@ -919,6 +955,9 @@ def test_manual_connect_restores_saved_token_only_after_explicit_button(qtbot, t
     assert calls == []
     window.connect_lichess()
 
+    assert calls == ["attach"]
+    assert window._connection_dialog is not None
+    window._connection_dialog.restore_button.click()
     assert calls == ["attach", "restore"]
     window.close()
 
@@ -2056,6 +2095,7 @@ def test_authentication_resumes_pending_final_sync_without_screen_takeover(qtbot
     monkeypatch.setattr(window.lichess, "start_game", lambda game_id: started.append(game_id))
     monkeypatch.setattr(window.lichess, "mark_game_finished", lambda game_id: marked.append(game_id))
 
+    window.lichess.username = "Owner"
     window._lichess_authenticated("Owner")
 
     assert "resume-final" in started
@@ -2254,10 +2294,21 @@ def test_429_restore_retry_button_waits_for_cooldown_and_uses_saved_token(qtbot,
     window = MainWindow(QSettings(str(tmp_path / "429-retry.ini"), QSettings.Format.IniFormat),
                         offline_mode=True)
     qtbot.addWidget(window)
+    class Signal:
+        def connect(self, _callback): pass
+    class Store:
+        def get(self): return "saved-token"
     class Service:
         token = "saved-token"
+        oauth_token_store = Store()
+        personal_token_store = Store()
+        selected_token_store = oauth_token_store
+        auth_method = "oauth"
+        status_changed = Signal()
+        client = type("Client", (), {"rate_limit_remaining": 0})()
         def __init__(self): self.restore_calls = 0
         def restore(self): self.restore_calls += 1
+        def set_auth_method(self, _method): pass
         def close(self): pass
     service = Service()
     window.lichess = service
@@ -2273,6 +2324,8 @@ def test_429_restore_retry_button_waits_for_cooldown_and_uses_saved_token(qtbot,
     assert window.connect_button.isEnabled()
     assert window.connect_button.text() == "Повторить подключение"
     window.connect_lichess()
+    assert window._connection_dialog is not None
+    window._connection_dialog.restore_button.click()
     assert service.restore_calls == 1
     assert not window.connect_button.isEnabled()
 
@@ -2663,9 +2716,20 @@ def test_late_safety_snapshot_cannot_authorize_old_account_session(
     class ConnectedService:
         username = "AccountA"
         token = "saved-fake-token"
+        class Signal:
+            def connect(self, _callback): pass
+        class Store:
+            def get(self): return "saved-fake-token"
+        oauth_token_store = Store()
+        personal_token_store = Store()
+        selected_token_store = oauth_token_store
+        auth_method = "oauth"
+        status_changed = Signal()
+        client = type("Client", (), {"rate_limit_remaining": 0})()
         def __init__(self): self.requests = []
         def check_active_games_for_analysis(self, request_id): self.requests.append(request_id)
         def disconnect_account(self): pass
+        def set_auth_method(self, _method): pass
         def restore(self): self.restored = True
         def close(self, timeout=1.0): return True
 
@@ -2689,6 +2753,8 @@ def test_late_safety_snapshot_cannot_authorize_old_account_session(
         window.offline_mode = False
         window.manual_connect_mode = True
         window.connect_lichess()
+        assert window._connection_dialog is not None
+        window._connection_dialog.restore_button.click()
         assert service.restored
 
     window._analysis_safety_games_received(old_request, [])

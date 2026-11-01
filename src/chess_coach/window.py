@@ -37,6 +37,7 @@ from PySide6.QtWidgets import (
     QLineEdit,
     QPushButton,
     QProgressDialog,
+    QRadioButton,
     QTabWidget,
     QSpinBox,
     QSplitter,
@@ -1569,6 +1570,122 @@ class ActiveGamesDialog(QDialog):
             self.accept()
 
 
+class LichessConnectionDialog(QDialog):
+    """Explicit OAuth/PAT chooser; credentials never enter persistent Qt state."""
+    method_changed = Signal(str)
+    restore_requested = Signal()
+    oauth_requested = Signal()
+    personal_token_requested = Signal(str)
+    delete_personal_token_requested = Signal()
+    diagnostics_requested = Signal()
+
+    def __init__(self, method: str = "oauth", *, oauth_saved: bool = False,
+                 personal_token_saved: bool = False, parent=None) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("Подключение к Lichess")
+        self.setMinimumWidth(520)
+        layout = QVBoxLayout(self)
+        layout.addWidget(QLabel("Подключение к Lichess"))
+        explanation = QLabel(
+            "Выберите способ подключения. Секреты хранятся отдельно в Windows Credential Manager. "
+            "Локальные данные партий остаются доступными без сети.")
+        explanation.setWordWrap(True)
+        layout.addWidget(explanation)
+        self.status_label = QLabel("Не подключено")
+        self.status_label.setWordWrap(True)
+        layout.addWidget(self.status_label)
+        self.diagnostics_button = QPushButton("Открыть обезличенный отчёт диагностики")
+        self.diagnostics_button.clicked.connect(self.diagnostics_requested.emit)
+        layout.addWidget(self.diagnostics_button)
+        modes = QHBoxLayout()
+        self.oauth_radio = QRadioButton("Через браузер (OAuth)")
+        self.personal_radio = QRadioButton("Персональный токен")
+        self.oauth_radio.setChecked(method != "personal_token")
+        self.personal_radio.setChecked(method == "personal_token")
+        modes.addWidget(self.oauth_radio)
+        modes.addWidget(self.personal_radio)
+        layout.addLayout(modes)
+        self.pages = QStackedWidget()
+        oauth_page = QWidget()
+        oauth_layout = QVBoxLayout(oauth_page)
+        oauth_layout.addWidget(QLabel(
+            "OAuth PKCE откроет Lichess в браузере. Запрашиваются board:play и "
+            "challenge:write; puzzle:read хранится отдельно и запрашивается только для истории задач."))
+        oauth_link = QPushButton("Открыть страницу управления токенами Lichess")
+        oauth_link.clicked.connect(lambda: QDesktopServices.openUrl(
+            QUrl("https://lichess.org/account/oauth/token")))
+        oauth_layout.addWidget(oauth_link)
+        self.oauth_saved_badge = QLabel("Сохранённое подключение: " +
+                                        ("доступно в Windows Credential Manager" if oauth_saved else "не найдено"))
+        oauth_layout.addWidget(self.oauth_saved_badge)
+        self.restore_button = QPushButton("Проверить сохранённое подключение")
+        self.oauth_button = QPushButton("Подключить через браузер")
+        oauth_layout.addWidget(self.restore_button)
+        oauth_layout.addWidget(self.oauth_button)
+        self.pages.addWidget(oauth_page)
+
+        token_page = QWidget()
+        token_layout = QVBoxLayout(token_page)
+        token_note = QLabel(
+            "Создайте новый минимально привилегированный токен на Lichess и вставьте его здесь. "
+            "Не используйте ранее раскрытый токен. Нужные полномочия зависят от функций: "
+            "board:play и challenge:write; puzzle:read выдаётся отдельно.")
+        token_note.setWordWrap(True)
+        token_layout.addWidget(token_note)
+        token_link = QPushButton("Создать или отозвать токен на Lichess")
+        token_link.clicked.connect(lambda: QDesktopServices.openUrl(
+            QUrl("https://lichess.org/account/oauth/token")))
+        token_layout.addWidget(token_link)
+        self.personal_token_input = QLineEdit()
+        self.personal_token_input.setEchoMode(QLineEdit.EchoMode.Password)
+        self.personal_token_input.setPlaceholderText("Вставьте новый токен Lichess")
+        self.personal_token_input.setClearButtonEnabled(True)
+        token_layout.addWidget(self.personal_token_input)
+        self.personal_saved_badge = QLabel(
+            "Сохранён в Windows Credential Manager" if personal_token_saved
+            else "Сохранённый персональный токен не найден")
+        token_layout.addWidget(self.personal_saved_badge)
+        self.personal_check_button = QPushButton(
+            "Заменить" if personal_token_saved else "Проверить и сохранить")
+        token_layout.addWidget(self.personal_check_button)
+        self.personal_delete_button = QPushButton("Удалить локально сохранённый токен")
+        self.personal_delete_button.setEnabled(personal_token_saved)
+        token_layout.addWidget(self.personal_delete_button)
+        warning = QLabel("Удаление удаляет только локальную копию. Чтобы отозвать полномочия, "
+                         "используйте страницу Lichess выше. Программа и другие процессы "
+                         "профиля Windows с достаточными правами технически могут читать сохранённые учётные данные.")
+        warning.setWordWrap(True)
+        token_layout.addWidget(warning)
+        self.pages.addWidget(token_page)
+        self.pages.setCurrentIndex(0 if method != "personal_token" else 1)
+        layout.addWidget(self.pages)
+        close = QPushButton("Закрыть")
+        close.clicked.connect(self.accept)
+        layout.addWidget(close)
+        self.oauth_radio.toggled.connect(self._on_mode_toggled)
+        self.personal_radio.toggled.connect(self._on_mode_toggled)
+        self.restore_button.clicked.connect(self.restore_requested.emit)
+        self.oauth_button.clicked.connect(self.oauth_requested.emit)
+        self.personal_check_button.clicked.connect(self._submit_personal_token)
+        self.personal_delete_button.clicked.connect(self.delete_personal_token_requested.emit)
+
+    def _on_mode_toggled(self, checked: bool) -> None:
+        if not checked:
+            return
+        method = "oauth" if self.oauth_radio.isChecked() else "personal_token"
+        self.pages.setCurrentIndex(0 if method == "oauth" else 1)
+        self.method_changed.emit(method)
+
+    def _submit_personal_token(self) -> None:
+        token = self.personal_token_input.text()
+        if token.strip():
+            self.personal_token_requested.emit(token)
+            self.personal_token_input.clear()
+
+    def set_status(self, message: str) -> None:
+        self.status_label.setText(message)
+
+
 class MainWindow(QMainWindow):
     analysis_progress = Signal(str, int, int)
     analysis_finished = Signal(str, object)
@@ -1590,6 +1707,7 @@ class MainWindow(QMainWindow):
         self.offline_mode = offline_mode
         self.manual_connect_mode = manual_connect_mode
         self._offline_data_dir: tempfile.TemporaryDirectory | None = None
+        self._connection_dialog: LichessConnectionDialog | None = None
         if offline_mode:
             # Smoke runs must not read or write the owner's settings or game DB.
             self._offline_data_dir = tempfile.TemporaryDirectory(prefix="chess-coach-offline-")
@@ -1603,6 +1721,10 @@ class MainWindow(QMainWindow):
                 QStandardPaths.StandardLocation.AppDataLocation
             ))
             data_root.mkdir(parents=True, exist_ok=True)
+        selected_auth_method = self.settings.value("lichess/selected_auth_method", "oauth", type=str)
+        if selected_auth_method not in {"oauth", "personal_token"}:
+            selected_auth_method = "oauth"
+            self.settings.setValue("lichess/selected_auth_method", selected_auth_method)
         color = self.settings.value("player_color", chess.WHITE, type=int)
         self.controller = GameController(chess.Color(color))
         self.game_repository = GameRepository(data_root / "games.sqlite3", async_writes=asynchronous_storage)
@@ -1703,7 +1825,7 @@ class MainWindow(QMainWindow):
             self.connection.setText("●  Ручной режим · запросов нет")
             self.connect_button.setText("Подключиться вручную")
             self.connect_button.setToolTip(
-                "Профиль и локальные партии доступны. OAuth, восстановление соединения и запросы "
+                "Профиль и локальные партии доступны. Выбор OAuth/PAT и сетевые запросы "
                 "к Lichess начнутся только после нажатия этой кнопки."
             )
         elif offline_mode:
@@ -1713,6 +1835,10 @@ class MainWindow(QMainWindow):
     def _create_lichess_service(self):
         try:
             return LichessService(token_store=WindowsCredentialStore(),
+                                  personal_token_store=WindowsCredentialStore(
+                                      user=WindowsCredentialStore.PERSONAL_TOKEN_USER),
+                                  auth_method=self.settings.value(
+                                      "lichess/selected_auth_method", "oauth", type=str),
                                   repository=self.game_repository, parent=self)
         except CredentialStorageError:
             return None
@@ -3624,27 +3750,106 @@ class MainWindow(QMainWindow):
         if not self.lichess:
             QMessageBox.warning(self, "Lichess", "Windows Credential Manager недоступен. Установите зависимости проекта.")
             return
-        # A previous account's asynchronous safety response must not survive a
-        # user-initiated reconnect, even before OAuth returns the new identity.
+        self._open_lichess_connection_dialog()
+
+    def _open_lichess_connection_dialog(self) -> None:
+        try:
+            oauth_saved = bool(self.lichess.oauth_token_store.get())
+            personal_saved = bool(self.lichess.personal_token_store.get())
+        except CredentialStorageError as exc:
+            QMessageBox.warning(self, "Lichess", str(exc))
+            return
+        method = self.settings.value("lichess/selected_auth_method", "oauth", type=str)
+        dialog = LichessConnectionDialog(method, oauth_saved=oauth_saved,
+                                         personal_token_saved=personal_saved, parent=self)
+        dialog.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose, True)
+        self._connection_dialog = dialog
+        dialog.method_changed.connect(self._select_lichess_auth_method)
+        dialog.restore_requested.connect(self._restore_selected_lichess_auth)
+        dialog.oauth_requested.connect(self._start_lichess_oauth)
+        dialog.personal_token_requested.connect(self._save_personal_lichess_token)
+        dialog.delete_personal_token_requested.connect(self._delete_personal_lichess_token)
+        dialog.diagnostics_requested.connect(self._show_lichess_diagnostic_report)
+        self.lichess.status_changed.connect(dialog.set_status)
+        dialog.finished.connect(lambda _result: setattr(self, "_connection_dialog", None))
+        dialog.open()
+
+    def _show_lichess_diagnostic_report(self) -> None:
+        report = anonymized_report(
+            schema_version=SCHEMA_VERSION,
+            engine_verified=(self.settings.value("stockfish_verified_path", "", type=str)
+                             == self.settings.value("stockfish_path", "", type=str)
+                             and bool(self.settings.value("stockfish_path", "", type=str))),
+            recent_counts=(self.game_repository.analysis_job_counts()
+                           if self.game_repository is not None else {}))
+        QMessageBox.information(self._connection_dialog or self, "Обезличенная диагностика", report)
+
+    def _select_lichess_auth_method(self, method: str) -> None:
         self._invalidate_analysis_preflight()
-        if self.manual_connect_mode:
-            try:
-                has_saved_token = bool(self.lichess.token)
-            except CredentialStorageError as exc:
-                QMessageBox.warning(self, "Lichess", str(exc))
-                return
-            if has_saved_token:
-                self.connect_button.setEnabled(False)
+        self._lichess_connected = False
+        self.settings.setValue("lichess/selected_auth_method", method)
+        self.settings.sync()
+        if self.lichess is None:
+            return
+        self.lichess.set_auth_method(method)
+        # A deliberate mode switch validates only that method's own saved token.
+        try:
+            if self.lichess.selected_token_store.get():
                 self.lichess.restore()
             else:
-                self.lichess.connect_account()
+                self.connection.setText("●  Не подключено")
+        except CredentialStorageError as exc:
+            if self._connection_dialog:
+                self._connection_dialog.set_status(str(exc))
+
+    def _restore_selected_lichess_auth(self) -> None:
+        if not self.lichess:
             return
-        if getattr(self, "_restore_retry_ready", False) and self.lichess.token:
-            self._restore_retry_ready = False
-            self.connect_button.setEnabled(False)
-            self.lichess.restore()
+        self._invalidate_analysis_preflight()
+        self.connect_button.setEnabled(False)
+        self.lichess.restore()
+
+    def _start_lichess_oauth(self) -> None:
+        if not self.lichess:
             return
+        self._invalidate_analysis_preflight()
+        self._lichess_connected = False
+        self.settings.setValue("lichess/selected_auth_method", "oauth")
+        self.settings.sync()
+        self.lichess.set_auth_method("oauth")
         self.lichess.connect_account()
+
+    def _save_personal_lichess_token(self, token: str) -> None:
+        if not self.lichess:
+            return
+        self._invalidate_analysis_preflight()
+        self._lichess_connected = False
+        self.settings.setValue("lichess/selected_auth_method", "personal_token")
+        self.settings.sync()
+        self.lichess.set_auth_method("personal_token")
+        self.lichess.connect_personal_token(token)
+
+    def _delete_personal_lichess_token(self) -> None:
+        if not self.lichess:
+            return
+        answer = QMessageBox.question(
+            self, "Удалить локальный токен",
+            "Удалить сохранённую копию из Windows Credential Manager? Это не отзывает токен на Lichess.",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel,
+            QMessageBox.StandardButton.Cancel)
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+        try:
+            self.lichess.delete_saved_personal_token()
+            if self.lichess.auth_method == "personal_token":
+                self._invalidate_analysis_preflight()
+                self._lichess_connected = False
+            if self._connection_dialog:
+                self._connection_dialog.personal_saved_badge.setText(
+                    "Локально сохранённый токен удалён; на Lichess он не отозван")
+                self._connection_dialog.personal_delete_button.setEnabled(False)
+        except CredentialStorageError as exc:
+            QMessageBox.warning(self, "Lichess", str(exc))
 
     def disconnect_lichess(self) -> None:
         self._invalidate_analysis_preflight()
@@ -3785,7 +3990,9 @@ class MainWindow(QMainWindow):
             delay = max(1, int(match.group(1))) if match else 60
             QTimer.singleShot(delay * 1000, self._enable_restore_retry)
             QTimer.singleShot(delay * 1000, self._refresh_online_controls)
-        elif status in {"Не подключено", "Ошибка подключения"}:
+        elif (status in {"Не подключено", "Ошибка подключения", "Ошибка проверки аккаунта"}
+              or status.startswith("Проверка аккаунта отклонена")
+              or status.startswith("Требуется повторное подключение")):
             self._restore_retry_ready = False
             self.connect_button.setText("Подключить Lichess")
             self.connect_button.setEnabled(True)
@@ -3842,9 +4049,15 @@ class MainWindow(QMainWindow):
         self._refresh_batch_readiness()
 
     def _lichess_authenticated(self, username: str) -> None:
+        # Signals from a canceled authorization/restore worker may arrive after
+        # a user changed auth mode; only accept the service's current identity.
+        if not self.lichess or self.lichess.username != username:
+            return
         self._invalidate_analysis_preflight()
         self._lichess_connected = True
         self.connection.setText(f"●  Подключено: {username}")
+        if self._connection_dialog is not None:
+            self._connection_dialog.accept()
         self.connect_button.setEnabled(False)
         self.disconnect_button.setEnabled(True)
         self._refresh_online_controls()
@@ -3901,7 +4114,12 @@ class MainWindow(QMainWindow):
         if getattr(self, "_open_challenge_id", None):
             self.cancel_invitation_button.setEnabled(True)
         self.game_status.setText(message)
-        QMessageBox.warning(self, "Lichess", message)
+        if self._connection_dialog is not None and shiboken6.isValid(self._connection_dialog):
+            self._connection_dialog.set_status(message)
+        elif "HTTP 403" in message or "HTTP 401" in message:
+            self.home_status.setText(message + " Локальная библиотека и история остаются доступны.")
+        else:
+            QMessageBox.warning(self, "Lichess", message)
         self.refresh(message)
 
     def _lichess_move_failed(self, game_id: str, uci: str, request_id: str, status: int) -> None:

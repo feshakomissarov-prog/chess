@@ -6,6 +6,7 @@ import threading
 import random
 import time
 import webbrowser
+import uuid
 
 from PySide6.QtCore import QObject, Signal
 
@@ -14,6 +15,8 @@ from .archive import ArchiveSync
 from .puzzles import PuzzleActivitySync
 from .auth import (CLIENT_ID, OAuthCallbackServer, WindowsCredentialStore,
                    authorize_and_store, create_authorization_request)
+from .auth import CredentialStorageError
+from ..diagnostics import log_event
 
 
 class LichessService(QObject):
@@ -47,10 +50,17 @@ class LichessService(QObject):
     puzzle_pilot_finished = Signal(int, int, str, str)
 
     def __init__(self, client: LichessClient | None = None, token_store=None,
-                 repository=None, parent=None):
+                 repository=None, parent=None, personal_token_store=None,
+                 auth_method: str = "oauth"):
         super().__init__(parent)
         self.client = client or LichessClient()
-        self.token_store = token_store or WindowsCredentialStore()
+        self.oauth_token_store = token_store or WindowsCredentialStore()
+        self.personal_token_store = personal_token_store or WindowsCredentialStore(
+            user=getattr(WindowsCredentialStore, "PERSONAL_TOKEN_USER",
+                         "personal-access-token"))
+        self.auth_method = auth_method if auth_method in {"oauth", "personal_token"} else "oauth"
+        self._auth_generation = 0
+        self._auth_lock = threading.RLock()
         self.repository = repository
         self._archive_stop: threading.Event | None = None
         self._puzzle_stop: threading.Event | None = None
@@ -365,7 +375,97 @@ class LichessService(QObject):
 
     @property
     def token(self) -> str | None:
-        return self.token_store.get()
+        return self.selected_token_store.get()
+
+    @property
+    def selected_token_store(self):
+        return (self.personal_token_store if self.auth_method == "personal_token"
+                else self.oauth_token_store)
+
+    @property
+    def token_store(self):
+        """Compatibility alias for code paths that use the selected account."""
+        return self.selected_token_store
+
+    def set_auth_method(self, method: str) -> None:
+        """Switch credentials without deleting either slot or revoking PATs."""
+        if method not in {"oauth", "personal_token"}:
+            raise ValueError("Неизвестный способ подключения Lichess.")
+        if method == self.auth_method:
+            return
+        self._cancel_active_session()
+        self.auth_method = method
+        self.username = None
+        self.status_changed.emit("Не подключено")
+
+    def _cancel_active_session(self) -> None:
+        with self._auth_lock:
+            self._auth_generation += 1
+        if self._callback is not None:
+            self._callback.cancel()
+            self._callback = None
+        self._connection_stop.set()
+        if self._archive_stop is not None:
+            self._archive_stop.set()
+        if self._puzzle_stop is not None:
+            self._puzzle_stop.set()
+        if self._username_challenge_stop:
+            self._username_challenge_stop.set()
+        for stop in self._game_stops.values():
+            stop.set()
+        self._connection_stop = threading.Event()
+        with self._event_lock:
+            self._event_stream_started = False
+        self.username = None
+
+    def connect_personal_token(self, token: str) -> None:
+        """Validate a manually entered PAT before persisting it to its own slot."""
+        candidate = token.strip()
+        if not candidate:
+            self.error.emit("Введите персональный токен Lichess.")
+            return
+        self._cancel_active_session()
+        auth_generation = self._auth_generation
+        correlation_id = uuid.uuid4().hex[:12]
+        def work():
+            started = time.monotonic()
+            log_event("account_check_started", "lichess_auth", correlation_id=correlation_id,
+                      stage="personal_token")
+            self.status_changed.emit("Проверяем аккаунт по персональному токену…")
+            try:
+                account = self.client.get_account(candidate)
+                username = account.get("username")
+                if not isinstance(username, str) or not username.strip():
+                    raise LichessError("Lichess не вернул корректный аккаунт.")
+                with self._auth_lock:
+                    if auth_generation != self._auth_generation or self.auth_method != "personal_token":
+                        raise LichessError("Проверка токена устарела; подключение не сохранено.")
+                    self.personal_token_store.set(candidate)
+                    self.auth_method = "personal_token"
+                    self.username = username.strip()
+                    self._connection_stop = threading.Event()
+                log_event("credential_store_success", "lichess_auth",
+                          correlation_id=correlation_id, stage="personal_token")
+                log_event("connection_ready", "lichess_auth", correlation_id=correlation_id,
+                          stage="personal_token", duration_ms=(time.monotonic() - started) * 1000)
+                self.authenticated.emit(self.username)
+                self._start_event_stream(candidate, expected_generation=auth_generation)
+            except Exception as exc:
+                log_event("account_check_failed", "lichess_auth", correlation_id=correlation_id,
+                          stage="personal_token", http_status=getattr(exc, "status", None),
+                          response_type=getattr(exc, "response_type", None), error=exc)
+                self.error.emit(str(exc) if isinstance(exc, (LichessError, CredentialStorageError))
+                                else "Не удалось проверить и сохранить токен.")
+                if isinstance(exc, RateLimitError) or getattr(exc, "status", None) == 429:
+                    delay = max(60, getattr(exc, "retry_after", 60))
+                    self.status_changed.emit(f"Ограничение Lichess (429): повторите через {delay} с")
+                elif getattr(exc, "status", None) == 403:
+                    self.status_changed.emit("Проверка аккаунта отклонена Lichess (HTTP 403)")
+                elif getattr(exc, "status", None) == 401:
+                    self.status_changed.emit("Требуется повторное подключение Lichess (HTTP 401)")
+                else:
+                    self.status_changed.emit("Ошибка проверки аккаунта")
+        self._thread(work, "chess-coach-personal-token-check")
 
     def _thread(self, target, name: str) -> None:
         thread = threading.Thread(target=target, name=name, daemon=True)
@@ -381,19 +481,41 @@ class LichessService(QObject):
                 return
             self._restore_running = True
         self.status_changed.emit("Проверяем подключение…")
+        selected_store = self.selected_token_store
+        selected_method = self.auth_method
+        auth_generation = self._auth_generation
         def work():
+            correlation_id = uuid.uuid4().hex[:12]
+            started = time.monotonic()
+            auth_generation = self._auth_generation
+            log_event("restore_started", "lichess_auth", correlation_id=correlation_id,
+                      stage=self.auth_method)
             try:
-                token = self.token_store.get()
+                token = selected_store.get()
                 if not token:
                     self.status_changed.emit("Не подключено")
                     return
                 account = self.client.get_account(token)
-                self.username = str(account["username"])
+                if (auth_generation != self._auth_generation
+                        or selected_method != self.auth_method):
+                    return
+                username = account.get("username")
+                if not isinstance(username, str) or not username.strip():
+                    raise LichessError("Lichess не вернул корректный аккаунт.")
+                with self._auth_lock:
+                    if (auth_generation != self._auth_generation
+                            or selected_method != self.auth_method):
+                        return
+                    self.username = username.strip()
+                log_event("connection_ready", "lichess_auth", correlation_id=correlation_id,
+                          stage=self.auth_method,
+                          duration_ms=(time.monotonic() - started) * 1000)
                 self.authenticated.emit(self.username)
-                self._start_event_stream(token)
+                self._start_event_stream(token, expected_generation=auth_generation)
             except Exception as exc:
-                if isinstance(exc, LichessError) and exc.status == 401:
-                    self.token_store.delete()
+                log_event("restore_failed", "lichess_auth", correlation_id=correlation_id,
+                          stage=self.auth_method, http_status=getattr(exc, "status", None),
+                          response_type=getattr(exc, "response_type", None), error=exc)
                 self.error.emit(str(exc))
                 if isinstance(exc, RateLimitError) or (
                     isinstance(exc, LichessError) and exc.status == 429
@@ -401,6 +523,10 @@ class LichessService(QObject):
                     self.status_changed.emit(
                         f"Ограничение Lichess (429): повторная попытка не раньше чем через {max(60, getattr(exc, 'retry_after', 60))} с"
                     )
+                elif isinstance(exc, LichessError) and exc.status == 403:
+                    self.status_changed.emit("Проверка аккаунта отклонена Lichess (HTTP 403)")
+                elif isinstance(exc, LichessError) and exc.status == 401:
+                    self.status_changed.emit("Требуется повторное подключение Lichess (HTTP 401)")
                 else:
                     self.status_changed.emit("Ошибка подключения")
             finally:
@@ -437,8 +563,25 @@ class LichessService(QObject):
         self._thread(work, "chess-coach-analysis-safety")
 
     def connect_account(self) -> None:
+        self._cancel_active_session()
+        auth_generation = self._auth_generation
         def work():
             callback = None
+            correlation_id = uuid.uuid4().hex[:12]
+
+            class GuardedOAuthStore:
+                def get(inner_self):
+                    return self.oauth_token_store.get()
+
+                def set(inner_self, token):
+                    with self._auth_lock:
+                        if (auth_generation != self._auth_generation
+                                or self.auth_method != "oauth"):
+                            raise LichessError("Авторизация устарела; секрет не сохранён.")
+                        self.oauth_token_store.set(token)
+
+                def delete(inner_self):
+                    return self.oauth_token_store.delete()
             try:
                 callback = OAuthCallbackServer()
                 self._callback = callback
@@ -446,23 +589,40 @@ class LichessService(QObject):
                 if not webbrowser.open(request.url):
                     raise LichessError("Не удалось открыть браузер для авторизации Lichess.")
                 self.status_changed.emit("Ожидание авторизации в браузере…")
-                _, username = authorize_and_store(self.client, self.token_store, callback, request)
-                self.username = username
-                self._connection_stop = threading.Event()
+                _, username = authorize_and_store(
+                    self.client, GuardedOAuthStore(), callback, request,
+                    is_current=lambda: (auth_generation == self._auth_generation
+                                        and self.auth_method == "oauth"))
+                with self._auth_lock:
+                    if auth_generation != self._auth_generation or self.auth_method != "oauth":
+                        return
+                    self.username = username
+                    self._connection_stop = threading.Event()
                 self.authenticated.emit(username)
-                self._start_event_stream(self.token_store.get())
+                self._start_event_stream(self.oauth_token_store.get(),
+                                         expected_generation=auth_generation)
                 self._callback = None
             except Exception as exc:
                 if callback:
                     callback.close()
                     self._callback = None
+                log_event("oauth_exchange_or_validation_failed", "lichess_auth",
+                          correlation_id=correlation_id,
+                          http_status=getattr(exc, "status", None),
+                          response_type=getattr(exc, "response_type", None), error=exc)
                 self.error.emit(str(exc))
-                self.status_changed.emit("Не подключено")
+                if getattr(exc, "status", None) == 403:
+                    self.status_changed.emit("Проверка аккаунта отклонена Lichess (HTTP 403)")
+                elif getattr(exc, "status", None) == 429:
+                    self.status_changed.emit(f"Ограничение Lichess (429): повторите через {max(60, getattr(exc, 'retry_after', 60))} с")
+                else:
+                    self.status_changed.emit("Не подключено")
         self._thread(work, "chess-coach-oauth")
 
     def disconnect_account(self) -> None:
         # A disconnect must cancel ongoing background requests immediately,
         # before the token is revoked by the worker.
+        self._cancel_active_session()
         if self._archive_stop is not None:
             self._archive_stop.set()
         if self._puzzle_stop is not None:
@@ -475,7 +635,7 @@ class LichessService(QObject):
                 stop.set()
             try:
                 token = self.token_store.get()
-                if token:
+                if token and self.auth_method == "oauth":
                     try:
                         self.client.revoke_token(token)
                     finally:
@@ -486,10 +646,23 @@ class LichessService(QObject):
                 self.error.emit(str(exc))
         self._thread(work, "chess-coach-disconnect")
 
-    def _start_event_stream(self, token: str | None) -> None:
+    def delete_saved_personal_token(self) -> None:
+        """Delete only the local PAT copy; never call the Lichess revoke API."""
+        if self.auth_method == "personal_token":
+            self._cancel_active_session()
+            self.username = None
+            self.status_changed.emit("Не подключено")
+        self.personal_token_store.delete()
+
+    def _start_event_stream(self, token: str | None,
+                            expected_generation: int | None = None) -> None:
         if not token:
             return
-        connection_stop = self._connection_stop
+        with self._auth_lock:
+            auth_generation = self._auth_generation
+            if expected_generation is not None and expected_generation != auth_generation:
+                return
+            connection_stop = self._connection_stop
         with self._event_lock:
             if self._event_stream_started:
                 return
@@ -519,7 +692,10 @@ class LichessService(QObject):
                         connection_stop.wait(max(60, exc.retry_after))
                     except LichessError as exc:
                         if exc.status == 401:
-                            self.token_store.delete()
+                            connection_stop.set()
+                            self.error.emit(str(exc))
+                            break
+                        if exc.status == 403:
                             connection_stop.set()
                             self.error.emit(str(exc))
                             break
@@ -529,12 +705,14 @@ class LichessService(QObject):
                 self.status_changed.emit("Не подключено")
             finally:
                 with self._event_lock:
-                    self._event_stream_started = False
+                    if auth_generation == self._auth_generation:
+                        self._event_stream_started = False
                 # A fast account switch may have installed a new connection stop
                 # event while this worker was still unwinding. Start exactly one
                 # stream for that current connection after releasing the old one.
                 current_connection_stop = self._connection_stop
-                if not self._stop.is_set() and not current_connection_stop.is_set():
+                if (not self._stop.is_set() and not current_connection_stop.is_set()
+                        and auth_generation == self._auth_generation):
                     try:
                         self._start_event_stream(self.token_store.get())
                     except Exception:

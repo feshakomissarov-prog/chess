@@ -28,7 +28,9 @@ _CONTEXT: contextvars.ContextVar[dict[str, str]] = contextvars.ContextVar(
 _LAST_ERROR_CODE = "none"
 _ALLOWED = {"duration_ms", "run_id", "job_id", "error_code", "status", "mode",
             "count", "new_count", "checked_count", "page", "http_status",
-            "bytes", "records", "schema_version", "engine_verified", "thread"}
+            "bytes", "records", "schema_version", "engine_verified", "thread",
+            "response_type", "method", "route", "stage", "correlation_id",
+            "retry_after"}
 _SECRET = re.compile(
     r"(?i)(bearer\s+\S+|(?:access[_-]?token|refresh[_-]?token|token|authorization|"
     r"client[_-]?secret|oauth[_-]?code|code)[=:]\s*\S+)")
@@ -83,7 +85,7 @@ def log_event(event: str, component: str, *, level: int = logging.INFO,
     for key, value in fields.items():
         if key not in _ALLOWED or value is None:
             continue
-        if key in {"duration_ms", "count", "new_count", "checked_count", "page", "http_status", "bytes", "records", "schema_version"}:
+        if key in {"duration_ms", "count", "new_count", "checked_count", "page", "http_status", "bytes", "records", "schema_version", "retry_after"}:
             try:
                 safe[key] = max(0, int(value))
             except (TypeError, ValueError):

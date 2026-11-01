@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import threading
 import time
+import uuid
 from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
 from dataclasses import dataclass
@@ -19,9 +20,11 @@ from ..diagnostics import log_event
 class LichessError(RuntimeError):
     """Safe, user-facing API error; never contains request headers or tokens."""
 
-    def __init__(self, message: str, status: int | None = None) -> None:
+    def __init__(self, message: str, status: int | None = None,
+                 response_type: str | None = None) -> None:
         super().__init__(message)
         self.status = status
+        self.response_type = response_type
 
 
 class RateLimitError(LichessError):
@@ -129,7 +132,7 @@ def _error_message(status: int, body: str) -> str:
     if status == 401:
         return "Авторизация Lichess недействительна или отозвана. Подключите аккаунт снова."
     if status == 403:
-        return "Lichess запретил действие. Проверьте разрешения аккаунта и состояние партии."
+        return "Lichess отклонил запрос (HTTP 403)."
     if status == 404:
         return "Партия или вызов Lichess больше не найдены."
     if status == 429:
@@ -186,6 +189,7 @@ class LichessClient:
         accept: str = "application/json",
     ) -> HttpResponse:
         started = time.monotonic()
+        correlation_id = uuid.uuid4().hex[:12]
         diagnostic_route = ("puzzle_dashboard" if path.startswith("/api/puzzle/dashboard/")
                            else "account" if path == "/api/account" else "api")
         url = f"{self.base_url}{path}"
@@ -209,26 +213,39 @@ class LichessClient:
                     self._rate_limited_until = max(self._rate_limited_until, time.monotonic() + retry_after)
                     log_event("rate_limit_429", "lichess_api",
                               duration_ms=(time.monotonic() - started) * 1000,
-                              http_status=429, mode=diagnostic_route)
+                              http_status=429, mode=diagnostic_route,
+                              method=method, route=diagnostic_route,
+                              correlation_id=correlation_id,
+                              retry_after=retry_after)
                     raise RateLimitError(retry_after)
         except Exception as exc:
             if not isinstance(exc, RateLimitError):
                 log_event("api_request_failed", "lichess_api",
                           duration_ms=(time.monotonic() - started) * 1000,
-                          mode=diagnostic_route, error=exc)
+                          mode=diagnostic_route, method=method, route=diagnostic_route,
+                          correlation_id=correlation_id, error=exc)
             raise
         if response.status >= 400:
+            response_type = _classify_error_response(response.headers, response.body)
             log_event("api_request_failed", "lichess_api",
                       duration_ms=(time.monotonic() - started) * 1000,
                       http_status=response.status, mode=diagnostic_route,
+                      method=method, route=diagnostic_route,
+                      response_type=response_type, correlation_id=correlation_id,
                       error=LichessError("HTTP status error", response.status))
             detail = response.body[:2048].decode("utf-8", "replace")
-            raise LichessError(_error_message(response.status, detail), response.status)
+            message = _error_message(response.status, detail)
+            if response.status == 403 and path == "/api/account":
+                message = ("Проверка аккаунта отклонена Lichess (HTTP 403). "
+                           "Сохранённые локальные данные доступны; автоматическая повторная авторизация не запускается.")
+            raise LichessError(message, response.status,
+                               response_type)
         if diagnostic_route == "puzzle_dashboard":
             log_event("puzzle_sync_dashboard_received", "lichess_api",
                       duration_ms=(time.monotonic() - started) * 1000,
                       bytes=len(response.body), http_status=response.status)
         return response
+
 
     def _check_cooldown_locked(self) -> None:
         deadline = self._rate_limited_until - time.monotonic()
@@ -539,3 +556,19 @@ class LichessClient:
 
     def stream_game(self, token: str, game_id: str, stop_event: threading.Event) -> Iterator[dict]:
         yield from self.stream_ndjson(f"/api/board/game/stream/{game_id}", token, stop_event)
+
+
+def _classify_error_response(headers: Mapping[str, str], body: bytes) -> str:
+    """Classify a denial without retaining or logging its contents."""
+    content_type = next((str(value).casefold() for key, value in headers.items()
+                         if str(key).casefold() == "content-type"), "")
+    if "json" in content_type:
+        return "json"
+    if "html" in content_type:
+        return "html"
+    prefix = body.lstrip()[:32].lower()
+    if prefix.startswith((b"<!doctype html", b"<html")):
+        return "html"
+    if prefix.startswith((b"{", b"[")):
+        return "json"
+    return "other"
