@@ -1,3 +1,11 @@
+## 02.11.2026 — PR #30 C0–C2: Lichess credentials and HTTP 403 diagnostics
+
+В `codex/m45-batch-analysis` продолжается существующий draft [PR #30](https://github.com/feshakomissarov-prog/chess/pull/30), base `main`; M4.6 не начинался. C0 реализует OAuth PKCE и отдельный PAT connection flow с Credential Manager слотами `oauth-access-token` и `personal-access-token`; выбранный enum хранится в QSettings. C1 добавляет безопасную классификацию/диагностику account 401/403/429; реальная причина 403 не установлена без разрешённого живого запроса. C2 добавляет регрессии на credential isolation, validation-before-save, auto-restore, late worker results, UI masking и отсутствие секретов в логах/QSettings.
+
+Windows CPython 3.12.10 / Qt offscreen локально: **375 тестов PASS**, `compileall`, `pip check`, `git diff --check` PASS. Windows Actions run [#109](https://github.com/feshakomissarov-prog/chess/actions/runs/41360194914) на SHA `6ae0ec7ec4d590d46639c1d86edafeb92d1dc942`: **SUCCESS, 375 passed**, compileall и isolated offline window initialization PASS. Последующий docs-only итоговый commit должен пройти exact-head CI отдельно. Реальные OAuth/Lichess, пользовательская SQLite/архив и Stockfish не использованы. Подробности и ручные шаги — в [M4.5 execution log](handoffs/M4_5_EXECUTION_LOG.md). Владелец должен отозвать ранее раскрытый PAT на Lichess до использования и только локально создать новый минимальный PAT; не присылать секрет в переписке.
+
+---
+
 ## 02.11.2026 — идеи будущего учебного режима сохранены, код не начинался
 
 [Черновик M4.7 Training Arena и GitHub-референсы](research/M4_7_TRAINING_ARENA_IDEAS_AND_GITHUB_REFERENCES.md): локальная игра от выбранной позиции против Stockfish, уровни помощи, дебютный sparring, оценка и сохранение собственных планов/стрелок, повтор без подсказок. Изучены сохранённые репозитории Opening Trainer, Tabia, Blitzr, CARA, DaisyChess, Maia, qam4/chess-coach, Mainline, Chesser. **Решение: пересмотреть и скорректировать идеи после реализации/приёмки M4.6, перед началом M5 (голос).** Это не утверждённое техническое задание, в текущем draft PR #30 ничего не меняется. Учебная engine-помощь — только в отдельном безопасном локальном режиме; Board API Lichess остаётся без engine hints во время игры.
@@ -214,3 +222,50 @@ git pull --ff-only
 **Не удалять локальные изменения ради switch/pull.** При установленном ярлыке `Chess Coach.lnk` можно запускать двойным щелчком; он использует `.venv\Scripts\pythonw.exe` и может автоматически восстановить OAuth-соединение. Если нужен настоящий офлайн-тест, код должен явно гарантировать отсутствие обращений к сети. Для новой установки ориентироваться на `README.md` и Python >=3.12; пока версия 3.12 не подтверждена тестами.
 
 **Ближайшее решение (01.11.2026):** пользователь передаёт Codex одно большое ТЗ [M3_M4_DATA_ARCHIVE_ANALYTICS_PUZZLES.md](specs/M3_M4_DATA_ARCHIVE_ANALYTICS_PUZZLES.md), реализация внутри — по небольшим проверяемым блокам/PR. Сначала завершить P0 и осознанно принять #8, затем SQLite/импорт, после Stockfish/сводная аналитика и задачи Lichess. Голос позднее.
+
+## M4.5 — активная работа (2026-11-01)
+
+Единое утверждённое ТЗ v2.0 [M4_5_BATCH_ANALYSIS_PERSONAL_DIAGNOSTICS.md](specs/M4_5_BATCH_ANALYSIS_PERSONAL_DIAGNOSTICS.md), этапы 0–I выполняются в ветке `codex/m45-batch-analysis` от актуального `main` `6c3692c827294386fd070da9f9e7f086429320d9`, draft [PR #30](https://github.com/feshakomissarov-prog/chess/pull/30), base `main`. Последний кодовый checkpoint `415c9e1c7fa8cb0c3da1170ff2176bc87cd0e495` (в PR). Этапы 0/A/B/C/D/E/F/G/H/I выполнялись с отдельными commits и записями; подробные SHA и результаты — в [M4_5_EXECUTION_LOG.md](handoffs/M4_5_EXECUTION_LOG.md). Schema v16 аддитивно хранит точность дат; старые game/PGN facts не перестраивались. Реализованы версия-совместимая очередь, метрики/события, bounded selective review, CC0 opening transpositions, phase provenance, библиотека/паспорт, per-color recent/historical profile, source-aware aggregates и evidence positions. Окно массового анализа включает явный старт, pause/resume/cancel, параметры CPU/Hash/лимита, fail-closed Lichess preflight перед каждой игрой и восстановление совместимых заданий после рестарта; возобновление/отмена ограничены точной парой engine hash + параметрами.
+
+Подтверждения кода: Windows Python 3.12.10 локально `python -m pytest -q` — **285 PASS**, включая корпус из 20 hand-authored synthetic mini-reports; compileall, pip check и diff-check PASS. Windows CI [run #76](https://github.com/feshakomissarov-prog/chess/actions/runs/41282799453) на SHA `415c9e1c7fa8cb0c3da1170ff2176bc87cd0e495`: **SUCCESS, 285 passed за 119.67 с**, Python 3.12.10, Qt/PySide6/shiboken6 6.12.0, compileall и изолированная офлайн-инициализация Qt окна PASS. Ранее run #75 на предыдущем code checkpoint также прошёл (265 PASS).
+
+Ограничения/приёмка: real opportunity conversion остаётся **PARTIAL** — нет подтверждённой связи candidate → последующее действие, поэтому процента нет. Большой набор из 20 отчётов не заменяет оценку на 20 реальных/контрольных партиях. Визуальная ручная проверка GUI, пользовательская SQLite/PGN, живые OAuth/Lichess и настоящий Stockfish — **NOT RUN/NOT TOUCHED**. PR остаётся draft; ничего не слито.
+
+## M4.5 second-pass review — текущий handoff (2026-11-01)
+
+В ветке `codex/m45-batch-analysis`, draft PR [#30](https://github.com/feshakomissarov-prog/chess/pull/30), реализуются R10–R17 из [second-pass spec](reviews/PR30_M45_SECOND_PASS_REVIEW_FIX_SPEC.md). Подробные коммиты, тесты и ограничения записаны в [execution log](handoffs/M4_5_EXECUTION_LOG.md).
+
+- R10: selective review newest-first, SQL pages, quota расходуется только на новые jobs; 200 synthetic games доказывают progression 10+10 без запуска UCI.
+- R11: schema v17 additive refresh checkpoint по account/game/revision/hash; no-eval/partial/changed/API failure и retry deadline; fake export 80 партий проходит 25+25+25+5, archive backfill cursor сохраняется.
+- R12: opportunity metrics account-relative по mover и выбранному account color; один shared analysis run на два linked accounts; глобальная owner-relative метка `opponent_blunder` больше не сохраняется.
+- R13: source score completeness отдельно от собственных сравнимых решений; PGN root `%eval` сохраняется в ply 0 только при наличии; GUI обозначает missing first-move baseline.
+- R14: opening provenance отдельно маркирует Lichess ECO и CC0 matcher, конфликт остаётся видимым.
+- R15: obsolete detector rows/tags остаются историей, но исключены из активного отчёта и review planning.
+- R16: локальная accuracy честно остаётся NULL/unsupported; UI поясняет причину и coverage, Lichess accuracy остаётся отдельной.
+- R17/CI: Windows Python 3.12.10 полный offscreen CI на финальном SHA ещё ожидается; локальный полный прогон достиг 100%, но двойной `-q` подавил явную summary, поэтому локальный PASS пока не утверждается. Обновить этот статус по фактическому Actions run.
+
+Реальные Lichess/OAuth, архив, личная SQLite и настоящий Stockfish не запускались/не открывались. Fair Play synthetic regressions включают активное изменение snapshot, timeout/429 и lease loss. PR не слит и должен оставаться draft.
+
+### Второй проход review R10–R17 — CI checkpoint
+
+Windows Actions run [#86](https://github.com/feshakomissarov-prog/chess/actions/runs/41329457378) на code SHA `44782f00374456f35cfc9ab45b453b8fdb3d0ce6` — **SUCCESS**, 310 passed за 201.80 с; Windows Server 2025, Python 3.12.10 x64, PySide6/Qt/shiboken6 6.12.0. `compileall` и isolated offline window initialization PASS. Подробный status каждого R10–R17 и ручные ограничения — в [execution log](handoffs/M4_5_EXECUTION_LOG.md). Final exact-head verification is recorded there.
+
+Документационный head `9ca4b32e75744db980bd4540579a3bbcc12eee65` проверен Windows Actions run [#87](https://github.com/feshakomissarov-prog/chess/actions/runs/41329890613): SUCCESS, 310 passed за 224.16 с; compileall и isolated offline window init PASS. После обновления журнала запускается завершающий точный CI на новом head.
+
+## M4.5.1 U10–U16 — актуальный handoff (2026-11-01)
+
+Продолжение: тот же `codex/m45-batch-analysis`, тот же draft [PR #30](https://github.com/feshakomissarov-prog/chess/pull/30), base `main`. Обязательное ревью-ТЗ: [U10–U16](reviews/PR30_M451_U0_U9_FOLLOWUP_REVIEW_SPEC.md); полный статус этапов и результаты см. [журнал исполнения](handoffs/M4_5_EXECUTION_LOG.md). Исторические статусы выше описывают предыдущие checkpoint и не являются текущим состоянием.
+
+- U10: локальный position evaluation в обычном режиме требует успешного актуального Lichess `/api/account/playing` preflight; активная человеческая игра, неизвестный/усечённый ответ, устаревшая сессия, 429 или disconnect блокируют запуск и отменяют выдачу. Fake-service/fake-engine проверки PASS; абсолютный сетевой race с новой игрой остаётся ограничением короткого lease, реальный Lichess не проверялся.
+- U11–U15: bounded discovery существующего вложенного Stockfish; скрытое до подтверждения решение Lichess Puzzle; честные знаменатели статистики и реально свёрнутые фильтры; реактивная fail-closed готовность Batch Analysis; локальный выбор истории задач по аккаунту без сетевых запросов. Регрессионные тесты добавлены.
+- U16: M4.6 не реализуется; из origin/main перенесён только будущий документ спецификации. Ранее установленный Stockfish 19 проверен UCI без переустановки. Ни личная SQLite, ни OAuth, ни архив не использовались.
+- Локально на Windows Python 3.12.10: полный offscreen набор **350 тестов PASS**, целевые проверки — **13 PASS**; compileall и diff-check PASS. Windows CI на точном SHA `78aff6310a0ff963946897aa3d0fb9214ef3ac03` — **SUCCESS**, run [#98](https://github.com/feshakomissarov-prog/chess/actions/runs/41349352168); offscreen tests, compileall и isolated offline window initialization PASS. Последующий документационный commit требует нового exact-head CI.
+- GUI-пилот, Lichess, OAuth, пользовательские данные и анализ двух партий остаются **НЕ ПРОВЕРЕНЫ**. Следующая ручная приёмка должна ограничиться ровно двумя завершёнными партиями после создания пользователем резервной копии собственной SQLite.
+
+PR остаётся draft. M4.6 не начинать до отдельного принятия M4.5/M4.5.1 владельцем.
+
+## M4.5.1 B0–B4 — текущая работа (2026-11-02)
+
+Продолжение в `codex/m45-batch-analysis`, draft PR #30; применено ТЗ [B0–B4 live pilot](https://github.com/feshakomissarov-prog/chess/blob/chatgpt/pr30-live-pilot-multipv-puzzles-logs-arrows/docs/reviews/PR30_M451_LIVE_PILOT_ENGINE_PUZZLES_LOGGING_ARROWS.md). MultiPV больше не задаётся через `SimpleEngine.configure`; selective режим передаёт `multipv` параметр поиску, ошибки остаются `failed` без автоматического retry. Добавлены постоянные обезличенные ротационные логи и доступ/opt-in отчёт в настройках, `since`-ограничение и пропуск неизменённых Lichess puzzle записей, нулевой sync больше не запрашивает dashboard, ручные стрелки ПКМ заметно толще при сохранении отдельного тонкого предхода.
+
+Локально Windows Python 3.12.10, Qt offscreen: полный набор **360 тестов PASS за 115.92 с** (целевой набор из затронутых файлов ранее — 180 PASS). Установленный Stockfish 19 (не переустанавливался) реально завершил анализ синтетической партии `e2e4 e7e5`, 3 позиции × 3000 узлов; analysis run записан в изолированную временную SQLite. Реальные Lichess/OAuth/архив/личная SQLite и массовый Stockfish не запускались. Windows Actions для implementation SHA `38c051b11b9776165fc0648b56fa1f945f1d226a` — SUCCESS, run [#103](https://github.com/feshakomissarov-prog/chess/actions/runs/41355300614): Windows Server 2025/Python 3.12.10, 360 PASS, compileall и isolated offline-window initialization PASS. Последующая только-документационная фиксация статуса проверяется новым exact-head CI.

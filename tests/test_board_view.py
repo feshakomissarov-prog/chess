@@ -117,6 +117,17 @@ def test_annotation_right_click_and_drag_toggle_without_move(qtbot) -> None:
     assert widget._board.fen() == board.fen()
 
 
+def test_manual_annotation_arrows_are_prominent_at_supported_board_sizes():
+    for side in (400, 480, 560, 640):
+        square = side / 8
+        width = BoardView._arrow_width(square, 0.88)
+        assert width >= 8
+        assert width <= 17
+        assert 0.20 * square <= width <= 0.23 * square or width == 17
+    # Premove remains visibly separate and keeps its independent rendering path.
+    assert BoardView._arrow_width(55, 0.76) < BoardView._arrow_width(55, 0.88)
+
+
 def test_annotation_action_signal_records_add_remove_and_clear_context(qtbot) -> None:
     widget = BoardView(chess.Board())
     qtbot.addWidget(widget)

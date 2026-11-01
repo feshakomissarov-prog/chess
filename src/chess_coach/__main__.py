@@ -2,42 +2,18 @@
 
 import sys
 import argparse
-from datetime import datetime, timezone
-import os
-from pathlib import Path
-import traceback
 
 from PySide6.QtWidgets import QApplication
+
+from .diagnostics import configure_logging, log_event
 
 from .window import MainWindow
 
 
 def _exception_hook(exc_type, exc_value, exc_traceback) -> None:
-    """Write stack-only diagnostics for pythonw launches; never log game data."""
-    try:
-        local_app_data = os.environ.get("LOCALAPPDATA")
-        root = Path(local_app_data) if local_app_data else Path.home() / "AppData" / "Local"
-        logs = root / "ChessCoach" / "logs"
-        logs.mkdir(parents=True, exist_ok=True)
-        path = logs / "crash.log"
-        if path.exists() and path.stat().st_size >= 1_000_000:
-            rotated = logs / "crash.log.1"
-            if rotated.exists():
-                rotated.unlink()
-            path.replace(rotated)
-        frames = traceback.extract_tb(exc_traceback, limit=16)
-        summary = "\n".join(
-            f"  {Path(frame.filename).name}:{frame.lineno} in {frame.name}"
-            for frame in frames
-        )
-        with path.open("a", encoding="utf-8") as stream:
-            stream.write(
-                f"{datetime.now(timezone.utc).isoformat()} "
-                f"{exc_type.__name__}\n{summary}\n\n"
-            )
-    except Exception:
-        # Diagnostics must not replace the original exception or create a loop.
-        pass
+    """Log only the exception class; traceback paths may reveal local usernames."""
+    log_event("unhandled_exception", "application", level=40,
+              error=exc_value if isinstance(exc_value, BaseException) else RuntimeError())
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -53,6 +29,9 @@ def main(argv: list[str] | None = None) -> int:
     )
     args = parser.parse_args(argv)
     sys.excepthook = _exception_hook
+    configure_logging()
+    log_event("app_start", "application", mode=("offline" if args.offline else
+              "manual_connect" if args.manual_connect else "standard"))
     app = QApplication([sys.argv[0]])
     app.setOrganizationName("ChessCoach")
     app.setApplicationName("ChessCoach")

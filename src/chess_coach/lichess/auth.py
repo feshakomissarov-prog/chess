@@ -6,12 +6,15 @@ import base64
 import hashlib
 import secrets
 import threading
+import time
+import uuid
 from dataclasses import dataclass
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from typing import Protocol
+from typing import Callable, Protocol
 from urllib.parse import parse_qs, urlencode, urlparse
 
 from .api import LichessClient, LichessError
+from ..diagnostics import log_event
 
 
 CLIENT_ID = "chess-coach-feshakomissarov-prog-windows"
@@ -35,6 +38,7 @@ class WindowsCredentialStore:
 
     SERVICE = "ChessCoach.Lichess"
     USER = "oauth-access-token"
+    PERSONAL_TOKEN_USER = "personal-access-token"
 
     def __init__(self, keyring_module=None, *, service: str | None = None,
                  user: str | None = None) -> None:
@@ -143,7 +147,7 @@ class OAuthCallbackServer:
                 )
                 owner._received.set()
                 payload = (
-                    "Авторизация завершена. Можно вернуться в Chess Coach."
+                    "Код передан Chess Coach. Проверку аккаунта завершит приложение."
                     if owner._result.code
                     else "Авторизация не завершена. Вернитесь в Chess Coach."
                 ).encode("utf-8")
@@ -213,15 +217,45 @@ def authorize_and_store(
     callback: OAuthCallbackServer,
     request: AuthorizationRequest,
     timeout: float = 300.0,
+    is_current: Callable[[], bool] | None = None,
 ) -> tuple[str, str]:
     """Exchange a checked callback, validate the token, then persist it."""
+    correlation_id = uuid.uuid4().hex[:12]
+    stage_started = time.monotonic()
     code = callback.wait(request.state, timeout)
-    token = client.exchange_code(
-        code, request.verifier, request.redirect_uri, CLIENT_ID
-    )
-    account = client.get_account(token)
+    log_event("oauth_callback_received", "lichess_auth", correlation_id=correlation_id)
+    if is_current is not None and not is_current():
+        raise LichessError("Запрос авторизации устарел; подключение не сохранено.")
+    try:
+        token = client.exchange_code(
+            code, request.verifier, request.redirect_uri, CLIENT_ID
+        )
+    except Exception as exc:
+        log_event("oauth_exchange_failed", "lichess_auth", correlation_id=correlation_id,
+                  stage="oauth", http_status=getattr(exc, "status", None), error=exc)
+        raise
+    log_event("oauth_exchange_success", "lichess_auth", correlation_id=correlation_id,
+              duration_ms=(time.monotonic() - stage_started) * 1000)
+    account_started = time.monotonic()
+    log_event("account_check_started", "lichess_auth", correlation_id=correlation_id,
+              stage="oauth")
+    try:
+        account = client.get_account(token)
+    except Exception as exc:
+        log_event("account_check_failed", "lichess_auth", correlation_id=correlation_id,
+                  stage="oauth", http_status=getattr(exc, "status", None),
+                  response_type=getattr(exc, "response_type", None), error=exc)
+        raise
     username = account.get("username")
-    if not isinstance(username, str) or not username:
+    if not isinstance(username, str) or not username.strip():
         raise LichessError("Lichess не вернул имя аккаунта.")
+    if is_current is not None and not is_current():
+        raise LichessError("Проверка аккаунта устарела; подключение не сохранено.")
+    log_event("account_check_succeeded", "lichess_auth", correlation_id=correlation_id,
+              stage="oauth", duration_ms=(time.monotonic() - account_started) * 1000)
     token_store.set(token)
-    return token, username
+    log_event("credential_store_success", "lichess_auth", correlation_id=correlation_id,
+              stage="oauth")
+    log_event("connection_ready", "lichess_auth", correlation_id=correlation_id,
+              stage="oauth")
+    return token, username.strip()

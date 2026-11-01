@@ -1,0 +1,627 @@
+"""SQLite M4.5 schema and migration tests use synthetic temporary databases only."""
+
+from __future__ import annotations
+
+import sqlite3
+import threading
+
+import pytest
+
+from chess_coach.lichess.repository import GameRepository, SCHEMA_VERSION
+from chess_coach.lichess.archive import ArchiveSync
+from chess_coach.lichess.api import RateLimitError
+from chess_coach.lichess.statistics import StatisticsService
+
+
+def _seed_repository(path) -> tuple[GameRepository, str]:
+    repository = GameRepository(path)
+    repository.save_snapshot(
+        "synthetic-game", "startpos", "e2e4 e7e5", "white", "Synthetic opponent",
+        False, "blitz", "mate", "white", white_player="Synthetic user",
+        black_player="Synthetic opponent", started_at="2026-10-01T12:00:00+00:00",
+    )
+    revision = repository.current_line("synthetic-game")
+    assert revision is not None
+    repository.save_note("synthetic-game", "synthetic note", line_revision=1, ply=1)
+    repository.save_analysis(
+        "synthetic-game", line_revision=1, line_hash=revision["line_hash"],
+        source="stockfish", engine_name="Fake UCI", engine_version="fake-v1",
+        parameters={"limit_kind": "nodes", "limit_value": 10},
+        assessments=[
+            {"ply": 0, "white_cp": 0, "nodes": 10, "pv": ["e2e4"]},
+            {"ply": 1, "white_cp": 15, "nodes": 10, "pv": ["e7e5"]},
+            {"ply": 2, "white_cp": 5, "nodes": 10, "pv": ["g1f3"]},
+        ],
+        classifications=[
+            {"ply": 1, "mover": "white", "eval_loss_cp": 0, "label": "good"},
+            {"ply": 2, "mover": "black", "eval_loss_cp": 10, "label": "good"},
+        ],
+    )
+    return repository, revision["line_hash"]
+
+
+def _mark_as_v9(path) -> None:
+    with sqlite3.connect(path) as db:
+        db.execute("DROP VIEW IF EXISTS analysis_coverage")
+        db.execute("DROP TABLE IF EXISTS event_tags")
+        db.execute("DROP TABLE IF EXISTS analysis_alternatives")
+        db.execute("DROP TABLE IF EXISTS analysis_events")
+        db.execute("DROP TABLE IF EXISTS move_metrics")
+        db.execute("DROP TABLE IF EXISTS analysis_jobs")
+        db.execute("PRAGMA user_version=9")
+
+
+def test_schema_v16_includes_openings_and_date_precision_without_copying_game_facts(tmp_path):
+    path = tmp_path / "synthetic.sqlite3"
+    repository, line_hash = _seed_repository(path)
+    try:
+        assert SCHEMA_VERSION == 17
+        with repository._connection() as db:
+            version = db.execute("PRAGMA user_version").fetchone()[0]
+            game = db.execute("SELECT game_id,pgn,moves FROM games WHERE game_id=?",
+                              ("synthetic-game",)).fetchone()
+            revision = db.execute("SELECT line_hash FROM game_revisions WHERE game_id=?",
+                                  ("synthetic-game",)).fetchone()
+            coverage = db.execute("SELECT * FROM analysis_coverage WHERE game_id=?",
+                                  ("synthetic-game",)).fetchone()
+            tables = {row[0] for row in db.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'")}
+            columns = {row[1] for row in db.execute("PRAGMA table_info(games)")}
+        assert version == 17
+        assert game["game_id"] == "synthetic-game" and game["moves"] == "e2e4 e7e5"
+        assert game["pgn"]
+        assert revision["line_hash"] == line_hash
+        assert coverage["total_positions"] == 3
+        assert coverage["scored_positions"] == 3
+        assert coverage["comparable_move_pairs"] == 2
+        assert {"games", "game_revisions", "analysis_jobs", "move_metrics",
+                "analysis_events", "event_tags", "analysis_alternatives", "opening_matches"} <= tables
+        assert "game_time_precision" in columns
+        assert coverage["measured_moves"] == 2
+        assert "lichess_eval_refresh_state" in tables
+    finally:
+        repository.shutdown()
+
+
+def test_v16_to_v17_eval_refresh_migration_is_additive_and_backed_up(tmp_path):
+    path = tmp_path / "v16-targeted-refresh.sqlite3"
+    repository, line_hash = _seed_repository(path)
+    repository.shutdown()
+    with sqlite3.connect(path) as db:
+        db.execute("PRAGMA user_version=16")
+    migrated = GameRepository(path)
+    try:
+        backup = path.with_name(path.name + ".pre-m3-v17.bak")
+        assert backup.exists()
+        with sqlite3.connect(backup) as db:
+            assert db.execute("PRAGMA integrity_check").fetchone()[0] == "ok"
+            assert db.execute("PRAGMA user_version").fetchone()[0] == 16
+            assert db.execute("SELECT COUNT(*) FROM games").fetchone()[0] == 1
+            assert db.execute("SELECT COUNT(*) FROM game_notes").fetchone()[0] == 1
+        with migrated._connection() as db:
+            assert db.execute("PRAGMA user_version").fetchone()[0] == 17
+            assert db.execute("SELECT COUNT(*) FROM games").fetchone()[0] == 1
+            assert db.execute("SELECT COUNT(*) FROM game_moves").fetchone()[0] == 2
+            assert db.execute("SELECT COUNT(*) FROM position_assessments").fetchone()[0] == 3
+            assert db.execute("SELECT line_hash FROM game_revisions").fetchone()[0] == line_hash
+            assert db.execute("PRAGMA foreign_key_check").fetchall() == []
+            assert db.execute("SELECT COUNT(*) FROM lichess_eval_refresh_state").fetchone()[0] == 0
+    finally:
+        migrated.shutdown()
+
+
+def test_opening_v16_database_does_not_rewrite_coverage_view(tmp_path):
+    path = tmp_path / "stable-schema.sqlite3"
+    first = GameRepository(path)
+    first.shutdown()
+    with sqlite3.connect(path) as db:
+        schema_version_before = db.execute("PRAGMA schema_version").fetchone()[0]
+        view_sql_before = db.execute(
+            "SELECT sql FROM sqlite_master WHERE type='view' AND name='analysis_coverage'").fetchone()[0]
+    reopened = GameRepository(path)
+    reopened.shutdown()
+    with sqlite3.connect(path) as db:
+        schema_version_after = db.execute("PRAGMA schema_version").fetchone()[0]
+        view_sql_after = db.execute(
+            "SELECT sql FROM sqlite_master WHERE type='view' AND name='analysis_coverage'").fetchone()[0]
+    assert schema_version_after == schema_version_before
+    assert view_sql_after == view_sql_before
+
+
+def test_v9_upgrade_creates_verified_backup_and_preserves_existing_records(tmp_path):
+    path = tmp_path / "upgrade.sqlite3"
+    repository, line_hash = _seed_repository(path)
+    repository.shutdown()
+    _mark_as_v9(path)
+
+    upgraded = GameRepository(path)
+    try:
+        backup = path.with_name(path.name + ".pre-m3-v17.bak")
+        assert backup.exists()
+        with sqlite3.connect(backup) as backup_db:
+            assert backup_db.execute("PRAGMA integrity_check").fetchone()[0] == "ok"
+            assert backup_db.execute("PRAGMA user_version").fetchone()[0] == 9
+            assert backup_db.execute("SELECT COUNT(*) FROM games").fetchone()[0] == 1
+            assert backup_db.execute("SELECT COUNT(*) FROM game_notes").fetchone()[0] == 1
+            assert backup_db.execute("SELECT COUNT(*) FROM analysis_runs").fetchone()[0] == 1
+        with upgraded._connection() as db:
+            assert db.execute("PRAGMA user_version").fetchone()[0] == 17
+            assert db.execute("SELECT COUNT(*) FROM games").fetchone()[0] == 1
+            assert db.execute("SELECT COUNT(*) FROM game_moves").fetchone()[0] == 2
+            assert db.execute("SELECT COUNT(*) FROM game_positions").fetchone()[0] == 3
+            assert db.execute("SELECT body FROM game_notes").fetchone()[0] == "synthetic note"
+            assert db.execute("SELECT line_hash FROM game_revisions").fetchone()[0] == line_hash
+            assert db.execute("SELECT COUNT(*) FROM position_assessments").fetchone()[0] == 3
+        assert upgraded.latest_analysis_detail("synthetic-game", 1) is not None
+    finally:
+        upgraded.shutdown()
+
+
+def test_v10_database_with_preexisting_analysis_jobs_is_upgraded_additively(tmp_path):
+    path = tmp_path / "preexisting-jobs-v10.sqlite3"
+    repository, _line_hash = _seed_repository(path)
+    candidate = repository.list_games_needing_fast_analysis()[0]
+    repository.enqueue_analysis_jobs(
+        [candidate], analysis_pass="fast", engine_version="synthetic-engine",
+        parameters={"limit_kind": "nodes", "limit_value": 20_000})
+    repository.shutdown()
+
+    with sqlite3.connect(path) as db:
+        db.execute("ALTER TABLE analysis_jobs DROP COLUMN result_run_id")
+        db.execute("ALTER TABLE analysis_jobs DROP COLUMN lease_until")
+        db.execute("ALTER TABLE analysis_jobs DROP COLUMN lease_owner")
+        db.execute("DROP TABLE IF EXISTS analysis_events")
+        db.execute("DROP TABLE IF EXISTS event_tags")
+        db.execute("DROP TABLE IF EXISTS analysis_alternatives")
+        db.execute("DROP TABLE IF EXISTS move_metrics")
+        db.execute("PRAGMA user_version=10")
+
+    upgraded = GameRepository(path)
+    try:
+        backup = path.with_name(path.name + ".pre-m3-v17.bak")
+        with sqlite3.connect(backup) as db:
+            assert db.execute("PRAGMA integrity_check").fetchone()[0] == "ok"
+            assert db.execute("PRAGMA user_version").fetchone()[0] == 10
+            assert db.execute("SELECT COUNT(*) FROM analysis_jobs").fetchone()[0] == 1
+        with upgraded._connection() as db:
+            assert db.execute("PRAGMA user_version").fetchone()[0] == 17
+            columns = {row[1] for row in db.execute("PRAGMA table_info(analysis_jobs)")}
+            assert {"lease_owner", "lease_until", "result_run_id"} <= columns
+            job = db.execute("SELECT status,game_id FROM analysis_jobs").fetchone()
+        assert tuple(job) == ("queued", "synthetic-game")
+    finally:
+        upgraded.shutdown()
+
+
+def test_v11_database_upgrades_additively_to_move_metrics_and_events(tmp_path):
+    path = tmp_path / "upgrade-v11.sqlite3"
+    repository, line_hash = _seed_repository(path)
+    repository.shutdown()
+    with sqlite3.connect(path) as db:
+        db.execute("DROP TABLE analysis_events")
+        db.execute("DROP TABLE event_tags")
+        db.execute("DROP TABLE analysis_alternatives")
+        db.execute("DROP TABLE move_metrics")
+        db.execute("DROP VIEW analysis_coverage")
+        db.execute("PRAGMA user_version=11")
+    upgraded = GameRepository(path)
+    try:
+        backup = path.with_name(path.name + ".pre-m3-v17.bak")
+        with sqlite3.connect(backup) as db:
+            assert db.execute("PRAGMA user_version").fetchone()[0] == 11
+            assert db.execute("PRAGMA integrity_check").fetchone()[0] == "ok"
+        with upgraded._connection() as db:
+            assert db.execute("PRAGMA user_version").fetchone()[0] == 17
+            assert db.execute("SELECT line_hash FROM game_revisions").fetchone()[0] == line_hash
+            assert db.execute("SELECT COUNT(*) FROM games").fetchone()[0] == 1
+            assert db.execute("SELECT COUNT(*) FROM analysis_runs").fetchone()[0] == 1
+            assert db.execute("SELECT COUNT(*) FROM move_metrics").fetchone()[0] == 0
+            assert db.execute("SELECT COUNT(*) FROM analysis_events").fetchone()[0] == 0
+    finally:
+        upgraded.shutdown()
+
+
+def test_v12_database_adds_many_to_many_event_tags_without_touching_analysis(tmp_path):
+    path = tmp_path / "upgrade-v12.sqlite3"
+    repository, line_hash = _seed_repository(path)
+    repository.shutdown()
+    with sqlite3.connect(path) as db:
+        db.execute("DROP TABLE event_tags")
+        db.execute("DROP TABLE analysis_alternatives")
+        db.execute("PRAGMA user_version=12")
+    upgraded = GameRepository(path)
+    try:
+        backup = path.with_name(path.name + ".pre-m3-v17.bak")
+        with sqlite3.connect(backup) as db:
+            assert db.execute("PRAGMA user_version").fetchone()[0] == 12
+            assert db.execute("PRAGMA integrity_check").fetchone()[0] == "ok"
+        with upgraded._connection() as db:
+            assert db.execute("PRAGMA user_version").fetchone()[0] == 17
+            assert db.execute("SELECT line_hash FROM game_revisions").fetchone()[0] == line_hash
+            assert db.execute("SELECT COUNT(*) FROM position_assessments").fetchone()[0] == 3
+            assert db.execute("SELECT COUNT(*) FROM move_metrics").fetchone()[0] == 2
+            assert db.execute("SELECT COUNT(*) FROM event_tags").fetchone()[0] == 0
+    finally:
+        upgraded.shutdown()
+
+
+def test_v13_database_adds_review_alternatives_and_preserves_event_tags(tmp_path):
+    path = tmp_path / "upgrade-v13.sqlite3"
+    repository, _line_hash = _seed_repository(path)
+    repository.shutdown()
+    with sqlite3.connect(path) as db:
+        tagged = db.execute("SELECT COUNT(*) FROM event_tags").fetchone()[0]
+        assert tagged > 0
+        db.execute("DROP TABLE analysis_alternatives")
+        db.execute("PRAGMA user_version=13")
+    upgraded = GameRepository(path)
+    try:
+        backup = path.with_name(path.name + ".pre-m3-v17.bak")
+        with sqlite3.connect(backup) as db:
+            assert db.execute("PRAGMA user_version").fetchone()[0] == 13
+            assert db.execute("PRAGMA integrity_check").fetchone()[0] == "ok"
+        with upgraded._connection() as db:
+            assert db.execute("PRAGMA user_version").fetchone()[0] == 17
+            assert db.execute("SELECT COUNT(*) FROM event_tags").fetchone()[0] == tagged
+            assert db.execute("SELECT COUNT(*) FROM position_assessments").fetchone()[0] == 3
+            assert db.execute("SELECT COUNT(*) FROM analysis_alternatives").fetchone()[0] == 0
+    finally:
+        upgraded.shutdown()
+
+
+def test_v9_migration_failure_rolls_back_new_ddl_and_keeps_backup_and_facts(
+        tmp_path, monkeypatch):
+    path = tmp_path / "rollback.sqlite3"
+    repository, _line_hash = _seed_repository(path)
+    repository.shutdown()
+    _mark_as_v9(path)
+
+    original = GameRepository._migrate_m45_schema
+
+    def fail_after_ddl(db):
+        original(db)
+        raise RuntimeError("injected migration failure")
+
+    monkeypatch.setattr(GameRepository, "_migrate_m45_schema", staticmethod(fail_after_ddl))
+    with pytest.raises(RuntimeError, match="injected migration failure"):
+        GameRepository(path)
+
+    with sqlite3.connect(path) as db:
+        assert db.execute("PRAGMA user_version").fetchone()[0] == 9
+        assert db.execute("SELECT COUNT(*) FROM games").fetchone()[0] == 1
+        assert db.execute("SELECT COUNT(*) FROM game_notes").fetchone()[0] == 1
+        assert db.execute("SELECT COUNT(*) FROM analysis_runs").fetchone()[0] == 1
+        assert db.execute("SELECT name FROM sqlite_master WHERE name='analysis_jobs'").fetchone() is None
+        assert db.execute("SELECT name FROM sqlite_master WHERE name='move_metrics'").fetchone() is None
+        assert db.execute("SELECT name FROM sqlite_master WHERE name='analysis_events'").fetchone() is None
+        assert db.execute("SELECT name FROM sqlite_master WHERE name='event_tags'").fetchone() is None
+        assert db.execute("PRAGMA integrity_check").fetchone()[0] == "ok"
+    backup = path.with_name(path.name + ".pre-m3-v17.bak")
+    with sqlite3.connect(backup) as db:
+        assert db.execute("PRAGMA integrity_check").fetchone()[0] == "ok"
+
+    monkeypatch.setattr(GameRepository, "_migrate_m45_schema", staticmethod(original))
+    recovered = GameRepository(path)
+    try:
+        assert len(recovered.list_games()) == 1
+        with recovered._connection() as db:
+            assert db.execute("PRAGMA user_version").fetchone()[0] == 17
+            assert db.execute("SELECT COUNT(*) FROM analysis_jobs").fetchone()[0] == 0
+    finally:
+        recovered.shutdown()
+
+
+def test_late_lichess_pgn_evaluations_merge_into_one_partial_run_without_erasing_scores(tmp_path):
+    repository = GameRepository(tmp_path / "late-evals.sqlite3")
+    try:
+        partial = {
+            "id": "late-eval-game",
+            "pgn": ('[Event "Archive"]\n[White "Me"]\n[Black "Friend"]\n[Result "*"]\n\n'
+                    '1. e4 { [%eval 0.25,20] } e5 *\n'),
+        }
+        repository.import_archive_record("Me", partial, checkpoint_ms=10, backfill=True)
+        first_runs = repository.list_analyses("late-eval-game")
+        assert len(first_runs) == 1
+        assert first_runs[0]["status"] == "partial"
+        from chess_coach.lichess.statistics import StatisticsService
+        partial_summary = StatisticsService(repository).summary(analysis_source="lichess-pgn")
+        assert partial_summary["analysis_games"] == 1
+        assert partial_summary["evaluated_moves"] == 0
+        assert partial_summary["scored_positions"] == 1
+        first_run_id = first_runs[0]["run_id"]
+        first = repository.find_analysis_cache(
+            "late-eval-game", 1, first_runs[0]["line_hash"], "lichess-pgn", None,
+            {"format": "pgn-eval-v1"})
+        assert len(first["assessments"]) == 1
+        assert first["assessments"][0]["white_cp"] == 25
+
+        refreshed = {
+            **partial,
+            "pgn": ('[Event "Archive"]\n[White "Me"]\n[Black "Friend"]\n[Result "*"]\n\n'
+                    '1. e4 { [%eval 0.10,10] } e5 { [%eval 0.10,10] } *\n'),
+        }
+        repository.import_archive_record("Me", refreshed, checkpoint_ms=11, backfill=True)
+        repository.import_archive_record("Me", refreshed, checkpoint_ms=11, backfill=True)
+
+        runs = repository.list_analyses("late-eval-game")
+        assert len(runs) == 1
+        assert runs[0]["run_id"] == first_run_id
+        assert runs[0]["status"] == "complete"
+        detail = repository.find_analysis_cache(
+            "late-eval-game", 1, runs[0]["line_hash"], "lichess-pgn", None,
+            {"format": "pgn-eval-v1"})
+        assert [(row["ply"], row["white_cp"]) for row in detail["assessments"]] == [
+            (1, 25), (2, 10)]
+        with repository._connection() as db:
+            assert db.execute("SELECT COUNT(*) FROM position_assessments WHERE run_id=?",
+                              (first_run_id,)).fetchone()[0] == 2
+            coverage = db.execute("SELECT scored_positions,comparable_move_pairs "
+                                  "FROM analysis_coverage WHERE run_id=?",
+                                  (first_run_id,)).fetchone()
+        assert tuple(coverage) == (2, 1)
+    finally:
+        repository.shutdown()
+
+
+def test_lichess_archive_move_metrics_drive_summary_without_legacy_classifications(tmp_path):
+    repository = GameRepository(tmp_path / "canonical-lichess-metrics.sqlite3")
+    try:
+        pgn = ('[Event "Synthetic"]\n[Site "Lichess"]\n[Date "2026.10.01"]\n'
+               '[White "Me"]\n[Black "Opponent"]\n[Result "1-0"]\n\n'
+               '1. e4 { [%eval 0.50,12] } e5 { [%eval 0.50,12] } '
+               '2. Nf3 { [%eval -1.00,12] } Nc6 { [%eval -1.00,12] } 1-0\n')
+        repository.import_archive_record("Me", {"id": "lichess-metrics", "pgn": pgn,
+                "accuracy": {"white": 76, "black": 81}}, checkpoint_ms=1, backfill=True)
+        account_id = repository.ensure_archive_account("Me")
+        run = repository.list_analyses("lichess-metrics")[0]
+        with repository._connection() as db:
+            legacy_count = db.execute(
+                "SELECT COUNT(*) FROM move_classifications WHERE run_id=?", (run["run_id"],)
+            ).fetchone()[0]
+        detail = repository.latest_analysis_detail("lichess-metrics", 1)
+        by_ply = {item["ply"]: item for item in detail["move_metrics"]}
+        assert legacy_count == 0
+        assert by_ply[3]["severity"] in {"mistake", "blunder"}
+        assert by_ply[3]["source"] == "lichess-pgn"
+        assert detail["official_game_accuracy"] == 76
+        assert detail["official_game_accuracy_color"] == "white"
+        assert detail["official_game_accuracy_source"] == "lichess"
+        assert detail["official_game_accuracy_n"] == 1
+        summary = StatisticsService(repository).summary(
+            account_id=account_id, analysis_source="lichess-pgn")
+        assert summary["own_assessed_moves"] == 1
+        assert summary["own_error_count"] == 1
+        assert summary["lichess_accuracy"]["white"] == 76
+        page = StatisticsService(repository).game_page(
+            account_id=account_id, analysis_source="lichess-pgn")
+        assert page["items"][0]["own_mistakes"] + page["items"][0]["own_blunders"] == 1
+        second_account = repository.ensure_archive_account("SecondOwner")
+        with repository._connection() as db:
+            db.execute("INSERT INTO account_games(account_id,game_id,remote_id,imported_at,color) "
+                       "VALUES(?,?,?,?,?)", (second_account, "lichess-metrics", "same-game",
+                       "2026-11-01T00:00:00+00:00", "black"))
+        second_detail = repository.latest_analysis_detail(
+            "lichess-metrics", 1, account_id=second_account)
+        assert second_detail["official_game_accuracy"] == 81
+        assert second_detail["official_game_accuracy_color"] == "black"
+        assert second_detail["official_game_accuracy_n"] == 1
+    finally:
+        repository.shutdown()
+
+
+def test_late_lichess_eval_refresh_rebuilds_derived_facts_and_removes_stale_events(tmp_path, monkeypatch):
+    repository = GameRepository(tmp_path / "late-derived-refresh.sqlite3")
+    try:
+        base = ('[Event "Archive"]\n[White "Me"]\n[Black "Friend"]\n[Result "*"]\n\n')
+        initial = base + ('1. e4 { [%eval 0.0] } e5 { [%eval 2.0] } '
+                          '2. Nf3 { [%eval -1.0] } Nc6 *\n')
+        repository.import_archive_record("Me", {"id": "late-derived", "pgn": initial},
+                                         checkpoint_ms=1, backfill=True)
+        run_id = repository.list_analyses("late-derived")[0]["run_id"]
+        with repository._connection() as db:
+            before_metrics = [tuple(row) for row in db.execute(
+                "SELECT ply,severity,cp_loss FROM move_metrics WHERE run_id=? "
+                "AND metric_version='cc-move-metrics-v2' ORDER BY ply", (run_id,))]
+            before_events = [tuple(row) for row in db.execute(
+                "SELECT event_type,confidence_state FROM analysis_events WHERE run_id=? ORDER BY event_type",
+                (run_id,))]
+            assert any(event[0] == "missed_opportunity" for event in before_events)
+        assert any(row[1] in {"mistake", "blunder"} for row in before_metrics)
+        repository.save_note("late-derived", "keep this note", line_revision=1, ply=2)
+
+        refreshed = base + ('1. e4 { [%eval 0.0] } e5 { [%eval 0.0] } '
+                            '2. Nf3 { [%eval 0.0] } Nc6 { [%eval 0.0] } *\n')
+        repository.import_archive_record("Me", {"id": "late-derived", "pgn": refreshed},
+                                         checkpoint_ms=2, backfill=True)
+        repository.import_archive_record("Me", {"id": "late-derived", "pgn": refreshed},
+                                         checkpoint_ms=2, backfill=True)
+        with repository._connection() as db:
+            after_metrics = [tuple(row) for row in db.execute(
+                "SELECT ply,severity,cp_loss FROM move_metrics WHERE run_id=? "
+                "AND metric_version='cc-move-metrics-v2' ORDER BY ply", (run_id,))]
+            after_events = [tuple(row) for row in db.execute(
+                "SELECT event_type,confidence_state FROM analysis_events WHERE run_id=? ORDER BY event_type",
+                (run_id,))]
+            assert db.execute("SELECT COUNT(*) FROM analysis_runs WHERE game_id='late-derived'").fetchone()[0] == 1
+            assert db.execute("SELECT body FROM game_notes WHERE game_id='late-derived'").fetchone()[0] == "keep this note"
+        assert after_metrics != before_metrics
+        assert all(row[1] == "good" for row in after_metrics if row[2] is not None)
+        assert not any(event[0] == "missed_opportunity" for event in after_events)
+        assert len(after_metrics) == len({row[0] for row in after_metrics})
+
+        from chess_coach.lichess import event_detectors
+        def fail_rebuild(*_args, **_kwargs):
+            raise RuntimeError("synthetic derived-fact failure")
+        monkeypatch.setattr(event_detectors, "detect_registered_events", fail_rebuild)
+        rejected = base + ('1. e4 { [%eval 0.0] } e5 { [%eval 2.0] } '
+                           '2. Nf3 { [%eval -1.0] } Nc6 { [%eval 0.0] } *\n')
+        with pytest.raises(RuntimeError, match="synthetic derived-fact failure"):
+            repository.import_archive_record("Me", {"id": "late-derived", "pgn": rejected},
+                                             checkpoint_ms=3, backfill=True)
+        with repository._connection() as db:
+            assert db.execute("SELECT raw_pgn FROM games WHERE game_id='late-derived'").fetchone()[0] == refreshed
+            rollback_metrics = [tuple(row) for row in db.execute(
+                "SELECT ply,severity,cp_loss FROM move_metrics WHERE run_id=? "
+                "AND metric_version='cc-move-metrics-v2' ORDER BY ply", (run_id,))]
+        assert rollback_metrics == after_metrics
+    finally:
+        repository.shutdown()
+
+
+def test_bounded_eval_refresh_only_requests_incomplete_recent_lines_and_keeps_cursors(tmp_path):
+    repository = GameRepository(tmp_path / "targeted-refresh.sqlite3")
+    try:
+        repository.import_archive_record("Me", {
+            "id": "needs-eval",
+            "pgn": ('[Event "Archive"]\n[White "Me"]\n[Black "Friend"]\n[Result "*"]\n\n'
+                    '1. e4 { [%eval 0.20] } e5 *\n'),
+        }, checkpoint_ms=None, backfill=False)
+        repository.import_archive_record("Me", {
+            "id": "already-covered",
+            "pgn": ('[Event "Archive"]\n[White "Me"]\n[Black "Friend"]\n[Result "*"]\n\n'
+                    '1. d4 { [%eval 0.30] } d5 { [%eval 0.10] } *\n'),
+        }, checkpoint_ms=None, backfill=False)
+        account_id = "lichess:me"
+        before = repository.archive_sync_state(account_id)
+
+        class FakeExportClient:
+            def __init__(self):
+                self.calls = []
+
+            def export_game_pgn(self, token, game_id):
+                self.calls.append((token, game_id))
+                assert token == "fake-token"
+                assert game_id == "needs-eval"
+                return ('[Event "Archive"]\n[White "Me"]\n[Black "Friend"]\n[Result "*"]\n\n'
+                        '1. e4 { [%eval 0.20] } e5 { [%eval 0.10] } *\n')
+
+        client = FakeExportClient()
+        result = ArchiveSync(client, repository).refresh_missing_evaluations(
+            "Me", "fake-token", threading.Event(), limit=10)
+        after = repository.archive_sync_state(account_id)
+        assert result == {"selected": 1, "checked": 1, "gained_scored_pairs": 1,
+                          "unchanged": 0, "failed": 0, "refreshed": 1,
+                          "cancelled": False}
+        assert client.calls == [("fake-token", "needs-eval")]
+        for key in ("backfill_before", "backfill_complete", "backfill_started_at",
+                    "incremental_since"):
+            assert after.get(key) == before.get(key)
+        run = repository.list_analyses("needs-eval")[0]
+        assert run["status"] == "complete"
+        assert repository.list_games_missing_lichess_evaluations(account_id, limit=10) == []
+        with pytest.raises(ValueError, match="1–100"):
+            ArchiveSync(client, repository).refresh_missing_evaluations(
+                "Me", "fake-token", threading.Event(), limit=101)
+    finally:
+        repository.shutdown()
+
+
+def test_targeted_eval_refresh_stops_on_429_without_retrying_or_masking_error(tmp_path):
+    repository = GameRepository(tmp_path / "targeted-refresh-429.sqlite3")
+    try:
+        repository.import_archive_record("Me", {
+            "id": "needs-eval",
+            "pgn": ('[Event "Archive"]\n[White "Me"]\n[Black "Friend"]\n[Result "*"]\n\n'
+                    '1. e4 *\n'),
+        }, checkpoint_ms=None, backfill=False)
+
+        class LimitedClient:
+            calls = 0
+
+            def export_game_pgn(self, _token, _game_id):
+                self.calls += 1
+                raise RateLimitError(75)
+
+        client = LimitedClient()
+        result = ArchiveSync(client, repository).refresh_missing_evaluations(
+            "Me", "fake-token", threading.Event(), limit=10)
+        assert result["failed"] == 1 and result["checked"] == 0
+        assert client.calls == 1
+        assert repository.list_games_missing_lichess_evaluations("lichess:me") == []
+        with repository._connection() as db:
+            state = db.execute("SELECT status,last_checked_at,next_retry_at,last_error "
+                               "FROM lichess_eval_refresh_state").fetchone()
+        assert state["status"] == "api_failure" and state["last_checked_at"] is None
+        assert state["next_retry_at"] and "RateLimitError" in state["last_error"]
+        # Explicit recheck is opt-in; an API failure was not marked as a successful scan.
+        assert len(repository.list_games_missing_lichess_evaluations(
+            "lichess:me", recheck_checked=True)) == 1
+    finally:
+        repository.shutdown()
+
+
+def test_targeted_eval_refresh_walks_distinct_pages_and_reports_no_eval(tmp_path):
+    repository = GameRepository(tmp_path / "targeted-refresh-pages.sqlite3")
+    try:
+        for index in range(80):
+            repository.import_archive_record("Me", {
+                "id": f"unchecked-{index:03d}",
+                "pgn": ('[Event "Archive"]\n[White "Me"]\n[Black "Friend"]\n'
+                        '[Result "*"]\n\n1. e4 *\n'),
+            }, checkpoint_ms=None, backfill=False)
+        account_id = "lichess:me"
+
+        class NoEvalClient:
+            calls = []
+
+            def export_game_pgn(self, _token, game_id):
+                self.calls.append(game_id)
+                return ('[Event "Archive"]\n[White "Me"]\n[Black "Friend"]\n'
+                        '[Result "*"]\n\n1. e4 *\n')
+
+        client = NoEvalClient()
+        service = ArchiveSync(client, repository)
+        sizes = []
+        for _ in range(4):
+            report = service.refresh_missing_evaluations(
+                "Me", "fake", threading.Event(), limit=25)
+            sizes.append(report["checked"])
+            assert report["unchanged"] == report["checked"]
+            assert report["gained_scored_pairs"] == report["failed"] == 0
+        assert sizes == [25, 25, 25, 5]
+        assert len(set(client.calls)) == 80
+        assert service.refresh_missing_evaluations(
+            "Me", "fake", threading.Event(), limit=25)["selected"] == 0
+        assert repository.archive_sync_state(account_id).get("incremental_since") is None
+    finally:
+        repository.shutdown()
+
+
+def test_lichess_post_move_eval_completeness_does_not_claim_full_own_decision_coverage(tmp_path):
+    repository = GameRepository(tmp_path / "decision-comparability.sqlite3")
+    try:
+        without_baseline = ('[Event "Archive"]\n[White "Me"]\n[Black "Friend"]\n'
+            '[Result "*"]\n\n1. e4 { [%eval 0.20] } e5 { [%eval 0.10] } '
+            '2. Nf3 { [%eval 0.30] } Nc6 { [%eval 0.20] } *\n')
+        game_id, _ = repository.import_archive_record(
+            "Me", {"id": "post-only", "pgn": without_baseline}, checkpoint_ms=None,
+            backfill=False, _return_inserted=True)
+        run = repository.list_analyses(game_id)[0]
+        assert run["status"] == "complete"  # source coverage is post-move plies 1..N
+        detail = repository.latest_analysis_detail(game_id, 1, account_id="lichess:me")
+        assert detail["coverage"]["scored_positions"] == 4
+        assert detail["coverage"]["comparable_move_pairs"] == 3
+        assert detail["decision_coverage"] == {
+            "owner_color": "white", "own_moves": 2, "comparable_own_moves": 1,
+            "missing_own_move_plies": [1], "first_own_move_missing_baseline": True,
+            "source_eval_scored_post_moves": 4, "source_eval_expected_post_moves": 4,
+            "source_eval_complete": True,
+        }
+        assert detail["local_game_accuracy"] is None
+        assert detail["local_accuracy_status"]["status"] == "unsupported"
+        assert "CPL" in detail["local_accuracy_status"]["reason"]
+        assert detail["local_accuracy_status"]["coverage"] == {
+            "comparable_own_moves": 1, "own_moves": 2}
+
+        with_baseline = ('[Event "Archive"]\n[White "Me"]\n[Black "Friend"]\n'
+            '[Result "*"]\n\n{ [%eval 0.00] } 1. e4 { [%eval 0.20] } '
+            'e5 { [%eval 0.10] } 2. Nf3 { [%eval 0.30] } Nc6 { [%eval 0.20] } *\n')
+        control_id, _ = repository.import_archive_record(
+            "Me", {"id": "with-baseline", "pgn": with_baseline}, checkpoint_ms=None,
+            backfill=False, _return_inserted=True)
+        control = repository.latest_analysis_detail(control_id, 1, account_id="lichess:me")
+        assert control["decision_coverage"]["comparable_own_moves"] == 2
+        assert control["decision_coverage"]["missing_own_move_plies"] == []
+        assert control["decision_coverage"]["first_own_move_missing_baseline"] is False
+    finally:
+        repository.shutdown()

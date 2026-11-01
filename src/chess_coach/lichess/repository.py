@@ -9,7 +9,7 @@ import hashlib
 import json
 import sqlite3
 from concurrent.futures import Future, ThreadPoolExecutor
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 import threading
 import uuid
@@ -18,7 +18,7 @@ import chess
 import chess.pgn
 
 
-SCHEMA_VERSION = 9
+SCHEMA_VERSION = 17
 DEFAULT_PAGE_SIZE = 100
 MAX_PAGE_SIZE = 500
 
@@ -117,6 +117,7 @@ class GameRepository:
                 "white_player": "TEXT NOT NULL DEFAULT '?'",
                 "black_player": "TEXT NOT NULL DEFAULT '?'",
                 "started_at": "TEXT",
+                "game_time_precision": "TEXT NOT NULL DEFAULT 'unknown'",
                 "final_sync_pending": "INTEGER NOT NULL DEFAULT 0",
                 "source": "TEXT NOT NULL DEFAULT 'lichess'",
                 "source_game_id": "TEXT",
@@ -198,6 +199,24 @@ class GameRepository:
                     FOREIGN KEY(game_id,line_revision)
                       REFERENCES game_revisions(game_id,line_revision) ON DELETE CASCADE
                 );
+                CREATE TABLE IF NOT EXISTS opening_matches (
+                    game_id TEXT NOT NULL,
+                    line_revision INTEGER NOT NULL,
+                    dataset_revision TEXT NOT NULL,
+                    algorithm_version TEXT NOT NULL,
+                    eco TEXT NOT NULL,
+                    name TEXT NOT NULL,
+                    family TEXT NOT NULL,
+                    variation TEXT,
+                    matched_ply INTEGER NOT NULL,
+                    lichess_conflict INTEGER NOT NULL DEFAULT 0,
+                    matched_at TEXT NOT NULL,
+                    PRIMARY KEY(game_id,line_revision),
+                    FOREIGN KEY(game_id,line_revision)
+                      REFERENCES game_revisions(game_id,line_revision) ON DELETE CASCADE
+                );
+                CREATE INDEX IF NOT EXISTS idx_opening_matches_eco
+                    ON opening_matches(eco,game_id,line_revision);
                 CREATE TABLE IF NOT EXISTS game_notes (
                     note_id TEXT PRIMARY KEY, game_id TEXT NOT NULL,
                     line_revision INTEGER, ply INTEGER, position_uid TEXT,
@@ -248,6 +267,18 @@ class GameRepository:
                     last_sync_new_count INTEGER NOT NULL DEFAULT 0,
                     last_error TEXT, updated_at TEXT NOT NULL
                 );
+                CREATE TABLE IF NOT EXISTS lichess_eval_refresh_state (
+                    account_id TEXT NOT NULL REFERENCES accounts(account_id) ON DELETE CASCADE,
+                    game_id TEXT NOT NULL REFERENCES games(game_id) ON DELETE CASCADE,
+                    line_revision INTEGER NOT NULL,
+                    line_hash TEXT NOT NULL,
+                    status TEXT NOT NULL CHECK(status IN
+                      ('checked_no_evals','partial','changed','api_failure')),
+                    last_checked_at TEXT,
+                    next_retry_at TEXT,
+                    last_error TEXT,
+                    PRIMARY KEY(account_id,game_id,line_revision,line_hash)
+                );
                 CREATE TABLE IF NOT EXISTS puzzle_dashboard_snapshots (
                     snapshot_id TEXT PRIMARY KEY, account_id TEXT NOT NULL REFERENCES accounts(account_id),
                     days INTEGER NOT NULL, fetched_at TEXT NOT NULL, payload_json TEXT NOT NULL
@@ -269,8 +300,12 @@ class GameRepository:
                     PRIMARY KEY(run_id,attempt_uid)
                 );
                 CREATE INDEX IF NOT EXISTS idx_puzzle_attempt_date ON puzzle_attempts(account_id,attempt_date_ms);
+                CREATE INDEX IF NOT EXISTS idx_eval_refresh_status
+                    ON lichess_eval_refresh_state(account_id,status,next_retry_at);
                 CREATE INDEX IF NOT EXISTS idx_puzzle_attempt_puzzle ON puzzle_attempts(puzzle_id,attempt_date_ms);
                 CREATE INDEX IF NOT EXISTS idx_games_updated ON games(updated_at DESC, game_id);
+                CREATE INDEX IF NOT EXISTS idx_games_started_recent
+                    ON games(started_at DESC,game_id DESC);
                 CREATE INDEX IF NOT EXISTS idx_games_opponent ON games(opponent);
                 CREATE INDEX IF NOT EXISTS idx_game_notes_position ON game_notes(position_uid);
                 CREATE INDEX IF NOT EXISTS idx_analysis_cache ON analysis_runs(game_id,line_revision,source,engine_version,status);
@@ -365,7 +400,139 @@ class GameRepository:
                     db.execute(f"RELEASE SAVEPOINT {savepoint}")
                     db.execute("UPDATE games SET import_error=? WHERE game_id=?",
                                (str(exc), row["game_id"]))
+            self._migrate_m45_schema(db)
             db.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
+
+    @staticmethod
+    def _migrate_m45_schema(db: sqlite3.Connection) -> None:
+        """Add resumable analysis, derived coverage, and versioned move/event facts.
+
+        The queue describes work; metrics/events reference existing run and move facts.
+        Existing raw games, PGN, moves, positions, and v1 classifications remain untouched.
+        """
+        db.execute("""CREATE TABLE IF NOT EXISTS analysis_jobs (
+            job_id TEXT PRIMARY KEY,
+            game_id TEXT NOT NULL REFERENCES games(game_id) ON DELETE CASCADE,
+            line_revision INTEGER NOT NULL,
+            line_hash TEXT NOT NULL,
+            analysis_pass TEXT NOT NULL CHECK(analysis_pass IN ('fast','review')),
+            engine_version TEXT NOT NULL,
+            parameters_json TEXT NOT NULL,
+            status TEXT NOT NULL CHECK(status IN
+                ('queued','running','paused','complete','failed','cancelled','stale')),
+            attempts INTEGER NOT NULL DEFAULT 0,
+            lease_owner TEXT,
+            lease_until TEXT,
+            result_run_id TEXT REFERENCES analysis_runs(run_id) ON DELETE SET NULL,
+            priority_at TEXT,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            started_at TEXT,
+            finished_at TEXT,
+            error TEXT,
+            UNIQUE(game_id,line_revision,line_hash,analysis_pass,engine_version,parameters_json),
+            FOREIGN KEY(game_id,line_revision)
+                REFERENCES game_revisions(game_id,line_revision) ON DELETE CASCADE
+        )""")
+        db.execute("CREATE INDEX IF NOT EXISTS idx_analysis_jobs_dispatch "
+                   "ON analysis_jobs(status,priority_at DESC,created_at,job_id)")
+        db.execute("CREATE INDEX IF NOT EXISTS idx_analysis_jobs_line "
+                   "ON analysis_jobs(game_id,line_revision,line_hash,status)")
+        job_columns = {row[1] for row in db.execute("PRAGMA table_info(analysis_jobs)")}
+        for name, definition in (("lease_owner", "TEXT"), ("lease_until", "TEXT"),
+                                 ("result_run_id", "TEXT REFERENCES analysis_runs(run_id) ON DELETE SET NULL")):
+            if name not in job_columns:
+                db.execute(f"ALTER TABLE analysis_jobs ADD COLUMN {name} {definition}")
+        # Versioned derived facts are additive: v1 classifications and all raw
+        # games/positions remain intact and can be reclassified without UCI.
+        db.execute("""CREATE TABLE IF NOT EXISTS move_metrics (
+            run_id TEXT NOT NULL REFERENCES analysis_runs(run_id) ON DELETE CASCADE,
+            game_id TEXT NOT NULL, line_revision INTEGER NOT NULL, ply INTEGER NOT NULL,
+            metric_version TEXT NOT NULL, source TEXT NOT NULL,
+            white_cp_before INTEGER, mate_white_before INTEGER,
+            white_cp_after INTEGER, mate_white_after INTEGER,
+            cp_loss INTEGER, mate_discontinuity INTEGER NOT NULL DEFAULT 0,
+            wdl_before_json TEXT, wdl_after_json TEXT, wdl_model TEXT,
+            accuracy REAL, accuracy_source TEXT, accuracy_formula_id TEXT,
+            severity TEXT NOT NULL, severity_policy_version TEXT NOT NULL,
+            legacy_label TEXT,
+            PRIMARY KEY(run_id,ply,metric_version),
+            FOREIGN KEY(game_id,line_revision,ply)
+                REFERENCES game_moves(game_id,line_revision,ply) ON DELETE CASCADE
+        )""")
+        db.execute("CREATE INDEX IF NOT EXISTS idx_move_metrics_scope "
+                   "ON move_metrics(game_id,line_revision,source,metric_version,ply)")
+        db.execute("""CREATE TABLE IF NOT EXISTS analysis_events (
+            event_key TEXT PRIMARY KEY,
+            run_id TEXT NOT NULL REFERENCES analysis_runs(run_id) ON DELETE CASCADE,
+            game_id TEXT NOT NULL, line_revision INTEGER NOT NULL, ply INTEGER NOT NULL,
+            event_type TEXT NOT NULL, confidence_state TEXT NOT NULL
+                CHECK(confidence_state IN ('verified','candidate','unknown','rejected')),
+            source TEXT NOT NULL, detector_version TEXT NOT NULL, evidence_json TEXT NOT NULL,
+            FOREIGN KEY(game_id,line_revision,ply)
+                REFERENCES game_moves(game_id,line_revision,ply) ON DELETE CASCADE
+        )""")
+        db.execute("CREATE INDEX IF NOT EXISTS idx_analysis_events_scope "
+                   "ON analysis_events(game_id,line_revision,event_type,confidence_state,ply)")
+        db.execute("""CREATE TABLE IF NOT EXISTS event_tags (
+            event_key TEXT NOT NULL REFERENCES analysis_events(event_key) ON DELETE CASCADE,
+            tag TEXT NOT NULL, detector_version TEXT NOT NULL,
+            confidence_state TEXT NOT NULL
+                CHECK(confidence_state IN ('verified','candidate','unknown','rejected')),
+            evidence_json TEXT NOT NULL,
+            PRIMARY KEY(event_key,tag,detector_version)
+        )""")
+        db.execute("CREATE INDEX IF NOT EXISTS idx_event_tags_tag "
+                   "ON event_tags(tag,confidence_state,event_key)")
+        db.execute("""CREATE TABLE IF NOT EXISTS analysis_alternatives (
+            run_id TEXT NOT NULL REFERENCES analysis_runs(run_id) ON DELETE CASCADE,
+            game_id TEXT NOT NULL, line_revision INTEGER NOT NULL, ply INTEGER NOT NULL,
+            multipv_rank INTEGER NOT NULL CHECK(multipv_rank >= 1),
+            white_cp INTEGER, mate_white INTEGER, depth INTEGER, nodes INTEGER, pv_uci TEXT,
+            PRIMARY KEY(run_id,ply,multipv_rank),
+            FOREIGN KEY(game_id,line_revision,ply)
+                REFERENCES game_positions(game_id,line_revision,ply) ON DELETE CASCADE
+        )""")
+        db.execute("CREATE INDEX IF NOT EXISTS idx_analysis_alternatives_game "
+                   "ON analysis_alternatives(game_id,line_revision,ply,run_id)")
+        # The coverage view is a schema object, not startup-time cache. Rebuild it
+        # only while migrating an older schema; current v16 restarts are read-only
+        # with respect to sqlite_master.
+        schema_version = int(db.execute("PRAGMA user_version").fetchone()[0])
+        coverage_view_exists = db.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='view' AND name='analysis_coverage'").fetchone()
+        if schema_version < SCHEMA_VERSION:
+            db.execute("DROP VIEW IF EXISTS analysis_coverage")
+        if schema_version < SCHEMA_VERSION or not coverage_view_exists:
+            db.execute("""CREATE VIEW IF NOT EXISTS analysis_coverage AS
+            SELECT ar.run_id,ar.game_id,ar.line_revision,ar.line_hash,ar.source,
+                   ar.engine_name,ar.engine_version,ar.parameters_json,ar.status,
+                   ar.started_at,ar.finished_at,
+                   (SELECT COUNT(*) FROM game_positions gp
+                    WHERE gp.game_id=ar.game_id AND gp.line_revision=ar.line_revision)
+                       AS total_positions,
+                   (SELECT COUNT(*) FROM position_assessments pa
+                    WHERE pa.run_id=ar.run_id
+                      AND (pa.white_cp IS NOT NULL OR pa.mate_white IS NOT NULL))
+                       AS scored_positions,
+                   (SELECT COUNT(*) FROM move_metrics mm
+                    WHERE mm.run_id=ar.run_id AND mm.metric_version='cc-move-metrics-v2')
+                       AS measured_moves,
+                   (SELECT COUNT(*) FROM analysis_events ae
+                    WHERE ae.run_id=ar.run_id AND ae.confidence_state='candidate')
+                       AS candidate_events,
+                   (SELECT COUNT(*) FROM game_moves gm
+                    WHERE gm.game_id=ar.game_id AND gm.line_revision=ar.line_revision
+                      AND EXISTS (SELECT 1 FROM position_assessments pre
+                                  WHERE pre.run_id=ar.run_id AND pre.ply=gm.ply-1
+                                    AND (pre.white_cp IS NOT NULL OR pre.mate_white IS NOT NULL))
+                      AND EXISTS (SELECT 1 FROM position_assessments post
+                                  WHERE post.run_id=ar.run_id AND post.ply=gm.ply
+                                    AND (post.white_cp IS NOT NULL OR post.mate_white IS NOT NULL)))
+                       AS comparable_move_pairs
+            FROM analysis_runs ar
+            JOIN game_revisions gr ON gr.game_id=ar.game_id
+                AND gr.line_revision=ar.line_revision AND gr.is_current=1""")
 
     def save_snapshot(self, game_id: str, initial_fen: str, moves: str, color: str,
                       opponent: str, rated: bool, clock: str, status: str,
@@ -415,12 +582,15 @@ class GameRepository:
         previous = None
         if not (white_player and black_player and started_at):
             with self._connection() as db:
-                previous = db.execute("SELECT white_player, black_player, started_at FROM games "
+                previous = db.execute("SELECT white_player, black_player, started_at,game_time_precision FROM games "
                                       "WHERE game_id=?", (game_id,)).fetchone()
         if previous:
             white_player = white_player or previous["white_player"]
             black_player = black_player or previous["black_player"]
             started_at = started_at or previous["started_at"]
+        precision = _time_precision(started_at)
+        if precision == "unknown" and previous:
+            precision = previous["game_time_precision"] or "unknown"
         if color == "white":
             white_player = white_player or "Вы"
             black_player = black_player or opponent or "?"
@@ -442,9 +612,9 @@ class GameRepository:
         with self._connection() as db:
             db.execute("""INSERT INTO games (
                 game_id, initial_fen, moves, color, opponent, rated, clock, status,
-                winner, updated_at, pgn, white_player, black_player, started_at,
+                winner, updated_at, pgn, white_player, black_player, started_at,game_time_precision,
                 final_sync_pending, source, source_game_id, variant
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'lichess', ?, 'standard')
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'lichess', ?, 'standard')
                 ON CONFLICT(game_id) DO UPDATE SET initial_fen=excluded.initial_fen,
                 moves=excluded.moves, opponent=CASE WHEN ? THEN games.opponent ELSE excluded.opponent END,
                 rated=excluded.rated, clock=excluded.clock, status=excluded.status,
@@ -452,12 +622,13 @@ class GameRepository:
                 color=CASE WHEN ? THEN games.color ELSE excluded.color END,
                 white_player=excluded.white_player, black_player=excluded.black_player,
                 started_at=excluded.started_at,
+                game_time_precision=excluded.game_time_precision,
                 final_sync_pending=excluded.final_sync_pending,
                 source=excluded.source, source_game_id=excluded.source_game_id,
                 variant=excluded.variant""",
                 (game_id, initial_fen, moves, color, opponent, int(rated), clock, status,
                  winner, datetime.now(timezone.utc).isoformat(), pgn, white_player,
-                 black_player, started_at, int(final_sync_pending), game_id,
+                 black_player, started_at, precision, int(final_sync_pending), game_id,
                  int(preserve_existing_color),
                  int(preserve_existing_color)))
             current = db.execute("SELECT line_revision, line_hash FROM game_revisions "
@@ -567,6 +738,374 @@ class GameRepository:
                 query += " WHERE status NOT IN ('created', 'started', 'started_soon', 'playing')"
             query += " ORDER BY updated_at DESC"
             return [dict(row) for row in db.execute(query)]
+
+    def list_games_missing_lichess_evaluations(self, account_id: str, *,
+                                                limit: int = 25,
+                                                recheck_checked: bool = False) -> list[dict]:
+        """Return unchecked incomplete Lichess lines, newest first and in bounded pages."""
+        limit = max(1, min(100, int(limit)))
+        checked_filter = "" if recheck_checked else (
+            "AND (ers.status IS NULL OR ers.status NOT IN "
+            "('checked_no_evals','partial','changed','api_failure') OR "
+            "(ers.status='api_failure' AND ers.next_retry_at IS NOT NULL "
+            "AND ers.next_retry_at<=?)) "
+        )
+        params: list[object] = [account_id]
+        if not recheck_checked:
+            params.append(datetime.now(timezone.utc).isoformat())
+        params.append(limit)
+        with self._connection() as db:
+            rows = db.execute(
+                "SELECT g.game_id,gr.line_revision,gr.line_hash,g.started_at,g.variant,"
+                "COALESCE(ers.status,'not_checked') AS refresh_status,ers.last_checked_at "
+                "FROM games g JOIN account_games ag ON ag.game_id=g.game_id "
+                "JOIN game_revisions gr ON gr.game_id=g.game_id AND gr.is_current=1 "
+                "LEFT JOIN lichess_eval_refresh_state ers ON ers.account_id=ag.account_id "
+                "AND ers.game_id=g.game_id AND ers.line_revision=gr.line_revision "
+                "AND ers.line_hash=gr.line_hash "
+                "WHERE ag.account_id=? AND g.status NOT IN "
+                "('created','started','started_soon','playing') AND g.variant='standard' "
+                "AND NOT EXISTS (SELECT 1 FROM analysis_runs ar "
+                "WHERE ar.game_id=g.game_id AND ar.line_revision=gr.line_revision "
+                "AND ar.line_hash=gr.line_hash AND ar.source='lichess-pgn' "
+                "AND ar.status='complete' AND "
+                "(SELECT COUNT(*) FROM position_assessments pa WHERE pa.run_id=ar.run_id "
+                "AND (pa.white_cp IS NOT NULL OR pa.mate_white IS NOT NULL)) >= "
+                "(SELECT COUNT(*) FROM game_moves gm WHERE gm.game_id=g.game_id "
+                "AND gm.line_revision=gr.line_revision)) " + checked_filter +
+                "ORDER BY CASE WHEN g.started_at IS NULL THEN 1 ELSE 0 END,"
+                "g.started_at DESC,g.game_id DESC LIMIT ?", params).fetchall()
+        return [dict(row) for row in rows]
+
+    def lichess_eval_score_count(self, game_id: str, line_revision: int) -> int:
+        with self._connection() as db:
+            row = db.execute(
+                "SELECT COUNT(DISTINCT pa.ply) FROM position_assessments pa "
+                "JOIN analysis_runs ar ON ar.run_id=pa.run_id "
+                "WHERE ar.game_id=? AND ar.line_revision=? AND ar.source='lichess-pgn' "
+                "AND (pa.white_cp IS NOT NULL OR pa.mate_white IS NOT NULL)",
+                (game_id, int(line_revision))).fetchone()
+        return int(row[0])
+
+    def game_move_count(self, game_id: str, line_revision: int) -> int:
+        with self._connection() as db:
+            row = db.execute("SELECT COUNT(*) FROM game_moves WHERE game_id=? AND line_revision=?",
+                             (game_id, int(line_revision))).fetchone()
+        return int(row[0])
+
+    def lichess_eval_pair_count(self, game_id: str, line_revision: int) -> int:
+        with self._connection() as db:
+            row = db.execute(
+                "SELECT COUNT(*) FROM game_moves gm WHERE gm.game_id=? AND gm.line_revision=? "
+                "AND EXISTS (SELECT 1 FROM position_assessments pre JOIN analysis_runs ar "
+                "ON ar.run_id=pre.run_id WHERE ar.game_id=gm.game_id "
+                "AND ar.line_revision=gm.line_revision AND ar.source='lichess-pgn' "
+                "AND pre.ply=gm.ply-1 AND (pre.white_cp IS NOT NULL OR pre.mate_white IS NOT NULL)) "
+                "AND EXISTS (SELECT 1 FROM position_assessments post JOIN analysis_runs ar "
+                "ON ar.run_id=post.run_id WHERE ar.game_id=gm.game_id "
+                "AND ar.line_revision=gm.line_revision AND ar.source='lichess-pgn' "
+                "AND post.ply=gm.ply AND (post.white_cp IS NOT NULL OR post.mate_white IS NOT NULL))",
+                (game_id, int(line_revision))).fetchone()
+        return int(row[0])
+
+    def record_lichess_eval_refresh(self, account_id: str, game_id: str, *,
+                                    line_revision: int, line_hash: str, status: str,
+                                    error: str | None = None, retry_after_seconds: int = 0) -> None:
+        allowed = {"checked_no_evals", "partial", "changed", "api_failure"}
+        if status not in allowed:
+            raise ValueError("Invalid targeted evaluation refresh status")
+        now = datetime.now(timezone.utc)
+        last_checked = None if status == "api_failure" else now.isoformat()
+        retry_at = ((now + timedelta(seconds=max(1, int(retry_after_seconds)))).isoformat()
+                    if retry_after_seconds else None)
+        with self._connection() as db:
+            db.execute(
+                "INSERT INTO lichess_eval_refresh_state(account_id,game_id,line_revision,line_hash,"
+                "status,last_checked_at,next_retry_at,last_error) VALUES(?,?,?,?,?,?,?,?) "
+                "ON CONFLICT(account_id,game_id,line_revision,line_hash) DO UPDATE SET "
+                "status=excluded.status,last_checked_at=excluded.last_checked_at,"
+                "next_retry_at=excluded.next_retry_at,last_error=excluded.last_error",
+                (account_id, game_id, int(line_revision), line_hash, status,
+                 last_checked, retry_at, error))
+
+    def list_games_needing_fast_analysis(self, *, account_id: str | None = None,
+                                         limit: int = 1000,
+                                         engine_version: str | None = None,
+                                         parameters: dict | None = None,
+                                         retry_failed: bool = False) -> list[dict]:
+        """Page recent eligible lines, skipping work already represented for this config."""
+        limit = max(1, min(10_000, int(limit)))
+        join = " JOIN account_games ag ON ag.game_id=g.game_id " if account_id else ""
+        account_filter = "AND ag.account_id=? " if account_id else ""
+        params: list[object] = [account_id] if account_id else []
+        represented = ""
+        if engine_version is not None and parameters is not None:
+            params_json = json.dumps(parameters, sort_keys=True, separators=(",", ":"))
+            represented_job_statuses = ("'queued','running','paused','complete'" if retry_failed
+                                        else "'queued','running','paused','complete','failed','cancelled','stale'")
+            represented = (
+                "AND NOT EXISTS (SELECT 1 FROM analysis_jobs aj "
+                "WHERE aj.game_id=g.game_id AND aj.line_revision=gr.line_revision "
+                "AND aj.line_hash=gr.line_hash AND aj.analysis_pass='fast' "
+                "AND aj.engine_version=? AND aj.parameters_json=? "
+                f"AND aj.status IN ({represented_job_statuses})) "
+                "AND NOT EXISTS (SELECT 1 FROM analysis_runs ar "
+                "WHERE ar.game_id=g.game_id AND ar.line_revision=gr.line_revision "
+                "AND ar.line_hash=gr.line_hash AND ar.source='stockfish' "
+                "AND ar.engine_version=? AND ar.parameters_json=? AND ar.status='complete') "
+            )
+            params.extend([engine_version, params_json, engine_version, params_json])
+        params.append(limit)
+        sql = (
+            "SELECT DISTINCT g.game_id,gr.line_revision,gr.line_hash,g.started_at,g.variant "
+            "FROM games g " + join +
+            "JOIN game_revisions gr ON gr.game_id=g.game_id AND gr.is_current=1 "
+            "WHERE g.status IN ('mate','resign','stalemate','timeout','draw','outoftime',"
+            "'cheat','noStart','variantEnd','finished') AND COALESCE(g.final_sync_pending,0)=0 "
+            "AND g.import_error IS NULL AND g.pgn IS NOT NULL "
+            "AND (g.pgn LIKE '%[Result \"1-0\"]%' OR g.pgn LIKE '%[Result \"0-1\"]%' "
+            "OR g.pgn LIKE '%[Result \"1/2-1/2\"]%') AND g.variant='standard' "
+            + account_filter +
+            "AND NOT EXISTS (SELECT 1 FROM analysis_runs ar "
+            "WHERE ar.game_id=g.game_id AND ar.line_revision=gr.line_revision "
+            "AND ar.line_hash=gr.line_hash AND ar.source='lichess-pgn' "
+            "AND ar.status='complete' AND "
+            "(SELECT COUNT(*) FROM position_assessments pa WHERE pa.run_id=ar.run_id "
+            "AND (pa.white_cp IS NOT NULL OR pa.mate_white IS NOT NULL)) >= "
+            "(SELECT COUNT(*) FROM game_moves gm WHERE gm.game_id=g.game_id "
+            "AND gm.line_revision=gr.line_revision)) "
+            + represented +
+            "ORDER BY CASE WHEN g.started_at IS NULL THEN 1 ELSE 0 END,"
+            "g.started_at DESC,g.game_id DESC LIMIT ?")
+        with self._connection() as db:
+            rows = db.execute(sql, params).fetchall()
+        return [dict(row) for row in rows]
+
+    def enqueue_analysis_jobs(self, candidates: list[dict], *, analysis_pass: str,
+                              engine_version: str, parameters: dict,
+                              retry_failed: bool = False) -> dict[str, int]:
+        if analysis_pass not in {"fast", "review"}:
+            raise ValueError("Unknown analysis pass")
+        params_json = json.dumps(parameters, sort_keys=True, separators=(",", ":"))
+        now = datetime.now(timezone.utc).isoformat()
+        queued = skipped = 0
+        with self._connection() as db:
+            db.execute("BEGIN IMMEDIATE")
+            for candidate in candidates:
+                game_id = str(candidate["game_id"])
+                revision = int(candidate["line_revision"])
+                line_hash = str(candidate["line_hash"])
+                job_id = uuid.uuid4().hex
+                if retry_failed:
+                    requeued = db.execute(
+                        "UPDATE analysis_jobs SET status='queued',attempts=0,lease_owner=NULL,"
+                        "lease_until=NULL,result_run_id=NULL,error=NULL,started_at=NULL,finished_at=NULL,"
+                        "updated_at=? WHERE game_id=? AND line_revision=? AND line_hash=? "
+                        "AND analysis_pass=? AND engine_version=? AND parameters_json=? "
+                        "AND status IN ('failed','cancelled','stale')",
+                        (now, game_id, revision, line_hash, analysis_pass, engine_version, params_json))
+                    if requeued.rowcount:
+                        queued += 1
+                        continue
+                cursor = db.execute(
+                    "INSERT OR IGNORE INTO analysis_jobs(job_id,game_id,line_revision,line_hash,"
+                    "analysis_pass,engine_version,parameters_json,status,attempts,priority_at,"
+                    "created_at,updated_at) VALUES(?,?,?,?,?,?,?,'queued',0,?,?,?)",
+                    (job_id, game_id, revision, line_hash, analysis_pass, engine_version,
+                     params_json, candidate.get("started_at"), now, now))
+                if cursor.rowcount:
+                    queued += 1
+                else:
+                    skipped += 1
+        return {"queued": queued, "already_present": skipped}
+
+    def claim_next_analysis_job(self, worker_id: str, *, engine_version: str,
+                                analysis_pass: str, parameters: dict | None = None,
+                                lease_seconds: int = 300) -> dict | None:
+        if not worker_id:
+            raise ValueError("worker_id is required")
+        lease_seconds = max(30, min(3600, int(lease_seconds)))
+        params_json = json.dumps(parameters, sort_keys=True, separators=(",", ":")) if parameters is not None else None
+        now_dt = datetime.now(timezone.utc)
+        now = now_dt.isoformat()
+        until = (now_dt + timedelta(seconds=lease_seconds)).isoformat()
+        with self._connection() as db:
+            db.execute("BEGIN IMMEDIATE")
+            while True:
+                params_clause = " AND parameters_json=?" if params_json is not None else ""
+                values = [analysis_pass, engine_version]
+                if params_json is not None:
+                    values.append(params_json)
+                values.append(now)
+                row = db.execute(
+                    "SELECT * FROM analysis_jobs WHERE analysis_pass=? AND engine_version=? "
+                    + params_clause + " AND (status='queued' OR "
+                    "(status='running' AND (lease_until IS NULL OR lease_until<?))) "
+                    "ORDER BY CASE WHEN priority_at IS NULL THEN 1 ELSE 0 END,"
+                    "priority_at DESC,created_at,job_id LIMIT 1", values).fetchone()
+                if not row:
+                    return None
+                current = db.execute(
+                    "SELECT line_revision,line_hash FROM game_revisions "
+                    "WHERE game_id=? AND is_current=1", (row["game_id"],)).fetchone()
+                if (not current or int(current["line_revision"]) != int(row["line_revision"])
+                        or current["line_hash"] != row["line_hash"]):
+                    db.execute("UPDATE analysis_jobs SET status='stale',updated_at=?,"
+                                "lease_owner=NULL,lease_until=NULL WHERE job_id=?",
+                                (now, row["job_id"]))
+                    continue
+                db.execute("UPDATE analysis_jobs SET status='running',attempts=attempts+1,"
+                            "lease_owner=?,lease_until=?,started_at=?,updated_at=?,error=NULL "
+                            "WHERE job_id=?",
+                            (worker_id, until, now, now, row["job_id"]))
+                result = dict(row)
+                result.update(status="running", attempts=int(row["attempts"]) + 1,
+                              lease_owner=worker_id, lease_until=until, started_at=now,
+                              updated_at=now, error=None)
+                return result
+
+    def list_completed_fast_analysis_jobs(self, *, engine_version: str,
+                                          parameters: dict,
+                                          account_id: str | None = None) -> list[dict]:
+        """List exact-config completed fast jobs with their persisted result runs."""
+        params_json = json.dumps(parameters, sort_keys=True, separators=(",", ":"))
+        join = " JOIN account_games ag ON ag.game_id=aj.game_id " if account_id else ""
+        account_clause = " AND ag.account_id=?" if account_id else ""
+        values: list[object] = [engine_version, params_json]
+        if account_id:
+            values.append(account_id)
+        with self._connection() as db:
+            return [dict(row) for row in db.execute(
+                "SELECT DISTINCT aj.game_id,aj.line_revision,aj.line_hash,aj.result_run_id "
+                "FROM analysis_jobs aj " + join + "WHERE aj.analysis_pass='fast' "
+                "AND aj.engine_version=? AND aj.parameters_json=? AND aj.status='complete' "
+                "AND aj.result_run_id IS NOT NULL" + account_clause +
+                " ORDER BY aj.game_id", values)]
+
+    def list_reviewable_analysis_runs(self, *, engine_version: str,
+                                      parameters: dict,
+                                      account_id: str | None = None,
+                                      limit: int = 100, offset: int = 0) -> list[dict]:
+        """Select a bounded, deterministic newest-first page for selective review."""
+        limit = max(1, min(500, int(limit)))
+        offset = max(0, int(offset))
+        params_json = json.dumps(parameters, sort_keys=True, separators=(",", ":"))
+        account_join = " JOIN account_games ag ON ag.game_id=ar.game_id " if account_id else ""
+        account_clause = " AND ag.account_id=?" if account_id else ""
+        values: list[object] = [engine_version, params_json]
+        if account_id:
+            values.append(account_id)
+        sql = (
+            "WITH eligible AS (SELECT ar.run_id,ar.game_id,ar.line_revision,ar.line_hash,ar.source,"
+            "g.started_at,"
+            "ROW_NUMBER() OVER(PARTITION BY ar.game_id ORDER BY "
+            "CASE WHEN ar.source='stockfish' THEN 0 ELSE 1 END,ar.finished_at DESC,ar.run_id DESC) rank "
+            "FROM analysis_runs ar JOIN games g ON g.game_id=ar.game_id "
+            "JOIN game_revisions gr ON gr.game_id=ar.game_id "
+            "AND gr.line_revision=ar.line_revision AND gr.is_current=1 "
+            "LEFT JOIN analysis_jobs aj ON aj.result_run_id=ar.run_id " + account_join +
+            "WHERE ((ar.source='stockfish' AND ar.status='complete' AND aj.analysis_pass='fast' "
+            "AND aj.status='complete' AND aj.engine_version=? AND aj.parameters_json=?) "
+            "OR (ar.source='lichess-pgn' AND ar.status IN ('complete','partial')))" +
+            account_clause + ") SELECT run_id,game_id,line_revision,line_hash,source,started_at "
+            "FROM eligible WHERE rank=1 ORDER BY CASE WHEN started_at IS NULL THEN 1 ELSE 0 END,"
+            "started_at DESC,game_id DESC LIMIT ? OFFSET ?")
+        values.extend([limit, offset])
+        with self._connection() as db:
+            return [dict(row) for row in db.execute(sql, values)]
+
+    def renew_analysis_job_lease(self, job_id: str, worker_id: str, *,
+                                 lease_seconds: int = 300) -> bool:
+        lease_seconds = max(30, min(3600, int(lease_seconds)))
+        now_dt = datetime.now(timezone.utc)
+        with self._connection() as db:
+            cursor = db.execute(
+                "UPDATE analysis_jobs SET lease_until=?,updated_at=? "
+                "WHERE job_id=? AND status='running' AND lease_owner=?",
+                ((now_dt + timedelta(seconds=lease_seconds)).isoformat(),
+                 now_dt.isoformat(), job_id, worker_id))
+        return cursor.rowcount == 1
+
+    def finish_analysis_job(self, job_id: str, worker_id: str, *, status: str,
+                            result_run_id: str | None = None,
+                            error: str | None = None) -> None:
+        if status not in {"complete", "paused", "cancelled", "failed", "stale"}:
+            raise ValueError("Invalid terminal analysis job status")
+        now = datetime.now(timezone.utc).isoformat()
+        with self._connection() as db:
+            cursor = db.execute(
+                "UPDATE analysis_jobs SET status=?,result_run_id=?,error=?,updated_at=?,"
+                "finished_at=?,lease_owner=NULL,lease_until=NULL "
+                "WHERE job_id=? AND status='running' AND lease_owner=?",
+                (status, result_run_id, error[:500] if error else None, now,
+                 now if status in {"complete", "cancelled", "failed", "stale"} else None,
+                 job_id, worker_id))
+            if cursor.rowcount != 1:
+                raise RuntimeError("Analysis job lease was lost before it could be finalized.")
+
+    def resume_paused_analysis_jobs(self, *, engine_version: str | None = None,
+                                    parameters: dict | None = None) -> int:
+        now = datetime.now(timezone.utc).isoformat()
+        params_json = (json.dumps(parameters, sort_keys=True, separators=(",", ":"))
+                       if parameters is not None else None)
+        with self._connection() as db:
+            if engine_version is None and params_json is None:
+                cursor = db.execute("UPDATE analysis_jobs SET status='queued',updated_at=? "
+                                    "WHERE status='paused'", (now,))
+            elif params_json is None:
+                cursor = db.execute("UPDATE analysis_jobs SET status='queued',updated_at=? "
+                                    "WHERE status='paused' AND engine_version=?",
+                                    (now, engine_version))
+            elif engine_version is None:
+                cursor = db.execute("UPDATE analysis_jobs SET status='queued',updated_at=? "
+                                    "WHERE status='paused' AND parameters_json=?",
+                                    (now, params_json))
+            else:
+                cursor = db.execute("UPDATE analysis_jobs SET status='queued',updated_at=? "
+                                    "WHERE status='paused' AND engine_version=? "
+                                    "AND parameters_json=?",
+                                    (now, engine_version, params_json))
+        return cursor.rowcount
+
+    def cancel_queued_analysis_jobs(self, *, engine_version: str | None = None,
+                                    parameters: dict | None = None) -> int:
+        now = datetime.now(timezone.utc).isoformat()
+        params_json = (json.dumps(parameters, sort_keys=True, separators=(",", ":"))
+                       if parameters is not None else None)
+        with self._connection() as db:
+            if engine_version is None and params_json is None:
+                cursor = db.execute("UPDATE analysis_jobs SET status='cancelled',updated_at=?,"
+                                    "finished_at=? WHERE status='queued'", (now, now))
+            elif params_json is None:
+                cursor = db.execute("UPDATE analysis_jobs SET status='cancelled',updated_at=?,"
+                                    "finished_at=? WHERE status='queued' AND engine_version=?",
+                                    (now, now, engine_version))
+            elif engine_version is None:
+                cursor = db.execute("UPDATE analysis_jobs SET status='cancelled',updated_at=?,"
+                                    "finished_at=? WHERE status='queued' AND parameters_json=?",
+                                    (now, now, params_json))
+            else:
+                cursor = db.execute("UPDATE analysis_jobs SET status='cancelled',updated_at=?,"
+                                    "finished_at=? WHERE status='queued' AND engine_version=? "
+                                    "AND parameters_json=?",
+                                    (now, now, engine_version, params_json))
+        return cursor.rowcount
+
+    def analysis_job_counts(self, *, engine_version: str | None = None,
+                            parameters: dict | None = None) -> dict[str, int]:
+        clauses: list[str] = []
+        values: list[str] = []
+        if engine_version is not None:
+            clauses.append("engine_version=?")
+            values.append(engine_version)
+        if parameters is not None:
+            clauses.append("parameters_json=?")
+            values.append(json.dumps(parameters, sort_keys=True, separators=(",", ":")))
+        where = " WHERE " + " AND ".join(clauses) if clauses else ""
+        with self._connection() as db:
+            rows = db.execute("SELECT status,COUNT(*) AS count FROM analysis_jobs" + where +
+                              " GROUP BY status", tuple(values)).fetchall()
+        return {str(row["status"]): int(row["count"]) for row in rows}
 
     def search_games(self, query: str = "", *, page: int = 0,
                      page_size: int = DEFAULT_PAGE_SIZE, completed_only: bool = False,
@@ -772,16 +1311,33 @@ class GameRepository:
         status = ("draw" if result == "1/2-1/2" else "finished"
                   if result in {"1-0", "0-1"} else "unknownFinish")
         clock = parsed.headers.get("TimeControl", "-")
-        started_at = parsed.headers.get("UTCDate") or parsed.headers.get("Date")
-        if started_at and len(started_at) == 10 and started_at[4] == ".":
-            started_at = started_at.replace(".", "-") + "T00:00:00+00:00"
-        if not started_at and record.get("createdAt") is not None:
+        header_date = parsed.headers.get("UTCDate") or parsed.headers.get("Date")
+        started_at = None
+        time_precision = "unknown"
+        if header_date and len(header_date) == 10 and header_date[4] in {".", "-"}:
+            try:
+                parsed_date = datetime.strptime(header_date, "%Y.%m.%d" if header_date[4] == "."
+                                                else "%Y-%m-%d").date()
+                started_at = parsed_date.isoformat() + "T00:00:00+00:00"
+                time_precision = "date_only"
+            except ValueError:
+                pass
+        if started_at is None and record.get("createdAt") is not None:
             try:
                 started_at = datetime.fromtimestamp(int(record["createdAt"]) / 1000,
                     timezone.utc).isoformat()
+                time_precision = "timestamp"
             except (TypeError, ValueError, OverflowError, OSError):
                 started_at = None
+                time_precision = "unknown"
         lichess_assessments = []
+        initial_evaluation = parsed.eval()
+        if initial_evaluation is not None:
+            initial_score = initial_evaluation.pov(chess.WHITE)
+            lichess_assessments.append({
+                "ply": 0, "white_cp": initial_score.score(mate_score=None),
+                "mate_white": initial_score.mate(), "depth": parsed.eval_depth(),
+            })
         for ply, node in enumerate(parsed.mainline(), start=1):
             evaluation = node.eval()
             if evaluation is None:
@@ -800,21 +1356,35 @@ class GameRepository:
         imported_at = datetime.now(timezone.utc).isoformat()
         phase = record.get("division")
         middle_start = end_start = None
+        from .phases import PHASE_FALLBACK_VERSION, infer_phase_boundaries
         if isinstance(phase, dict):
             middle_start = _phase_ply(phase.get("middle"))
             end_start = _phase_ply(phase.get("end"))
+        fallback_middle = fallback_end = None
+        if middle_start is None and end_start is None:
+            phase_board = (chess.Board() if initial_fen == "startpos" else chess.Board(initial_fen))
+            phase_boards = [phase_board.copy(stack=False)]
+            for raw_move in moves.split():
+                move = chess.Move.from_uci(raw_move)
+                phase_board.push(move)
+                phase_boards.append(phase_board.copy(stack=False))
+            fallback_middle, fallback_end = infer_phase_boundaries(phase_boards)
 
         inserted_link = {"value": False}
 
         def commit_archive(db: sqlite3.Connection, revision: int, line_hash: str) -> None:
             db.execute("UPDATE games SET source='lichess_archive', source_game_id=?, variant=?, "
+                       "started_at=COALESCE(started_at,?), "
+                       "game_time_precision=CASE WHEN ?='unknown' THEN game_time_precision "
+                       "ELSE ? END, "
                        "raw_checksum=?, raw_pgn=?, last_move_at=COALESCE(?,last_move_at), "
                        "lichess_accuracy_white=COALESCE(?,lichess_accuracy_white), "
                        "lichess_accuracy_black=COALESCE(?,lichess_accuracy_black), "
                        "white_rating=COALESCE(?,white_rating),black_rating=COALESCE(?,black_rating), "
                        "opening_eco=COALESCE(?,opening_eco),opening_name=COALESCE(?,opening_name) "
                        "WHERE game_id=?",
-                       (game_id, variant, raw_hash, raw_pgn, record.get("lastMoveAt"),
+                       (game_id, variant, started_at, time_precision, time_precision,
+                        raw_hash, raw_pgn, record.get("lastMoveAt"),
                         (record.get("accuracy") or {}).get("white"),
                         (record.get("accuracy") or {}).get("black"), white_data.get("rating"),
                         black_data.get("rating"), opening.get("eco"), opening.get("name"), game_id))
@@ -832,27 +1402,89 @@ class GameRepository:
                        "opponent=excluded.opponent,player_name=excluded.player_name",
                        (account_id, game_id, game_id, imported_at, player_color, player_rating,
                         opponent_rating, opponent, white if player_color == "white" else black))
-            if lichess_assessments:
-                existing = db.execute("SELECT 1 FROM analysis_runs WHERE game_id=? AND line_revision=? "
-                                      "AND line_hash=? AND source='lichess-pgn' AND status='complete' "
-                                      "LIMIT 1", (game_id, revision, line_hash)).fetchone()
-                if not existing:
+            eval_parameters = json.dumps({"format": "pgn-eval-v1"}, sort_keys=True)
+            existing_eval_run = db.execute(
+                "SELECT * FROM analysis_runs WHERE game_id=? AND line_revision=? AND line_hash=? "
+                "AND source='lichess-pgn' AND parameters_json=? "
+                "ORDER BY finished_at DESC,run_id DESC LIMIT 1",
+                (game_id, revision, line_hash, eval_parameters)).fetchone()
+            if lichess_assessments or existing_eval_run:
+                now = datetime.now(timezone.utc).isoformat()
+                if existing_eval_run:
+                    run_id = existing_eval_run["run_id"]
+                    changed = False
+                else:
                     run_id = uuid.uuid4().hex
-                    now = datetime.now(timezone.utc).isoformat()
                     db.execute("INSERT INTO analysis_runs VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
                                (run_id, game_id, revision, line_hash, "lichess-pgn", "Lichess", None,
-                                json.dumps({"format": "pgn-eval-v1"}, sort_keys=True), now, now,
-                                "complete", None))
-                    db.executemany("INSERT INTO position_assessments VALUES (?,?,?,?,?,?,?,?,?)",
-                                   [(run_id, game_id, revision, item["ply"], item["white_cp"],
-                                     item["mate_white"], item["depth"], None, "")
-                                    for item in lichess_assessments])
+                                eval_parameters, now, now, "partial", None))
+                    changed = True
+                for item in lichess_assessments:
+                    old = db.execute("SELECT white_cp,mate_white,depth,nodes,pv_uci "
+                                     "FROM position_assessments WHERE run_id=? AND ply=?",
+                                     (run_id, item["ply"])).fetchone()
+                    incoming_has_score = (item["white_cp"] is not None or
+                                          item["mate_white"] is not None)
+                    if old:
+                        old_has_score = old["white_cp"] is not None or old["mate_white"] is not None
+                        incoming_depth = item["depth"]
+                        old_depth = old["depth"]
+                        # Preserve an existing higher-quality assessment when a later
+                        # export is shallower or omits depth; equal/newer depth replaces it.
+                        if not incoming_has_score or (old_has_score and old_depth is not None and
+                                (incoming_depth is None or incoming_depth < old_depth)):
+                            continue
+                        values = (item["white_cp"], item["mate_white"], incoming_depth)
+                        if tuple(old[:3]) != values:
+                            db.execute("UPDATE position_assessments SET white_cp=?,mate_white=?,depth=? "
+                                       "WHERE run_id=? AND ply=?",
+                                       (*values, run_id, item["ply"]))
+                            changed = True
+                    else:
+                        db.execute("INSERT INTO position_assessments VALUES (?,?,?,?,?,?,?,?,?)",
+                                   (run_id, game_id, revision, item["ply"], item["white_cp"],
+                                    item["mate_white"], item["depth"], None, ""))
+                        changed = True
+                expected_positions = db.execute(
+                    "SELECT COUNT(*) FROM game_moves WHERE game_id=? AND line_revision=?",
+                    (game_id, revision)).fetchone()[0]
+                scored_positions = db.execute(
+                    "SELECT COUNT(*) FROM position_assessments pa JOIN game_positions gp "
+                    "ON gp.game_id=pa.game_id AND gp.line_revision=pa.line_revision AND gp.ply=pa.ply "
+                    "WHERE pa.run_id=? AND pa.ply>0 "
+                    "AND (white_cp IS NOT NULL OR mate_white IS NOT NULL)", (run_id,)).fetchone()[0]
+                eval_status = ("complete" if expected_positions and
+                               scored_positions >= expected_positions else "partial")
+                if existing_eval_run and existing_eval_run["status"] != eval_status:
+                    changed = True
+                if changed:
+                    db.execute("UPDATE analysis_runs SET status=?,finished_at=?,error=NULL WHERE run_id=?",
+                               (eval_status, now, run_id))
+                existing_metrics = db.execute(
+                    "SELECT 1 FROM move_metrics WHERE run_id=? AND metric_version='cc-move-metrics-v2' LIMIT 1",
+                    (run_id,)).fetchone()
+                if changed or not existing_metrics:
+                    self._insert_derived_metrics_for_run(
+                        db, run_id, user_color=player_color, replace=bool(changed))
             if middle_start is not None or end_start is not None:
                 db.execute("INSERT INTO game_phase_boundaries VALUES (?,?,?,?,?,?) "
                            "ON CONFLICT(game_id,line_revision) DO UPDATE SET "
                            "middle_start_ply=excluded.middle_start_ply,end_start_ply=excluded.end_start_ply,"
                            "source=excluded.source,method_version=excluded.method_version",
                            (game_id, revision, middle_start, end_start, "lichess", "lichess-division-v1"))
+                self._apply_phase_labels(db, game_id, revision, middle_start, end_start)
+            elif fallback_middle is not None or fallback_end is not None:
+                existing_phase = db.execute(
+                    "SELECT source FROM game_phase_boundaries WHERE game_id=? AND line_revision=?",
+                    (game_id, revision)).fetchone()
+                if not existing_phase or existing_phase["source"] != "lichess":
+                    db.execute("INSERT INTO game_phase_boundaries VALUES (?,?,?,?,?,?) "
+                               "ON CONFLICT(game_id,line_revision) DO UPDATE SET "
+                               "middle_start_ply=excluded.middle_start_ply,end_start_ply=excluded.end_start_ply,"
+                               "source=excluded.source,method_version=excluded.method_version",
+                               (game_id, revision, fallback_middle, fallback_end,
+                                "material-fallback", PHASE_FALLBACK_VERSION))
+                    self._apply_phase_labels(db, game_id, revision, fallback_middle, fallback_end)
             if pilot_run_id:
                 db.execute("UPDATE archive_pilot_runs SET new_count=new_count+? WHERE run_id=?",
                            (int(not existing_account_link), pilot_run_id))
@@ -992,7 +1624,10 @@ class GameRepository:
                       source: str, engine_name: str | None, engine_version: str | None,
                       parameters: dict, assessments: list[dict],
                       classifications: list[dict], status: str = "complete",
-                      error: str | None = None) -> str:
+                      error: str | None = None,
+                      alternatives: list[dict] | None = None) -> str:
+        from .move_metrics import build_move_facts
+
         self._wait_before_read(game_id)
         run_id = uuid.uuid4().hex
         now = datetime.now(timezone.utc).isoformat()
@@ -1005,22 +1640,186 @@ class GameRepository:
                            [(run_id, game_id, line_revision, item["ply"], item.get("white_cp"),
                              item.get("mate_white"), item.get("depth"), item.get("nodes"),
                              " ".join(item.get("pv", []))) for item in assessments])
+            db.executemany("""INSERT INTO analysis_alternatives (
+                run_id,game_id,line_revision,ply,multipv_rank,white_cp,mate_white,
+                depth,nodes,pv_uci
+            ) VALUES (?,?,?,?,?,?,?,?,?,?)""",
+                [(run_id, game_id, line_revision, item["ply"], item["multipv_rank"],
+                  item.get("white_cp"), item.get("mate_white"), item.get("depth"),
+                  item.get("nodes"), " ".join(item.get("pv", [])))
+                 for item in alternatives or []])
             db.executemany("INSERT INTO move_classifications VALUES (?,?,?,?,?,?,?,?,?)",
                            [(run_id, game_id, line_revision, item["ply"], item["mover"],
                              item.get("phase", "unknown"), item.get("eval_loss_cp"),
                              item.get("label", "unknown"), item.get("algorithm_version", ""))
                             for item in classifications])
+            moves = [dict(row) for row in db.execute(
+                "SELECT ply,mover,uci FROM game_moves WHERE game_id=? AND line_revision=? ORDER BY ply",
+                (game_id, line_revision))]
+            revision_row = db.execute("SELECT initial_fen FROM game_revisions WHERE game_id=? "
+                                      "AND line_revision=?", (game_id, line_revision)).fetchone()
+            metrics, events = build_move_facts(
+                assessments, moves, source=source, run_id=run_id,
+                classifications=classifications,
+                initial_fen=revision_row["initial_fen"] if revision_row else "startpos")
+            for event in events:
+                event["tags"] = ["opportunity"]
+            from .event_detectors import detect_registered_events
+            events.extend(detect_registered_events(
+                assessments, moves, metrics, run_id=run_id, source=source))
+            db.executemany("""INSERT INTO move_metrics (
+                run_id,game_id,line_revision,ply,metric_version,source,
+                white_cp_before,mate_white_before,white_cp_after,mate_white_after,
+                cp_loss,mate_discontinuity,wdl_before_json,wdl_after_json,wdl_model,
+                accuracy,accuracy_source,accuracy_formula_id,severity,
+                severity_policy_version,legacy_label
+            ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                [(run_id, game_id, line_revision, row["ply"], row["metric_version"], row["source"],
+                  row["white_cp_before"], row["mate_white_before"], row["white_cp_after"],
+                  row["mate_white_after"], row["cp_loss"], row["mate_discontinuity"],
+                  row["wdl_before_json"], row["wdl_after_json"], row["wdl_model"],
+                  row["accuracy"], row["accuracy_source"], row["accuracy_formula_id"],
+                  row["severity"], row["severity_policy_version"], row["legacy_label"])
+                 for row in metrics])
+            self._insert_event_rows(db, events, run_id, game_id, line_revision)
         self.invalidate_statistics_cache()
         return run_id
 
+    @staticmethod
+    def _insert_event_rows(db: sqlite3.Connection, events: list[dict], run_id: str,
+                           game_id: str, line_revision: int, *, ignore: bool = False) -> None:
+        insert = "INSERT OR IGNORE" if ignore else "INSERT"
+        db.executemany(f"""{insert} INTO analysis_events (
+            event_key,run_id,game_id,line_revision,ply,event_type,confidence_state,
+            source,detector_version,evidence_json
+        ) VALUES (?,?,?,?,?,?,?,?,?,?)""",
+            [(row["event_key"], run_id, game_id, line_revision, row["ply"],
+              row["event_type"], row["confidence_state"], row["source"],
+              row["detector_version"], row["evidence_json"]) for row in events])
+        db.executemany("""INSERT OR IGNORE INTO event_tags (
+            event_key,tag,detector_version,confidence_state,evidence_json
+        ) VALUES (?,?,?,?,?)""",
+            [(row["event_key"], tag, row["detector_version"], row["confidence_state"],
+              row["evidence_json"]) for row in events for tag in row.get("tags", [])])
+
+    @classmethod
+    def _insert_derived_metrics_for_run(cls, db: sqlite3.Connection, run_id: str,
+                                        *, user_color: str | None = None,
+                                        replace: bool = False) -> int:
+        """Materialize canonical v2 move facts from one persisted source run, without UCI."""
+        from .move_metrics import build_move_facts
+        from .event_detectors import detect_registered_events
+
+        run = db.execute("SELECT * FROM analysis_runs WHERE run_id=?", (run_id,)).fetchone()
+        if not run:
+            return 0
+        assessments = [dict(row) for row in db.execute(
+            "SELECT * FROM position_assessments WHERE run_id=? ORDER BY ply", (run_id,))]
+        for item in assessments:
+            item["pv"] = str(item.get("pv_uci") or "").split()
+        moves = [dict(row) for row in db.execute(
+            "SELECT ply,mover,uci FROM game_moves WHERE game_id=? AND line_revision=? ORDER BY ply",
+            (run["game_id"], run["line_revision"]))]
+        revision = db.execute("SELECT initial_fen FROM game_revisions WHERE game_id=? "
+                              "AND line_revision=?", (run["game_id"], run["line_revision"])).fetchone()
+        classifications = [dict(row) for row in db.execute(
+            "SELECT * FROM move_classifications WHERE run_id=? ORDER BY ply", (run_id,))]
+        metrics, events = build_move_facts(
+            assessments, moves, source=run["source"], run_id=run_id,
+            classifications=classifications,
+            initial_fen=revision["initial_fen"] if revision else "startpos")
+        for event in events:
+            event["tags"] = ["opportunity"]
+        events.extend(detect_registered_events(
+            assessments, moves, metrics, run_id=run_id, source=run["source"]))
+        if replace:
+            from .move_metrics import METRIC_VERSION
+            db.execute("DELETE FROM move_metrics WHERE run_id=? AND metric_version=?",
+                       (run_id, METRIC_VERSION))
+            db.execute("DELETE FROM analysis_events WHERE run_id=? AND "
+                       "(detector_version='cc-opportunity-candidate-v1' "
+                       "OR detector_version LIKE 'cc-base-events-v1:%')", (run_id,))
+        db.executemany("""INSERT OR IGNORE INTO move_metrics (
+            run_id,game_id,line_revision,ply,metric_version,source,
+            white_cp_before,mate_white_before,white_cp_after,mate_white_after,
+            cp_loss,mate_discontinuity,wdl_before_json,wdl_after_json,wdl_model,
+            accuracy,accuracy_source,accuracy_formula_id,severity,
+            severity_policy_version,legacy_label
+        ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+            [(run_id, run["game_id"], run["line_revision"], row["ply"],
+              row["metric_version"], row["source"], row["white_cp_before"],
+              row["mate_white_before"], row["white_cp_after"], row["mate_white_after"],
+              row["cp_loss"], row["mate_discontinuity"], row["wdl_before_json"],
+              row["wdl_after_json"], row["wdl_model"], row["accuracy"],
+              row["accuracy_source"], row["accuracy_formula_id"], row["severity"],
+              row["severity_policy_version"], row["legacy_label"]) for row in metrics])
+        cls._insert_event_rows(db, events, run_id, run["game_id"], run["line_revision"], ignore=True)
+        return len(metrics)
+
+    @staticmethod
+    def _load_analysis_events(db: sqlite3.Connection, run_id: str) -> list[dict]:
+        from .event_detectors import DETECTOR_VERSION
+
+        # Retain superseded detector evidence in SQLite for audit, but expose only
+        # the active base-detector version in reports and review planning.
+        events = [dict(row) for row in db.execute(
+            "SELECT * FROM analysis_events WHERE run_id=? AND "
+            "(detector_version NOT LIKE 'cc-base-events-v%' OR detector_version LIKE ?) "
+            "ORDER BY ply,event_type,detector_version",
+            (run_id, DETECTOR_VERSION + ":%"))]
+        for event in events:
+            event["tags"] = [row[0] for row in db.execute(
+                "SELECT tag FROM event_tags WHERE event_key=? ORDER BY tag",
+                (event["event_key"],))]
+        return events
+
+    @staticmethod
+    def _load_move_metrics(db: sqlite3.Connection, run_id: str) -> list[dict]:
+        rows = db.execute(
+            "SELECT mm.*,gm.mover,CASE WHEN pb.middle_start_ply IS NOT NULL "
+            "AND mm.ply<pb.middle_start_ply THEN 'opening' WHEN pb.end_start_ply IS NOT NULL "
+            "AND mm.ply>=pb.end_start_ply THEN 'endgame' WHEN pb.middle_start_ply IS NOT NULL "
+            "AND mm.ply>=pb.middle_start_ply THEN 'middlegame' ELSE 'unknown' END phase "
+            "FROM move_metrics mm JOIN game_moves gm ON gm.game_id=mm.game_id "
+            "AND gm.line_revision=mm.line_revision AND gm.ply=mm.ply "
+            "LEFT JOIN game_phase_boundaries pb ON pb.game_id=mm.game_id "
+            "AND pb.line_revision=mm.line_revision WHERE mm.run_id=? ORDER BY mm.ply",
+            (run_id,)).fetchall()
+        return [dict(row) for row in rows]
+
+    @staticmethod
+    def _load_review_coverage(db: sqlite3.Connection, game_id: str,
+                              line_revision: int, line_hash: str) -> dict | None:
+        row = db.execute(
+            "SELECT ar.run_id,aj.parameters_json,aj.status FROM analysis_jobs aj "
+            "JOIN analysis_runs ar ON ar.run_id=aj.result_run_id WHERE aj.game_id=? "
+            "AND aj.line_revision=? AND aj.line_hash=? AND aj.analysis_pass='review' "
+            "AND aj.status='complete' ORDER BY aj.updated_at DESC,aj.job_id DESC LIMIT 1",
+            (game_id, line_revision, line_hash)).fetchone()
+        if not row:
+            return None
+        params = json.loads(row["parameters_json"])
+        reviewed = db.execute(
+            "SELECT COUNT(*) FROM move_metrics WHERE run_id=? AND metric_version='cc-move-metrics-v2' "
+            "AND cp_loss IS NOT NULL", (row["run_id"],)).fetchone()[0]
+        total_moves = db.execute(
+            "SELECT COUNT(*) FROM game_moves WHERE game_id=? AND line_revision=?",
+            (game_id, line_revision)).fetchone()[0]
+        return {"status": row["status"], "reviewed_moves": int(reviewed),
+                "selected_moves": len(params.get("review_move_plies", [])),
+                "total_moves": int(total_moves), "source": "stockfish-review"}
+
     def find_analysis_cache(self, game_id: str, line_revision: int, line_hash: str,
                             source: str, engine_version: str | None,
-                            parameters: dict) -> dict | None:
+                            parameters: dict, *, account_id: str | None = None,
+                            user_color: str | None = None) -> dict | None:
         params_json = json.dumps(parameters, sort_keys=True)
+        usable_statuses = ("('complete','partial')" if source == "lichess-pgn" or
+                           parameters.get("analysis_pass") == "review" else "('complete')")
         with self._connection() as db:
             run = db.execute("SELECT * FROM analysis_runs WHERE game_id=? AND line_revision=? "
                              "AND line_hash=? AND source=? AND engine_version IS ? "
-                             "AND parameters_json=? AND status='complete' "
+                             f"AND parameters_json=? AND status IN {usable_statuses} "
                              "ORDER BY finished_at DESC LIMIT 1",
                              (game_id, line_revision, line_hash, source, engine_version,
                               params_json)).fetchone()
@@ -1031,6 +1830,28 @@ class GameRepository:
                 "SELECT * FROM position_assessments WHERE run_id=? ORDER BY ply", (run["run_id"],))]
             result["classifications"] = [dict(row) for row in db.execute(
                 "SELECT * FROM move_classifications WHERE run_id=? ORDER BY ply", (run["run_id"],))]
+            result["move_metrics"] = self._load_move_metrics(db, run["run_id"])
+            result["alternatives"] = [dict(row) for row in db.execute(
+                "SELECT * FROM analysis_alternatives WHERE run_id=? ORDER BY ply,multipv_rank",
+                (run["run_id"],))]
+            result["events"] = self._load_analysis_events(db, run["run_id"])
+            coverage = db.execute("SELECT * FROM analysis_coverage WHERE run_id=?",
+                                  (run["run_id"],)).fetchone()
+            result["coverage"] = dict(coverage) if coverage else None
+            result["decision_coverage"] = self._decision_coverage(
+                db, result, game_id, account_id=account_id, user_color=user_color)
+            result["review_coverage"] = self._load_review_coverage(
+                db, game_id, int(run["line_revision"]), str(run["line_hash"]))
+            self._attach_official_accuracy(db, result, game_id, account_id=account_id,
+                                           user_color=user_color)
+            result["local_game_accuracy"] = None
+            result["local_game_accuracy_formula_id"] = None
+            result["local_accuracy_status"] = {
+                "status": "unsupported",
+                "reason": "Локальная accuracy не рассчитывается: CPL и категории ошибок не являются процентом точности.",
+                "coverage": {"comparable_own_moves": result["decision_coverage"]["comparable_own_moves"],
+                             "own_moves": result["decision_coverage"]["own_moves"]},
+            }
             return result
 
     def list_analyses(self, game_id: str, line_revision: int | None = None) -> list[dict]:
@@ -1043,14 +1864,38 @@ class GameRepository:
         with self._connection() as db:
             return [dict(row) for row in db.execute(sql, params)]
 
-    def latest_analysis_detail(self, game_id: str, line_revision: int) -> dict | None:
+    def latest_analysis_detail(self, game_id: str, line_revision: int, *,
+                               account_id: str | None = None,
+                               user_color: str | None = None) -> dict | None:
         """Load one current analysis and its plotted points/classifications for a detail view."""
+        with self._connection() as db:
+            materialize = db.execute(
+                "SELECT ar.run_id FROM analysis_runs ar JOIN game_revisions gr "
+                "ON gr.game_id=ar.game_id AND gr.line_revision=ar.line_revision "
+                "WHERE ar.game_id=? AND ar.line_revision=? AND gr.is_current=1 "
+                "AND ar.status IN ('complete','partial') AND NOT EXISTS "
+                "(SELECT 1 FROM analysis_jobs aj WHERE aj.result_run_id=ar.run_id "
+                "AND aj.analysis_pass='review') ORDER BY "
+                "CASE WHEN ar.status='complete' THEN 0 ELSE 1 END,ar.finished_at DESC,"
+                "ar.run_id DESC LIMIT 1", (game_id, line_revision)).fetchone()
+            if materialize:
+                has_metrics = db.execute("SELECT 1 FROM move_metrics WHERE run_id=? LIMIT 1",
+                                         (materialize["run_id"],)).fetchone()
+            else:
+                has_metrics = True
+        if materialize and not has_metrics:
+            # Legacy reports are hydrated from saved assessments only; this never opens UCI.
+            self.materialize_analysis_metrics(materialize["run_id"])
         with self._connection() as db:
             run = db.execute(
                 "SELECT ar.* FROM analysis_runs ar JOIN game_revisions gr "
                 "ON gr.game_id=ar.game_id AND gr.line_revision=ar.line_revision "
                 "WHERE ar.game_id=? AND ar.line_revision=? AND gr.is_current=1 "
-                "AND ar.status='complete' ORDER BY ar.finished_at DESC,ar.run_id DESC LIMIT 1",
+                "AND ar.status IN ('complete','partial') AND NOT EXISTS "
+                "(SELECT 1 FROM analysis_jobs aj WHERE aj.result_run_id=ar.run_id "
+                "AND aj.analysis_pass='review') "
+                "ORDER BY CASE WHEN ar.status='complete' THEN 0 ELSE 1 END,"
+                "ar.finished_at DESC,ar.run_id DESC LIMIT 1",
                 (game_id, line_revision)).fetchone()
             if not run:
                 return None
@@ -1060,24 +1905,262 @@ class GameRepository:
             result["classifications"] = [dict(row) for row in db.execute(
                 "SELECT * FROM move_classifications WHERE run_id=? AND ply>0 ORDER BY ply",
                 (run["run_id"],))]
+            result["move_metrics"] = self._load_move_metrics(db, run["run_id"])
+            result["alternatives"] = [dict(row) for row in db.execute(
+                "SELECT * FROM analysis_alternatives WHERE run_id=? ORDER BY ply,multipv_rank",
+                (run["run_id"],))]
+            result["events"] = self._load_analysis_events(db, run["run_id"])
+            coverage = db.execute("SELECT * FROM analysis_coverage WHERE run_id=?",
+                                  (run["run_id"],)).fetchone()
+            result["coverage"] = dict(coverage) if coverage else None
+            result["decision_coverage"] = self._decision_coverage(
+                db, result, game_id, account_id=account_id, user_color=user_color)
+            result["review_coverage"] = self._load_review_coverage(
+                db, game_id, int(run["line_revision"]), str(run["line_hash"]))
+            self._attach_official_accuracy(db, result, game_id, account_id=account_id,
+                                           user_color=user_color)
+            result["local_game_accuracy"] = None
+            result["local_game_accuracy_formula_id"] = None
+            result["local_accuracy_status"] = {
+                "status": "unsupported",
+                "reason": "Локальная accuracy не рассчитывается: CPL и категории ошибок не являются процентом точности.",
+                "coverage": {"comparable_own_moves": result["decision_coverage"]["comparable_own_moves"],
+                             "own_moves": result["decision_coverage"]["own_moves"]},
+            }
             return result
 
+    @staticmethod
+    def _decision_coverage(db: sqlite3.Connection, analysis: dict, game_id: str, *,
+                           account_id: str | None, user_color: str | None) -> dict:
+        game = db.execute("SELECT color FROM games WHERE game_id=?", (game_id,)).fetchone()
+        linked = (db.execute("SELECT color FROM account_games WHERE account_id=? AND game_id=?",
+                             (account_id, game_id)).fetchone() if account_id else None)
+        color = (linked["color"] if linked else None) or (
+            user_color if user_color in {"white", "black"} else
+            game["color"] if game else None)
+        if color not in {"white", "black"}:
+            return {"owner_color": None, "own_moves": 0, "comparable_own_moves": 0,
+                    "missing_own_move_plies": [], "first_own_move_missing_baseline": False}
+        run_id = str(analysis["run_id"])
+        revision = int(analysis["line_revision"])
+        own_moves = int(db.execute(
+            "SELECT COUNT(*) FROM game_moves WHERE game_id=? AND line_revision=? AND mover=?",
+            (game_id, revision, color)).fetchone()[0])
+        comparable = int(db.execute(
+            "SELECT COUNT(*) FROM move_metrics mm JOIN game_moves gm ON gm.game_id=mm.game_id "
+            "AND gm.line_revision=mm.line_revision AND gm.ply=mm.ply "
+            "WHERE mm.run_id=? AND gm.mover=? AND mm.cp_loss IS NOT NULL",
+            (run_id, color)).fetchone()[0])
+        missing = [int(row[0]) for row in db.execute(
+            "SELECT gm.ply FROM game_moves gm WHERE gm.game_id=? AND gm.line_revision=? "
+            "AND gm.mover=? AND NOT EXISTS (SELECT 1 FROM position_assessments pre "
+            "WHERE pre.run_id=? AND pre.ply=gm.ply-1 AND "
+            "(pre.white_cp IS NOT NULL OR pre.mate_white IS NOT NULL)) ORDER BY gm.ply",
+            (game_id, revision, color, run_id))]
+        source_post_scores = int(db.execute(
+            "SELECT COUNT(*) FROM position_assessments WHERE run_id=? AND ply>0 "
+            "AND (white_cp IS NOT NULL OR mate_white IS NOT NULL)", (run_id,)).fetchone()[0])
+        expected = int(db.execute("SELECT COUNT(*) FROM game_moves WHERE game_id=? AND line_revision=?",
+                                  (game_id, revision)).fetchone()[0])
+        return {"owner_color": color, "own_moves": own_moves,
+                "comparable_own_moves": comparable, "missing_own_move_plies": missing,
+                "first_own_move_missing_baseline": bool(missing and min(missing) == (
+                    1 if color == "white" else 2)),
+                "source_eval_scored_post_moves": source_post_scores,
+                "source_eval_expected_post_moves": expected,
+                "source_eval_complete": source_post_scores >= expected if expected else False}
+
+    @staticmethod
+    def _attach_official_accuracy(db: sqlite3.Connection, result: dict, game_id: str, *,
+                                  account_id: str | None, user_color: str | None) -> None:
+        game = db.execute("SELECT source,source_game_id,color,lichess_accuracy_white,"
+                          "lichess_accuracy_black FROM games WHERE game_id=?", (game_id,)).fetchone()
+        linked_color = None
+        if account_id:
+            link = db.execute("SELECT color FROM account_games WHERE account_id=? AND game_id=?",
+                              (account_id, game_id)).fetchone()
+            linked_color = link["color"] if link else None
+        color = (linked_color if account_id else
+                 user_color if user_color in {"white", "black"} else
+                 game["color"] if game else None)
+        is_lichess = bool(game and (game["source"] in {"lichess", "lichess_archive"}
+                                    or game["source_game_id"]
+                                    or db.execute("SELECT 1 FROM account_games WHERE game_id=? LIMIT 1",
+                                                  (game_id,)).fetchone()))
+        value = None
+        if is_lichess and (not account_id or linked_color):
+            column = "lichess_accuracy_white" if color == "white" else (
+                "lichess_accuracy_black" if color == "black" else None)
+            if column:
+                value = game[column]
+        result["official_game_accuracy"] = value
+        result["official_game_accuracy_source"] = "lichess" if is_lichess else None
+        result["official_game_accuracy_color"] = color
+        result["official_game_accuracy_n"] = int(value is not None)
+
+    def materialize_analysis_metrics(self, run_id: str) -> int:
+        """Atomically replace v2 facts from persisted assessments; no engine is started."""
+        with self._connection() as db:
+            run = db.execute("SELECT * FROM analysis_runs WHERE run_id=?", (run_id,)).fetchone()
+            if not run:
+                return 0
+            db.execute("BEGIN IMMEDIATE")
+            count = self._insert_derived_metrics_for_run(db, run_id, replace=True)
+        self.invalidate_statistics_cache()
+        return count
+
+    def reclassify_analysis_events(self, run_id: str) -> int:
+        """Run registered pure detectors over one saved run, with no Stockfish access."""
+        from .event_detectors import detect_registered_events
+
+        with self._connection() as db:
+            run = db.execute("SELECT * FROM analysis_runs WHERE run_id=?", (run_id,)).fetchone()
+            if not run:
+                return 0
+            assessments = [dict(row) for row in db.execute(
+                "SELECT * FROM position_assessments WHERE run_id=? ORDER BY ply", (run_id,))]
+            for row in assessments:
+                row["pv"] = row.get("pv_uci", "").split()
+            moves = [dict(row) for row in db.execute(
+                "SELECT ply,mover,uci FROM game_moves WHERE game_id=? AND line_revision=? ORDER BY ply",
+                (run["game_id"], run["line_revision"]))]
+            metrics = [dict(row) for row in db.execute(
+                "SELECT * FROM move_metrics WHERE run_id=? AND metric_version='cc-move-metrics-v2' "
+                "ORDER BY ply", (run_id,))]
+            before = int(db.execute("SELECT COUNT(*) FROM analysis_events WHERE run_id=?",
+                                    (run_id,)).fetchone()[0])
+        events = detect_registered_events(
+            assessments, moves, metrics, run_id=run_id, source=run["source"])
+        with self._connection() as db:
+            db.execute("BEGIN IMMEDIATE")
+            self._insert_event_rows(db, events, run_id, run["game_id"],
+                                    run["line_revision"], ignore=True)
+            after = int(db.execute("SELECT COUNT(*) FROM analysis_events WHERE run_id=?",
+                                   (run_id,)).fetchone()[0])
+        return max(0, after - before)
+
+    def plan_review_positions(self, run_id: str, *, budget_per_game: int = 12,
+                              budget_total: int = 100) -> list[dict]:
+        """Return a capped review plan from stored metrics; this method never starts UCI."""
+        from .event_detectors import select_review_positions
+
+        with self._connection() as db:
+            metrics = [dict(row) for row in db.execute(
+                "SELECT * FROM move_metrics WHERE run_id=? AND metric_version='cc-move-metrics-v2' "
+                "ORDER BY ply", (run_id,))]
+            events = self._load_analysis_events(db, run_id)
+        return select_review_positions(metrics, events, budget_per_game=budget_per_game,
+                                       budget_total=budget_total)
+
     def phase_for_ply(self, game_id: str, line_revision: int, ply: int) -> str:
+        from .phases import phase_at_ply
+
         with self._connection() as db:
             row = db.execute("SELECT middle_start_ply,end_start_ply FROM game_phase_boundaries "
                              "WHERE game_id=? AND line_revision=?", (game_id,line_revision)).fetchone()
-        if not row:
-            return "unknown"
-        middle, end = row["middle_start_ply"], row["end_start_ply"]
-        if middle is None and end is None:
-            return "unknown"
-        if middle is not None and ply < middle:
-            return "opening"
-        if end is not None and ply >= end:
-            return "endgame"
-        if middle is not None and end is not None and middle <= ply < end:
-            return "middlegame"
-        return "unknown"
+        return phase_at_ply(row["middle_start_ply"], row["end_start_ply"], int(ply)) if row else "unknown"
+
+    def phase_boundaries(self, game_id: str, line_revision: int) -> dict | None:
+        """Return phase boundaries together with their source and method version."""
+        with self._connection() as db:
+            row = db.execute("SELECT * FROM game_phase_boundaries WHERE game_id=? AND line_revision=?",
+                             (game_id, line_revision)).fetchone()
+        return dict(row) if row else None
+
+    def infer_missing_phase_boundaries(self, limit: int = 25) -> int:
+        """Explicit bounded phase-fallback backfill for current standard lines only."""
+        from .phases import PHASE_FALLBACK_VERSION, infer_phase_boundaries
+
+        limit = max(1, min(int(limit), 100))
+        with self._connection() as db:
+            ids = [str(row[0]) for row in db.execute(
+                "SELECT g.game_id FROM games g LEFT JOIN game_phase_boundaries p "
+                "ON p.game_id=g.game_id AND p.line_revision=g.line_revision "
+                "WHERE g.variant='standard' AND p.game_id IS NULL "
+                "AND g.status NOT IN ('created','started','started_soon','playing') "
+                "AND g.import_error IS NULL ORDER BY COALESCE(g.started_at,g.updated_at) DESC,"
+                "g.game_id LIMIT ?", (limit,))]
+        saved = 0
+        for game_id in ids:
+            line = self.current_line(game_id)
+            if not line:
+                continue
+            try:
+                board = chess.Board() if line["initial_fen"] == "startpos" else chess.Board(line["initial_fen"])
+                if not board.is_valid():
+                    continue
+                boards = [board.copy(stack=False)]
+                for raw in str(line["moves"]).split():
+                    move = chess.Move.from_uci(raw)
+                    if move not in board.legal_moves:
+                        boards = []
+                        break
+                    board.push(move)
+                    boards.append(board.copy(stack=False))
+            except (ValueError, chess.InvalidMoveError, chess.IllegalMoveError):
+                continue
+            if not boards:
+                continue
+            middle, end = infer_phase_boundaries(boards)
+            if middle is None and end is None:
+                continue
+            with self._connection() as db:
+                cur = db.execute("INSERT OR IGNORE INTO game_phase_boundaries VALUES (?,?,?,?,?,?)",
+                    (game_id, int(line["line_revision"]), middle, end,
+                     "material-fallback", PHASE_FALLBACK_VERSION))
+                saved += int(cur.rowcount == 1)
+                if cur.rowcount == 1:
+                    self._apply_phase_labels(db, game_id, int(line["line_revision"]), middle, end)
+        return saved
+
+    @staticmethod
+    def _apply_phase_labels(db: sqlite3.Connection, game_id: str, line_revision: int,
+                            middle: int | None, end: int | None) -> None:
+        from .phases import phase_at_ply
+
+        rows = db.execute("SELECT mc.run_id,mc.ply FROM move_classifications mc "
+                          "JOIN analysis_runs ar ON ar.run_id=mc.run_id "
+                          "WHERE mc.game_id=? AND mc.line_revision=?",
+                          (game_id, line_revision)).fetchall()
+        db.executemany("UPDATE move_classifications SET phase=? WHERE run_id=? AND ply=?",
+                       [(phase_at_ply(middle, end, int(row["ply"])), row["run_id"], row["ply"])
+                        for row in rows])
+
+    def save_opening_match(self, game_id: str, line_revision: int, match: dict | None) -> None:
+        """Store a versioned opening reference without replacing Lichess metadata."""
+        self._wait_before_read(game_id)
+        with self._connection() as db:
+            if match is None:
+                db.execute("DELETE FROM opening_matches WHERE game_id=? AND line_revision=?",
+                           (game_id, line_revision))
+                return
+            game = db.execute("SELECT opening_eco,opening_name FROM games WHERE game_id=?",
+                              (game_id,)).fetchone()
+            if not game:
+                raise KeyError(game_id)
+            conflict = bool((game["opening_eco"] and game["opening_eco"] != match["eco"]) or
+                            (game["opening_name"] and game["opening_name"] != match["name"]))
+            db.execute("INSERT INTO opening_matches VALUES (?,?,?,?,?,?,?,?,?,?,?) "
+                       "ON CONFLICT(game_id,line_revision) DO UPDATE SET "
+                       "dataset_revision=excluded.dataset_revision,algorithm_version=excluded.algorithm_version,"
+                       "eco=excluded.eco,name=excluded.name,family=excluded.family,variation=excluded.variation,"
+                       "matched_ply=excluded.matched_ply,lichess_conflict=excluded.lichess_conflict,"
+                       "matched_at=excluded.matched_at",
+                       (game_id, line_revision, match["dataset_revision"], match["algorithm_version"],
+                        match["eco"], match["name"], match["family"], match.get("variation"),
+                        match["matched_ply"], int(conflict), datetime.now(timezone.utc).isoformat()))
+        self.invalidate_statistics_cache()
+
+    def opening_match(self, game_id: str, line_revision: int | None = None) -> dict | None:
+        with self._connection() as db:
+            if line_revision is None:
+                row = db.execute("SELECT om.* FROM opening_matches om JOIN games g "
+                                 "ON g.game_id=om.game_id AND g.line_revision=om.line_revision "
+                                 "WHERE om.game_id=?", (game_id,)).fetchone()
+            else:
+                row = db.execute("SELECT * FROM opening_matches WHERE game_id=? AND line_revision=?",
+                                 (game_id, line_revision)).fetchone()
+        return dict(row) if row else None
 
     def import_puzzle_activity(self, username: str, record: dict, *,
                                backfill: bool = False,
@@ -1109,20 +2192,51 @@ class GameRepository:
 
         results: list[tuple[str, bool]] = []
         with self._connection() as db:
+            existing: set[str] = set()
+            puzzle_metadata: dict[str, tuple] = {}
+            # SQLite builds on Windows often cap bound variables at 999. Chunk
+            # the preflight so large puzzle pages remain portable.
+            for offset in range(0, len(prepared), 500):
+                chunk = prepared[offset:offset + 500]
+                if not chunk:
+                    continue
+                placeholders = ",".join("?" for _ in chunk)
+                existing.update(row[0] for row in db.execute(
+                    f"SELECT attempt_uid FROM puzzle_attempts WHERE attempt_uid IN ({placeholders})",
+                    tuple(item[0] for item in chunk)).fetchall())
+            puzzle_ids = list(dict.fromkeys(item[1] for item in prepared))
+            for offset in range(0, len(puzzle_ids), 500):
+                chunk_ids = puzzle_ids[offset:offset + 500]
+                placeholders = ",".join("?" for _ in chunk_ids)
+                for row in db.execute(
+                        "SELECT puzzle_id,fen,solution_json,themes_json,puzzle_rating,plays "
+                        f"FROM puzzles WHERE puzzle_id IN ({placeholders})", chunk_ids).fetchall():
+                    puzzle_metadata[str(row["puzzle_id"])] = tuple(row[key] for key in
+                        ("fen", "solution_json", "themes_json", "puzzle_rating", "plays"))
             for attempt_uid, puzzle_id, attempt_date, record, stable in prepared:
                 puzzle = record["puzzle"]
                 now = datetime.now(timezone.utc).isoformat()
                 solution = puzzle.get("solution") if isinstance(puzzle.get("solution"), list) else []
                 themes = puzzle.get("themes") if isinstance(puzzle.get("themes"), list) else []
-                db.execute("INSERT INTO puzzles VALUES (?,?,?,?,?,?,?) ON CONFLICT(puzzle_id) "
-                           "DO UPDATE SET fen=excluded.fen,solution_json=excluded.solution_json, "
-                           "themes_json=excluded.themes_json,puzzle_rating=excluded.puzzle_rating, "
-                           "plays=excluded.plays,updated_at=excluded.updated_at",
-                           (puzzle_id, puzzle["fen"], json.dumps(solution), json.dumps(themes),
-                            puzzle.get("rating"), puzzle.get("plays"), now))
-                inserted = db.execute("INSERT OR IGNORE INTO puzzle_attempts VALUES (?,?,?,?,?,?,?,?)",
-                                      (attempt_uid, account_id, puzzle_id, attempt_date,
-                                       int(bool(record.get("win"))), "lichess", stable, now)).rowcount
+                incoming_puzzle = (puzzle["fen"], json.dumps(solution), json.dumps(themes),
+                                   puzzle.get("rating"), puzzle.get("plays"))
+                if puzzle_metadata.get(puzzle_id) != incoming_puzzle:
+                    db.execute("INSERT INTO puzzles VALUES (?,?,?,?,?,?,?) ON CONFLICT(puzzle_id) "
+                               "DO UPDATE SET fen=excluded.fen,solution_json=excluded.solution_json, "
+                               "themes_json=excluded.themes_json,puzzle_rating=excluded.puzzle_rating, "
+                               "plays=excluded.plays,updated_at=excluded.updated_at",
+                               (puzzle_id, *incoming_puzzle,
+                                now))
+                    puzzle_metadata[puzzle_id] = incoming_puzzle
+                if attempt_uid in existing:
+                    inserted = 0
+                else:
+                    inserted = db.execute(
+                        "INSERT OR IGNORE INTO puzzle_attempts VALUES (?,?,?,?,?,?,?,?)",
+                        (attempt_uid, account_id, puzzle_id, attempt_date,
+                         int(bool(record.get("win"))), "lichess", stable, now)).rowcount
+                    if inserted:
+                        existing.add(attempt_uid)
                 if pilot_run_id is not None:
                     run = db.execute("SELECT account_id,status FROM puzzle_pilot_runs WHERE run_id=?",
                                      (pilot_run_id,)).fetchone()
@@ -1142,10 +2256,10 @@ class GameRepository:
                         db.execute("UPDATE puzzle_sync_state SET backfill_before=?, "
                                    "imported_count=imported_count+?,updated_at=? WHERE account_id=?",
                                    (attempt_date + 1, int(bool(inserted)), now, account_id))
-                    else:
+                    elif inserted:
                         db.execute("UPDATE puzzle_sync_state SET imported_count=imported_count+?, "
                                    "last_error=NULL,updated_at=? WHERE account_id=?",
-                                   (int(bool(inserted)), now, account_id))
+                                   (1, now, account_id))
                 results.append((attempt_uid, bool(inserted)))
         return results
 
@@ -1246,6 +2360,43 @@ class GameRepository:
                                "LIMIT ? OFFSET ?", (account_id, limit, offset)).fetchall()
             return [dict(row) for row in rows]
 
+    def list_puzzle_accounts(self) -> list[dict]:
+        """List only accounts with locally saved puzzle attempts."""
+        with self._connection() as db:
+            rows = db.execute(
+                "SELECT a.account_id,a.username,COUNT(pu.attempt_uid) AS attempts "
+                "FROM accounts a JOIN puzzle_attempts pu ON pu.account_id=a.account_id "
+                "GROUP BY a.account_id,a.username ORDER BY lower(a.username),a.account_id").fetchall()
+        return [dict(row) for row in rows]
+
+    def puzzle_history_page(self, account_id: str, *, query: str = "",
+                            outcome: str | None = None, page: int = 0,
+                            page_size: int = 100) -> dict:
+        """Read a bounded, filterable local puzzle history page."""
+        page = max(0, int(page))
+        page_size = min(MAX_PAGE_SIZE, max(1, int(page_size)))
+        clauses = ["a.account_id=?"]
+        params: list[object] = [account_id]
+        if outcome in {"win", "loss"}:
+            clauses.append("a.win=?")
+            params.append(int(outcome == "win"))
+        term = query.strip()
+        if term:
+            clauses.append("(a.puzzle_id LIKE ? OR p.themes_json LIKE ? OR "
+                            "CAST(p.puzzle_rating AS TEXT) LIKE ? OR "
+                            "CAST(a.attempt_date_ms AS TEXT) LIKE ?)")
+            params.extend([f"%{term}%"] * 4)
+        where = " WHERE " + " AND ".join(clauses)
+        with self._connection() as db:
+            total = int(db.execute("SELECT COUNT(*) FROM puzzle_attempts a JOIN puzzles p USING(puzzle_id)"
+                                   + where, params).fetchone()[0])
+            rows = db.execute("SELECT a.*,p.fen,p.solution_json,p.themes_json,p.puzzle_rating,p.plays "
+                              "FROM puzzle_attempts a JOIN puzzles p USING(puzzle_id)" + where +
+                              " ORDER BY a.attempt_date_ms DESC,a.attempt_uid LIMIT ? OFFSET ?",
+                              [*params, page_size, page * page_size]).fetchall()
+        return {"items": [dict(row) for row in rows], "total": total, "page": page,
+                "page_size": page_size, "pages": (total + page_size - 1) // page_size}
+
     def puzzle_statistics(self, account_id: str) -> dict:
         with self._connection() as db:
             row = db.execute("SELECT COUNT(*) total,COALESCE(SUM(win),0) wins, "
@@ -1273,6 +2424,21 @@ class GameRepository:
                 "themes": {theme: {"attempts": values[0], "wins": values[1],
                                    "success_percent": round(100 * values[1] / values[0], 1)}
                            for theme, values in counts.items()}}
+
+    def puzzle_rating_trend(self, account_id: str, *, limit: int = 12) -> list[dict]:
+        """Return a bounded monthly local puzzle-rating trend, newest month last."""
+        limit = max(1, min(int(limit), 60))
+        with self._connection() as db:
+            rows = db.execute(
+                "SELECT strftime('%Y-%m',a.attempt_date_ms/1000,'unixepoch') AS month, "
+                "COUNT(*) AS attempts,AVG(p.puzzle_rating) AS average_rating, "
+                "SUM(a.win) AS wins FROM puzzle_attempts a JOIN puzzles p USING(puzzle_id) "
+                "WHERE a.account_id=? GROUP BY month ORDER BY month DESC LIMIT ?",
+                (account_id, limit)).fetchall()
+        return [{"month": row["month"], "attempts": int(row["attempts"]),
+                 "average_rating": round(float(row["average_rating"]), 1)
+                    if row["average_rating"] is not None else None,
+                 "wins": int(row["wins"] or 0)} for row in reversed(rows)]
 
     def save_puzzle_dashboard(self, account_id: str, days: int, payload: dict) -> None:
         now = datetime.now(timezone.utc).isoformat()
@@ -1313,6 +2479,23 @@ def _pgn_date(started_at: str | None) -> str:
         return instant.strftime("%Y.%m.%d")
     except (ValueError, OverflowError, OSError):
         return "????.??.??"
+
+
+def _time_precision(value: str | None) -> str:
+    if not value:
+        return "unknown"
+    text = str(value).strip()
+    if len(text) == 10:
+        try:
+            datetime.strptime(text, "%Y-%m-%d")
+            return "date_only"
+        except ValueError:
+            return "unknown"
+    try:
+        datetime.fromisoformat(text.replace("Z", "+00:00"))
+        return "timestamp"
+    except ValueError:
+        return "unknown"
 
 
 def _line_hash(initial_fen: str, moves: str) -> str:
