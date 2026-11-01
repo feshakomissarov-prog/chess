@@ -192,3 +192,11 @@
 - Регрессия synthetic archive import подтверждает accuracy при `lichess_archive`, затем создаёт вторую account link на ту же game с чёрным цветом и проверяет отдельные значения `white=76`, `black=81`, source Lichess и `n=1`. Существующий старый `source='lichess'` тест также оставлен.
 - Проверено: Python 3.12.10 offscreen targeted — **7 PASS**, compileall и diff-check — PASS. Реальные учётные записи/пользовательская БД не использовались.
 - Остались R4–R9; следующий этап атомарно пересобирает derived metrics/events при изменении PGN evaluations.
+
+## PR #30 deep review — R4 (2026-11-01)
+
+- R4 code commit `8c2bb074c23bfe5b0c03dcfca2a880acabce0c10`: изменения/дозагрузка Lichess eval теперь перестраивают `move_metrics` v2 и управляемые opportunity/base-detector events только для этого `analysis_run`, внутри той же SQLite transaction что PGN assessments. Прежние derived rows удаляются перед детерминированной заменой; каскадно удаляются только теги управляемых events. Notes, исходные PGN/ходы, другие runs и другие metric versions сохраняются.
+- Повтор того же export, eval с меньшей глубиной и отсутствие новых scores не запускают replacement; если старый run не имеет materialized metrics, локальный lazy hydrate создаёт их без UCI. `materialize_analysis_metrics` использует тот же атомарный replacement helper и инвалидирует statistics cache.
+- Регрессия: synthetic PGN создаёт candidate missed opportunity, обновлённые eval меняют severity и удаляют stale event, повтор не дублирует metrics/runs, пользовательская note сохраняется. Injected failure derived-detector внутри import подтверждает rollback сырого PGN и derived rows целиком.
+- Проверено на Windows Python 3.12.10 offscreen: `pytest tests/test_m45_analysis_store.py tests/test_m45_move_metrics.py -q` — **16 PASS**, compileall/diff-check — PASS. Не запускались UCI/сеть/пользовательская SQLite.
+- Остались R5–R9; следующий блок — orchestrated selective review (fast → capped selected positions → persisted review jobs/coverage).
