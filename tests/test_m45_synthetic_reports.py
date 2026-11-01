@@ -5,6 +5,7 @@ from __future__ import annotations
 import pytest
 
 from chess_coach.lichess.move_metrics import build_move_facts
+from chess_coach.lichess.event_detectors import detect_registered_events
 
 
 # Each row is a small, source-labelled game report. Scores are White POV.
@@ -52,7 +53,14 @@ def test_synthetic_game_report_has_expected_source_coverage_and_metrics(report):
     facts, events = build_move_facts(assessments, moves, source=report["source"],
                                      run_id=f"report:{report['id']}")
     if report["id"] == "missing-position":
-        assert facts == []
+        assert len(facts) == 1
+        assert facts[0]["cp_loss"] is None
+        assert facts[0]["severity"] == "unknown"
+        unknown_events = detect_registered_events(assessments, moves, facts,
+            run_id="report:missing-position", source=report["source"], user_color=None)
+        assert len(unknown_events) == 1
+        assert unknown_events[0]["event_type"] == "outcome_unknown"
+        assert unknown_events[0]["confidence_state"] == "unknown"
     else:
         assert len(facts) == (2 if report.get("event") == "candidate" else 1)
         fact = facts[0]
@@ -63,7 +71,10 @@ def test_synthetic_game_report_has_expected_source_coverage_and_metrics(report):
         assert fact["accuracy_source"] is None
     assert report["coverage"] in {"complete", "partial"}
     assert report.get("official_accuracy") is None or report["source"] == "lichess-pgn"
-    assert len(events) == (1 if report.get("event") == "candidate" else 0)
+    if report.get("event") == "candidate":
+        assert len(events) == 1
+    elif report["id"] != "missing-position":
+        assert events == []
     if events:
         assert facts[1]["mover"] == "black"
         assert facts[1]["cp_loss"] == 125

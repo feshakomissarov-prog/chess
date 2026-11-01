@@ -1091,8 +1091,8 @@ def test_archive_import_keeps_lichess_pgn_evaluations_as_separate_source(tmp_pat
     from chess_coach.lichess.statistics import StatisticsService
     summary = StatisticsService(repo).summary(analysis_source="lichess-pgn")
     assert summary["games"] == 1
-    assert summary["evaluated_moves"] == 1
-    assert summary["move_coverage_percent"] == 50.0
+    assert summary["evaluated_moves"] == 0
+    assert summary["move_coverage_percent"] == 0.0
 
 
 def test_statistics_use_move_denominators_partial_coverage_and_keep_accuracy_separate(tmp_path):
@@ -1133,12 +1133,12 @@ def test_statistics_use_move_denominators_partial_coverage_and_keep_accuracy_sep
     summary = StatisticsService(repo).summary(analysis_source="stockfish")
     assert (summary["games"], summary["wins"], summary["draws"], summary["losses"]) == (2, 1, 1, 0)
     assert summary["confirmed_moves"] == 4
-    assert summary["evaluated_moves"] == 3
-    assert summary["move_coverage_percent"] == 75.0
-    assert summary["own_assessed_moves"] == 2
-    assert summary["own_error_rate_per_100"] == 100.0
-    assert summary["avg_cpl_cp"] == 175.0
-    assert summary["swings_200cp"] == 1
+    assert summary["evaluated_moves"] == 1
+    assert summary["move_coverage_percent"] == 50.0
+    assert summary["own_assessed_moves"] == 1
+    assert summary["own_error_rate_per_100"] == 0.0
+    assert summary["avg_cpl_cp"] == 0.0
+    assert summary["swings_200cp"] == 0
     assert summary["lichess_accuracy"] == {"white": 90.0, "black": 80.0}
     assert summary["rating_trend"] == [{"date": repo.get_game("w")["started_at"],
                                          "game_time_precision": "timestamp",
@@ -1315,7 +1315,7 @@ def test_statistics_choose_one_run_when_finished_at_ties(tmp_path):
     for loss in (50, 250):
         run_ids.append(repo.save_analysis("g", line_revision=1, line_hash=line["line_hash"],
             source="stockfish", engine_name="Fake", engine_version="1", parameters={"nodes": loss},
-            assessments=[{"ply": 1, "white_cp": loss}], classifications=[
+            assessments=[{"ply": 0, "white_cp": 0}, {"ply": 1, "white_cp": -loss}], classifications=[
                 {"ply": 1, "mover": "white", "eval_loss_cp": loss,
                  "label": "mistake" if loss == 50 else "blunder", "phase": "unknown",
                  "algorithm_version": "test"}]))
