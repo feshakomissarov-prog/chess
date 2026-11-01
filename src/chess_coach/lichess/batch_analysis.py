@@ -281,31 +281,42 @@ class BatchAnalysisRunner:
             return 0
         selected_total = 0
         queued_jobs = 0
-        runs = self.repository.list_reviewable_analysis_runs(
-            engine_version=self.engine_key, parameters=self.parameters, account_id=account_id)
-        for run in runs:
-            remaining = cap - selected_total
-            if remaining <= 0:
+        page_size = 100
+        offset = 0
+        while selected_total < cap:
+            runs = self.repository.list_reviewable_analysis_runs(
+                engine_version=self.engine_key, parameters=self.parameters,
+                account_id=account_id, limit=page_size, offset=offset)
+            if not runs:
                 break
-            plan = self.repository.plan_review_positions(
-                run["run_id"], budget_per_game=max(0, min(50, int(budget_per_game))),
-                budget_total=remaining)
-            move_plies = [int(item["ply"]) for item in plan]
-            if not move_plies:
-                continue
-            review_params = {
-                "review_policy_version": "cc-selective-review-v1",
-                "parent_run_id": run["run_id"], "source": run["source"],
-                "review_move_plies": move_plies,
-                "limit_kind": "nodes", "limit_value": max(10_000, min(300_000, int(nodes))),
-                "multipv": max(1, min(3, int(multipv))), "threads": 1, "hash_mb": 128,
-            }
-            result = self.repository.enqueue_analysis_jobs(
-                [{"game_id": run["game_id"], "line_revision": run["line_revision"],
-                  "line_hash": run["line_hash"]}], analysis_pass="review",
-                engine_version=self.review_engine_key, parameters=review_params)
-            queued_jobs += result["queued"]
-            selected_total += len(move_plies)
+            offset += len(runs)
+            for run in runs:
+                remaining = cap - selected_total
+                if remaining <= 0:
+                    break
+                plan = self.repository.plan_review_positions(
+                    run["run_id"], budget_per_game=max(0, min(50, int(budget_per_game))),
+                    budget_total=remaining)
+                move_plies = [int(item["ply"]) for item in plan]
+                if not move_plies:
+                    continue
+                review_params = {
+                    "review_policy_version": "cc-selective-review-v1",
+                    "parent_run_id": run["run_id"], "source": run["source"],
+                    "review_move_plies": move_plies,
+                    "limit_kind": "nodes", "limit_value": max(10_000, min(300_000, int(nodes))),
+                    "multipv": max(1, min(3, int(multipv))), "threads": 1, "hash_mb": 128,
+                }
+                result = self.repository.enqueue_analysis_jobs(
+                    [{"game_id": run["game_id"], "line_revision": run["line_revision"],
+                      "line_hash": run["line_hash"], "started_at": run["started_at"]}],
+                    analysis_pass="review", engine_version=self.review_engine_key,
+                    parameters=review_params)
+                queued_jobs += result["queued"]
+                # Duplicate queued/complete/paused jobs do not consume this invocation's quota;
+                # keep scanning older pages until newly requested work fills the cap.
+                if result["queued"]:
+                    selected_total += len(move_plies)
         return queued_jobs
 
     def _job_has_eligible_legal_line(self, job: dict) -> bool:

@@ -244,3 +244,10 @@
 - Synthetic test has distinct PVs before/after opponent move and confirms the answer-side legal move is selected; negative fixture supplies an illegal/wrong-side PV and confirms null; existing missed-opportunity chain remains candidate-only.
 - Проверено: Windows Python 3.12.10 offscreen, `pytest tests/test_m45_move_metrics.py tests/test_m45_event_detectors.py tests/test_m45_analysis_store.py -q` — **25 PASS**, compileall/diff-check — PASS. Реальный движок не запускался.
 - Остались R7–R9; следующий блок — phase boundaries и assignment после phase hydration.
+
+## PR #30 second-pass review — R10 (2026-11-01)
+
+- Исправлен R10: `list_reviewable_analysis_runs` возвращает ограниченные страницы в deterministic newest-first порядке (дата NULL последней, затем `game_id DESC`); batch review проходит страницы, пока не набран лимит именно новых review plies. Уже queued/running/paused/complete exact jobs не съедают budget; очередь остаётся долговечной и результат не удаляется. Селекция и SQL-only enqueue не запускают UCI.
+- Regression: 200 синтетических игр с `game_id`, намеренно противоположным дате; `budget_total=10` ставит первые 10 newest, после completion следующий вызов ставит следующие 10. Проверяются уникальные job IDs и отсутствие UCI.
+- Проверено: Windows Python 3.12.10, `pytest tests/test_m45_batch.py -q` — PASS; предыдущая адресная проверка R10 также прошла. Реальные архив, Stockfish и пользовательская SQLite не использовались.
+- Следующий блок: R11 persistent bounded state для targeted Lichess eval refresh; сеть останется fake-only.

@@ -902,8 +902,11 @@ class GameRepository:
 
     def list_reviewable_analysis_runs(self, *, engine_version: str,
                                       parameters: dict,
-                                      account_id: str | None = None) -> list[dict]:
-        """Select one deterministic current source run per game for selective review."""
+                                      account_id: str | None = None,
+                                      limit: int = 100, offset: int = 0) -> list[dict]:
+        """Select a bounded, deterministic newest-first page for selective review."""
+        limit = max(1, min(500, int(limit)))
+        offset = max(0, int(offset))
         params_json = json.dumps(parameters, sort_keys=True, separators=(",", ":"))
         account_join = " JOIN account_games ag ON ag.game_id=ar.game_id " if account_id else ""
         account_clause = " AND ag.account_id=?" if account_id else ""
@@ -912,16 +915,20 @@ class GameRepository:
             values.append(account_id)
         sql = (
             "WITH eligible AS (SELECT ar.run_id,ar.game_id,ar.line_revision,ar.line_hash,ar.source,"
+            "g.started_at,"
             "ROW_NUMBER() OVER(PARTITION BY ar.game_id ORDER BY "
             "CASE WHEN ar.source='stockfish' THEN 0 ELSE 1 END,ar.finished_at DESC,ar.run_id DESC) rank "
-            "FROM analysis_runs ar JOIN game_revisions gr ON gr.game_id=ar.game_id "
+            "FROM analysis_runs ar JOIN games g ON g.game_id=ar.game_id "
+            "JOIN game_revisions gr ON gr.game_id=ar.game_id "
             "AND gr.line_revision=ar.line_revision AND gr.is_current=1 "
             "LEFT JOIN analysis_jobs aj ON aj.result_run_id=ar.run_id " + account_join +
             "WHERE ((ar.source='stockfish' AND ar.status='complete' AND aj.analysis_pass='fast' "
             "AND aj.status='complete' AND aj.engine_version=? AND aj.parameters_json=?) "
             "OR (ar.source='lichess-pgn' AND ar.status IN ('complete','partial')))" +
-            account_clause + ") SELECT run_id,game_id,line_revision,line_hash,source "
-            "FROM eligible WHERE rank=1 ORDER BY game_id")
+            account_clause + ") SELECT run_id,game_id,line_revision,line_hash,source,started_at "
+            "FROM eligible WHERE rank=1 ORDER BY CASE WHEN started_at IS NULL THEN 1 ELSE 0 END,"
+            "started_at DESC,game_id DESC LIMIT ? OFFSET ?")
+        values.extend([limit, offset])
         with self._connection() as db:
             return [dict(row) for row in db.execute(sql, values)]
 

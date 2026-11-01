@@ -257,6 +257,64 @@ def test_opt_in_selective_review_persists_capped_jobs_and_does_not_duplicate_on_
         repository.shutdown()
 
 
+def test_selective_review_pages_newest_first_without_duplicate_jobs_consuming_budget(tmp_path):
+    repository = GameRepository(tmp_path / "review-newest-progress.sqlite3")
+    try:
+        engines = []
+        runner = _runner(repository, tmp_path, engines)
+        # IDs deliberately sort opposite to dates so a game_id ordering regression is visible.
+        for index in range(200):
+            game_id = f"game-{199-index:03d}"
+            started = (datetime(2026, 1, 1, tzinfo=timezone.utc)
+                       + timedelta(days=index)).isoformat()
+            _save_game(repository, game_id, started)
+            line = repository.current_line(game_id)
+            run_id = repository.save_analysis(
+                game_id, line_revision=1, line_hash=line["line_hash"], source="stockfish",
+                engine_name="Synthetic", engine_version=runner.engine_key,
+                parameters=runner.parameters,
+                assessments=[{"ply": 0, "white_cp": 0},
+                             {"ply": 1, "white_cp": -250},
+                             {"ply": 2, "white_cp": -250}],
+                classifications=[], status="complete")
+            repository.enqueue_analysis_jobs(
+                [{"game_id": game_id, "line_revision": 1, "line_hash": line["line_hash"]}],
+                analysis_pass="fast", engine_version=runner.engine_key,
+                parameters=runner.parameters)
+            job = repository.claim_next_analysis_job(
+                f"seed-{index}", engine_version=runner.engine_key,
+                analysis_pass="fast", parameters=runner.parameters)
+            assert job and job["game_id"] == game_id
+            repository.finish_analysis_job(job["job_id"], f"seed-{index}",
+                                           status="complete", result_run_id=run_id)
+
+        assert runner.enqueue_selected_reviews(budget_per_game=1, budget_total=10) == 10
+        with repository._connection() as db:
+            first = [dict(row) for row in db.execute(
+                "SELECT * FROM analysis_jobs WHERE analysis_pass='review' ORDER BY created_at,job_id")]
+        first_ids = [row["game_id"] for row in first]
+        expected = [f"game-{i:03d}" for i in range(0, 10)]
+        assert first_ids == expected
+        # Simulate a later invocation after the first page has completed. Existing work
+        # must not consume budget or prevent the next newest 10 games from being queued.
+        for row in first:
+            claimed = repository.claim_next_analysis_job(
+                "review-seeder", engine_version=runner.review_engine_key,
+                analysis_pass="review")
+            assert claimed and claimed["job_id"] == row["job_id"]
+            repository.finish_analysis_job(claimed["job_id"], "review-seeder", status="complete")
+        assert runner.enqueue_selected_reviews(budget_per_game=1, budget_total=10) == 10
+        with repository._connection() as db:
+            second = [dict(row) for row in db.execute(
+                "SELECT * FROM analysis_jobs WHERE analysis_pass='review' ORDER BY created_at,job_id")]
+        second_ids = [row["game_id"] for row in second if row["game_id"] not in first_ids]
+        assert second_ids == [f"game-{i:03d}" for i in range(10, 20)]
+        assert len({row["job_id"] for row in second}) == 20
+        assert not engines  # queue selection is metadata-only; no UCI process is started
+    finally:
+        repository.shutdown()
+
+
 def test_opt_in_selective_review_with_no_candidates_never_starts_deep_engine(tmp_path):
     repository = GameRepository(tmp_path / "no-review-candidates.sqlite3")
     engines = []
