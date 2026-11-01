@@ -360,3 +360,9 @@
 
 - GitHub Actions Windows tests run #93: **SUCCESS**, **342 passed in 159.60s**, затем `compileall` и isolated `--offline` window initialization PASS. Windows Server 2025, CPython 3.12.10 x64, PySide6/Qt/shiboken6 6.12.0. [Actions run #93](https://github.com/feshakomissarov-prog/chess/actions/runs/41340574609).
 - Этот run проверил код на текущем PR head. Финальный log-only commit требует повторного Windows CI для exact final SHA; результат будет внесён в заключительный handoff после завершения.
+
+### U8 debounce follow-up
+
+- Позиционная оценка теперь включается отдельным checkable opt-in действием только в `--offline`; активируется 300 ms debounce после каждого локального хода. Изменение позиции останавливает прежний `SimpleAnalysisResult`; если UCI ещё закрывается, сохраняется только запрос на последнюю позицию. Тренировочный и онлайн режимы принудительно выключают оценку.
+- Fake-engine Qt regression выполняет четыре быстрых легальных хода и подтверждает ровно один следующий анализ финальной FEN; отдельно проверяются opt-in, connected/unknown guard, stale cancellation и отсутствие записи PGN/SQLite.
+- Локальный полный Windows Python 3.12.10 suite после follow-up: **342 passed in 106.00s**; compileall и diff-check PASS. Предыдущий точный CI #94 на SHA `a3730942f67c9db78edb9b03ec40ea0edce5e8f9` прошёл 342 tests, но не включает этот follow-up. Следующий commit запускает exact-head Windows CI повторно; Lichess/OAuth, личные партии и анализ реальных партий не запускались.

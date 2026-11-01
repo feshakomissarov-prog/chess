@@ -559,18 +559,26 @@ def test_position_evaluation_is_explicit_offline_only_and_stale_result_is_hidden
     window.start_local_game()
     assert window.position_eval_button.isVisible()
     calls = []
-    monkeypatch.setattr("chess_coach.window.evaluate_position",
-                        lambda _path, _board, _stop, _active:
-                        (calls.append("called") or {"score_white_cp": 35,
-                         "mate_white": None, "best_move": "e2e4", "depth": 12}))
+    def fake_eval(_path, board, _stop, _active):
+        calls.append(board.fen())
+        return {"score_white_cp": 35, "mate_white": None,
+                "best_move": "e2e4", "depth": 12}
+    monkeypatch.setattr("chess_coach.window.evaluate_position", fake_eval)
     qtbot.mouseClick(window.position_eval_button, Qt.MouseButton.LeftButton)
-    qtbot.waitUntil(lambda: window._position_eval_thread is None, timeout=3000)
-    assert calls == ["called"]
+    qtbot.waitUntil(lambda: len(calls) == 1 and window._position_eval_thread is None,
+                    timeout=3000)
     assert "+0.35" in window.position_eval_label.text()
+
+    for uci in ("e2e4", "e7e5", "g1f3", "b8c6"):
+        window.on_move_intent(chess.Move.from_uci(uci))
+    final_fen = window.controller.board.fen()
+    qtbot.waitUntil(lambda: len(calls) == 2 and window._position_eval_thread is None,
+                    timeout=3000)
+    assert calls[-1] == final_fen  # debounce evaluates only the final position
 
     window._lichess_connected = True
     window.analyze_local_position()
-    assert calls == ["called"]
+    assert len(calls) == 2
     assert "приостановлена" in window.position_eval_label.text()
     window.close()
 

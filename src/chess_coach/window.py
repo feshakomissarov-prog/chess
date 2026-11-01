@@ -1568,6 +1568,12 @@ class MainWindow(QMainWindow):
         self._position_eval_thread: threading.Thread | None = None
         self._position_eval_stop: threading.Event | None = None
         self._position_eval_handle: dict = {}
+        self._position_eval_mode = False
+        self._position_eval_queued = False
+        self._position_eval_timer = QTimer(self)
+        self._position_eval_timer.setSingleShot(True)
+        self._position_eval_timer.setInterval(300)
+        self._position_eval_timer.timeout.connect(self._start_position_evaluation)
         self._analysis_dialog: QProgressDialog | None = None
         self._analysis_safety_request_id: str | None = None
         self._analysis_safety_context: tuple | None = None
@@ -1805,9 +1811,10 @@ class MainWindow(QMainWindow):
         self.undo_local_button.setVisible(False)
         side_layout.addWidget(self.undo_local_button)
         self.position_eval_button = QPushButton("Анализировать позицию")
+        self.position_eval_button.setCheckable(True)
         self.position_eval_button.setToolTip(
-            "Однократная локальная оценка по явному запросу. Доступна только в изолированном --offline.")
-        self.position_eval_button.clicked.connect(self.analyze_local_position)
+            "Включает локальную оценку позиции по явному запросу. Доступна только в изолированном --offline.")
+        self.position_eval_button.toggled.connect(self._set_position_evaluation_enabled)
         self.position_eval_button.setVisible(False)
         side_layout.addWidget(self.position_eval_button)
         self.position_eval_label = QLabel("Оценка Stockfish выключена.")
@@ -1970,6 +1977,11 @@ class MainWindow(QMainWindow):
 
     def refresh(self, message: str | None = None) -> None:
         if self.online_session is not None:
+            if self._position_eval_mode:
+                self.position_eval_button.blockSignals(True)
+                self.position_eval_button.setChecked(False)
+                self.position_eval_button.blockSignals(False)
+                self._set_position_evaluation_enabled(False)
             if self._position_eval_thread is not None:
                 self._cancel_position_evaluation("Оценка остановлена: открыта онлайн-партия.")
             self.undo_local_button.setVisible(False)
@@ -2820,6 +2832,11 @@ class MainWindow(QMainWindow):
         mode = self.local_mode_combo.currentData()
         if mode not in {"free", "premove_training"} or mode == self._local_board_mode:
             return
+        if mode != "free" and self._position_eval_mode:
+            self.position_eval_button.blockSignals(True)
+            self.position_eval_button.setChecked(False)
+            self.position_eval_button.blockSignals(False)
+            self._set_position_evaluation_enabled(False)
         self._local_board_mode = mode
         discarded = self.controller.set_premove_training(mode == "premove_training")
         self.board.set_premove(None, self.controller.player_color)
@@ -2938,7 +2955,11 @@ class MainWindow(QMainWindow):
             return
         previous = tuple(self.controller.board.move_stack)
         if self.controller.apply_move_intent(move):
-            self._cancel_position_evaluation("Позиция изменилась; предыдущая оценка отменена.")
+            if self._position_eval_thread is not None:
+                self._cancel_position_evaluation("Позиция изменилась; предыдущая оценка отменена.")
+            if self._position_eval_mode:
+                self.position_eval_label.setText("Позиция обновлена; ждём завершения ходов…")
+                self._position_eval_timer.start(300)
             if tuple(self.controller.board.move_stack) != previous:
                 self.board.clear_annotations()
             self.refresh("Ход записан в локальную партию.")
@@ -2946,14 +2967,38 @@ class MainWindow(QMainWindow):
             self.refresh("Ход не выполнен: позиция не изменилась.")
 
     def analyze_local_position(self) -> None:
-        """Run an explicit opt-in evaluation only in the isolated offline workspace."""
+        """Explicit one-shot action, retained for callers and UI integration tests."""
+        self._start_position_evaluation()
+
+    def _set_position_evaluation_enabled(self, enabled: bool) -> None:
+        if enabled and (not self.offline_mode or self.online_session is not None
+                        or self._screen_mode != "local" or self._local_board_mode != "free"
+                        or self._lichess_connected):
+            self.position_eval_button.blockSignals(True)
+            self.position_eval_button.setChecked(False)
+            self.position_eval_button.blockSignals(False)
+            self.position_eval_label.setText("Оценка приостановлена: безопасность партии не подтверждена.")
+            return
+        self._position_eval_mode = bool(enabled)
+        if enabled:
+            self.position_eval_button.setText("Выключить оценку позиции")
+            self.position_eval_label.setText("Оценка включена; анализируется только локальная позиция.")
+            self._position_eval_timer.start(300)
+        else:
+            self.position_eval_button.setText("Анализировать позицию")
+            self._position_eval_timer.stop()
+            self._position_eval_queued = False
+            self._cancel_position_evaluation("Оценка Stockfish выключена.")
+
+    def _start_position_evaluation(self) -> None:
+        """Evaluate the latest board after debounce; only one UCI job may be active."""
         if (not self.offline_mode or self.online_session is not None
                 or self._screen_mode != "local" or self._local_board_mode != "free"
                 or self._lichess_connected):
             self.position_eval_label.setText("Оценка приостановлена: безопасность партии не подтверждена.")
             return
         if self._position_eval_thread is not None and self._position_eval_thread.is_alive():
-            self._cancel_position_evaluation("Останавливаем устаревшую оценку…")
+            self._position_eval_queued = True
             return
         engine_path = self.settings.value("stockfish_verified_path", "", type=str)
         configured = self.settings.value("stockfish_path", "", type=str)
@@ -3016,6 +3061,9 @@ class MainWindow(QMainWindow):
                 self.position_eval_label.setText(
                     f"Stockfish · {score} · лучший ход {payload.get('best_move') or 'н/д'} · "
                     f"глубина {payload.get('depth') or 'н/д'}; оценка не является точностью Lichess.")
+        if self._position_eval_queued and self._position_eval_mode:
+            self._position_eval_queued = False
+            self._position_eval_timer.start(0)
         self.refresh()
 
     def on_premove_intent(self, move: chess.Move) -> None:
@@ -4447,6 +4495,7 @@ class MainWindow(QMainWindow):
 
     def closeEvent(self, event) -> None:
         self._shutdown_requested = True
+        self._position_eval_timer.stop()
         if self._position_eval_thread is not None:
             self._cancel_position_evaluation("Останавливаем локальную оценку перед закрытием…")
         install_thread = self._engine_install_thread
