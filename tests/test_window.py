@@ -112,15 +112,16 @@ def test_batch_analysis_controls_are_explicit_and_resume_after_pause(qtbot):
     assert not dialog.pause_button.isEnabled()
     assert dialog.resume_button.isEnabled()
     qtbot.mouseClick(dialog.start_button, Qt.MouseButton.LeftButton)
-    assert started == [(1000, 20_000, 64, False, False)]
+    assert started == [(1000, 20_000, 64, False, False, False)]
     dialog.set_running(True)
     assert dialog.close() is False
     qtbot.mouseClick(dialog.pause_button, Qt.MouseButton.LeftButton)
     assert paused == [True]
     dialog.worker_finished.emit(True, "Пауза")
     assert dialog.resume_button.isEnabled()
+    dialog.selective_review.setChecked(True)
     qtbot.mouseClick(dialog.resume_button, Qt.MouseButton.LeftButton)
-    assert started[-1] == (1000, 20_000, 64, True, False)
+    assert started[-1] == (1000, 20_000, 64, True, False, True)
     dialog.worker_finished.emit(False, "Завершено")
     assert not dialog.pause_button.isEnabled()
 

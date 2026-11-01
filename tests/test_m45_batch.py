@@ -47,7 +47,7 @@ class FakeEngine:
     def configure(self, options):
         self.configure_calls.append(dict(options))
 
-    def analysis(self, board, _limit):
+    def analysis(self, board, _limit, **_kwargs):
         self.analysis_calls += 1
         return FakeResult(board)
 
@@ -195,6 +195,173 @@ def test_batch_revalidates_eligibility_before_creating_uci_process(tmp_path):
         assert result["failed"] == 1
         assert not engines
         assert repository.analysis_job_counts(engine_version=runner.engine_key) == {"failed": 1}
+    finally:
+        repository.shutdown()
+
+
+def test_opt_in_selective_review_persists_capped_jobs_and_does_not_duplicate_on_restart(tmp_path):
+    repository = GameRepository(tmp_path / "selective-review-flow.sqlite3")
+    engines = []
+    try:
+        _save_game(repository, "reviewable", "2026-10-01T00:00:00+00:00")
+        runner = _runner(repository, tmp_path, engines)
+        candidate = repository.list_games_needing_fast_analysis(limit=1)[0]
+        repository.enqueue_analysis_jobs([candidate], analysis_pass="fast",
+                                         engine_version=runner.engine_key,
+                                         parameters=runner.parameters)
+        fast_job = repository.claim_next_analysis_job(
+            "seed-worker", engine_version=runner.engine_key, analysis_pass="fast",
+            parameters=runner.parameters)
+        line = repository.current_line("reviewable")
+        fast_run = repository.save_analysis(
+            "reviewable", line_revision=1, line_hash=line["line_hash"],
+            source="stockfish", engine_name="Synthetic UCI", engine_version=runner.engine_key,
+            parameters=runner.parameters,
+            assessments=[{"ply": 0, "white_cp": 0}, {"ply": 1, "white_cp": -250},
+                         {"ply": 2, "white_cp": -250}], classifications=[], status="complete")
+        repository.finish_analysis_job(fast_job["job_id"], "seed-worker", status="complete",
+                                       result_run_id=fast_run)
+        assert runner.enqueue_selected_reviews(budget_per_game=1, budget_total=1) == 1
+        assert runner.enqueue_selected_reviews(budget_per_game=1, budget_total=1) == 0
+        assert repository.analysis_job_counts(engine_version=runner.review_engine_key) == {"queued": 1}
+        result = runner.run(stop_event=threading.Event(), safety_check=lambda _job: True,
+                            include_selective_review=True, review_budget_per_game=1,
+                            review_budget_total=1)
+        assert result["processed"] == 1, f"{result.get('reason')} · {result.get('queue')} · {result.get('review_queue')}"
+        assert result["review_queue"] == {"complete": 1}
+        with repository._connection() as db:
+            review = db.execute(
+                "SELECT aj.parameters_json,aj.result_run_id,ar.status FROM analysis_jobs aj "
+                "JOIN analysis_runs ar ON ar.run_id=aj.result_run_id "
+                "WHERE aj.analysis_pass='review'").fetchone()
+            alternative_count = db.execute(
+                "SELECT COUNT(*) FROM analysis_alternatives WHERE run_id=?", (review["result_run_id"],)
+            ).fetchone()[0]
+        assert json.loads(review["parameters_json"])["review_move_plies"] == [1]
+        assert review["status"] == "partial"
+        assert alternative_count > 0
+        detail = repository.latest_analysis_detail("reviewable", 1)
+        assert detail["status"] == "complete"  # sparse review cannot replace fast run
+        assert detail["review_coverage"] == {
+            "status": "complete", "reviewed_moves": 1, "selected_moves": 1,
+            "total_moves": 2, "source": "stockfish-review"}
+        restart_engines = []
+        restarted = _runner(repository, tmp_path, restart_engines)
+        repeated = restarted.run(stop_event=threading.Event(), safety_check=lambda _job: True,
+                                 include_selective_review=True, review_budget_per_game=1,
+                                 review_budget_total=1)
+        assert repeated["processed"] == 0
+        assert not restart_engines
+        assert repository.analysis_job_counts(engine_version=runner.review_engine_key) == {"complete": 1}
+    finally:
+        repository.shutdown()
+
+
+def test_opt_in_selective_review_with_no_candidates_never_starts_deep_engine(tmp_path):
+    repository = GameRepository(tmp_path / "no-review-candidates.sqlite3")
+    engines = []
+    try:
+        _save_game(repository, "quiet", "2026-10-01T00:00:00+00:00")
+        runner = _runner(repository, tmp_path, engines)
+        candidate = repository.list_games_needing_fast_analysis(limit=1)[0]
+        repository.enqueue_analysis_jobs([candidate], analysis_pass="fast",
+                                         engine_version=runner.engine_key,
+                                         parameters=runner.parameters)
+        job = repository.claim_next_analysis_job(
+            "seed-worker", engine_version=runner.engine_key, analysis_pass="fast",
+            parameters=runner.parameters)
+        line = repository.current_line("quiet")
+        fast_run = repository.save_analysis(
+            "quiet", line_revision=1, line_hash=line["line_hash"], source="stockfish",
+            engine_name="Synthetic UCI", engine_version=runner.engine_key,
+            parameters=runner.parameters,
+            assessments=[{"ply": 0, "white_cp": 0}, {"ply": 1, "white_cp": 0},
+                         {"ply": 2, "white_cp": 0}], classifications=[], status="complete")
+        repository.finish_analysis_job(job["job_id"], "seed-worker", status="complete",
+                                       result_run_id=fast_run)
+        assert runner.enqueue_selected_reviews(budget_total=10) == 0
+        result = runner.run(stop_event=threading.Event(), safety_check=lambda _job: True,
+                            include_selective_review=True)
+        assert result["review_queued"] == 0
+        assert result["processed"] == 0
+        assert not engines
+    finally:
+        repository.shutdown()
+
+
+def test_selective_review_can_use_ready_lichess_archive_metrics(tmp_path):
+    repository = GameRepository(tmp_path / "lichess-selective-source.sqlite3")
+    try:
+        pgn = ('[Event "Synthetic"]\n[White "Me"]\n[Black "Friend"]\n[Result "1-0"]\n\n'
+               '1. e4 { [%eval 0.0] } e5 { [%eval 2.0] } '
+               '2. Nf3 { [%eval -1.0] } Nc6 { [%eval -1.0] } 1-0\n')
+        repository.import_archive_record("Me", {"id": "lichess-review-source", "pgn": pgn},
+                                         checkpoint_ms=1, backfill=True)
+        account_id = repository.ensure_archive_account("Me")
+        runner = _runner(repository, tmp_path, [])
+        assert runner.enqueue_selected_reviews(account_id=account_id,
+                                               budget_per_game=1, budget_total=1) == 1
+        assert repository.analysis_job_counts(engine_version=runner.review_engine_key) == {"queued": 1}
+        with repository._connection() as db:
+            row = db.execute(
+                "SELECT parameters_json FROM analysis_jobs WHERE analysis_pass='review'").fetchone()
+        assert json.loads(row["parameters_json"])["source"] == "lichess-pgn"
+    finally:
+        repository.shutdown()
+
+
+def test_periodic_fair_play_monitor_interrupts_active_selective_review(tmp_path):
+    repository = GameRepository(tmp_path / "review-fair-play-monitor.sqlite3")
+    engines = []
+    try:
+        _save_game(repository, "reviewable", "2026-10-01T00:00:00+00:00")
+        runner = _runner(repository, tmp_path, engines)
+        runner.safety_refresh_seconds = 0.02
+        candidate = repository.list_games_needing_fast_analysis(limit=1)[0]
+        repository.enqueue_analysis_jobs([candidate], analysis_pass="fast",
+                                         engine_version=runner.engine_key,
+                                         parameters=runner.parameters)
+        fast_job = repository.claim_next_analysis_job(
+            "seed-worker", engine_version=runner.engine_key, analysis_pass="fast",
+            parameters=runner.parameters)
+        line = repository.current_line("reviewable")
+        fast_run = repository.save_analysis(
+            "reviewable", line_revision=1, line_hash=line["line_hash"], source="stockfish",
+            engine_name="Synthetic UCI", engine_version=runner.engine_key,
+            parameters=runner.parameters,
+            assessments=[{"ply": 0, "white_cp": 0}, {"ply": 1, "white_cp": -250},
+                         {"ply": 2, "white_cp": -250}], classifications=[], status="complete")
+        repository.finish_analysis_job(fast_job["job_id"], "seed-worker", status="complete",
+                                       result_run_id=fast_run)
+        assert runner.enqueue_selected_reviews(budget_per_game=1, budget_total=1) == 1
+
+        def factory(_path):
+            engine = FakeEngine()
+            engines.append(engine)
+            return engine
+
+        class BlockingReviewAnalyzer:
+            engine_factory = staticmethod(factory)
+
+            def review_selected_positions(self, _game, _path, _plies, *, stop_event, **_kwargs):
+                assert stop_event.wait(2), "periodic safety monitor did not stop review UCI"
+                raise InterruptedError("fair-play proof expired during selective review")
+
+        runner.analyzer = BlockingReviewAnalyzer()
+        safety_calls = []
+
+        def safety(_job):
+            safety_calls.append(len(safety_calls))
+            return len(safety_calls) == 1
+
+        result = runner.run(stop_event=threading.Event(), safety_check=safety,
+                            include_selective_review=True, review_budget_per_game=1,
+                            review_budget_total=1)
+        assert result["paused"] is True and result["processed"] == 0
+        assert len(safety_calls) >= 2
+        assert repository.analysis_job_counts(engine_version=runner.review_engine_key) == {"paused": 1}
+        assert len(repository.list_analyses("reviewable")) == 1  # only the pre-existing fast run
+        assert len(engines) == 1 and engines[0].quit_calls == 1
     finally:
         repository.shutdown()
 

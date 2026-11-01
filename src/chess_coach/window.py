@@ -330,13 +330,18 @@ class StatisticsGameDialog(QDialog):
             coverage = analysis.get("coverage") or {}
             total_positions = int(coverage.get("total_positions") or (len(line["moves"].split()) + 1))
             scored_positions = int(coverage.get("scored_positions") or 0)
+            review_coverage = analysis.get("review_coverage") or {}
+            review_text = (f"Selective review: {review_coverage.get('reviewed_moves', 0)} "
+                           f"оценённых критических ходов из {review_coverage.get('selected_moves', 0)} "
+                           f"выбранных (не заменяет полный fast охват)" if review_coverage else
+                           "Selective review: ещё не запускался")
             self.graph = EvaluationGraph(analysis["assessments"], self, phases)
             self.graph.selected_ply.connect(self._request_position)
             self.graph_layout.addWidget(self.graph)
             self.graph_layout.addWidget(QLabel(
                 f"Оценено позиций: {scored_positions} / {total_positions}; "
                 f"источник: {source}; статус: {analysis.get('status', 'unknown')}; "
-                f"алгоритм ошибок: {CLASSIFIER_VERSION}"))
+                f"алгоритм ошибок: {CLASSIFIER_VERSION}\n{review_text}"))
             metrics = analysis.get("move_metrics", [])
             for item in metrics:
                 label = str(item.get("severity", "unknown"))
@@ -1160,7 +1165,7 @@ class SettingsDialog(QDialog):
 class BatchAnalysisDialog(QDialog):
     """Explicit controls for the bounded recent-first fast-analysis queue."""
 
-    run_requested = Signal(int, int, int, bool, bool)
+    run_requested = Signal(int, int, int, bool, bool, bool)
     pause_requested = Signal()
     cancel_requested = Signal()
     worker_progress = Signal(str)
@@ -1180,11 +1185,13 @@ class BatchAnalysisDialog(QDialog):
         self.nodes = QSpinBox(); self.nodes.setRange(1000, 30_000); self.nodes.setSingleStep(1000); self.nodes.setValue(20_000)
         self.hash_mb = QSpinBox(); self.hash_mb.setRange(16, 128); self.hash_mb.setSingleStep(16); self.hash_mb.setValue(64)
         self.retry_failed = QCheckBox("Повторить ранее завершившиеся ошибкой/отменённые задания")
+        self.selective_review = QCheckBox("После быстрого прохода выборочно перепроверить критические позиции (до 12 на игру / 100 всего)")
         form.addWidget(QLabel("Максимум партий для добавления"), 0, 0); form.addWidget(self.limit, 0, 1)
         form.addWidget(QLabel("Узлов на позицию"), 1, 0); form.addWidget(self.nodes, 1, 1)
         form.addWidget(QLabel("Hash (МБ)"), 2, 0); form.addWidget(self.hash_mb, 2, 1)
         layout.addLayout(form)
         layout.addWidget(self.retry_failed)
+        layout.addWidget(self.selective_review)
         self.queue_label = QLabel("Очередь ещё не загружена")
         self.queue_label.setWordWrap(True)
         layout.addWidget(self.queue_label)
@@ -1195,12 +1202,13 @@ class BatchAnalysisDialog(QDialog):
         self.start_button = QPushButton("Добавить недостающие и запустить")
         self.start_button.clicked.connect(lambda: self.run_requested.emit(
             self.limit.value(), self.nodes.value(), self.hash_mb.value(), False,
-            self.retry_failed.isChecked()))
+            self.retry_failed.isChecked(), self.selective_review.isChecked()))
         self.resume_button = QPushButton("Продолжить очередь")
         # A persistent queue may have been paused by a previous application run.
         self.resume_button.setEnabled(True)
         self.resume_button.clicked.connect(lambda: self.run_requested.emit(
-            self.limit.value(), self.nodes.value(), self.hash_mb.value(), True, False))
+            self.limit.value(), self.nodes.value(), self.hash_mb.value(), True, False,
+            self.selective_review.isChecked()))
         self.pause_button = QPushButton("Пауза")
         self.pause_button.setEnabled(False)
         self.pause_button.clicked.connect(self.pause_requested.emit)
@@ -1229,6 +1237,7 @@ class BatchAnalysisDialog(QDialog):
         self.nodes.setEnabled(not running)
         self.hash_mb.setEnabled(not running)
         self.retry_failed.setEnabled(not running)
+        self.selective_review.setEnabled(not running)
         self.pause_button.setEnabled(running)
         self.cancel_button.setEnabled(running)
 
@@ -2021,15 +2030,17 @@ class MainWindow(QMainWindow):
             return
         dialog = BatchAnalysisDialog(self)
         self._batch_dialog = dialog
-        dialog.run_requested.connect(lambda limit, nodes, hash_mb, resume, retry_failed:
-            self._start_batch_analysis(dialog, limit, nodes, hash_mb, resume, retry_failed))
+        dialog.run_requested.connect(lambda limit, nodes, hash_mb, resume, retry_failed, selective_review:
+            self._start_batch_analysis(dialog, limit, nodes, hash_mb, resume,
+                                       retry_failed, selective_review))
         dialog.pause_requested.connect(self._pause_batch_analysis)
         dialog.cancel_requested.connect(self._cancel_batch_analysis)
         dialog.finished.connect(lambda _result: setattr(self, "_batch_dialog", None))
         dialog.show()
 
     def _start_batch_analysis(self, dialog: BatchAnalysisDialog, limit: int, nodes: int,
-                              hash_mb: int, resume: bool, retry_failed: bool = False) -> None:
+                              hash_mb: int, resume: bool, retry_failed: bool = False,
+                              selective_review: bool = False) -> None:
         if self._shutdown_requested or (self._batch_thread and self._batch_thread.is_alive()):
             return
         service = self.lichess
@@ -2062,13 +2073,20 @@ class MainWindow(QMainWindow):
                 if resume:
                     available = self.game_repository.analysis_job_counts(
                         engine_version=runner.engine_key, parameters=runner.parameters)
-                    if not any(available.get(status, 0)
-                               for status in ("queued", "paused", "running")):
+                    review_available = (self.game_repository.analysis_job_counts(
+                        engine_version=runner.review_engine_key) if selective_review else {})
+                    if not (any(available.get(status, 0)
+                                for status in ("queued", "paused", "running"))
+                            or any(review_available.get(status, 0)
+                                   for status in ("queued", "paused", "running"))):
                         dialog.worker_finished.emit(
                             False, "Для выбранного движка и бюджета нет незавершённой очереди.")
                         return
                     resumed = self.game_repository.resume_paused_analysis_jobs(
                         engine_version=runner.engine_key, parameters=runner.parameters)
+                    if selective_review:
+                        resumed += self.game_repository.resume_paused_analysis_jobs(
+                            engine_version=runner.review_engine_key)
                     enqueued = {"queued": 0, "already_present": 0}
                 else:
                     enqueued = runner.enqueue_missing(account_id=account_id, limit=limit,
@@ -2077,12 +2095,15 @@ class MainWindow(QMainWindow):
                 unknown_preflight = threading.Event()
                 initial_counts = self.game_repository.analysis_job_counts(
                     engine_version=runner.engine_key, parameters=runner.parameters)
+                review_counts = self.game_repository.analysis_job_counts(
+                    engine_version=runner.review_engine_key)
                 dialog.worker_queue_status.emit(
-                    f"Подходят/уже есть: {enqueued['queued'] + enqueued['already_present']} · "
-                    f"в очереди: {initial_counts.get('queued', 0)} · "
-                    f"приостановлены: {initial_counts.get('paused', 0)} · "
-                    f"выполнены: {initial_counts.get('complete', 0)} · "
-                    f"ошибки: {initial_counts.get('failed', 0)}")
+                    f"Fast — добавлено: {enqueued['queued']} · очередь: {initial_counts.get('queued', 0)} · "
+                    f"пауза: {initial_counts.get('paused', 0)} · готово: {initial_counts.get('complete', 0)} · "
+                    f"ошибки: {initial_counts.get('failed', 0)}\n"
+                    f"Selective review — очередь: {review_counts.get('queued', 0)} · "
+                    f"пауза: {review_counts.get('paused', 0)} · готово: {review_counts.get('complete', 0)} · "
+                    f"ошибки: {review_counts.get('failed', 0)}")
 
                 def safety_check(_job: dict) -> bool | None:
                     # Called before every game. Any disconnect, identity change,
@@ -2129,20 +2150,29 @@ class MainWindow(QMainWindow):
                         f"ошибки: {counts.get('failed', 0)}")
 
                 result = runner.run(stop_event=stop, pause_event=pause,
-                                    safety_check=safety_check, progress=progress)
+                                    safety_check=safety_check, progress=progress,
+                                    include_selective_review=selective_review,
+                                    account_id=account_id)
                 counts = self.game_repository.analysis_job_counts(
                     engine_version=runner.engine_key, parameters=runner.parameters)
+                review_counts = self.game_repository.analysis_job_counts(
+                    engine_version=runner.review_engine_key)
                 dialog.worker_queue_status.emit(
-                    f"Подходили/уже есть: {enqueued['queued'] + enqueued['already_present']} · "
-                    f"очередь: {counts.get('queued', 0)} · пауза: {counts.get('paused', 0)} · "
-                    f"выполнены: {counts.get('complete', 0)} · ошибки: {counts.get('failed', 0)} · "
-                    f"неизвестное состояние: {int(unknown_preflight.is_set())}")
+                    f"Fast — очередь: {counts.get('queued', 0)} · пауза: {counts.get('paused', 0)} · "
+                    f"готово: {counts.get('complete', 0)} · ошибки: {counts.get('failed', 0)} · "
+                    f"unknown: {int(unknown_preflight.is_set())}\n"
+                    f"Selective review — очередь: {review_counts.get('queued', 0)} · "
+                    f"пауза: {review_counts.get('paused', 0)} · готово: {review_counts.get('complete', 0)} · "
+                    f"ошибки: {review_counts.get('failed', 0)}")
                 dialog.worker_finished.emit(bool(result.get("paused")),
                     f"Добавлено: {enqueued['queued']} · уже стояло в очереди: {enqueued['already_present']} · "
                     f"возобновлено: {resumed}\nОбработано сейчас: {result.get('processed', 0)} · "
                     f"очередь: {counts.get('queued', 0)} · пауза: {counts.get('paused', 0)} · "
                     f"готово: {counts.get('complete', 0)} · ошибки: {counts.get('failed', 0)} · "
-                    f"отменено: {counts.get('cancelled', 0)}\n{result.get('reason') or ''}")
+                    f"отменено: {counts.get('cancelled', 0)}\n"
+                    f"Selective review: добавлено {result.get('review_queued', 0)}, "
+                    f"очередь {review_counts.get('queued', 0)}, готово {review_counts.get('complete', 0)}\n"
+                    f"{result.get('reason') or ''}")
             except Exception as exc:
                 dialog.worker_finished.emit(False, f"Очередь не запущена или остановлена: {exc}")
 

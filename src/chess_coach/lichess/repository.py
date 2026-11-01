@@ -830,25 +830,29 @@ class GameRepository:
         return {"queued": queued, "already_present": skipped}
 
     def claim_next_analysis_job(self, worker_id: str, *, engine_version: str,
-                                analysis_pass: str, parameters: dict,
+                                analysis_pass: str, parameters: dict | None = None,
                                 lease_seconds: int = 300) -> dict | None:
         if not worker_id:
             raise ValueError("worker_id is required")
         lease_seconds = max(30, min(3600, int(lease_seconds)))
-        params_json = json.dumps(parameters, sort_keys=True, separators=(",", ":"))
+        params_json = json.dumps(parameters, sort_keys=True, separators=(",", ":")) if parameters is not None else None
         now_dt = datetime.now(timezone.utc)
         now = now_dt.isoformat()
         until = (now_dt + timedelta(seconds=lease_seconds)).isoformat()
         with self._connection() as db:
             db.execute("BEGIN IMMEDIATE")
             while True:
+                params_clause = " AND parameters_json=?" if params_json is not None else ""
+                values = [analysis_pass, engine_version]
+                if params_json is not None:
+                    values.append(params_json)
+                values.append(now)
                 row = db.execute(
                     "SELECT * FROM analysis_jobs WHERE analysis_pass=? AND engine_version=? "
-                    "AND parameters_json=? AND (status='queued' OR "
+                    + params_clause + " AND (status='queued' OR "
                     "(status='running' AND (lease_until IS NULL OR lease_until<?))) "
                     "ORDER BY CASE WHEN priority_at IS NULL THEN 1 ELSE 0 END,"
-                    "priority_at DESC,created_at,job_id LIMIT 1",
-                    (analysis_pass, engine_version, params_json, now)).fetchone()
+                    "priority_at DESC,created_at,job_id LIMIT 1", values).fetchone()
                 if not row:
                     return None
                 current = db.execute(
@@ -869,6 +873,49 @@ class GameRepository:
                               lease_owner=worker_id, lease_until=until, started_at=now,
                               updated_at=now, error=None)
                 return result
+
+    def list_completed_fast_analysis_jobs(self, *, engine_version: str,
+                                          parameters: dict,
+                                          account_id: str | None = None) -> list[dict]:
+        """List exact-config completed fast jobs with their persisted result runs."""
+        params_json = json.dumps(parameters, sort_keys=True, separators=(",", ":"))
+        join = " JOIN account_games ag ON ag.game_id=aj.game_id " if account_id else ""
+        account_clause = " AND ag.account_id=?" if account_id else ""
+        values: list[object] = [engine_version, params_json]
+        if account_id:
+            values.append(account_id)
+        with self._connection() as db:
+            return [dict(row) for row in db.execute(
+                "SELECT DISTINCT aj.game_id,aj.line_revision,aj.line_hash,aj.result_run_id "
+                "FROM analysis_jobs aj " + join + "WHERE aj.analysis_pass='fast' "
+                "AND aj.engine_version=? AND aj.parameters_json=? AND aj.status='complete' "
+                "AND aj.result_run_id IS NOT NULL" + account_clause +
+                " ORDER BY aj.game_id", values)]
+
+    def list_reviewable_analysis_runs(self, *, engine_version: str,
+                                      parameters: dict,
+                                      account_id: str | None = None) -> list[dict]:
+        """Select one deterministic current source run per game for selective review."""
+        params_json = json.dumps(parameters, sort_keys=True, separators=(",", ":"))
+        account_join = " JOIN account_games ag ON ag.game_id=ar.game_id " if account_id else ""
+        account_clause = " AND ag.account_id=?" if account_id else ""
+        values: list[object] = [engine_version, params_json]
+        if account_id:
+            values.append(account_id)
+        sql = (
+            "WITH eligible AS (SELECT ar.run_id,ar.game_id,ar.line_revision,ar.line_hash,ar.source,"
+            "ROW_NUMBER() OVER(PARTITION BY ar.game_id ORDER BY "
+            "CASE WHEN ar.source='stockfish' THEN 0 ELSE 1 END,ar.finished_at DESC,ar.run_id DESC) rank "
+            "FROM analysis_runs ar JOIN game_revisions gr ON gr.game_id=ar.game_id "
+            "AND gr.line_revision=ar.line_revision AND gr.is_current=1 "
+            "LEFT JOIN analysis_jobs aj ON aj.result_run_id=ar.run_id " + account_join +
+            "WHERE ((ar.source='stockfish' AND ar.status='complete' AND aj.analysis_pass='fast' "
+            "AND aj.status='complete' AND aj.engine_version=? AND aj.parameters_json=?) "
+            "OR (ar.source='lichess-pgn' AND ar.status IN ('complete','partial')))" +
+            account_clause + ") SELECT run_id,game_id,line_revision,line_hash,source "
+            "FROM eligible WHERE rank=1 ORDER BY game_id")
+        with self._connection() as db:
+            return [dict(row) for row in db.execute(sql, values)]
 
     def renew_analysis_job_lease(self, job_id: str, worker_id: str, *,
                                  lease_seconds: int = 300) -> bool:
@@ -1623,6 +1670,28 @@ class GameRepository:
             (run_id,)).fetchall()
         return [dict(row) for row in rows]
 
+    @staticmethod
+    def _load_review_coverage(db: sqlite3.Connection, game_id: str,
+                              line_revision: int, line_hash: str) -> dict | None:
+        row = db.execute(
+            "SELECT ar.run_id,aj.parameters_json,aj.status FROM analysis_jobs aj "
+            "JOIN analysis_runs ar ON ar.run_id=aj.result_run_id WHERE aj.game_id=? "
+            "AND aj.line_revision=? AND aj.line_hash=? AND aj.analysis_pass='review' "
+            "AND aj.status='complete' ORDER BY aj.updated_at DESC,aj.job_id DESC LIMIT 1",
+            (game_id, line_revision, line_hash)).fetchone()
+        if not row:
+            return None
+        params = json.loads(row["parameters_json"])
+        reviewed = db.execute(
+            "SELECT COUNT(*) FROM move_metrics WHERE run_id=? AND metric_version='cc-move-metrics-v2' "
+            "AND cp_loss IS NOT NULL", (row["run_id"],)).fetchone()[0]
+        total_moves = db.execute(
+            "SELECT COUNT(*) FROM game_moves WHERE game_id=? AND line_revision=?",
+            (game_id, line_revision)).fetchone()[0]
+        return {"status": row["status"], "reviewed_moves": int(reviewed),
+                "selected_moves": len(params.get("review_move_plies", [])),
+                "total_moves": int(total_moves), "source": "stockfish-review"}
+
     def find_analysis_cache(self, game_id: str, line_revision: int, line_hash: str,
                             source: str, engine_version: str | None,
                             parameters: dict, *, account_id: str | None = None,
@@ -1652,6 +1721,8 @@ class GameRepository:
             coverage = db.execute("SELECT * FROM analysis_coverage WHERE run_id=?",
                                   (run["run_id"],)).fetchone()
             result["coverage"] = dict(coverage) if coverage else None
+            result["review_coverage"] = self._load_review_coverage(
+                db, game_id, int(run["line_revision"]), str(run["line_hash"]))
             self._attach_official_accuracy(db, result, game_id, account_id=account_id,
                                            user_color=user_color)
             result["local_game_accuracy"] = None
@@ -1713,6 +1784,8 @@ class GameRepository:
             coverage = db.execute("SELECT * FROM analysis_coverage WHERE run_id=?",
                                   (run["run_id"],)).fetchone()
             result["coverage"] = dict(coverage) if coverage else None
+            result["review_coverage"] = self._load_review_coverage(
+                db, game_id, int(run["line_revision"]), str(run["line_hash"]))
             self._attach_official_accuracy(db, result, game_id, account_id=account_id,
                                            user_color=user_color)
             result["local_game_accuracy"] = None

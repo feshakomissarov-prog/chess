@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
+import json
 import threading
 import time
 import uuid
@@ -63,6 +64,7 @@ class BatchAnalysisRunner:
         self.parameters = self.options.parameters()
         self.binary_sha256 = _binary_fingerprint(self.engine_path)
         self.engine_key = "stockfish-sha256:" + self.binary_sha256
+        self.review_engine_key = "stockfish-review-sha256:" + self.binary_sha256
         self.lease_seconds = max(30, min(3600, int(lease_seconds)))
         self.safety_refresh_seconds = max(0.01, min(60.0, float(safety_refresh_seconds)))
         self.analyzer = analyzer or CompletedGameAnalyzer(repository, engine_factory)
@@ -80,7 +82,11 @@ class BatchAnalysisRunner:
 
     def run(self, *, stop_event: threading.Event, safety_check: Callable[[dict], bool | None],
             pause_event: threading.Event | None = None,
-            progress: Callable[[str, int, int], None] | None = None) -> dict[str, int | bool | str | None]:
+            progress: Callable[[str, int, int], None] | None = None,
+            include_selective_review: bool = False,
+            account_id: str | None = None,
+            review_budget_per_game: int = 12,
+            review_budget_total: int = 100) -> dict[str, int | bool | str | None]:
         if safety_check is None:
             raise ValueError("A fail-closed per-game safety check is required.")
         engine: chess.engine.SimpleEngine | None = None
@@ -94,6 +100,9 @@ class BatchAnalysisRunner:
         active_job: dict | None = None
         safety_lost = threading.Event()
         safety_failure: list[str] = []
+        analysis_pass = "fast"
+        review_scheduled = False
+        review_queued = 0
 
         def check_active_safety(job: dict) -> bool:
             try:
@@ -136,10 +145,23 @@ class BatchAnalysisRunner:
                     paused = True
                     stop_reason = "paused"
                     break
-                job = self.repository.claim_next_analysis_job(
-                    self.worker_id, engine_version=self.engine_key,
-                    analysis_pass="fast", parameters=self.parameters,
-                    lease_seconds=self.lease_seconds)
+                if analysis_pass == "fast":
+                    job = self.repository.claim_next_analysis_job(
+                        self.worker_id, engine_version=self.engine_key,
+                        analysis_pass="fast", parameters=self.parameters,
+                        lease_seconds=self.lease_seconds)
+                    if job is None and include_selective_review and not review_scheduled:
+                        review_queued = self.enqueue_selected_reviews(
+                            account_id=account_id, budget_per_game=review_budget_per_game,
+                            budget_total=review_budget_total)
+                        review_scheduled = True
+                        analysis_pass = "review"
+                        continue
+                else:
+                    job = self.repository.claim_next_analysis_job(
+                        self.worker_id, engine_version=self.review_engine_key,
+                        analysis_pass="review", parameters=None,
+                        lease_seconds=self.lease_seconds)
                 if job is None:
                     break
                 safety_failure.clear()
@@ -175,10 +197,26 @@ class BatchAnalysisRunner:
                         progress(str(job["game_id"]), done, total)
 
                 try:
-                    result = self.analyzer.analyze(
-                        str(job["game_id"]), self.engine_path, self.analysis_options,
-                        progress=on_progress, stop_event=analysis_stop,
-                        analysis_pass="fast", engine=engine)
+                    if job["analysis_pass"] == "fast":
+                        result = self.analyzer.analyze(
+                            str(job["game_id"]), self.engine_path, self.analysis_options,
+                            progress=on_progress, stop_event=analysis_stop,
+                            analysis_pass="fast", engine=engine)
+                    else:
+                        review_params = json.loads(job["parameters_json"])
+                        result = self.analyzer.review_selected_positions(
+                            str(job["game_id"]), self.engine_path,
+                            review_params["review_move_plies"],
+                            # The worker performed an authoritative preflight and its
+                            # independent TTL monitor continues while UCI runs. This
+                            # callback only reads the thread-safe monitor state; it
+                            # must not issue one Lichess request per selected ply.
+                            safety_check=lambda: not safety_lost.is_set() and not analysis_stop.is_set(),
+                            nodes=int(review_params["limit_value"]),
+                            multipv=int(review_params["multipv"]),
+                            stop_event=analysis_stop,
+                            progress=lambda done, total: on_progress(done, total),
+                            engine=engine)
                 except InterruptedError as exc:
                     if stop_event.is_set():
                         status = "cancelled"
@@ -224,9 +262,51 @@ class BatchAnalysisRunner:
             if cancelled:
                 self.repository.cancel_queued_analysis_jobs(
                     engine_version=self.engine_key, parameters=self.parameters)
+                self.repository.cancel_queued_analysis_jobs(engine_version=self.review_engine_key)
         return {"processed": processed, "failed": failed, "paused": paused,
                 "cancelled": cancelled, "reason": stop_reason,
-                "queue": self.repository.analysis_job_counts(engine_version=self.engine_key)}
+                "queue": self.repository.analysis_job_counts(engine_version=self.engine_key,
+                                                               parameters=self.parameters),
+                "review_queue": self.repository.analysis_job_counts(
+                    engine_version=self.review_engine_key),
+                "review_queued": review_queued}
+
+    def enqueue_selected_reviews(self, *, account_id: str | None = None,
+                                 budget_per_game: int = 12,
+                                 budget_total: int = 100,
+                                 nodes: int = 150_000, multipv: int = 2) -> int:
+        """Persist bounded review jobs from one current fast or Lichess source run per game."""
+        cap = max(0, min(500, int(budget_total)))
+        if cap == 0:
+            return 0
+        selected_total = 0
+        queued_jobs = 0
+        runs = self.repository.list_reviewable_analysis_runs(
+            engine_version=self.engine_key, parameters=self.parameters, account_id=account_id)
+        for run in runs:
+            remaining = cap - selected_total
+            if remaining <= 0:
+                break
+            plan = self.repository.plan_review_positions(
+                run["run_id"], budget_per_game=max(0, min(50, int(budget_per_game))),
+                budget_total=remaining)
+            move_plies = [int(item["ply"]) for item in plan]
+            if not move_plies:
+                continue
+            review_params = {
+                "review_policy_version": "cc-selective-review-v1",
+                "parent_run_id": run["run_id"], "source": run["source"],
+                "review_move_plies": move_plies,
+                "limit_kind": "nodes", "limit_value": max(10_000, min(300_000, int(nodes))),
+                "multipv": max(1, min(3, int(multipv))), "threads": 1, "hash_mb": 128,
+            }
+            result = self.repository.enqueue_analysis_jobs(
+                [{"game_id": run["game_id"], "line_revision": run["line_revision"],
+                  "line_hash": run["line_hash"]}], analysis_pass="review",
+                engine_version=self.review_engine_key, parameters=review_params)
+            queued_jobs += result["queued"]
+            selected_total += len(move_plies)
+        return queued_jobs
 
     def _job_has_eligible_legal_line(self, job: dict) -> bool:
         game = self.repository.get_game(str(job["game_id"]))
