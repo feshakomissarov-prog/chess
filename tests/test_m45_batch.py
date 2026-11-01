@@ -173,6 +173,72 @@ def test_batch_analysis_fails_closed_before_starting_engine(tmp_path, unsafe_sta
         repository.shutdown()
 
 
+def test_cancel_during_safety_check_cancels_claimed_and_remaining_jobs(tmp_path):
+    repository = GameRepository(tmp_path / "cancel-during-preflight.sqlite3")
+    engines = []
+    try:
+        _save_game(repository, "first", "2026-10-02T00:00:00+00:00")
+        _save_game(repository, "second", "2026-10-01T00:00:00+00:00")
+        runner = _runner(repository, tmp_path, engines)
+        runner.enqueue_missing()
+        stop = threading.Event()
+
+        def cancel_during_safety(_job):
+            stop.set()
+            return None
+
+        result = runner.run(stop_event=stop, safety_check=cancel_during_safety)
+        assert result["cancelled"] is True
+        assert result["paused"] is False
+        assert result["processed"] == 0
+        assert not engines
+        assert repository.analysis_job_counts(engine_version=runner.engine_key) == {
+            "cancelled": 2}
+        assert repository.list_analyses("first") == []
+        assert repository.list_analyses("second") == []
+    finally:
+        repository.shutdown()
+
+
+def test_resume_and_cancel_are_scoped_to_exact_engine_parameters(tmp_path):
+    repository = GameRepository(tmp_path / "parameter-scoped-queue.sqlite3")
+    engines = []
+    try:
+        _save_game(repository, "game", "2026-10-02T00:00:00+00:00")
+        runner = _runner(repository, tmp_path, engines)
+        candidate = repository.list_games_needing_fast_analysis()[0]
+        other_parameters = FastPassOptions(nodes=10_000, hash_mb=32).parameters()
+        repository.enqueue_analysis_jobs([candidate], analysis_pass="fast",
+                                         engine_version=runner.engine_key,
+                                         parameters=runner.parameters)
+        repository.enqueue_analysis_jobs([candidate], analysis_pass="fast",
+                                         engine_version=runner.engine_key,
+                                         parameters=other_parameters)
+        claimed_default = repository.claim_next_analysis_job(
+            "worker-default", engine_version=runner.engine_key, analysis_pass="fast",
+            parameters=runner.parameters)
+        claimed_other = repository.claim_next_analysis_job(
+            "worker-other", engine_version=runner.engine_key, analysis_pass="fast",
+            parameters=other_parameters)
+        repository.finish_analysis_job(claimed_default["job_id"], "worker-default", status="paused")
+        repository.finish_analysis_job(claimed_other["job_id"], "worker-other", status="paused")
+        assert repository.resume_paused_analysis_jobs(
+            engine_version=runner.engine_key, parameters=runner.parameters) == 1
+        assert repository.analysis_job_counts(engine_version=runner.engine_key) == {
+            "paused": 1, "queued": 1}
+        assert repository.cancel_queued_analysis_jobs(
+            engine_version=runner.engine_key, parameters=runner.parameters) == 1
+        assert repository.analysis_job_counts(engine_version=runner.engine_key) == {
+            "cancelled": 1, "paused": 1}
+        assert repository.analysis_job_counts(engine_version=runner.engine_key,
+                                              parameters=runner.parameters) == {"cancelled": 1}
+        assert repository.analysis_job_counts(engine_version=runner.engine_key,
+                                              parameters=other_parameters) == {"paused": 1}
+        assert not engines
+    finally:
+        repository.shutdown()
+
+
 def test_batch_detects_new_human_game_before_next_job_and_stops_engine(tmp_path):
     repository = GameRepository(tmp_path / "appearing-human.sqlite3")
     engines = []

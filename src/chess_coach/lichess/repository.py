@@ -862,35 +862,68 @@ class GameRepository:
             if cursor.rowcount != 1:
                 raise RuntimeError("Analysis job lease was lost before it could be finalized.")
 
-    def resume_paused_analysis_jobs(self, *, engine_version: str | None = None) -> int:
+    def resume_paused_analysis_jobs(self, *, engine_version: str | None = None,
+                                    parameters: dict | None = None) -> int:
         now = datetime.now(timezone.utc).isoformat()
+        params_json = (json.dumps(parameters, sort_keys=True, separators=(",", ":"))
+                       if parameters is not None else None)
         with self._connection() as db:
-            if engine_version is None:
+            if engine_version is None and params_json is None:
                 cursor = db.execute("UPDATE analysis_jobs SET status='queued',updated_at=? "
                                     "WHERE status='paused'", (now,))
-            else:
+            elif params_json is None:
                 cursor = db.execute("UPDATE analysis_jobs SET status='queued',updated_at=? "
                                     "WHERE status='paused' AND engine_version=?",
                                     (now, engine_version))
+            elif engine_version is None:
+                cursor = db.execute("UPDATE analysis_jobs SET status='queued',updated_at=? "
+                                    "WHERE status='paused' AND parameters_json=?",
+                                    (now, params_json))
+            else:
+                cursor = db.execute("UPDATE analysis_jobs SET status='queued',updated_at=? "
+                                    "WHERE status='paused' AND engine_version=? "
+                                    "AND parameters_json=?",
+                                    (now, engine_version, params_json))
         return cursor.rowcount
 
-    def cancel_queued_analysis_jobs(self, *, engine_version: str | None = None) -> int:
+    def cancel_queued_analysis_jobs(self, *, engine_version: str | None = None,
+                                    parameters: dict | None = None) -> int:
         now = datetime.now(timezone.utc).isoformat()
+        params_json = (json.dumps(parameters, sort_keys=True, separators=(",", ":"))
+                       if parameters is not None else None)
         with self._connection() as db:
-            if engine_version is None:
+            if engine_version is None and params_json is None:
                 cursor = db.execute("UPDATE analysis_jobs SET status='cancelled',updated_at=?,"
                                     "finished_at=? WHERE status='queued'", (now, now))
-            else:
+            elif params_json is None:
                 cursor = db.execute("UPDATE analysis_jobs SET status='cancelled',updated_at=?,"
                                     "finished_at=? WHERE status='queued' AND engine_version=?",
                                     (now, now, engine_version))
+            elif engine_version is None:
+                cursor = db.execute("UPDATE analysis_jobs SET status='cancelled',updated_at=?,"
+                                    "finished_at=? WHERE status='queued' AND parameters_json=?",
+                                    (now, now, params_json))
+            else:
+                cursor = db.execute("UPDATE analysis_jobs SET status='cancelled',updated_at=?,"
+                                    "finished_at=? WHERE status='queued' AND engine_version=? "
+                                    "AND parameters_json=?",
+                                    (now, now, engine_version, params_json))
         return cursor.rowcount
 
-    def analysis_job_counts(self, *, engine_version: str | None = None) -> dict[str, int]:
-        where = " WHERE engine_version=?" if engine_version else ""
+    def analysis_job_counts(self, *, engine_version: str | None = None,
+                            parameters: dict | None = None) -> dict[str, int]:
+        clauses: list[str] = []
+        values: list[str] = []
+        if engine_version is not None:
+            clauses.append("engine_version=?")
+            values.append(engine_version)
+        if parameters is not None:
+            clauses.append("parameters_json=?")
+            values.append(json.dumps(parameters, sort_keys=True, separators=(",", ":")))
+        where = " WHERE " + " AND ".join(clauses) if clauses else ""
         with self._connection() as db:
             rows = db.execute("SELECT status,COUNT(*) AS count FROM analysis_jobs" + where +
-                              " GROUP BY status", (engine_version,) if engine_version else ()).fetchall()
+                              " GROUP BY status", tuple(values)).fetchall()
         return {str(row["status"]): int(row["count"]) for row in rows}
 
     def search_games(self, query: str = "", *, page: int = 0,

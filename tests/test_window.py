@@ -9,9 +9,9 @@ from PySide6.QtGui import QCloseEvent
 from PySide6.QtWidgets import QInputDialog, QMessageBox, QPushButton
 
 from chess_coach.board_view import BoardView
-from chess_coach.window import (ActiveGamesDialog, EvaluationGraph, MainWindow,
+from chess_coach.window import (ActiveGamesDialog, BatchAnalysisDialog, EvaluationGraph, MainWindow,
                                 SettingsDialog, StatisticsDialog, StatisticsGameDialog,
-                                _puzzle_attempt_summary)
+                                _batch_safety_from_games, _puzzle_attempt_summary)
 from chess_coach.lichess.session import LichessGameSession
 from chess_coach.lichess.repository import GameRepository
 
@@ -100,6 +100,80 @@ def test_evaluation_graph_keeps_phase_boundaries_for_rendering(qtbot):
     graph.show()
     qtbot.wait(20)
     assert graph.phase_boundaries["source"] == "lichess"
+
+
+def test_batch_analysis_controls_are_explicit_and_resume_after_pause(qtbot):
+    dialog = BatchAnalysisDialog()
+    qtbot.addWidget(dialog)
+    started = []
+    paused = []
+    dialog.run_requested.connect(lambda *args: started.append(args))
+    dialog.pause_requested.connect(lambda: paused.append(True))
+    assert not dialog.pause_button.isEnabled()
+    assert dialog.resume_button.isEnabled()
+    qtbot.mouseClick(dialog.start_button, Qt.MouseButton.LeftButton)
+    assert started == [(1000, 20_000, 64, False)]
+    dialog.set_running(True)
+    assert dialog.close() is False
+    qtbot.mouseClick(dialog.pause_button, Qt.MouseButton.LeftButton)
+    assert paused == [True]
+    dialog.worker_finished.emit(True, "Пауза")
+    assert dialog.resume_button.isEnabled()
+    qtbot.mouseClick(dialog.resume_button, Qt.MouseButton.LeftButton)
+    assert started[-1] == (1000, 20_000, 64, True)
+    dialog.worker_finished.emit(False, "Завершено")
+    assert not dialog.pause_button.isEnabled()
+
+
+def test_batch_analysis_safety_snapshot_fails_closed_and_allows_builtin_ai_only():
+    ai = {"source": "ai", "opponent": {"ai": 3, "id": None}}
+    bot_account = {"source": "friend", "opponent": {"ai": None, "id": "enginebot",
+                                                       "title": "BOT"}}
+    assert _batch_safety_from_games([]) is True
+    assert _batch_safety_from_games([ai]) is True
+    assert _batch_safety_from_games([bot_account]) is False
+    assert _batch_safety_from_games(None) is None
+    assert _batch_safety_from_games([ai] * 50) is None
+
+
+def test_offline_window_never_enables_or_starts_batch_engine(qtbot, tmp_path):
+    window = MainWindow(offline_mode=True)
+    qtbot.addWidget(window)
+    assert window.lichess is None
+    assert not window.home_batch_analysis_button.isEnabled()
+    assert window._batch_thread is None
+
+
+def test_batch_queue_pauses_on_new_human_game_but_not_builtin_ai(qtbot):
+    human_window = MainWindow(offline_mode=True)
+    qtbot.addWidget(human_window)
+    human_window._batch_pause = threading.Event()
+    human_window._lichess_event({"type": "gameStart", "game": {
+        "gameId": "human-during-batch", "source": "friend", "color": "white",
+        "opponent": {"id": "friend", "username": "Friend"}}})
+    assert human_window._batch_pause.is_set()
+
+    ai_window = MainWindow(offline_mode=True)
+    qtbot.addWidget(ai_window)
+    ai_window._batch_pause = threading.Event()
+    ai_window._lichess_event({"type": "gameStart", "game": {
+        "gameId": "ai-during-batch", "source": "ai", "color": "white",
+        "opponent": {"ai": 3, "id": None}}})
+    assert not ai_window._batch_pause.is_set()
+
+
+def test_window_close_cancels_and_waits_for_batch_worker(qtbot):
+    window = MainWindow(offline_mode=True)
+    qtbot.addWidget(window)
+    stop = threading.Event()
+    window._batch_stop = stop
+    worker = threading.Thread(target=stop.wait, name="fake-batch-worker", daemon=True)
+    window._batch_thread = worker
+    worker.start()
+    assert window.close() is False
+    assert stop.is_set()
+    qtbot.waitUntil(lambda: not worker.is_alive(), timeout=2000)
+    assert window.close() is True
 
 
 def test_statistics_screen_filters_asynchronously_and_resets(qtbot, tmp_path):

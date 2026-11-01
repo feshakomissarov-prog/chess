@@ -47,6 +47,7 @@ from .board_view import BoardView
 from .controller import GameController
 from .lichess.auth import CredentialStorageError, WindowsCredentialStore
 from .lichess.analysis import AnalysisOptions, CLASSIFIER_VERSION, CompletedGameAnalyzer
+from .lichess.batch_analysis import BatchAnalysisRunner, FastPassOptions
 from .lichess.repository import GameRepository
 from .lichess.service import LichessService
 from .lichess.session import LichessGameSession, classify_lichess_opponent
@@ -87,6 +88,13 @@ def _game_date_label(game: dict) -> str:
     if game.get("game_time_precision") == "date_only":
         return f"{str(started)[:10]} (точность до дня)"
     return str(started)
+
+
+def _batch_safety_from_games(games: object) -> bool | None:
+    """Classify one complete /api/account/playing snapshot; uncertainty blocks UCI."""
+    if not isinstance(games, list) or len(games) >= 50:
+        return None
+    return not any(classify_lichess_opponent(game) != "official_ai" for game in games)
 
 
 class OnlineGameDialog(QDialog):
@@ -942,6 +950,7 @@ class SettingsDialog(QDialog):
         buttons.rejected.connect(self.reject)
         layout.addWidget(buttons)
 
+
     def save(self, settings: QSettings) -> None:
         settings.setValue("player_color", self.color.currentData())
         settings.setValue("board_flipped", self.flipped.isChecked())
@@ -1141,6 +1150,85 @@ class SettingsDialog(QDialog):
         self._finish_engine_probe("Проверка движка остановлена.")
 
 
+class BatchAnalysisDialog(QDialog):
+    """Explicit controls for the bounded recent-first fast-analysis queue."""
+
+    run_requested = Signal(int, int, int, bool)
+    pause_requested = Signal()
+    cancel_requested = Signal()
+    worker_progress = Signal(str)
+    worker_queue_status = Signal(str)
+    worker_finished = Signal(bool, str)
+
+    def __init__(self, parent=None) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("Массовый анализ завершённых партий")
+        self.setMinimumWidth(520)
+        layout = QVBoxLayout(self)
+        layout.addWidget(QLabel(
+            "Анализ запускается только по кнопке и только для завершённых стандартных партий. "
+            "Перед каждой партией Lichess проверяется заново; неизвестное состояние останавливает очередь."))
+        form = QGridLayout()
+        self.limit = QSpinBox(); self.limit.setRange(1, 10_000); self.limit.setValue(1000)
+        self.nodes = QSpinBox(); self.nodes.setRange(1000, 30_000); self.nodes.setSingleStep(1000); self.nodes.setValue(20_000)
+        self.hash_mb = QSpinBox(); self.hash_mb.setRange(16, 128); self.hash_mb.setSingleStep(16); self.hash_mb.setValue(64)
+        form.addWidget(QLabel("Максимум партий для добавления"), 0, 0); form.addWidget(self.limit, 0, 1)
+        form.addWidget(QLabel("Узлов на позицию"), 1, 0); form.addWidget(self.nodes, 1, 1)
+        form.addWidget(QLabel("Hash (МБ)"), 2, 0); form.addWidget(self.hash_mb, 2, 1)
+        layout.addLayout(form)
+        self.queue_label = QLabel("Очередь ещё не загружена")
+        self.queue_label.setWordWrap(True)
+        layout.addWidget(self.queue_label)
+        self.progress_label = QLabel("Движок не запущен")
+        self.progress_label.setWordWrap(True)
+        layout.addWidget(self.progress_label)
+        controls = QHBoxLayout()
+        self.start_button = QPushButton("Добавить недостающие и запустить")
+        self.start_button.clicked.connect(lambda: self.run_requested.emit(
+            self.limit.value(), self.nodes.value(), self.hash_mb.value(), False))
+        self.resume_button = QPushButton("Продолжить очередь")
+        # A persistent queue may have been paused by a previous application run.
+        self.resume_button.setEnabled(True)
+        self.resume_button.clicked.connect(lambda: self.run_requested.emit(
+            self.limit.value(), self.nodes.value(), self.hash_mb.value(), True))
+        self.pause_button = QPushButton("Пауза")
+        self.pause_button.setEnabled(False)
+        self.pause_button.clicked.connect(self.pause_requested.emit)
+        self.cancel_button = QPushButton("Отменить очередь")
+        self.cancel_button.setEnabled(False)
+        self.cancel_button.clicked.connect(self.cancel_requested.emit)
+        controls.addWidget(self.start_button); controls.addWidget(self.resume_button)
+        controls.addWidget(self.pause_button); controls.addWidget(self.cancel_button)
+        layout.addLayout(controls)
+        self.close_button = QPushButton("Закрыть")
+        self.close_button.clicked.connect(self.reject)
+        layout.addWidget(self.close_button)
+        self.worker_progress.connect(self.progress_label.setText)
+        self.worker_queue_status.connect(self.queue_label.setText)
+        self.worker_finished.connect(self._worker_finished)
+
+    def _worker_finished(self, paused: bool, message: str) -> None:
+        self.set_running(False)
+        self.resume_button.setEnabled(paused)
+        self.progress_label.setText(message)
+
+    def set_running(self, running: bool) -> None:
+        self.start_button.setEnabled(not running)
+        self.resume_button.setEnabled(not running)
+        self.limit.setEnabled(not running)
+        self.nodes.setEnabled(not running)
+        self.hash_mb.setEnabled(not running)
+        self.pause_button.setEnabled(running)
+        self.cancel_button.setEnabled(running)
+
+    def closeEvent(self, event) -> None:
+        if self.pause_button.isEnabled() or self.cancel_button.isEnabled():
+            self.progress_label.setText("Сначала поставьте очередь на паузу или отмените её.")
+            event.ignore()
+            return
+        super().closeEvent(event)
+
+
 class ActiveGamesDialog(QDialog):
     refresh_requested = Signal()
     open_requested = Signal(dict)
@@ -1270,6 +1358,12 @@ class MainWindow(QMainWindow):
         self._close_retry_scheduled = False
         self._analysis_stop: threading.Event | None = None
         self._analysis_thread: threading.Thread | None = None
+        self._batch_thread: threading.Thread | None = None
+        self._batch_stop: threading.Event | None = None
+        self._batch_pause: threading.Event | None = None
+        self._batch_dialog: BatchAnalysisDialog | None = None
+        self._batch_engine_key: str | None = None
+        self._batch_config: tuple[str, int, int] | None = None
         self._statistics_workers: set[threading.Thread] = set()
         self._analysis_dialog: QProgressDialog | None = None
         self._analysis_safety_request_id: str | None = None
@@ -1606,6 +1700,9 @@ class MainWindow(QMainWindow):
         self.home_archive_button.setEnabled(False)
         self.home_stats_button = QPushButton("Статистика партий")
         self.home_stats_button.clicked.connect(self.show_statistics)
+        self.home_batch_analysis_button = QPushButton("Массовый анализ Stockfish")
+        self.home_batch_analysis_button.clicked.connect(self.show_batch_analysis)
+        self.home_batch_analysis_button.setEnabled(False)
         self.home_puzzles_button = QPushButton("Моя история задач Lichess")
         self.home_puzzles_button.clicked.connect(self.start_puzzle_sync)
         self.home_puzzles_button.setEnabled(False)
@@ -1622,6 +1719,7 @@ class MainWindow(QMainWindow):
                        self.home_games_button, self.home_archive_status_button,
                        self.home_pilot_import_button,
                        self.home_archive_button, self.home_stats_button,
+                       self.home_batch_analysis_button,
                        self.home_puzzles_button, self.home_puzzles_pilot_button,
                        self.home_settings_button,
                        self.resume_game_button):
@@ -1753,6 +1851,7 @@ class MainWindow(QMainWindow):
             button.setEnabled(self._online_actions_allowed())
         self.active_games_button.setEnabled(self._online_actions_allowed())
         self.home_archive_button.setEnabled(self._online_actions_allowed())
+        self.home_batch_analysis_button.setEnabled(self._online_actions_allowed())
         self.home_pilot_import_button.setEnabled(self._online_actions_allowed())
         self.home_puzzles_button.setEnabled(self._online_actions_allowed())
         self.home_puzzles_pilot_button.setEnabled(self._online_actions_allowed())
@@ -1899,6 +1998,160 @@ class MainWindow(QMainWindow):
         dialog.position_requested.connect(self._open_statistics_position)
         dialog.exec()
         self._statistics_dialog = None
+
+    def show_batch_analysis(self) -> None:
+        if not self._online_actions_allowed() or not self.lichess:
+            QMessageBox.warning(self, "Массовый анализ",
+                "Для fail-closed проверки fair-play сначала подключите Lichess. "
+                "Без подтверждённого состояния аккаунта очередь не запускается.")
+            return
+        if self._batch_dialog is not None:
+            self._batch_dialog.show(); self._batch_dialog.raise_(); self._batch_dialog.activateWindow()
+            return
+        dialog = BatchAnalysisDialog(self)
+        self._batch_dialog = dialog
+        dialog.run_requested.connect(lambda limit, nodes, hash_mb, resume:
+            self._start_batch_analysis(dialog, limit, nodes, hash_mb, resume))
+        dialog.pause_requested.connect(self._pause_batch_analysis)
+        dialog.cancel_requested.connect(self._cancel_batch_analysis)
+        dialog.finished.connect(lambda _result: setattr(self, "_batch_dialog", None))
+        dialog.show()
+
+    def _start_batch_analysis(self, dialog: BatchAnalysisDialog, limit: int, nodes: int,
+                              hash_mb: int, resume: bool) -> None:
+        if self._shutdown_requested or (self._batch_thread and self._batch_thread.is_alive()):
+            return
+        service = self.lichess
+        username = str(getattr(service, "username", "") or "").strip()
+        engine_path = str(self.settings.value("stockfish_path", "", type=str)).strip()
+        if not service or not username or not engine_path:
+            QMessageBox.warning(dialog, "Массовый анализ",
+                "Подключите аккаунт Lichess и выберите существующий Stockfish executable "
+                "в настройках. Бинарник автоматически не скачивается.")
+            return
+        try:
+            options = FastPassOptions(nodes=nodes, hash_mb=hash_mb)
+            runner = BatchAnalysisRunner(self.game_repository, engine_path, options=options)
+        except (OSError, ValueError) as exc:
+            QMessageBox.warning(dialog, "Массовый анализ", str(exc))
+            return
+        config = (engine_path, runner.options.nodes, runner.options.hash_mb)
+        self._batch_config = config
+        self._batch_engine_key = runner.engine_key
+        self._batch_stop = threading.Event()
+        self._batch_pause = threading.Event()
+        stop, pause = self._batch_stop, self._batch_pause
+        generation = self._analysis_session_generation
+        account_id = self.game_repository.ensure_archive_account(username)
+        dialog.set_running(True)
+        dialog.worker_progress.emit("Подготовка очереди; Stockfish ещё не запущен…")
+
+        def work() -> None:
+            try:
+                if resume:
+                    available = self.game_repository.analysis_job_counts(
+                        engine_version=runner.engine_key, parameters=runner.parameters)
+                    if not any(available.get(status, 0)
+                               for status in ("queued", "paused", "running")):
+                        dialog.worker_finished.emit(
+                            False, "Для выбранного движка и бюджета нет незавершённой очереди.")
+                        return
+                    resumed = self.game_repository.resume_paused_analysis_jobs(
+                        engine_version=runner.engine_key, parameters=runner.parameters)
+                    enqueued = {"queued": 0, "already_present": 0}
+                else:
+                    enqueued = runner.enqueue_missing(account_id=account_id, limit=limit)
+                    resumed = 0
+                unknown_preflight = threading.Event()
+                initial_counts = self.game_repository.analysis_job_counts(
+                    engine_version=runner.engine_key, parameters=runner.parameters)
+                dialog.worker_queue_status.emit(
+                    f"Подходят/уже есть: {enqueued['queued'] + enqueued['already_present']} · "
+                    f"в очереди: {initial_counts.get('queued', 0)} · "
+                    f"приостановлены: {initial_counts.get('paused', 0)} · "
+                    f"выполнены: {initial_counts.get('complete', 0)} · "
+                    f"ошибки: {initial_counts.get('failed', 0)}")
+
+                def safety_check(_job: dict) -> bool | None:
+                    # Called before every game. Any disconnect, identity change,
+                    # malformed/truncated list, or API error fails closed.
+                    if (stop.is_set() or pause.is_set() or not self._lichess_connected
+                            or self.lichess is not service
+                            or generation != self._analysis_session_generation
+                            or str(getattr(service, "username", "") or "").strip().casefold()
+                               != username.casefold()):
+                        unknown_preflight.set()
+                        return None
+                    token = service.token
+                    if not token:
+                        unknown_preflight.set()
+                        return None
+                    try:
+                        games = service.client.get_playing_games(token)
+                    except Exception:
+                        unknown_preflight.set()
+                        raise
+                    if (stop.is_set() or pause.is_set() or not self._lichess_connected
+                            or self.lichess is not service
+                            or generation != self._analysis_session_generation
+                            or str(getattr(service, "username", "") or "").strip().casefold()
+                               != username.casefold()
+                            or service.token != token):
+                        unknown_preflight.set()
+                        return None
+                    safety = _batch_safety_from_games(games)
+                    if safety is None:
+                        unknown_preflight.set()
+                    return safety
+
+                def progress(game_id: str, done: int, total: int) -> None:
+                    counts = self.game_repository.analysis_job_counts(
+                        engine_version=runner.engine_key, parameters=runner.parameters)
+                    dialog.worker_queue_status.emit(
+                        f"Очередь: {counts.get('queued', 0)} · пауза: {counts.get('paused', 0)} · "
+                        f"выполнены: {counts.get('complete', 0)} · ошибки: {counts.get('failed', 0)} · "
+                        f"неизвестное состояние: {int(unknown_preflight.is_set())}")
+                    dialog.worker_progress.emit(
+                        f"Партия {game_id}: позиции {done}/{total} · "
+                        f"очередь: {counts.get('queued', 0)} · готово: {counts.get('complete', 0)} · "
+                        f"ошибки: {counts.get('failed', 0)}")
+
+                result = runner.run(stop_event=stop, pause_event=pause,
+                                    safety_check=safety_check, progress=progress)
+                counts = self.game_repository.analysis_job_counts(
+                    engine_version=runner.engine_key, parameters=runner.parameters)
+                dialog.worker_queue_status.emit(
+                    f"Подходили/уже есть: {enqueued['queued'] + enqueued['already_present']} · "
+                    f"очередь: {counts.get('queued', 0)} · пауза: {counts.get('paused', 0)} · "
+                    f"выполнены: {counts.get('complete', 0)} · ошибки: {counts.get('failed', 0)} · "
+                    f"неизвестное состояние: {int(unknown_preflight.is_set())}")
+                dialog.worker_finished.emit(bool(result.get("paused")),
+                    f"Добавлено: {enqueued['queued']} · уже стояло в очереди: {enqueued['already_present']} · "
+                    f"возобновлено: {resumed}\nОбработано сейчас: {result.get('processed', 0)} · "
+                    f"очередь: {counts.get('queued', 0)} · пауза: {counts.get('paused', 0)} · "
+                    f"готово: {counts.get('complete', 0)} · ошибки: {counts.get('failed', 0)} · "
+                    f"отменено: {counts.get('cancelled', 0)}\n{result.get('reason') or ''}")
+            except Exception as exc:
+                dialog.worker_finished.emit(False, f"Очередь не запущена или остановлена: {exc}")
+
+        thread = threading.Thread(target=work, name="chess-coach-batch-analysis", daemon=True)
+        self._batch_thread = thread
+        thread.start()
+
+    def _pause_batch_analysis(self) -> None:
+        if self._batch_pause is not None:
+            self._batch_pause.set()
+            if self._batch_dialog is not None:
+                self._batch_dialog.pause_button.setEnabled(False)
+                self._batch_dialog.progress_label.setText("Пауза запрошена; завершаем текущую позицию…")
+
+    def _cancel_batch_analysis(self) -> None:
+        if self._batch_stop is not None:
+            self._batch_stop.set()
+            if self._batch_dialog is not None:
+                self._batch_dialog.pause_button.setEnabled(False)
+                self._batch_dialog.cancel_button.setEnabled(False)
+                self._batch_dialog.progress_label.setText("Отмена запрошена; останавливаем движок…")
 
     def _statistics_worker_started(self, thread: threading.Thread) -> None:
         self._statistics_workers.add(thread)
@@ -2389,12 +2642,14 @@ class MainWindow(QMainWindow):
     def disconnect_lichess(self) -> None:
         self._invalidate_analysis_preflight()
         self._lichess_connected = False
+        self._pause_batch_analysis()
         if self.lichess:
             self.lichess.disconnect_account()
 
     def _invalidate_analysis_preflight(self) -> None:
         """Invalidate a pending safety reply when the authenticated session changes."""
         self._analysis_session_generation += 1
+        self._pause_batch_analysis()
         if self._analysis_safety_phase == "preflight" and self._analysis_safety_request_id:
             self._cancel_analysis_action(self._analysis_safety_request_id)
 
@@ -2502,6 +2757,7 @@ class MainWindow(QMainWindow):
             button.setEnabled(online_allowed)
         self.active_games_button.setEnabled(online_allowed)
         self.home_archive_button.setEnabled(online_allowed)
+        self.home_batch_analysis_button.setEnabled(online_allowed)
         self.home_pilot_import_button.setEnabled(online_allowed)
         self.home_puzzles_button.setEnabled(online_allowed)
         self.home_puzzles_pilot_button.setEnabled(online_allowed)
@@ -2534,6 +2790,7 @@ class MainWindow(QMainWindow):
         for button in (self.friend_link_button, self.username_button, self.ai_button,
                        self.home_ai_button, self.home_friend_button, self.home_username_button,
                        self.active_games_button, self.home_archive_button,
+                       self.home_batch_analysis_button,
                        self.home_pilot_import_button, self.home_puzzles_button):
             button.setEnabled(True)
 
@@ -2779,6 +3036,8 @@ class MainWindow(QMainWindow):
             if (not session.is_ai_opponent
                     and getattr(self, "_analysis_stop", None) is not None):
                 self._analysis_stop.set()
+            if not session.is_ai_opponent and self._batch_pause is not None:
+                self._pause_batch_analysis()
             if self._awaiting_game_start and previous is None:
                 self._awaiting_game_start = False
                 self.board.clear_annotations()
@@ -3544,13 +3803,20 @@ class MainWindow(QMainWindow):
             self._cancel_analysis_action(self._analysis_safety_request_id)
         analysis_thread = self._analysis_thread
         analysis_running = bool(analysis_thread and analysis_thread.is_alive())
-        if analysis_running:
+        batch_thread = self._batch_thread
+        batch_running = bool(batch_thread and batch_thread.is_alive())
+        if analysis_running or batch_running:
             if self._analysis_shutdown_deadline is None:
                 self._analysis_shutdown_deadline = time.monotonic() + 10.0
-            if self._analysis_stop is not None:
+            if analysis_running and self._analysis_stop is not None:
                 self._analysis_stop.set()
-            if self._analysis_dialog is not None:
+            if analysis_running and self._analysis_dialog is not None:
                 self._analysis_dialog.setLabelText("Останавливаем Stockfish перед закрытием приложения…")
+            if batch_running and self._batch_stop is not None:
+                self._batch_stop.set()
+            if batch_running and self._batch_dialog is not None:
+                self._batch_dialog.progress_label.setText(
+                    "Останавливаем массовый анализ перед закрытием приложения…")
         else:
             self._analysis_shutdown_deadline = None
 
@@ -3563,11 +3829,12 @@ class MainWindow(QMainWindow):
                 close_result = close_method()
             workers_stopped = close_result is not False
         analysis_stopped = not (analysis_thread and analysis_thread.is_alive())
+        batch_stopped = not (batch_thread and batch_thread.is_alive())
         statistics_stopped = not any(thread.is_alive() for thread in self._statistics_workers)
         # Do not destroy the QProcess parent until every child's finished handler
         # has observed and released that child, even if state() already says stopped.
         engine_probes_stopped = not self._engine_probe_processes
-        if (not workers_stopped or not analysis_stopped or not statistics_stopped
+        if (not workers_stopped or not analysis_stopped or not batch_stopped or not statistics_stopped
                 or not engine_probes_stopped or self.game_repository.has_pending_writes()):
             event.ignore()
             self.home_status.setText(
@@ -3587,6 +3854,20 @@ class MainWindow(QMainWindow):
                 # The service has already entered its close path. Keep the shell
                 # available for the window's close control, but make the app's
                 # controls clearly unavailable until the user retries closing.
+                if self.centralWidget() is not None:
+                    self.centralWidget().setEnabled(False)
+                return
+            if (batch_running and self._analysis_shutdown_deadline is not None
+                    and time.monotonic() >= self._analysis_shutdown_deadline):
+                self._analysis_shutdown_deadline = None
+                self._close_retry_scheduled = False
+                self._close_retry_timer.stop()
+                self.setEnabled(True)
+                self._shutdown_read_only = True
+                self.setWindowTitle("Chess Coach — ожидание остановки массового анализа")
+                self.home_status.setText(
+                    "Массовый Stockfish не остановился за 10 секунд. Приложение ожидает "
+                    "завершения процесса; после остановки снова нажмите X.")
                 if self.centralWidget() is not None:
                     self.centralWidget().setEnabled(False)
                 return

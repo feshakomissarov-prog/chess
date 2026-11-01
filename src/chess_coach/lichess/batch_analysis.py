@@ -116,11 +116,14 @@ class BatchAnalysisRunner:
                     safety = None
                     stop_reason = f"safety check failed: {type(exc).__name__}"
                 if safety is not True:
+                    cancelled = stop_event.is_set()
+                    paused = not cancelled
                     self.repository.finish_analysis_job(
-                        job["job_id"], self.worker_id, status="paused",
+                        job["job_id"], self.worker_id,
+                        status="cancelled" if cancelled else "paused",
                         error=stop_reason or "Safety state unknown or active human game detected.")
-                    paused = True
-                    stop_reason = stop_reason or "safety blocked"
+                    stop_reason = stop_reason or ("cancelled during safety check" if cancelled
+                                                   else "safety blocked")
                     break
                 if engine is None:
                     engine = self.analyzer.engine_factory(str(self.engine_path))
@@ -172,7 +175,8 @@ class BatchAnalysisRunner:
             if engine is not None:
                 engine.quit()
             if cancelled:
-                self.repository.cancel_queued_analysis_jobs(engine_version=self.engine_key)
+                self.repository.cancel_queued_analysis_jobs(
+                    engine_version=self.engine_key, parameters=self.parameters)
         return {"processed": processed, "failed": failed, "paused": paused,
                 "cancelled": cancelled, "reason": stop_reason,
                 "queue": self.repository.analysis_job_counts(engine_version=self.engine_key)}
