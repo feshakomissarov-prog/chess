@@ -226,4 +226,6 @@ git pull --ff-only
 
 ### Второй проход review R10–R17 — CI checkpoint
 
-Windows Actions run [#86](https://github.com/feshakomissarov-prog/chess/actions/runs/41329457378) на code SHA `44782f00374456f35cfc9ab45b453b8fdb3d0ce6` — **SUCCESS**, 310 passed за 201.80 с; Windows Server 2025, Python 3.12.10 x64, PySide6/Qt/shiboken6 6.12.0. `compileall` и isolated offline window initialization PASS. Подробный status каждого R10–R17 и ручные ограничения — в [execution log](handoffs/M4_5_EXECUTION_LOG.md). Документальный итоговый commit после этого запускает повторный CI на новом точном SHA.
+Windows Actions run [#86](https://github.com/feshakomissarov-prog/chess/actions/runs/41329457378) на code SHA `44782f00374456f35cfc9ab45b453b8fdb3d0ce6` — **SUCCESS**, 310 passed за 201.80 с; Windows Server 2025, Python 3.12.10 x64, PySide6/Qt/shiboken6 6.12.0. `compileall` и isolated offline window initialization PASS. Подробный status каждого R10–R17 и ручные ограничения — в [execution log](handoffs/M4_5_EXECUTION_LOG.md). Final exact-head verification is recorded there.
+
+Документационный head `9ca4b32e75744db980bd4540579a3bbcc12eee65` проверен Windows Actions run [#87](https://github.com/feshakomissarov-prog/chess/actions/runs/41329890613): SUCCESS, 310 passed за 224.16 с; compileall и isolated offline window init PASS. После обновления журнала запускается завершающий точный CI на новом head.

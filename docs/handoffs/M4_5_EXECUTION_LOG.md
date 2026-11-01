@@ -313,4 +313,9 @@
 ### R17 Windows CI result (run #86)
 
 - На кодовом checkpoint SHA `44782f00374456f35cfc9ab45b453b8fdb3d0ce6` полный Windows CI завершился **SUCCESS**: 310 passed in 201.80s; compileall PASS; offline window initialization PASS. Windows Server 2025, CPython 3.12.10 x64, PySide6/Qt/shiboken6 6.12.0. [Actions run #86](https://github.com/feshakomissarov-prog/chess/actions/runs/41329457378).
-- Отдельный документальный R17 commit добавляет это подтверждение; CI повторяется на resulting exact head. Полный CI использовал fake/synthetic DB, API и UCI; реальная Lichess/OAuth, пользовательская SQLite и настоящий Stockfish не запускались.
+- Отдельный документальный R17 commit `9ca4b32e75744db980bd4540579a3bbcc12eee65` также прошёл CI run #87 (см. ниже). Полный CI использовал fake/synthetic DB, API и UCI; реальная Lichess/OAuth, пользовательская SQLite и настоящий Stockfish не запускались.
+
+### Повторная проверка итоговой документации — run #87
+
+- Документальный head `9ca4b32e75744db980bd4540579a3bbcc12eee65`: Windows CI **SUCCESS**, **310 passed in 224.16s**, compileall и offline window initialization PASS; Python 3.12.10/Qt 6.12.0 на Windows Server 2025. [Actions run #87](https://github.com/feshakomissarov-prog/chess/actions/runs/41329890613).
+- Следующий commit только актуализирует журнал результатом #87; для строгого exact-head требования Actions проверяется ещё раз на новом head.
