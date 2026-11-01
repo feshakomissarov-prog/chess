@@ -761,7 +761,10 @@ class SettingsDialog(QDialog):
         self._engine_probe_buffer.clear()
         self.engine_test.setEnabled(False)
         self.engine_test_status.setText("Запущена ограниченная UCI-проверка…")
+        if hasattr(process_parent, "_track_engine_probe"):
+            process_parent._track_engine_probe(process)
         dialog_ref = weakref.ref(self)
+        owner_ref = weakref.ref(process_parent)
         def dispatch(method: str, *args) -> None:
             dialog = dialog_ref()
             if dialog is not None and shiboken6.isValid(dialog):
@@ -769,6 +772,10 @@ class SettingsDialog(QDialog):
             elif method == "_engine_probe_finished":
                 current = args[0]
                 if current.state() == QProcess.ProcessState.NotRunning:
+                    owner = owner_ref()
+                    if (owner is not None and shiboken6.isValid(owner)
+                            and hasattr(owner, "_untrack_engine_probe")):
+                        owner._untrack_engine_probe(current)
                     current.deleteLater()
         process.started.connect(lambda current=process: dispatch("_engine_probe_started", current))
         process.readyReadStandardOutput.connect(lambda current=process: dispatch("_read_engine_probe", current))
@@ -875,6 +882,9 @@ class SettingsDialog(QDialog):
                 timer.deleteLater()
                 setattr(self, timer_name, None)
         self._engine_process = None
+        owner = self._engine_probe_owner
+        if owner is not None and hasattr(owner, "_untrack_engine_probe"):
+            owner._untrack_engine_probe(process)
         self._engine_probe_owner = None
         self._engine_probe_finishing = False
         if self._engine_probe_finish_message:
@@ -1020,6 +1030,7 @@ class MainWindow(QMainWindow):
         self._analysis_dialog: QProgressDialog | None = None
         self._analysis_safety_request_id: str | None = None
         self._analysis_safety_context: tuple | None = None
+        self._engine_probe_processes: set[QProcess] = set()
         self._shutdown_requested = False
         self._shutdown_read_only = False
         self._analysis_shutdown_deadline: float | None = None
@@ -3074,6 +3085,12 @@ class MainWindow(QMainWindow):
             hash_mb=self.settings.value("stockfish_hash_mb", 128, type=int),
         ).normalized()
 
+    def _track_engine_probe(self, process: QProcess) -> None:
+        self._engine_probe_processes.add(process)
+
+    def _untrack_engine_probe(self, process: QProcess) -> None:
+        self._engine_probe_processes.discard(process)
+
     def _analysis_progress(self, game_id: str, done: int, total: int) -> None:
         if self._shutdown_requested:
             return
@@ -3196,11 +3213,15 @@ class MainWindow(QMainWindow):
             workers_stopped = close_result is not False
         analysis_stopped = not (analysis_thread and analysis_thread.is_alive())
         statistics_stopped = not any(thread.is_alive() for thread in self._statistics_workers)
+        # Do not destroy the QProcess parent until every child's finished handler
+        # has observed and released that child, even if state() already says stopped.
+        engine_probes_stopped = not self._engine_probe_processes
         if (not workers_stopped or not analysis_stopped or not statistics_stopped
-                or self.game_repository.has_pending_writes()):
+                or not engine_probes_stopped or self.game_repository.has_pending_writes()):
             event.ignore()
-            self.home_status.setText("Завершаем фоновые операции и сохраняем подтверждённые данные. "
-                                     "Окно закроется после безопасной остановки.")
+            self.home_status.setText(
+                "Завершаем фоновые операции и дочерние процессы, сохраняем подтверждённые данные. "
+                "Окно закроется после безопасной остановки.")
             if (analysis_running and self._analysis_shutdown_deadline is not None
                     and time.monotonic() >= self._analysis_shutdown_deadline):
                 self._analysis_shutdown_deadline = None

@@ -1728,3 +1728,26 @@ def test_analysis_shutdown_timeout_enters_read_only_then_repeated_close_finishes
     assert window.close() is True
     assert service.close_calls == 3
     assert shutdowns == ["sqlite.shutdown"]
+
+
+def test_main_window_waits_for_engine_probe_process_before_destroying_qprocess_parent(
+        qtbot, tmp_path):
+    import chess_coach.window as window_module
+
+    window = MainWindow(QSettings(str(tmp_path / "close-engine-probe.ini"),
+                                  QSettings.Format.IniFormat), offline_mode=True)
+    qtbot.addWidget(window)
+    class DelayedProcess:
+        running = True
+        def state(self):
+            return (window_module.QProcess.ProcessState.Running if self.running else
+                    window_module.QProcess.ProcessState.NotRunning)
+    process = DelayedProcess()
+    window._track_engine_probe(process)
+
+    assert window.close() is False
+    assert "дочерние процессы" in window.home_status.text()
+    window._close_retry_timer.stop()
+    process.running = False
+    window._untrack_engine_probe(process)
+    assert window.close() is True
