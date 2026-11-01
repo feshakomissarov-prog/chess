@@ -1153,7 +1153,7 @@ class SettingsDialog(QDialog):
 class BatchAnalysisDialog(QDialog):
     """Explicit controls for the bounded recent-first fast-analysis queue."""
 
-    run_requested = Signal(int, int, int, bool)
+    run_requested = Signal(int, int, int, bool, bool)
     pause_requested = Signal()
     cancel_requested = Signal()
     worker_progress = Signal(str)
@@ -1172,10 +1172,12 @@ class BatchAnalysisDialog(QDialog):
         self.limit = QSpinBox(); self.limit.setRange(1, 10_000); self.limit.setValue(1000)
         self.nodes = QSpinBox(); self.nodes.setRange(1000, 30_000); self.nodes.setSingleStep(1000); self.nodes.setValue(20_000)
         self.hash_mb = QSpinBox(); self.hash_mb.setRange(16, 128); self.hash_mb.setSingleStep(16); self.hash_mb.setValue(64)
+        self.retry_failed = QCheckBox("Повторить ранее завершившиеся ошибкой/отменённые задания")
         form.addWidget(QLabel("Максимум партий для добавления"), 0, 0); form.addWidget(self.limit, 0, 1)
         form.addWidget(QLabel("Узлов на позицию"), 1, 0); form.addWidget(self.nodes, 1, 1)
         form.addWidget(QLabel("Hash (МБ)"), 2, 0); form.addWidget(self.hash_mb, 2, 1)
         layout.addLayout(form)
+        layout.addWidget(self.retry_failed)
         self.queue_label = QLabel("Очередь ещё не загружена")
         self.queue_label.setWordWrap(True)
         layout.addWidget(self.queue_label)
@@ -1185,12 +1187,13 @@ class BatchAnalysisDialog(QDialog):
         controls = QHBoxLayout()
         self.start_button = QPushButton("Добавить недостающие и запустить")
         self.start_button.clicked.connect(lambda: self.run_requested.emit(
-            self.limit.value(), self.nodes.value(), self.hash_mb.value(), False))
+            self.limit.value(), self.nodes.value(), self.hash_mb.value(), False,
+            self.retry_failed.isChecked()))
         self.resume_button = QPushButton("Продолжить очередь")
         # A persistent queue may have been paused by a previous application run.
         self.resume_button.setEnabled(True)
         self.resume_button.clicked.connect(lambda: self.run_requested.emit(
-            self.limit.value(), self.nodes.value(), self.hash_mb.value(), True))
+            self.limit.value(), self.nodes.value(), self.hash_mb.value(), True, False))
         self.pause_button = QPushButton("Пауза")
         self.pause_button.setEnabled(False)
         self.pause_button.clicked.connect(self.pause_requested.emit)
@@ -1218,6 +1221,7 @@ class BatchAnalysisDialog(QDialog):
         self.limit.setEnabled(not running)
         self.nodes.setEnabled(not running)
         self.hash_mb.setEnabled(not running)
+        self.retry_failed.setEnabled(not running)
         self.pause_button.setEnabled(running)
         self.cancel_button.setEnabled(running)
 
@@ -2010,15 +2014,15 @@ class MainWindow(QMainWindow):
             return
         dialog = BatchAnalysisDialog(self)
         self._batch_dialog = dialog
-        dialog.run_requested.connect(lambda limit, nodes, hash_mb, resume:
-            self._start_batch_analysis(dialog, limit, nodes, hash_mb, resume))
+        dialog.run_requested.connect(lambda limit, nodes, hash_mb, resume, retry_failed:
+            self._start_batch_analysis(dialog, limit, nodes, hash_mb, resume, retry_failed))
         dialog.pause_requested.connect(self._pause_batch_analysis)
         dialog.cancel_requested.connect(self._cancel_batch_analysis)
         dialog.finished.connect(lambda _result: setattr(self, "_batch_dialog", None))
         dialog.show()
 
     def _start_batch_analysis(self, dialog: BatchAnalysisDialog, limit: int, nodes: int,
-                              hash_mb: int, resume: bool) -> None:
+                              hash_mb: int, resume: bool, retry_failed: bool = False) -> None:
         if self._shutdown_requested or (self._batch_thread and self._batch_thread.is_alive()):
             return
         service = self.lichess
@@ -2060,7 +2064,8 @@ class MainWindow(QMainWindow):
                         engine_version=runner.engine_key, parameters=runner.parameters)
                     enqueued = {"queued": 0, "already_present": 0}
                 else:
-                    enqueued = runner.enqueue_missing(account_id=account_id, limit=limit)
+                    enqueued = runner.enqueue_missing(account_id=account_id, limit=limit,
+                                                      retry_failed=retry_failed)
                     resumed = 0
                 unknown_preflight = threading.Event()
                 initial_counts = self.game_repository.analysis_job_counts(

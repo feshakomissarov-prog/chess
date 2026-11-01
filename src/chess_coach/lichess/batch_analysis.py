@@ -69,12 +69,14 @@ class BatchAnalysisRunner:
         self.worker_id = uuid.uuid4().hex
 
     def enqueue_missing(self, *, account_id: str | None = None,
-                        limit: int = 1000) -> dict[str, int]:
+                        limit: int = 1000, retry_failed: bool = False) -> dict[str, int]:
         candidates = self.repository.list_games_needing_fast_analysis(
-            account_id=account_id, limit=max(1, min(10_000, int(limit))))
+            account_id=account_id, limit=max(1, min(10_000, int(limit))),
+            engine_version=self.engine_key, parameters=self.parameters,
+            retry_failed=retry_failed)
         return self.repository.enqueue_analysis_jobs(
             candidates, analysis_pass="fast", engine_version=self.engine_key,
-            parameters=self.parameters)
+            parameters=self.parameters, retry_failed=retry_failed)
 
     def run(self, *, stop_event: threading.Event, safety_check: Callable[[dict], bool | None],
             pause_event: threading.Event | None = None,
@@ -152,6 +154,12 @@ class BatchAnalysisRunner:
                     stop_reason = stop_reason or ("cancelled during safety check" if cancelled
                                                    else safety_failure[0])
                     break
+                if not self._job_has_eligible_legal_line(job):
+                    self.repository.finish_analysis_job(
+                        job["job_id"], self.worker_id, status="failed",
+                        error="The game is no longer a completed standard game with a legal current line.")
+                    failed += 1
+                    continue
                 if engine is None:
                     engine = self.analyzer.engine_factory(str(self.engine_path))
                 with active_job_lock:
@@ -219,3 +227,29 @@ class BatchAnalysisRunner:
         return {"processed": processed, "failed": failed, "paused": paused,
                 "cancelled": cancelled, "reason": stop_reason,
                 "queue": self.repository.analysis_job_counts(engine_version=self.engine_key)}
+
+    def _job_has_eligible_legal_line(self, job: dict) -> bool:
+        game = self.repository.get_game(str(job["game_id"]))
+        revision = self.repository.current_line(str(job["game_id"]))
+        if not game or not revision:
+            return False
+        if (game.get("status") not in {"mate", "resign", "stalemate", "timeout", "draw",
+                                       "outoftime", "cheat", "noStart", "variantEnd", "finished"}
+                or bool(game.get("final_sync_pending")) or game.get("import_error")
+                or game.get("variant") != "standard"
+                or revision.get("line_revision") != job.get("line_revision")
+                or revision.get("line_hash") != job.get("line_hash")):
+            return False
+        pgn = str(game.get("pgn") or "")
+        if not any(f'[Result "{result}"]' in pgn
+                   for result in ("1-0", "0-1", "1/2-1/2")):
+            return False
+        try:
+            board = chess.Board() if revision["initial_fen"] == "startpos" else chess.Board(
+                revision["initial_fen"])
+            for uci in str(revision["moves"]).split():
+                board.push_uci(uci)
+        except (KeyError, ValueError, chess.InvalidMoveError, chess.IllegalMoveError,
+                chess.AmbiguousMoveError):
+            return False
+        return True

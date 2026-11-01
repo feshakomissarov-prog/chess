@@ -88,7 +88,9 @@ def test_batch_queue_is_idempotent_recent_first_and_reuses_one_fake_engine(tmp_p
         assert runner.options.hash_mb == 128
         assert runner.options.threads == 1
         assert runner.enqueue_missing(limit=10) == {"queued": 2, "already_present": 0}
-        assert runner.enqueue_missing(limit=10) == {"queued": 0, "already_present": 2}
+        # A second scan pages past exact-configuration jobs instead of repeatedly
+        # selecting the same first page.
+        assert runner.enqueue_missing(limit=10) == {"queued": 0, "already_present": 0}
         safety_calls = []
         result = runner.run(
             stop_event=threading.Event(), safety_check=lambda job: safety_calls.append(job["game_id"]) or True)
@@ -101,11 +103,98 @@ def test_batch_queue_is_idempotent_recent_first_and_reuses_one_fake_engine(tmp_p
         assert len(repository.list_analyses("older")) == 1
         jobs = repository.analysis_job_counts(engine_version=runner.engine_key)
         assert jobs == {"complete": 2}
-        assert runner.enqueue_missing(limit=10) == {"queued": 0, "already_present": 2}
+        assert runner.enqueue_missing(limit=10) == {"queued": 0, "already_present": 0}
         assert repository.analysis_job_counts(engine_version=runner.engine_key) == {"complete": 2}
         with repository._connection() as db:
             result_links = db.execute("SELECT COUNT(*) FROM analysis_jobs WHERE result_run_id IS NOT NULL").fetchone()[0]
         assert result_links == 2
+    finally:
+        repository.shutdown()
+
+
+def test_batch_queue_pages_past_existing_jobs_and_retries_only_explicitly(tmp_path):
+    repository = GameRepository(tmp_path / "queue-paging.sqlite3")
+    engines = []
+    try:
+        _save_game(repository, "a", "2026-10-03T00:00:00+00:00")
+        _save_game(repository, "b", "2026-10-02T00:00:00+00:00")
+        _save_game(repository, "c", "2026-10-01T00:00:00+00:00")
+        runner = _runner(repository, tmp_path, engines)
+        candidate = repository.list_games_needing_fast_analysis(limit=1)[0]
+        assert runner.enqueue_missing(limit=2)["queued"] == 2
+        # Add the next page without rebuilding or reordering the current queue.
+        assert runner.enqueue_missing(limit=2)["queued"] == 1
+        assert runner.enqueue_missing(limit=2)["queued"] == 0
+        job = repository.claim_next_analysis_job(
+            "worker", engine_version=runner.engine_key, analysis_pass="fast",
+            parameters=runner.parameters)
+        repository.finish_analysis_job(job["job_id"], "worker", status="failed",
+                                       error="synthetic failure")
+        assert runner.enqueue_missing(limit=10)["queued"] == 0
+        assert runner.enqueue_missing(limit=10, retry_failed=True)["queued"] == 1
+        assert repository.analysis_job_counts(engine_version=runner.engine_key)["queued"] == 3
+    finally:
+        repository.shutdown()
+
+
+def test_batch_queue_pages_15000_synthetic_games_exactly_once_per_configuration(tmp_path):
+    repository = GameRepository(tmp_path / "large-queue.sqlite3")
+    engines = []
+    try:
+        _save_game(repository, "template", "2026-10-01T00:00:00+00:00")
+        with repository._connection() as db:
+            template = db.execute(
+                "SELECT g.pgn,r.line_hash FROM games g JOIN game_revisions r "
+                "ON r.game_id=g.game_id WHERE g.game_id='template'").fetchone()
+            game_rows, revision_rows, move_rows = [], [], []
+            for i in range(15_000):
+                game_id = f"synthetic-{i:05d}"
+                game_rows.append((game_id, "startpos", "e2e4 e7e5", "white", "Synthetic",
+                                  0, "blitz", "finished", "white", "2026-10-01", template["pgn"],
+                                  "Synthetic user", "Synthetic opponent", "2026-10-01", 0))
+                revision_rows.append((game_id, 1, "startpos", "e2e4 e7e5", template["pgn"],
+                                      template["line_hash"], "2026-10-01", 1))
+                move_rows.extend(((game_id, 1, 1, "e2e4", "e4", "white", None, None),
+                                  (game_id, 1, 2, "e7e5", "e5", "black", None, None)))
+            db.executemany(
+                "INSERT INTO games(game_id,initial_fen,moves,color,opponent,rated,clock,status,winner,"
+                "updated_at,pgn,white_player,black_player,started_at,final_sync_pending) "
+                "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)", game_rows)
+            db.executemany(
+                "INSERT INTO game_revisions(game_id,line_revision,initial_fen,moves,pgn,line_hash,"
+                "created_at,is_current) VALUES(?,?,?,?,?,?,?,?)", revision_rows)
+            db.executemany(
+                "INSERT INTO game_moves(game_id,line_revision,ply,uci,san,mover,clock_ms,elapsed_ms) "
+                "VALUES(?,?,?,?,?,?,?,?)", move_rows)
+            db.execute("DELETE FROM games WHERE game_id='template'")
+        runner = _runner(repository, tmp_path, engines)
+        first = runner.enqueue_missing(limit=10_000)
+        second = runner.enqueue_missing(limit=10_000)
+        third = runner.enqueue_missing(limit=10_000)
+        assert first["queued"] == 10_000
+        assert second["queued"] == 5_000
+        assert third["queued"] == 0
+        assert repository.analysis_job_counts(engine_version=runner.engine_key) == {"queued": 15_000}
+        # A distinct engine/settings fingerprint is an independent requested pass.
+        other = _runner(repository, tmp_path, [], options=FastPassOptions(nodes=10_000, hash_mb=32))
+        assert other.enqueue_missing(limit=10_000)["queued"] == 10_000
+    finally:
+        repository.shutdown()
+
+
+def test_batch_revalidates_eligibility_before_creating_uci_process(tmp_path):
+    repository = GameRepository(tmp_path / "stale-batch-job.sqlite3")
+    engines = []
+    try:
+        _save_game(repository, "game", "2026-10-01T00:00:00+00:00")
+        runner = _runner(repository, tmp_path, engines)
+        runner.enqueue_missing(limit=10)
+        with repository._connection() as db:
+            db.execute("UPDATE games SET variant='chess960' WHERE game_id='game'")
+        result = runner.run(stop_event=threading.Event(), safety_check=lambda _job: True)
+        assert result["failed"] == 1
+        assert not engines
+        assert repository.analysis_job_counts(engine_version=runner.engine_key) == {"failed": 1}
     finally:
         repository.shutdown()
 

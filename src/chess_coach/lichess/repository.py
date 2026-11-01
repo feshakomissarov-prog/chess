@@ -739,19 +739,43 @@ class GameRepository:
         return [dict(row) for row in rows]
 
     def list_games_needing_fast_analysis(self, *, account_id: str | None = None,
-                                         limit: int = 1000) -> list[dict]:
-        """Select current standard completed lines not fully covered by Lichess PGN evals."""
+                                         limit: int = 1000,
+                                         engine_version: str | None = None,
+                                         parameters: dict | None = None,
+                                         retry_failed: bool = False) -> list[dict]:
+        """Page recent eligible lines, skipping work already represented for this config."""
         limit = max(1, min(10_000, int(limit)))
         join = " JOIN account_games ag ON ag.game_id=g.game_id " if account_id else ""
         account_filter = "AND ag.account_id=? " if account_id else ""
         params: list[object] = [account_id] if account_id else []
+        represented = ""
+        if engine_version is not None and parameters is not None:
+            params_json = json.dumps(parameters, sort_keys=True, separators=(",", ":"))
+            represented_job_statuses = ("'queued','running','paused','complete'" if retry_failed
+                                        else "'queued','running','paused','complete','failed','cancelled','stale'")
+            represented = (
+                "AND NOT EXISTS (SELECT 1 FROM analysis_jobs aj "
+                "WHERE aj.game_id=g.game_id AND aj.line_revision=gr.line_revision "
+                "AND aj.line_hash=gr.line_hash AND aj.analysis_pass='fast' "
+                "AND aj.engine_version=? AND aj.parameters_json=? "
+                f"AND aj.status IN ({represented_job_statuses})) "
+                "AND NOT EXISTS (SELECT 1 FROM analysis_runs ar "
+                "WHERE ar.game_id=g.game_id AND ar.line_revision=gr.line_revision "
+                "AND ar.line_hash=gr.line_hash AND ar.source='stockfish' "
+                "AND ar.engine_version=? AND ar.parameters_json=? AND ar.status='complete') "
+            )
+            params.extend([engine_version, params_json, engine_version, params_json])
         params.append(limit)
         sql = (
             "SELECT DISTINCT g.game_id,gr.line_revision,gr.line_hash,g.started_at,g.variant "
             "FROM games g " + join +
             "JOIN game_revisions gr ON gr.game_id=g.game_id AND gr.is_current=1 "
-            "WHERE g.status NOT IN ('created','started','started_soon','playing') "
-            "AND g.variant='standard' " + account_filter +
+            "WHERE g.status IN ('mate','resign','stalemate','timeout','draw','outoftime',"
+            "'cheat','noStart','variantEnd','finished') AND COALESCE(g.final_sync_pending,0)=0 "
+            "AND g.import_error IS NULL AND g.pgn IS NOT NULL "
+            "AND (g.pgn LIKE '%[Result \"1-0\"]%' OR g.pgn LIKE '%[Result \"0-1\"]%' "
+            "OR g.pgn LIKE '%[Result \"1/2-1/2\"]%') AND g.variant='standard' "
+            + account_filter +
             "AND NOT EXISTS (SELECT 1 FROM analysis_runs ar "
             "WHERE ar.game_id=g.game_id AND ar.line_revision=gr.line_revision "
             "AND ar.line_hash=gr.line_hash AND ar.source='lichess-pgn' "
@@ -760,6 +784,7 @@ class GameRepository:
             "AND (pa.white_cp IS NOT NULL OR pa.mate_white IS NOT NULL)) >= "
             "(SELECT COUNT(*) FROM game_moves gm WHERE gm.game_id=g.game_id "
             "AND gm.line_revision=gr.line_revision)) "
+            + represented +
             "ORDER BY CASE WHEN g.started_at IS NULL THEN 1 ELSE 0 END,"
             "g.started_at DESC,g.game_id DESC LIMIT ?")
         with self._connection() as db:
@@ -767,7 +792,8 @@ class GameRepository:
         return [dict(row) for row in rows]
 
     def enqueue_analysis_jobs(self, candidates: list[dict], *, analysis_pass: str,
-                              engine_version: str, parameters: dict) -> dict[str, int]:
+                              engine_version: str, parameters: dict,
+                              retry_failed: bool = False) -> dict[str, int]:
         if analysis_pass not in {"fast", "review"}:
             raise ValueError("Unknown analysis pass")
         params_json = json.dumps(parameters, sort_keys=True, separators=(",", ":"))
@@ -780,6 +806,17 @@ class GameRepository:
                 revision = int(candidate["line_revision"])
                 line_hash = str(candidate["line_hash"])
                 job_id = uuid.uuid4().hex
+                if retry_failed:
+                    requeued = db.execute(
+                        "UPDATE analysis_jobs SET status='queued',attempts=0,lease_owner=NULL,"
+                        "lease_until=NULL,result_run_id=NULL,error=NULL,started_at=NULL,finished_at=NULL,"
+                        "updated_at=? WHERE game_id=? AND line_revision=? AND line_hash=? "
+                        "AND analysis_pass=? AND engine_version=? AND parameters_json=? "
+                        "AND status IN ('failed','cancelled','stale')",
+                        (now, game_id, revision, line_hash, analysis_pass, engine_version, params_json))
+                    if requeued.rowcount:
+                        queued += 1
+                        continue
                 cursor = db.execute(
                     "INSERT OR IGNORE INTO analysis_jobs(job_id,game_id,line_revision,line_hash,"
                     "analysis_pass,engine_version,parameters_json,status,attempts,priority_at,"
