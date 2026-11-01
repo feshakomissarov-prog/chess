@@ -1275,7 +1275,8 @@ def test_takeback_button_is_clear_for_ai_and_sends_one_yes_request(qtbot, tmp_pa
     qtbot.addWidget(window)
     session = LichessGameSession("ai-takeback", window.game_repository)
     session.opponent = "Lichess AI level 4"
-    session.opponent_title = "BOT"
+    session.set_server_game_identity({"source": "ai", "opponent": {
+        "id": None, "username": "Lichess AI level 4", "ai": 4}})
     session.color = chess.WHITE
     session.apply_event({"type": "gameFull", "initialFen": "startpos",
                          "state": {"moves": "e2e4 e7e5", "status": "started"}})
@@ -1308,7 +1309,8 @@ def test_ai_takeback_errors_never_rewind_server_position(qtbot, tmp_path, monkey
     qtbot.addWidget(window)
     session = LichessGameSession(f"ai-takeback-{status}", window.game_repository)
     session.opponent = "Lichess AI level 4"
-    session.opponent_title = "BOT"
+    session.set_server_game_identity({"source": "ai", "opponent": {
+        "id": None, "username": "Lichess AI level 4", "ai": 4}})
     session.color = chess.WHITE
     session.apply_event({"type": "gameFull", "initialFen": "startpos",
                          "state": {"moves": "e2e4 e7e5", "status": "started"}})
@@ -1616,7 +1618,7 @@ def test_window_close_cancels_analysis_and_waits_for_engine_quit_before_sqlite(
     assert shutdown_order[:2] == ["engine.quit", "sqlite.shutdown"]
 
 
-def test_connected_analysis_is_blocked_by_unopened_human_game_and_allowed_only_for_proven_bot(
+def test_connected_analysis_allows_only_official_lichess_ai_and_blocks_bot_accounts(
         qtbot, tmp_path, monkeypatch):
     window = MainWindow(QSettings(str(tmp_path / "analysis-fair-play.ini"),
                                   QSettings.Format.IniFormat), offline_mode=True)
@@ -1635,15 +1637,109 @@ def test_connected_analysis_is_blocked_by_unopened_human_game_and_allowed_only_f
     window._start_game_analysis("finished-game", "fake-stockfish")
     assert len(requests) == 1 and not launches
     window._analysis_safety_games_received(requests[-1], [
-        {"gameId": "unopened-human-game", "opponent": {"username": "Friend"}}])
+        {"gameId": "unopened-human-game", "source": "friend",
+         "opponent": {"id": "friend", "username": "Friend"}}])
     assert not launches
     assert window._analysis_stop is None
 
     window._start_game_analysis("finished-game", "fake-stockfish")
     window._analysis_safety_games_received(requests[-1], [
-        {"gameId": "ai-game", "opponent": {"username": "stockfish", "title": "BOT"}}])
+        {"gameId": "ai-game", "source": "ai", "opponent": {
+            "id": None, "username": "Stockfish level 1", "ai": 1}}])
     assert len(launches) == 1
-    assert window._active_game_is_human({"opponent": {"username": "Lichess AI"}})
+    assert not window._active_game_blocks_engine({"source": "ai", "opponent": {
+        "id": None, "username": "Stockfish level 1", "ai": 1}})
+    window._analysis_finished("finished-game", {"error": "fixture complete"})
+
+    window._start_game_analysis("finished-game", "fake-stockfish")
+    window._analysis_safety_games_received(requests[-1], [{
+        "gameId": "unopened-bot-account", "source": "friend",
+        "opponent": {"id": "somebot", "username": "SomeBot", "title": "BOT"}}])
+    assert len(launches) == 1
+    assert window._analysis_stop is None
+
+    window._start_game_analysis("finished-game", "fake-stockfish")
+    window._analysis_safety_games_received(requests[-1], [{
+        "gameId": "ambiguous-game", "source": "ai",
+        "opponent": {"id": None, "username": "Stockfish", "ai": 9}}])
+    assert len(launches) == 1
+    assert window._analysis_stop is None
+
+    window._start_game_analysis("finished-game", "fake-stockfish")
+    window._analysis_safety_games_received(requests[-1], [{
+        "gameId": f"ai-{index}", "source": "ai",
+        "opponent": {"id": None, "username": "Stockfish level 1", "ai": 1},
+    } for index in range(50)])
+    assert len(launches) == 1
+    assert window._analysis_stop is None
+
+
+def test_open_active_game_carries_official_ai_identity_into_session(qtbot, tmp_path, monkeypatch):
+    window = MainWindow(QSettings(str(tmp_path / "open-active-ai.ini"),
+                                  QSettings.Format.IniFormat), offline_mode=True)
+    qtbot.addWidget(window)
+    window._lichess_connected = True
+
+    class FakeService:
+        def start_game(self, _game_id): pass
+        def close(self, timeout=1.0): return True
+
+    window.lichess = FakeService()
+    monkeypatch.setattr(window, "_online_actions_allowed", lambda: True)
+    window.open_active_game({
+        "gameId": "active-ai", "source": "ai", "color": "white",
+        "opponent": {"id": None, "username": "Stockfish level 2", "ai": 2},
+    })
+    assert window.online_session is not None
+    assert window.online_session.is_ai_opponent
+    assert window.online_session.game_source == "ai"
+    assert window.online_session.opponent_info["ai"] == 2
+    assert window.close() is True
+
+
+@pytest.mark.parametrize(
+    ("game", "should_stop", "expected_ai"),
+    [
+        ({"source": "friend", "opponent": {
+            "id": "somebot", "username": "SomeBot", "title": "BOT"}}, True, False),
+        ({"source": "ai", "opponent": {
+            "id": None, "username": "Stockfish level 1", "ai": 1}}, False, True),
+    ],
+)
+def test_game_start_bot_account_stops_analysis_but_builtin_ai_does_not(
+        qtbot, tmp_path, game, should_stop, expected_ai):
+    window = MainWindow(QSettings(str(tmp_path / f"game-start-ai-{expected_ai}.ini"),
+                                  QSettings.Format.IniFormat), offline_mode=True)
+    qtbot.addWidget(window)
+    class FakeLichess:
+        username = ""
+        def close(self, timeout=1.0): return True
+    window.lichess = FakeLichess()
+    stop = threading.Event()
+    window._analysis_stop = stop
+    game_start = {"type": "gameStart", "game": {
+        "gameId": "live-opponent", "color": "white", **game,
+    }}
+    window._lichess_event(game_start)
+    session = window.online_sessions["live-opponent"]
+    assert session.is_ai_opponent is expected_ai
+    assert stop.is_set() is should_stop
+
+    # Board gameState is mutable position data and cannot replace the
+    # opponent identity established by gameStart.
+    window._lichess_game_event("live-opponent", {
+        "type": "gameFull", "initialFen": "startpos", "source": "unrecognized",
+        "opponent": {"id": "somebot", "username": "SomeBot", "title": "BOT"},
+        "state": {"moves": "", "status": "started"},
+    })
+    assert session.is_ai_opponent is expected_ai
+    window._lichess_game_event("live-opponent", {
+        "type": "gameState", "moves": "e2e4", "status": "started",
+        "source": "friend", "opponent": {
+            "id": "somebot", "username": "SomeBot", "title": "BOT"},
+    })
+    assert session.is_ai_opponent is expected_ai
+    assert window.close() is True
 
 
 def test_connected_analysis_fails_closed_on_snapshot_error_and_new_human_game_start(

@@ -5,10 +5,60 @@ from __future__ import annotations
 from dataclasses import dataclass
 import time
 import uuid
+from typing import Any
 
 import chess
 
 from .repository import GameRepository
+
+
+LICHESS_GAME_SOURCES = frozenset({
+    "lobby", "friend", "ai", "api", "tournament", "position", "import",
+    "importlive", "simul", "relay", "pool", "arena", "swiss",
+})
+LICHESS_PLAYER_TITLES = frozenset({
+    "GM", "WGM", "IM", "WIM", "FM", "WFM", "NM", "CM", "WCM", "WNM", "LM",
+})
+
+
+def classify_lichess_opponent(game: Any) -> str:
+    """Classify a server game conservatively for fair-play decisions.
+
+    Only Lichess's explicit AI source/signature is the built-in AI exception.
+    BOT titles identify account opponents and are never an engine-safety allow.
+    """
+    if not isinstance(game, dict):
+        return "unknown"
+    source = game.get("source")
+    opponent = game.get("opponent")
+    if (not isinstance(source, str) or source not in LICHESS_GAME_SOURCES
+            or not isinstance(opponent, dict)):
+        return "unknown"
+
+    title = opponent.get("title")
+    if title is not None and not isinstance(title, str):
+        return "unknown"
+    if source == "ai":
+        level = opponent.get("ai")
+        if ("id" in opponent and opponent.get("id") is None
+                and type(level) is int and 1 <= level <= 8
+                and ("title" not in opponent or title is None)):
+            return "official_ai"
+        return "unknown"
+
+    # AI-shaped or null-identity records under another source are contradictory.
+    if "ai" in opponent or "id" not in opponent:
+        return "unknown"
+    opponent_id = opponent.get("id")
+    username = opponent.get("username")
+    if (not isinstance(opponent_id, str) or not opponent_id.strip()
+            or not isinstance(username, str) or not username.strip()):
+        return "unknown"
+    if title == "BOT":
+        return "bot_account"
+    if title is not None and title not in LICHESS_PLAYER_TITLES:
+        return "unknown"
+    return "human"
 
 
 @dataclass(frozen=True)
@@ -41,6 +91,8 @@ class LichessGameSession:
         self.color = chess.WHITE
         self.opponent = "Соперник"
         self.opponent_title: str | None = None
+        self.game_source: str | None = None
+        self.opponent_info: dict | None = None
         self.white_player: str | None = None
         self.black_player: str | None = None
         self.started_at: str | None = None
@@ -81,8 +133,27 @@ class LichessGameSession:
 
     @property
     def is_ai_opponent(self) -> bool:
-        # Only the API's explicit BOT title proves that this is an engine opponent.
-        return self.opponent_title == "BOT"
+        return classify_lichess_opponent({
+            "source": self.game_source,
+            "opponent": self.opponent_info,
+        }) == "official_ai"
+
+    def set_server_game_identity(self, game: dict) -> None:
+        """Store the immutable opponent identity from gameStart/account-playing."""
+        source = game.get("source")
+        self.game_source = source if isinstance(source, str) else None
+        opponent = game.get("opponent")
+        self.opponent_info = dict(opponent) if isinstance(opponent, dict) else None
+        self.opponent = "Соперник"
+        self.opponent_title = None
+        if self.opponent_info:
+            username = self.opponent_info.get("username")
+            opponent_id = self.opponent_info.get("id")
+            self.opponent = (username if isinstance(username, str) and username else
+                             opponent_id if isinstance(opponent_id, str) and opponent_id else
+                             "Соперник")
+            title = self.opponent_info.get("title")
+            self.opponent_title = title if isinstance(title, str) else None
 
     @property
     def input_locked(self) -> bool:

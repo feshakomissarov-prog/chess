@@ -14,7 +14,7 @@ import pytest
 from chess_coach.lichess.api import HttpResponse, LichessClient, LichessError, RateLimitError
 from chess_coach.lichess.auth import OAuthCallbackServer, create_authorization_request
 from chess_coach.lichess.repository import GameRepository
-from chess_coach.lichess.session import LichessGameSession
+from chess_coach.lichess.session import LichessGameSession, classify_lichess_opponent
 from chess_coach.lichess.service import LichessService
 
 LICHESS_MIN_MS = 1_356_998_400_070
@@ -200,6 +200,16 @@ def test_get_active_games_fails_closed_when_response_reaches_requested_limit():
                            base_url="https://lichess.test")
     with pytest.raises(LichessError, match="может быть неполным"):
         client.get_playing_games("token")
+
+
+def test_get_active_games_preserves_official_builtin_ai_identity():
+    ai_game = {"gameId": "ai123456", "source": "ai", "opponent": {
+        "id": None, "username": "Stockfish level 1", "ai": 1}}
+    client = LichessClient(FakeTransport([response(200, {"nowPlaying": [ai_game]})]),
+                           base_url="https://lichess.test")
+    games = client.get_playing_games("token")
+    assert games == [ai_game]
+    assert classify_lichess_opponent(games[0]) == "official_ai"
 
 
 def test_active_game_list_service_uses_one_explicit_request_without_retry(monkeypatch):
@@ -455,6 +465,45 @@ def test_finished_game_stream_interrupt_has_bounded_retry_and_keeps_sync_pending
     assert control.waits == [1]
     assert any("Финальная синхронизация" in status for status in statuses)
     assert "disconnected-final" in service._final_sync_game_ids
+
+
+def test_lichess_opponent_classifier_requires_the_official_ai_signature():
+    official_ai = {"source": "ai", "opponent": {
+        "id": None, "username": "Stockfish level 1", "ai": 1}}
+    bot_account = {"source": "friend", "opponent": {
+        "id": "somebot", "username": "SomeBot", "title": "BOT"}}
+    assert classify_lichess_opponent(official_ai) == "official_ai"
+    assert classify_lichess_opponent(bot_account) == "bot_account"
+    assert classify_lichess_opponent({"source": "future-source",
+                                      "opponent": official_ai["opponent"]}) == "unknown"
+    assert classify_lichess_opponent({"source": [],
+                                      "opponent": official_ai["opponent"]}) == "unknown"
+    assert classify_lichess_opponent({"source": "friend", "opponent": {
+        "id": None, "username": "Stockfish level 1", "ai": 1}}) == "unknown"
+    assert classify_lichess_opponent({"source": "ai", "opponent": {
+        "id": None, "username": "Stockfish", "ai": 9}}) == "unknown"
+    assert classify_lichess_opponent({"source": "ai", "opponent": {
+        "username": "Stockfish", "ai": 1}}) == "unknown"
+    assert classify_lichess_opponent({"source": "ai", "opponent": {
+        "id": "somebot", "username": "Stockfish", "ai": 1}}) == "unknown"
+    assert classify_lichess_opponent({"source": "ai", "opponent": {
+        "id": None, "username": "Stockfish", "ai": 1, "title": "BOT"}}) == "unknown"
+    assert classify_lichess_opponent({"source": "friend", "opponent": {
+        "id": "somebot", "username": "SomeBot", "title": []}}) == "unknown"
+
+
+def test_session_preserves_authoritative_ai_identity_across_game_state(tmp_path):
+    session = LichessGameSession("ai-session", GameRepository(tmp_path / "ai-session.sqlite3"))
+    session.set_server_game_identity({"source": "ai", "opponent": {
+        "id": None, "username": "Stockfish level 1", "ai": 1}})
+    assert session.is_ai_opponent
+    session.apply_event({"type": "gameFull", "initialFen": "startpos",
+                         "state": {"moves": "", "status": "started"}})
+    session.apply_event({"type": "gameState", "moves": "e2e4", "status": "started",
+                         "source": "friend", "opponent": {
+                             "id": "somebot", "username": "SomeBot", "title": "BOT"}})
+    assert session.is_ai_opponent
+    assert session.game_source == "ai"
 
 
 def test_game_stream_rebuilds_confirmed_state_and_saves_pgn(tmp_path):

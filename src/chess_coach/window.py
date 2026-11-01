@@ -49,7 +49,7 @@ from .lichess.auth import CredentialStorageError, WindowsCredentialStore
 from .lichess.analysis import AnalysisOptions, CLASSIFIER_VERSION, CompletedGameAnalyzer
 from .lichess.repository import GameRepository
 from .lichess.service import LichessService
-from .lichess.session import LichessGameSession
+from .lichess.session import LichessGameSession, classify_lichess_opponent
 from .lichess.statistics import StatisticsService
 
 
@@ -2181,9 +2181,6 @@ class MainWindow(QMainWindow):
             color = game.get("color")
             if color in {"white", "black"}:
                 session.color = chess.WHITE if color == "white" else chess.BLACK
-            opponent = game.get("opponent") or {}
-            session.opponent = opponent.get("username") or opponent.get("id") or "Соперник"
-            session.opponent_title = opponent.get("title")
             session.status = "started"
             session.clock_control = str(game.get("speed") or "-")
             self.online_sessions[session.game_id] = session
@@ -2191,6 +2188,9 @@ class MainWindow(QMainWindow):
             # A queued premove belongs to an earlier visible session. Viewing a
             # game from the account list must never submit that stale intent.
             session.premove = None
+        # Refresh the immutable type from the server's account-playing entry,
+        # including when this session already exists locally.
+        session.set_server_game_identity(game)
         if session is not self.online_session:
             self.board.clear_annotations()
         self.online_session = session
@@ -2495,9 +2495,7 @@ class MainWindow(QMainWindow):
             if color in {"white", "black"}:
                 session.color = chess.WHITE if color == "white" else chess.BLACK
             session.status = "started"
-            opponent = game.get("opponent", {})
-            session.opponent = opponent.get("username", "Соперник")
-            session.opponent_title = opponent.get("title")
+            session.set_server_game_identity(game)
             self.online_sessions[game_id] = session
             if (not session.is_ai_opponent
                     and getattr(self, "_analysis_stop", None) is not None):
@@ -2557,6 +2555,9 @@ class MainWindow(QMainWindow):
                 and event.get("type") in {"gameState", "gameFull"}):
             return
         if event.get("type") == "gameFull":
+            # gameFull/gameState are position snapshots. Preserve opponent
+            # classification established by gameStart/account-playing; player
+            # decoration in later snapshots is not sufficient to redefine it.
             username = (self.lichess.username or "").casefold()
             white = event.get("white", {})
             black = event.get("black", {})
@@ -3047,12 +3048,16 @@ class MainWindow(QMainWindow):
         return True
 
     @staticmethod
-    def _active_game_is_human(game: dict) -> bool:
-        opponent = game.get("opponent")
-        return not (isinstance(opponent, dict) and opponent.get("title") == "BOT")
+    def _active_game_blocks_engine(game: dict) -> bool:
+        return classify_lichess_opponent(game) != "official_ai"
 
     def _analysis_safety_games_received(self, request_id: str, games: list[dict]) -> None:
         if not self._analysis_safety_reply_is_current(request_id):
+            return
+        if not isinstance(games, list) or len(games) >= 50:
+            self._analysis_safety_error(
+                request_id, "Снимок активных партий некорректный или может быть усечён."
+            )
             return
         context = self._analysis_safety_context
         stop = self._analysis_stop
@@ -3063,7 +3068,7 @@ class MainWindow(QMainWindow):
             return
         active_human_ids = {session.game_id for session in self.online_sessions.values()
                             if session.status in {"started", "playing"} and not session.is_ai_opponent}
-        if any(self._active_game_is_human(game) for game in games) or active_human_ids:
+        if any(self._active_game_blocks_engine(game) for game in games) or active_human_ids:
             stop.set()
             if self._analysis_dialog:
                 self._analysis_dialog.close()
