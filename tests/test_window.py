@@ -6,7 +6,7 @@ import pytest
 from pathlib import Path
 from PySide6.QtCore import QPoint, QSettings, Qt
 from PySide6.QtGui import QCloseEvent
-from PySide6.QtWidgets import QInputDialog, QMessageBox, QPushButton
+from PySide6.QtWidgets import QLabel, QInputDialog, QMessageBox, QPushButton
 
 from chess_coach.board_view import BoardView
 from chess_coach.window import (ActiveGamesDialog, BatchAnalysisDialog, EvaluationGraph, MainWindow,
@@ -300,6 +300,22 @@ def test_statistics_game_detail_move_selection_emits_position(qtbot, tmp_path):
     assert "before_move" in dialog.events.item(0).toolTip()
     dialog._open_event_position(dialog.events.item(0))
     assert selected[-1] == ("detail-game", 0)
+
+
+def test_game_detail_explains_missing_initial_eval_for_first_own_move(qtbot, tmp_path):
+    repo = GameRepository(tmp_path / "decision-coverage-ui.sqlite3")
+    pgn = ('[Event "Archive"]\n[White "Me"]\n[Black "Friend"]\n[Result "*"]\n\n'
+           '1. e4 { [%eval 0.20] } e5 { [%eval 0.10] } '
+           '2. Nf3 { [%eval 0.30] } Nc6 { [%eval 0.20] } *\n')
+    game_id, _ = repo.import_archive_record("Me", {"id": "post-only-ui", "pgn": pgn},
+                                            checkpoint_ms=None, backfill=False,
+                                            _return_inserted=True)
+    dialog = StatisticsGameDialog(repo, repo.get_game(game_id))
+    qtbot.addWidget(dialog)
+    labels = "\n".join(label.text() for label in dialog.findChildren(QLabel))
+    assert "Сравнимость собственных ходов: 1/2" in labels
+    assert "первый ход не оценён: нет оценки позиции до хода" in labels
+    assert "статус: complete" in labels  # source scores remain separately complete
 
 
 def test_free_local_board_moves_both_sides_by_clicks_and_drag(qtbot, tmp_path):

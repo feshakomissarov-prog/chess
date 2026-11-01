@@ -266,3 +266,11 @@
 - Synthetic dual-account regression связывает одну партию с белым и чёрным аккаунтами, сохраняет один run и события на ходах обеих сторон; оба профиля видят только собственный opportunity event, и run не содержит ложного глобального `opponent_blunder`.
 - Проверено: Python 3.12.10, targeted profile/event/move-metric suite — **14 PASS**. Реальные аккаунты и пользовательские данные не использовались.
 - Следующий блок: R13 разделяет post-move Lichess source coverage и сравнимость собственных решений, включая явное отсутствие оценки до первого хода.
+
+## PR #30 second-pass review — R13 (2026-11-01)
+
+- R13: Lichess `complete` остаётся утверждением о полноте исходных post-move оценок (plies 1..N), а не о полноте качества собственных решений. `latest_analysis_detail` и cache detail теперь возвращают отдельный `decision_coverage`: цвет владельца, свои ходы, сравнимые пары, пропуски baseline, source post-move coverage. GUI явно показывает число сравнимых собственных ходов и сообщает, когда для первого собственного хода нет оценки позиции до хода. Смешивания Lichess и Stockfish score series нет; автоматический полный fast pass для поиска только ply0 не включён.
+- Импорт PGN теперь также сохраняет root `%eval` в ply 0, если сервер/PGN его действительно прислал; это позволяет закрыть baseline без подмены источника. Отсутствующий root score не синтезируется.
+- Regression fixtures: PGN с оценками только 1..N имеет source coverage 4/4, white comparable pairs 1/2 и первый ход `unknown`; контроль с реальным root eval даёт 2/2. Qt offscreen test подтверждает понятную маркировку в окне анализа.
+- Проверено: Windows Python 3.12.10, 3 адресных regression tests PASS. Реальный Lichess PGN/OAuth и пользовательская база не использовались.
+- Далее: R14 provenance дебюта, R15 устаревшие detector events и R16 честная маркировка local accuracy.

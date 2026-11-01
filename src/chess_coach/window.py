@@ -330,6 +330,12 @@ class StatisticsGameDialog(QDialog):
             coverage = analysis.get("coverage") or {}
             total_positions = int(coverage.get("total_positions") or (len(line["moves"].split()) + 1))
             scored_positions = int(coverage.get("scored_positions") or 0)
+            decision = analysis.get("decision_coverage") or {}
+            own_moves = int(decision.get("own_moves") or 0)
+            comparable_own = int(decision.get("comparable_own_moves") or 0)
+            decision_text = (f"Сравнимость собственных ходов: {comparable_own}/{own_moves}"
+                             + ("; первый ход не оценён: нет оценки позиции до хода"
+                                if decision.get("first_own_move_missing_baseline") else ""))
             review_coverage = analysis.get("review_coverage") or {}
             review_text = (f"Selective review: {review_coverage.get('reviewed_moves', 0)} "
                            f"оценённых критических ходов из {review_coverage.get('selected_moves', 0)} "
@@ -341,7 +347,7 @@ class StatisticsGameDialog(QDialog):
             self.graph_layout.addWidget(QLabel(
                 f"Оценено позиций: {scored_positions} / {total_positions}; "
                 f"источник: {source}; статус: {analysis.get('status', 'unknown')}; "
-                f"алгоритм ошибок: {CLASSIFIER_VERSION}\n{review_text}"))
+                f"алгоритм ошибок: {CLASSIFIER_VERSION}\n{decision_text}\n{review_text}"))
             metrics = analysis.get("move_metrics", [])
             for item in metrics:
                 label = str(item.get("severity", "unknown"))

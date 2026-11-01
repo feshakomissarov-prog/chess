@@ -585,3 +585,38 @@ def test_targeted_eval_refresh_walks_distinct_pages_and_reports_no_eval(tmp_path
         assert repository.archive_sync_state(account_id).get("incremental_since") is None
     finally:
         repository.shutdown()
+
+
+def test_lichess_post_move_eval_completeness_does_not_claim_full_own_decision_coverage(tmp_path):
+    repository = GameRepository(tmp_path / "decision-comparability.sqlite3")
+    try:
+        without_baseline = ('[Event "Archive"]\n[White "Me"]\n[Black "Friend"]\n'
+            '[Result "*"]\n\n1. e4 { [%eval 0.20] } e5 { [%eval 0.10] } '
+            '2. Nf3 { [%eval 0.30] } Nc6 { [%eval 0.20] } *\n')
+        game_id, _ = repository.import_archive_record(
+            "Me", {"id": "post-only", "pgn": without_baseline}, checkpoint_ms=None,
+            backfill=False, _return_inserted=True)
+        run = repository.list_analyses(game_id)[0]
+        assert run["status"] == "complete"  # source coverage is post-move plies 1..N
+        detail = repository.latest_analysis_detail(game_id, 1, account_id="lichess:me")
+        assert detail["coverage"]["scored_positions"] == 4
+        assert detail["coverage"]["comparable_move_pairs"] == 3
+        assert detail["decision_coverage"] == {
+            "owner_color": "white", "own_moves": 2, "comparable_own_moves": 1,
+            "missing_own_move_plies": [1], "first_own_move_missing_baseline": True,
+            "source_eval_scored_post_moves": 4, "source_eval_expected_post_moves": 4,
+            "source_eval_complete": True,
+        }
+
+        with_baseline = ('[Event "Archive"]\n[White "Me"]\n[Black "Friend"]\n'
+            '[Result "*"]\n\n{ [%eval 0.00] } 1. e4 { [%eval 0.20] } '
+            'e5 { [%eval 0.10] } 2. Nf3 { [%eval 0.30] } Nc6 { [%eval 0.20] } *\n')
+        control_id, _ = repository.import_archive_record(
+            "Me", {"id": "with-baseline", "pgn": with_baseline}, checkpoint_ms=None,
+            backfill=False, _return_inserted=True)
+        control = repository.latest_analysis_detail(control_id, 1, account_id="lichess:me")
+        assert control["decision_coverage"]["comparable_own_moves"] == 2
+        assert control["decision_coverage"]["missing_own_move_plies"] == []
+        assert control["decision_coverage"]["first_own_move_missing_baseline"] is False
+    finally:
+        repository.shutdown()
