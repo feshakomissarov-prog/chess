@@ -62,7 +62,11 @@ class CompletedGameAnalyzer:
                 options: AnalysisOptions = AnalysisOptions(), *,
                 active_human_game_ids: set[str] | None = None,
                 progress: Callable[[int, int], None] | None = None,
-                stop_event: threading.Event | None = None) -> dict:
+                stop_event: threading.Event | None = None,
+                analysis_pass: str = "standard",
+                engine: chess.engine.SimpleEngine | None = None) -> dict:
+        if analysis_pass not in {"standard", "fast", "review"}:
+            raise ValueError("Unknown analysis pass")
         if active_human_game_ids:
             raise ValueError("Нельзя запускать движок во время онлайн-партии с человеком.")
         game = self.repository.get_game(game_id)
@@ -80,7 +84,8 @@ class CompletedGameAnalyzer:
         parameters = {"limit_kind": options.limit_kind,
                       "limit_value": options.limit_value,
                       "threads": options.threads, "hash_mb": options.hash_mb,
-                      "multipv": 1, "classifier_version": CLASSIFIER_VERSION}
+                      "multipv": 1, "classifier_version": CLASSIFIER_VERSION,
+                      **({"analysis_pass": analysis_pass} if analysis_pass != "standard" else {})}
         initial_fen = revision["initial_fen"]
         board = chess.Board() if initial_fen == "startpos" else chess.Board(initial_fen)
         boards = [board.copy()]
@@ -88,11 +93,14 @@ class CompletedGameAnalyzer:
         for uci in moves:
             board.push_uci(uci)
             boards.append(board.copy())
-        engine = self.engine_factory(str(path))
+        engine_instance = engine
+        owns_engine = engine_instance is None
+        if engine_instance is None:
+            engine_instance = self.engine_factory(str(path))
         try:
             if stop_event is not None and stop_event.is_set():
                 raise InterruptedError("Анализ отменён.")
-            identity = dict(engine.id)
+            identity = dict(engine_instance.id)
             engine_name = str(identity.get("name") or "UCI engine")
             engine_version = json.dumps({
                 "identity_version": 2,
@@ -106,8 +114,8 @@ class CompletedGameAnalyzer:
             if cache:
                 cache["cached"] = True
                 return cache
-            engine.configure({"MultiPV": 1, "Threads": options.threads,
-                              "Hash": options.hash_mb})
+            engine_instance.configure({"MultiPV": 1, "Threads": options.threads,
+                                       "Hash": options.hash_mb})
             if stop_event is not None and stop_event.is_set():
                 raise InterruptedError("Анализ отменён.")
             assessments = []
@@ -115,7 +123,7 @@ class CompletedGameAnalyzer:
                 if stop_event is not None and stop_event.is_set():
                     raise InterruptedError("Анализ отменён.")
                 info = _analyze_interruptibly(
-                    engine, position, options.engine_limit(), stop_event)
+                    engine_instance, position, options.engine_limit(), stop_event)
                 score = info["score"].pov(chess.WHITE)
                 cp = score.score(mate_score=None)
                 assessments.append({
@@ -149,7 +157,8 @@ class CompletedGameAnalyzer:
             return {"run_id": run_id, "assessments": assessments,
                     "classifications": classifications, "cached": False}
         finally:
-            engine.quit()
+            if owns_engine:
+                engine_instance.quit()
 
 
 def _binary_fingerprint(path: Path) -> str:

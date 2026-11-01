@@ -620,7 +620,7 @@ def test_m3_migration_preserves_legacy_game_creates_revision_and_backup(tmp_path
         assert migrated.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION
         assert migrated.execute("SELECT COUNT(*) FROM game_positions").fetchone()[0] == 3
         assert migrated.execute("SELECT san FROM game_moves ORDER BY ply").fetchall()[0][0] == "e4"
-    backup = sqlite3.connect(str(path) + ".pre-m3-v10.bak")
+    backup = sqlite3.connect(str(path) + f".pre-m3-v{SCHEMA_VERSION}.bak")
     try:
         assert backup.execute("PRAGMA integrity_check").fetchone()[0] == "ok"
         assert backup.execute("PRAGMA user_version").fetchone()[0] == 0
@@ -1527,7 +1527,7 @@ def test_v8_puzzle_attempt_migration_deduplicates_legacy_uids_and_preserves_pilo
     assert len(links) == 1 and links[0][0] == run_id and links[0][1] == attempts[0][0]
     assert tuple(run) == (2, 2)  # historical run counters are not rewritten
     assert json.loads(attempts[0][1])["puzzle"]["rating"] in {1200, 1220}
-    backup = sqlite3.connect(str(path) + ".pre-m3-v10.bak")
+    backup = sqlite3.connect(str(path) + f".pre-m3-v{SCHEMA_VERSION}.bak")
     try:
         assert backup.execute("PRAGMA integrity_check").fetchone()[0] == "ok"
         assert backup.execute("PRAGMA user_version").fetchone()[0] == 8

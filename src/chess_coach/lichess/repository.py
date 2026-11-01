@@ -9,7 +9,7 @@ import hashlib
 import json
 import sqlite3
 from concurrent.futures import Future, ThreadPoolExecutor
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 import threading
 import uuid
@@ -18,7 +18,7 @@ import chess
 import chess.pgn
 
 
-SCHEMA_VERSION = 10
+SCHEMA_VERSION = 11
 DEFAULT_PAGE_SIZE = 100
 MAX_PAGE_SIZE = 500
 
@@ -386,6 +386,9 @@ class GameRepository:
             status TEXT NOT NULL CHECK(status IN
                 ('queued','running','paused','complete','failed','cancelled','stale')),
             attempts INTEGER NOT NULL DEFAULT 0,
+            lease_owner TEXT,
+            lease_until TEXT,
+            result_run_id TEXT REFERENCES analysis_runs(run_id) ON DELETE SET NULL,
             priority_at TEXT,
             created_at TEXT NOT NULL,
             updated_at TEXT NOT NULL,
@@ -400,6 +403,12 @@ class GameRepository:
                    "ON analysis_jobs(status,priority_at DESC,created_at,job_id)")
         db.execute("CREATE INDEX IF NOT EXISTS idx_analysis_jobs_line "
                    "ON analysis_jobs(game_id,line_revision,line_hash,status)")
+        job_columns = {row[1] for row in db.execute("PRAGMA table_info(analysis_jobs)")}
+        for name, definition in (("lease_owner", "TEXT"), ("lease_until", "TEXT"),
+                                 ("result_run_id", "TEXT REFERENCES analysis_runs(run_id) ON DELETE SET NULL")):
+            if name not in job_columns:
+                db.execute(f"ALTER TABLE analysis_jobs ADD COLUMN {name} {definition}")
+        db.execute("DROP VIEW IF EXISTS analysis_coverage")
         db.execute("""CREATE VIEW IF NOT EXISTS analysis_coverage AS
             SELECT ar.run_id,ar.game_id,ar.line_revision,ar.line_hash,ar.source,
                    ar.engine_name,ar.engine_version,ar.parameters_json,ar.status,
@@ -647,6 +656,161 @@ class GameRepository:
                 "ORDER BY CASE WHEN g.started_at IS NULL THEN 1 ELSE 0 END,"
                 "g.started_at DESC,g.game_id DESC LIMIT ?", (account_id, limit)).fetchall()
         return [dict(row) for row in rows]
+
+    def list_games_needing_fast_analysis(self, *, account_id: str | None = None,
+                                         limit: int = 1000) -> list[dict]:
+        """Select current standard completed lines not fully covered by Lichess PGN evals."""
+        limit = max(1, min(10_000, int(limit)))
+        join = " JOIN account_games ag ON ag.game_id=g.game_id " if account_id else ""
+        account_filter = "AND ag.account_id=? " if account_id else ""
+        params: list[object] = [account_id] if account_id else []
+        params.append(limit)
+        sql = (
+            "SELECT DISTINCT g.game_id,gr.line_revision,gr.line_hash,g.started_at,g.variant "
+            "FROM games g " + join +
+            "JOIN game_revisions gr ON gr.game_id=g.game_id AND gr.is_current=1 "
+            "WHERE g.status NOT IN ('created','started','started_soon','playing') "
+            "AND g.variant='standard' " + account_filter +
+            "AND NOT EXISTS (SELECT 1 FROM analysis_runs ar "
+            "WHERE ar.game_id=g.game_id AND ar.line_revision=gr.line_revision "
+            "AND ar.line_hash=gr.line_hash AND ar.source='lichess-pgn' "
+            "AND ar.status='complete' AND "
+            "(SELECT COUNT(*) FROM position_assessments pa WHERE pa.run_id=ar.run_id "
+            "AND (pa.white_cp IS NOT NULL OR pa.mate_white IS NOT NULL)) >= "
+            "(SELECT COUNT(*) FROM game_moves gm WHERE gm.game_id=g.game_id "
+            "AND gm.line_revision=gr.line_revision)) "
+            "ORDER BY CASE WHEN g.started_at IS NULL THEN 1 ELSE 0 END,"
+            "g.started_at DESC,g.game_id DESC LIMIT ?")
+        with self._connection() as db:
+            rows = db.execute(sql, params).fetchall()
+        return [dict(row) for row in rows]
+
+    def enqueue_analysis_jobs(self, candidates: list[dict], *, analysis_pass: str,
+                              engine_version: str, parameters: dict) -> dict[str, int]:
+        if analysis_pass not in {"fast", "review"}:
+            raise ValueError("Unknown analysis pass")
+        params_json = json.dumps(parameters, sort_keys=True, separators=(",", ":"))
+        now = datetime.now(timezone.utc).isoformat()
+        queued = skipped = 0
+        with self._connection() as db:
+            db.execute("BEGIN IMMEDIATE")
+            for candidate in candidates:
+                game_id = str(candidate["game_id"])
+                revision = int(candidate["line_revision"])
+                line_hash = str(candidate["line_hash"])
+                job_id = uuid.uuid4().hex
+                cursor = db.execute(
+                    "INSERT OR IGNORE INTO analysis_jobs(job_id,game_id,line_revision,line_hash,"
+                    "analysis_pass,engine_version,parameters_json,status,attempts,priority_at,"
+                    "created_at,updated_at) VALUES(?,?,?,?,?,?,?,'queued',0,?,?,?)",
+                    (job_id, game_id, revision, line_hash, analysis_pass, engine_version,
+                     params_json, candidate.get("started_at"), now, now))
+                if cursor.rowcount:
+                    queued += 1
+                else:
+                    skipped += 1
+        return {"queued": queued, "already_present": skipped}
+
+    def claim_next_analysis_job(self, worker_id: str, *, engine_version: str,
+                                analysis_pass: str, parameters: dict,
+                                lease_seconds: int = 300) -> dict | None:
+        if not worker_id:
+            raise ValueError("worker_id is required")
+        lease_seconds = max(30, min(3600, int(lease_seconds)))
+        params_json = json.dumps(parameters, sort_keys=True, separators=(",", ":"))
+        now_dt = datetime.now(timezone.utc)
+        now = now_dt.isoformat()
+        until = (now_dt + timedelta(seconds=lease_seconds)).isoformat()
+        with self._connection() as db:
+            db.execute("BEGIN IMMEDIATE")
+            while True:
+                row = db.execute(
+                    "SELECT * FROM analysis_jobs WHERE analysis_pass=? AND engine_version=? "
+                    "AND parameters_json=? AND (status='queued' OR "
+                    "(status='running' AND (lease_until IS NULL OR lease_until<?))) "
+                    "ORDER BY CASE WHEN priority_at IS NULL THEN 1 ELSE 0 END,"
+                    "priority_at DESC,created_at,job_id LIMIT 1",
+                    (analysis_pass, engine_version, params_json, now)).fetchone()
+                if not row:
+                    return None
+                current = db.execute(
+                    "SELECT line_revision,line_hash FROM game_revisions "
+                    "WHERE game_id=? AND is_current=1", (row["game_id"],)).fetchone()
+                if (not current or int(current["line_revision"]) != int(row["line_revision"])
+                        or current["line_hash"] != row["line_hash"]):
+                    db.execute("UPDATE analysis_jobs SET status='stale',updated_at=?,"
+                                "lease_owner=NULL,lease_until=NULL WHERE job_id=?",
+                                (now, row["job_id"]))
+                    continue
+                db.execute("UPDATE analysis_jobs SET status='running',attempts=attempts+1,"
+                            "lease_owner=?,lease_until=?,started_at=?,updated_at=?,error=NULL "
+                            "WHERE job_id=?",
+                            (worker_id, until, now, now, row["job_id"]))
+                result = dict(row)
+                result.update(status="running", attempts=int(row["attempts"]) + 1,
+                              lease_owner=worker_id, lease_until=until, started_at=now,
+                              updated_at=now, error=None)
+                return result
+
+    def renew_analysis_job_lease(self, job_id: str, worker_id: str, *,
+                                 lease_seconds: int = 300) -> bool:
+        lease_seconds = max(30, min(3600, int(lease_seconds)))
+        now_dt = datetime.now(timezone.utc)
+        with self._connection() as db:
+            cursor = db.execute(
+                "UPDATE analysis_jobs SET lease_until=?,updated_at=? "
+                "WHERE job_id=? AND status='running' AND lease_owner=?",
+                ((now_dt + timedelta(seconds=lease_seconds)).isoformat(),
+                 now_dt.isoformat(), job_id, worker_id))
+        return cursor.rowcount == 1
+
+    def finish_analysis_job(self, job_id: str, worker_id: str, *, status: str,
+                            result_run_id: str | None = None,
+                            error: str | None = None) -> None:
+        if status not in {"complete", "paused", "cancelled", "failed", "stale"}:
+            raise ValueError("Invalid terminal analysis job status")
+        now = datetime.now(timezone.utc).isoformat()
+        with self._connection() as db:
+            cursor = db.execute(
+                "UPDATE analysis_jobs SET status=?,result_run_id=?,error=?,updated_at=?,"
+                "finished_at=?,lease_owner=NULL,lease_until=NULL "
+                "WHERE job_id=? AND status='running' AND lease_owner=?",
+                (status, result_run_id, error[:500] if error else None, now,
+                 now if status in {"complete", "cancelled", "failed", "stale"} else None,
+                 job_id, worker_id))
+            if cursor.rowcount != 1:
+                raise RuntimeError("Analysis job lease was lost before it could be finalized.")
+
+    def resume_paused_analysis_jobs(self, *, engine_version: str | None = None) -> int:
+        now = datetime.now(timezone.utc).isoformat()
+        with self._connection() as db:
+            if engine_version is None:
+                cursor = db.execute("UPDATE analysis_jobs SET status='queued',updated_at=? "
+                                    "WHERE status='paused'", (now,))
+            else:
+                cursor = db.execute("UPDATE analysis_jobs SET status='queued',updated_at=? "
+                                    "WHERE status='paused' AND engine_version=?",
+                                    (now, engine_version))
+        return cursor.rowcount
+
+    def cancel_queued_analysis_jobs(self, *, engine_version: str | None = None) -> int:
+        now = datetime.now(timezone.utc).isoformat()
+        with self._connection() as db:
+            if engine_version is None:
+                cursor = db.execute("UPDATE analysis_jobs SET status='cancelled',updated_at=?,"
+                                    "finished_at=? WHERE status='queued'", (now, now))
+            else:
+                cursor = db.execute("UPDATE analysis_jobs SET status='cancelled',updated_at=?,"
+                                    "finished_at=? WHERE status='queued' AND engine_version=?",
+                                    (now, now, engine_version))
+        return cursor.rowcount
+
+    def analysis_job_counts(self, *, engine_version: str | None = None) -> dict[str, int]:
+        where = " WHERE engine_version=?" if engine_version else ""
+        with self._connection() as db:
+            rows = db.execute("SELECT status,COUNT(*) AS count FROM analysis_jobs" + where +
+                              " GROUP BY status", (engine_version,) if engine_version else ()).fetchall()
+        return {str(row["status"]): int(row["count"]) for row in rows}
 
     def search_games(self, query: str = "", *, page: int = 0,
                      page_size: int = DEFAULT_PAGE_SIZE, completed_only: bool = False,
