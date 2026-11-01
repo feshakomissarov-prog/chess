@@ -553,6 +553,15 @@ class StatisticsService:
                 "(SELECT COUNT(*) FROM move_classifications mc WHERE mc.run_id=ar.run_id "
                 "AND mc.ply>0 AND mc.mover=ag.color AND mc.eval_loss_cp IS NOT NULL "
                 "AND mc.label IN ('mistake','blunder')) own_errors,"
+                "(SELECT COUNT(*) FROM move_classifications mc WHERE mc.run_id=ar.run_id "
+                "AND mc.ply>0 AND mc.mover=ag.color AND mc.eval_loss_cp IS NOT NULL "
+                "AND mc.label='inaccuracy') own_inaccuracies,"
+                "(SELECT COUNT(*) FROM move_classifications mc WHERE mc.run_id=ar.run_id "
+                "AND mc.ply>0 AND mc.mover=ag.color AND mc.eval_loss_cp IS NOT NULL "
+                "AND mc.label='mistake') own_mistakes,"
+                "(SELECT COUNT(*) FROM move_classifications mc WHERE mc.run_id=ar.run_id "
+                "AND mc.ply>0 AND mc.mover=ag.color AND mc.eval_loss_cp IS NOT NULL "
+                "AND mc.label='blunder') own_blunders,"
                 "(SELECT COUNT(*) FROM analysis_events ae WHERE ae.run_id=ar.run_id "
                 "AND ae.event_type='missed_opportunity' AND ae.confidence_state='candidate') opportunity_candidates,"
                 "(SELECT COUNT(*) FROM analysis_events ae WHERE ae.run_id=ar.run_id "
@@ -570,6 +579,8 @@ class StatisticsService:
                 "AVG(official_accuracy) official_accuracy,COUNT(official_accuracy) accuracy_n,"
                 "COUNT(analysis_status) analyzed_games,SUM(assessed_own_moves) assessed_own_moves,"
                 "SUM(own_errors) own_errors,SUM(opportunity_candidates) opportunity_candidates,"
+                "SUM(own_inaccuracies) own_inaccuracies,SUM(own_mistakes) own_mistakes,"
+                "SUM(own_blunders) own_blunders,"
                 "SUM(verified_opportunities_used) verified_opportunities_used,"
                 "SUM(CASE WHEN game_time_precision='date_only' THEN 1 ELSE 0 END) date_only_games,"
                 "SUM(CASE WHEN started_at IS NULL THEN 1 ELSE 0 END) unknown_date_games "
@@ -581,10 +592,11 @@ class StatisticsService:
             item = dict(row)
             n = int(item["assessed_own_moves"] or 0)
             candidates = int(item["opportunity_candidates"] or 0)
-            used = int(item["verified_opportunities_used"] or 0)
             item["own_error_rate_per_100"] = round(100 * int(item["own_errors"] or 0) / n, 1) if n else None
-            item["opportunity_conversion"] = used / candidates if candidates else None
-            item["opportunity_conversion_status"] = "verified" if candidates else "no eligible denominator"
+            item["opportunity_conversion"] = None
+            item["opportunity_conversion_status"] = (
+                "not modeled: no verified candidate-to-action linkage" if candidates
+                else "no eligible denominator")
             item["official_accuracy"] = round(float(item["official_accuracy"]), 1) if item["official_accuracy"] is not None else None
             item["accuracy_source"] = "lichess"
             output.append(item)

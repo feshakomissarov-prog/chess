@@ -74,8 +74,9 @@ def test_profile_uses_90_day_complete_sample_per_color_and_keeps_denominators(tm
         assert unknown[0]["games"] == 1
         assert unknown[0]["accuracy_n"] == 1
         assert unknown[0]["my_color"] == "white"
-        assert all(row["opportunity_conversion"] is None
-                   for row in profile["historical_timeline"] if row["opportunity_candidates"] == 0)
+        assert all(row["opportunity_conversion"] is None for row in profile["historical_timeline"])
+        assert all(row["opportunity_conversion_status"] == "no eligible denominator"
+                   for row in profile["historical_timeline"])
     finally:
         repo.shutdown()
 
@@ -102,6 +103,27 @@ def test_current_focus_is_backed_by_opening_phase_and_move_evidence(tmp_path):
         assert diagnostics["phases"][0]["errors"] == 3
         assert {(row["game_id"], row["ply"], row["label"]) for row in diagnostics["current_focus"]} == {
             (f"profile-{index}", 1, "mistake") for index in range(3)}
+    finally:
+        repo.shutdown()
+
+
+def test_opportunity_conversion_stays_unknown_without_candidate_action_link(tmp_path):
+    repo = GameRepository(tmp_path / "opportunity-conversion.sqlite3")
+    try:
+        account = repo.ensure_archive_account("OpportunityOwner")
+        now = datetime(2026, 11, 1, 12, tzinfo=timezone.utc)
+        game_id = _add_account_game(repo, account, 1, "white",
+            (now - timedelta(days=1)).isoformat(), label="mistake")
+        with repo._connection() as db:
+            run_id = db.execute("SELECT run_id FROM analysis_runs WHERE game_id=?", (game_id,)).fetchone()[0]
+            db.execute("INSERT INTO analysis_events(event_key,run_id,game_id,line_revision,ply,event_type,"
+                "confidence_state,source,detector_version,evidence_json) VALUES (?,?,?,?,?,?,?,?,?,?)",
+                ("opportunity-candidate", run_id, game_id, 1, 1, "missed_opportunity", "candidate",
+                 "stockfish", "synthetic", "{}"))
+        row = StatisticsService(repo).historical_timeline(account_id=account)[0]
+        assert row["opportunity_candidates"] == 1
+        assert row["opportunity_conversion"] is None
+        assert "no verified candidate-to-action linkage" in row["opportunity_conversion_status"]
     finally:
         repo.shutdown()
 
@@ -149,5 +171,45 @@ def test_archive_import_records_date_precision_and_unknown_date_is_not_recent(tm
             assert db.execute("PRAGMA integrity_check").fetchone()[0] == "ok"
         with pytest.raises(ValueError, match="selected account"):
             StatisticsService(repo).personal_profile(account_id=None)
+    finally:
+        repo.shutdown()
+
+
+def test_personal_profile_and_page_remain_bounded_on_10000_synthetic_games(tmp_path):
+    repo = GameRepository(tmp_path / "profile-10000.sqlite3")
+    try:
+        account = repo.ensure_archive_account("ScaleOwner")
+        now = datetime.now(timezone.utc)
+        started = (now - timedelta(days=10)).isoformat()
+        created = now.isoformat()
+        games = []
+        revisions = []
+        links = []
+        for index in range(10_000):
+            game_id = f"scale-{index:05}"
+            color = "white" if index % 2 == 0 else "black"
+            games.append((game_id, "startpos", "", color, "Fixture", 0, "300+0",
+                          "finished", color, created, "*", "Owner", "Fixture", started,
+                          "timestamp", "lichess_archive", game_id, "standard", 1,
+                          None, 1500, 1500, 80.0, 82.0))
+            revisions.append((game_id, 1, "startpos", "", "*", f"scale-hash-{index}", created, 1))
+            links.append((account, game_id, game_id, created, "Fixture", "Owner", color, 1500, 1500))
+        with repo._connection() as db:
+            db.executemany("INSERT INTO games(game_id,initial_fen,moves,color,opponent,rated,clock,status,"
+                "winner,updated_at,pgn,white_player,black_player,started_at,game_time_precision,source,"
+                "source_game_id,variant,line_revision,import_error,white_rating,black_rating,"
+                "lichess_accuracy_white,lichess_accuracy_black) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                games)
+            db.executemany("INSERT INTO game_revisions VALUES (?,?,?,?,?,?,?,?)", revisions)
+            db.executemany("INSERT INTO account_games(account_id,game_id,remote_id,imported_at,opponent,"
+                "player_name,color,player_rating,opponent_rating) VALUES (?,?,?,?,?,?,?,?,?)", links)
+        service = StatisticsService(repo)
+        profile = service.personal_profile(account_id=account, now=now)
+        assert profile["color_segments"]["white"]["current"]["games"] == 5_000
+        assert profile["color_segments"]["black"]["current"]["games"] == 5_000
+        page = service.game_page(account_id=account, page=0, page_size=50)
+        assert page["total"] == 10_000 and len(page["items"]) == 50
+        with repo._connection() as db:
+            assert db.execute("PRAGMA integrity_check").fetchone()[0] == "ok"
     finally:
         repo.shutdown()
