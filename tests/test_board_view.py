@@ -347,3 +347,22 @@ def test_wheel_navigates_one_ply_each_direction(qtbot):
         widget.wheelEvent(wheel)
         assert wheel.isAccepted()
     assert emitted == [-1, 1]
+
+
+def test_graphical_promotion_picker_uses_piece_buttons(qtbot, monkeypatch):
+    from PySide6.QtWidgets import QPushButton
+    widget = BoardView(chess.Board("7k/P7/8/8/8/8/8/7K w - - 0 1"))
+    qtbot.addWidget(widget)
+    widget.resize(600, 600)
+    widget.show()
+    offered = []
+
+    def choose(dialog):
+        buttons = dialog.findChildren(QPushButton)
+        offered.extend(button.accessibleName() for button in buttons)
+        assert [button.text() for button in buttons] == ["♕", "♖", "♗", "♘"]
+        buttons[2].click()
+
+    monkeypatch.setattr(QDialog, "exec", choose)
+    assert widget._choose_promotion(chess.WHITE, chess.A8) == chess.BISHOP
+    assert offered == ["queen", "rook", "bishop", "knight"]
