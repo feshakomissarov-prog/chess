@@ -15,7 +15,7 @@
 | --- | --- | --- | --- | --- |
 | 0 | Аудит схемы v9 и договоры о метриках | DONE | `6bf0078fff22977869f3be786c19b492e4ece39a`, PR #30 | 212 pytest PASS; compileall PASS; baseline main `6c3692c`; личные данные NOT TOUCHED |
 | A | Аддитивные миграции, coverage | DONE | `d4c61816424fd61f181411b815f1d0956f4d7b94`, PR #30 | schema v10; 215 pytest PASS; v9 backup/integrity/rollback PASS |
-| B | Частичные и поздние оценки Lichess | TODO | — | — |
+| B | Частичные и поздние оценки Lichess | DONE | `d2da1445ad3573df07af7c7fb6c7d2eccf07c2d1`, PR #30 | 218 pytest PASS; fake export/429 PASS; real network NOT RUN |
 | C | Быстрая очередь Stockfish, recent-first | TODO | — | — |
 | D | Метрики, severity, события и возможности | TODO | — | — |
 | E | Выборочное уточнение, тактические мотивы | TODO | — | — |
@@ -69,3 +69,12 @@
 - Проверки после изменений: `QT_QPA_PLATFORM=offscreen .venv312/Scripts/python.exe -m pytest -q -ra` — exit 0, 215 тестов; `python -m compileall -q src tests` — PASS; `git diff --check` — PASS. Сначала обнаружились три устаревших ожидания `user_version=9` и ошибка теста на ply index; все исправлены, повторный полный набор зелёный.
 - Личная SQLite/PGN/OAuth — NOT TOUCHED; реальные Lichess/Stockfish — NOT RUN. Windows CI для нового SHA ожидается отдельно; миграция на владельческом профиле не запускалась.
 - Следующий этап B: исправить partial/late Lichess eval hydration в существующем импортере на тех же синтетических repository fixtures, без OAuth/API вызовов.
+
+## Этап B — Lichess eval hydration (2026-11-01)
+
+- Code commit: `d2da1445ad3573df07af7c7fb6c7d2eccf07c2d1`; PR #30 → `main`.
+- Частичные `lichess-pgn` runs теперь имеют статус `partial`; поздние оценки одной линии idempotent-merge в существующий run, не создавая дубликат и не стирая score с более высокой глубиной. `complete` означает покрытие каждой post-move позиции. Частичные runs видны в query/detail/statistics и используют отдельный source без подмешивания Stockfish.
+- Добавлен bounded (`1..100`) recent-first missing-eval selector и явные `ArchiveSync.refresh_missing_evaluations()` / `LichessService.refresh_missing_archive_evaluations()`. Они используют только уже сохранённую OAuth-сессию при явном вызове, один официальный export endpoint на игру, не запускаются при открытии экрана и не двигают full-backfill/incremental cursors. UI-кнопка будет добавлена на этапе G.
+- Регрессии: partial→late-full completion; повторная идентичная загрузка не создаёт run; сохраняется более глубокий старый score; coverage summary учитывает partial; targeted refresh выбирает только неполную партию, не меняет курсор; fake HTTP 429 прекращает цикл и не маскируется/не повторяется. Всё на temp SQLite/fake client.
+- Проверки: полный `QT_QPA_PLATFORM=offscreen .venv312/Scripts/python.exe -m pytest -q -ra` — exit 0, 218 PASS; `python -m compileall -q src tests` — PASS; `git diff --check` — PASS. Windows Python 3.12.10 локально. Реальные Lichess/OAuth и Stockfish — NOT RUN; личная база NOT TOUCHED.
+- Следующий этап C: заполнить `analysis_jobs`, поддержать recent-first enqueue, idempotency, claim/pause/resume/cancel/crash recovery, fake UCI lifecycle и fail-closed fair-play перед каждой работой. UI batch controls остаются на этапе G.
