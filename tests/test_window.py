@@ -6,7 +6,7 @@ import pytest
 from pathlib import Path
 from PySide6.QtCore import QPoint, QSettings, Qt
 from PySide6.QtGui import QCloseEvent
-from PySide6.QtWidgets import QInputDialog, QMessageBox
+from PySide6.QtWidgets import QInputDialog, QMessageBox, QPushButton
 
 from chess_coach.board_view import BoardView
 from chess_coach.window import (ActiveGamesDialog, EvaluationGraph, MainWindow,
@@ -1624,6 +1624,7 @@ def test_connected_analysis_is_blocked_by_unopened_human_game_and_allowed_only_f
     window._lichess_connected = True
     requests = []
     class ConnectedService:
+        username = "AccountA"
         def check_active_games_for_analysis(self, request_id): requests.append(request_id)
         def close(self, timeout=1.0): return True
     window.lichess = ConnectedService()
@@ -1653,6 +1654,7 @@ def test_connected_analysis_fails_closed_on_snapshot_error_and_new_human_game_st
     window._lichess_connected = True
     requests = []
     class ConnectedService:
+        username = "AccountA"
         def check_active_games_for_analysis(self, request_id): requests.append(request_id)
         def close(self, timeout=1.0): return True
     window.lichess = ConnectedService()
@@ -1671,6 +1673,147 @@ def test_connected_analysis_fails_closed_on_snapshot_error_and_new_human_game_st
         "gameId": "new-human-game", "color": "white",
         "opponent": {"username": "Friend"}}})
     assert stop.is_set()
+
+
+def test_connected_analysis_cancel_stops_fake_analyzer_without_saving_complete_run(
+        qtbot, tmp_path, monkeypatch):
+    window = MainWindow(QSettings(str(tmp_path / "analysis-cancel-connected.ini"),
+                                  QSettings.Format.IniFormat), offline_mode=True)
+    qtbot.addWidget(window)
+    window._lichess_connected = True
+
+    class ConnectedService:
+        username = "AccountA"
+        def __init__(self): self.requests = []
+        def check_active_games_for_analysis(self, request_id): self.requests.append(request_id)
+        def close(self, timeout=1.0): return True
+
+    service = ConnectedService()
+    window.lichess = service
+    analyzer_started = threading.Event()
+    analyzer_stopped = threading.Event()
+
+    class FakeAnalyzer:
+        def __init__(self, _repository): pass
+        def analyze(self, _game_id, _engine_path, _options, **kwargs):
+            stop_event = kwargs["stop_event"]
+            analyzer_started.set()
+            while not stop_event.wait(0.005):
+                pass
+            analyzer_stopped.set()
+            return {"error": "Анализ отменён."}
+
+    monkeypatch.setattr("chess_coach.window.CompletedGameAnalyzer", FakeAnalyzer)
+    monkeypatch.setattr(QMessageBox, "warning", lambda *_args: QMessageBox.StandardButton.Ok)
+    window._start_game_analysis("cancelled-connected-game", "fake-stockfish")
+    request_id = service.requests[-1]
+    window._analysis_safety_games_received(request_id, [])
+    qtbot.waitUntil(analyzer_started.is_set, timeout=3000)
+
+    dialog = window._analysis_dialog
+    assert dialog is not None
+    assert window._analysis_safety_phase == "running"
+    dialog.findChild(QPushButton).click()
+
+    qtbot.waitUntil(analyzer_stopped.is_set, timeout=3000)
+    qtbot.waitUntil(lambda: window._analysis_thread is not None
+                    and not window._analysis_thread.is_alive(), timeout=3000)
+    qtbot.waitUntil(lambda: window._analysis_stop is None, timeout=3000)
+    assert window.game_repository.list_analyses("cancelled-connected-game") == []
+    assert window._analysis_safety_phase is None
+    assert window.close() is True
+
+
+def test_preflight_cancel_ignores_late_empty_snapshot_and_http_429_fails_closed(
+        qtbot, tmp_path, monkeypatch):
+    window = MainWindow(QSettings(str(tmp_path / "analysis-stale-preflight.ini"),
+                                  QSettings.Format.IniFormat), offline_mode=True)
+    qtbot.addWidget(window)
+    window._lichess_connected = True
+
+    class ConnectedService:
+        username = "AccountA"
+        def __init__(self): self.requests = []
+        def check_active_games_for_analysis(self, request_id): self.requests.append(request_id)
+        def close(self, timeout=1.0): return True
+
+    service = ConnectedService()
+    window.lichess = service
+    launches = []
+    monkeypatch.setattr(window, "_launch_game_analysis",
+                        lambda *args, **kwargs: launches.append((args, kwargs)))
+    monkeypatch.setattr(QMessageBox, "warning", lambda *_args: QMessageBox.StandardButton.Ok)
+    window._start_game_analysis("cancelled-before-engine", "fake-stockfish")
+    request_id = service.requests[-1]
+    dialog = window._analysis_dialog
+    assert dialog is not None
+    dialog.findChild(QPushButton).click()
+    window._analysis_safety_games_received(request_id, [])
+    assert not launches
+    assert window._analysis_stop is None
+    assert window._analysis_safety_request_id is None
+
+    window._start_game_analysis("rate-limited-game", "fake-stockfish")
+    rate_limited_request = service.requests[-1]
+    window._analysis_safety_error(rate_limited_request, "HTTP 429: retry after 90s")
+    assert not launches
+    assert window._analysis_stop is None
+    assert window._analysis_safety_phase is None
+    assert window.close() is True
+
+
+@pytest.mark.parametrize("transition", ["disconnect", "account-switch", "reconnect-start"])
+def test_late_safety_snapshot_cannot_authorize_old_account_session(
+        qtbot, tmp_path, monkeypatch, transition):
+    window = MainWindow(QSettings(str(tmp_path / f"analysis-session-{transition}.ini"),
+                                  QSettings.Format.IniFormat), offline_mode=True)
+    qtbot.addWidget(window)
+    window._lichess_connected = True
+
+    class ConnectedService:
+        username = "AccountA"
+        token = "saved-fake-token"
+        def __init__(self): self.requests = []
+        def check_active_games_for_analysis(self, request_id): self.requests.append(request_id)
+        def disconnect_account(self): pass
+        def restore(self): self.restored = True
+        def close(self, timeout=1.0): return True
+
+    service = ConnectedService()
+    window.lichess = service
+    launches = []
+    monkeypatch.setattr(window, "_launch_game_analysis",
+                        lambda *args, **kwargs: launches.append((args, kwargs)))
+    monkeypatch.setattr(window, "_resume_pending_final_syncs", lambda: None)
+    monkeypatch.setattr(window, "_refresh_online_controls", lambda: None)
+
+    window._start_game_analysis("old-account-game", "fake-stockfish")
+    old_request = service.requests[-1]
+    if transition == "disconnect":
+        window.disconnect_lichess()
+    elif transition == "account-switch":
+        service.username = "AccountB"
+        window._lichess_authenticated("AccountB")
+    else:
+        window._lichess_connected = False
+        window.offline_mode = False
+        window.manual_connect_mode = True
+        window.connect_lichess()
+        assert service.restored
+
+    window._analysis_safety_games_received(old_request, [])
+    assert not launches
+    assert window._analysis_safety_request_id is None
+    assert window._analysis_stop is None
+
+    if transition == "account-switch":
+        window._start_game_analysis("new-account-game", "fake-stockfish")
+        new_request = service.requests[-1]
+        assert new_request != old_request
+        window._analysis_safety_games_received(new_request, [])
+        assert len(launches) == 1
+        assert launches[0][0][0] == "new-account-game"
+    assert window.close() is True
 
 
 def test_analysis_shutdown_timeout_enters_read_only_then_repeated_close_finishes(

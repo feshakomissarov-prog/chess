@@ -173,7 +173,7 @@ def test_api_errors_and_429_cooldown(monkeypatch):
         client.get_account("token")
 
 
-def test_get_active_games_uses_account_playing_and_discards_malformed_entries():
+def test_get_active_games_rejects_malformed_entries_instead_of_failing_open():
     payload = {"nowPlaying": [
         {"gameId": "game1234", "color": "white", "opponent": {"username": "Friend"}},
         None,
@@ -182,12 +182,24 @@ def test_get_active_games_uses_account_playing_and_discards_malformed_entries():
     fake = FakeTransport([response(200, payload)])
     client = LichessClient(fake, base_url="https://lichess.test")
 
-    games = client.get_playing_games("token")
-
-    assert [game["gameId"] for game in games] == ["game1234"]
+    with pytest.raises(LichessError, match="Некорректная запись"):
+        client.get_playing_games("token")
     assert fake.calls[0][0] == "GET"
     assert fake.calls[0][1].endswith("/api/account/playing?nb=50")
     assert fake.calls[0][2]["Authorization"] == "Bearer token"
+
+
+def test_get_active_games_fails_closed_when_response_reaches_requested_limit():
+    payload = {"nowPlaying": [
+        {"gameId": f"game{i}", "opponent": {"username": f"BOT{i}", "title": "BOT"}}
+        for i in range(49)
+    ]}
+    payload["nowPlaying"].append(
+        {"gameId": "hidden-human", "opponent": {"username": "Friend"}})
+    client = LichessClient(FakeTransport([response(200, payload)]),
+                           base_url="https://lichess.test")
+    with pytest.raises(LichessError, match="может быть неполным"):
+        client.get_playing_games("token")
 
 
 def test_active_game_list_service_uses_one_explicit_request_without_retry(monkeypatch):

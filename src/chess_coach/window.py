@@ -1030,6 +1030,8 @@ class MainWindow(QMainWindow):
         self._analysis_dialog: QProgressDialog | None = None
         self._analysis_safety_request_id: str | None = None
         self._analysis_safety_context: tuple | None = None
+        self._analysis_safety_phase: str | None = None
+        self._analysis_session_generation = 0
         self._engine_probe_processes: set[QProcess] = set()
         self._shutdown_requested = False
         self._shutdown_read_only = False
@@ -2099,6 +2101,9 @@ class MainWindow(QMainWindow):
         if not self.lichess:
             QMessageBox.warning(self, "Lichess", "Windows Credential Manager недоступен. Установите зависимости проекта.")
             return
+        # A previous account's asynchronous safety response must not survive a
+        # user-initiated reconnect, even before OAuth returns the new identity.
+        self._invalidate_analysis_preflight()
         if self.manual_connect_mode:
             try:
                 has_saved_token = bool(self.lichess.token)
@@ -2119,8 +2124,16 @@ class MainWindow(QMainWindow):
         self.lichess.connect_account()
 
     def disconnect_lichess(self) -> None:
+        self._invalidate_analysis_preflight()
+        self._lichess_connected = False
         if self.lichess:
             self.lichess.disconnect_account()
+
+    def _invalidate_analysis_preflight(self) -> None:
+        """Invalidate a pending safety reply when the authenticated session changes."""
+        self._analysis_session_generation += 1
+        if self._analysis_safety_phase == "preflight" and self._analysis_safety_request_id:
+            self._cancel_analysis_action(self._analysis_safety_request_id)
 
     def cancel_username_challenge(self) -> None:
         if self.lichess:
@@ -2194,6 +2207,7 @@ class MainWindow(QMainWindow):
         self.connection.setText("●  " + status)
         connected = bool(self._lichess_connected and not self.offline_mode)
         if status == "Не подключено":
+            self._invalidate_analysis_preflight()
             self._lichess_connected = False
             for button in (self.friend_link_button, self.username_button, self.ai_button):
                 button.setVisible(False)
@@ -2261,6 +2275,7 @@ class MainWindow(QMainWindow):
             button.setEnabled(True)
 
     def _lichess_authenticated(self, username: str) -> None:
+        self._invalidate_analysis_preflight()
         self._lichess_connected = True
         self.connection.setText(f"●  Подключено: {username}")
         self.connect_button.setEnabled(False)
@@ -2974,7 +2989,12 @@ class MainWindow(QMainWindow):
             return
 
         request_id = uuid.uuid4().hex
+        account_id = str(getattr(self.lichess, "username", "") or "").strip().casefold()
+        if not account_id:
+            self.home_status.setText("Не удалось определить подключённый аккаунт; анализ не запущен.")
+            return
         self._analysis_safety_request_id = request_id
+        self._analysis_safety_phase = "preflight"
         dialog = QProgressDialog("Проверяем активные партии Lichess…", "Отменить", 0, 0, self)
         dialog.setWindowTitle("Послепартийный анализ")
         dialog.setMinimumDuration(0)
@@ -2982,21 +3002,49 @@ class MainWindow(QMainWindow):
         self._analysis_dialog = dialog
         stop = threading.Event()
         self._analysis_stop = stop
-        self._analysis_safety_context = (request_id, game_id, engine_path, options)
-        dialog.canceled.connect(lambda request=request_id: self._cancel_analysis_safety_check(request))
+        self._analysis_safety_context = (
+            request_id, game_id, engine_path, options,
+            self._analysis_session_generation, account_id, self.lichess,
+        )
+        dialog.canceled.connect(lambda request=request_id: self._cancel_analysis_action(request))
         self.lichess.check_active_games_for_analysis(request_id)
 
-    def _cancel_analysis_safety_check(self, request_id: str) -> None:
+    def _cancel_analysis_action(self, request_id: str) -> None:
+        """Cancel either the server preflight or the analysis using one dialog."""
         if request_id != self._analysis_safety_request_id:
             return
-        self._analysis_safety_request_id = None
-        self._analysis_safety_context = None
         if self._analysis_stop is not None:
             self._analysis_stop.set()
+        if self._analysis_safety_phase == "preflight":
+            self._analysis_safety_request_id = None
+            self._analysis_safety_context = None
+            self._analysis_safety_phase = None
             self._analysis_stop = None
-        if self._analysis_dialog is not None:
-            self._analysis_dialog.close()
-            self._analysis_dialog = None
+            if self._analysis_dialog is not None:
+                self._analysis_dialog.close()
+                self._analysis_dialog = None
+            return
+        if self._analysis_safety_phase == "running" and self._analysis_dialog is not None:
+            self._analysis_dialog.setLabelText("Останавливаем анализ…")
+            button = self._analysis_dialog.findChild(QPushButton)
+            if button is not None:
+                button.setEnabled(False)
+
+    def _analysis_safety_reply_is_current(self, request_id: str) -> bool:
+        if (request_id != self._analysis_safety_request_id
+                or self._analysis_safety_phase != "preflight"):
+            return False
+        context = self._analysis_safety_context
+        if not context or len(context) < 7:
+            return False
+        _request, _game_id, _engine_path, _options, generation, account_id, service = context
+        current_account = str(getattr(self.lichess, "username", "") or "").strip().casefold()
+        if (not self._lichess_connected or self.lichess is not service
+                or generation != self._analysis_session_generation
+                or not account_id or current_account != account_id):
+            self._cancel_analysis_action(request_id)
+            return False
+        return True
 
     @staticmethod
     def _active_game_is_human(game: dict) -> bool:
@@ -3004,13 +3052,14 @@ class MainWindow(QMainWindow):
         return not (isinstance(opponent, dict) and opponent.get("title") == "BOT")
 
     def _analysis_safety_games_received(self, request_id: str, games: list[dict]) -> None:
-        if request_id != self._analysis_safety_request_id:
+        if not self._analysis_safety_reply_is_current(request_id):
             return
-        self._analysis_safety_request_id = None
         context = self._analysis_safety_context
-        self._analysis_safety_context = None
         stop = self._analysis_stop
-        if not context or stop is None or stop.is_set():
+        if not context or stop is None:
+            return
+        if stop.is_set():
+            self._cancel_analysis_action(request_id)
             return
         active_human_ids = {session.game_id for session in self.online_sessions.values()
                             if session.status in {"started", "playing"} and not session.is_ai_opponent}
@@ -3020,18 +3069,27 @@ class MainWindow(QMainWindow):
                 self._analysis_dialog.close()
                 self._analysis_dialog = None
             self._analysis_stop = None
+            self._analysis_safety_request_id = None
+            self._analysis_safety_context = None
+            self._analysis_safety_phase = None
             QMessageBox.warning(self, "Stockfish заблокирован",
                 "У аккаунта есть активная партия с человеком. Анализ Stockfish не запущен.")
             return
-        _request, game_id, engine_path, options = context
+        _request, game_id, engine_path, options, _generation, _account_id, _service = context
+        self._analysis_safety_context = None
+        self._analysis_safety_phase = "running"
+        if self._analysis_dialog is not None:
+            self._analysis_dialog.setLabelText("Анализ партии Stockfish…")
         self._launch_game_analysis(game_id, engine_path, options,
-                                   stop=stop, dialog=self._analysis_dialog)
+                                   stop=stop, dialog=self._analysis_dialog,
+                                   request_id=request_id)
 
     def _analysis_safety_error(self, request_id: str, message: str) -> None:
-        if request_id != self._analysis_safety_request_id:
+        if not self._analysis_safety_reply_is_current(request_id):
             return
         self._analysis_safety_request_id = None
         self._analysis_safety_context = None
+        self._analysis_safety_phase = None
         if self._analysis_stop is not None:
             self._analysis_stop.set()
             self._analysis_stop = None
@@ -3044,7 +3102,8 @@ class MainWindow(QMainWindow):
 
     def _launch_game_analysis(self, game_id: str, engine_path: str, options: AnalysisOptions,
                               *, stop: threading.Event | None = None,
-                              dialog: QProgressDialog | None = None) -> None:
+                              dialog: QProgressDialog | None = None,
+                              request_id: str | None = None) -> None:
         stop = stop or threading.Event()
         if dialog is None:
             dialog = QProgressDialog("Запуск Stockfish…", "Отменить", 0, 0, self)
@@ -3052,8 +3111,11 @@ class MainWindow(QMainWindow):
             dialog.setMinimumDuration(0)
             dialog.show()
             self._analysis_dialog = dialog
-            self._analysis_stop = stop
-            dialog.canceled.connect(stop.set)
+            request_id = request_id or uuid.uuid4().hex
+            self._analysis_safety_request_id = request_id
+            self._analysis_safety_phase = "running"
+            dialog.canceled.connect(lambda request=request_id: self._cancel_analysis_action(request))
+        self._analysis_stop = stop
         active_human_ids = {session.game_id for session in self.online_sessions.values()
                             if session.status in {"started", "playing"} and not session.is_ai_opponent}
         def work():
@@ -3101,6 +3163,9 @@ class MainWindow(QMainWindow):
 
     def _analysis_finished(self, game_id: str, result: object) -> None:
         self._analysis_stop = None
+        self._analysis_safety_request_id = None
+        self._analysis_safety_context = None
+        self._analysis_safety_phase = None
         if getattr(self, "_analysis_dialog", None):
             self._analysis_dialog.close()
             self._analysis_dialog = None
@@ -3190,7 +3255,7 @@ class MainWindow(QMainWindow):
     def closeEvent(self, event) -> None:
         self._shutdown_requested = True
         if self._analysis_safety_request_id is not None:
-            self._cancel_analysis_safety_check(self._analysis_safety_request_id)
+            self._cancel_analysis_action(self._analysis_safety_request_id)
         analysis_thread = self._analysis_thread
         analysis_running = bool(analysis_thread and analysis_thread.is_alive())
         if analysis_running:

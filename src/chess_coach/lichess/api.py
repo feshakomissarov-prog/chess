@@ -227,7 +227,12 @@ class LichessClient:
         return self._json_call("GET", "/api/account", token=token)
 
     def get_playing_games(self, token: str, limit: int = 50) -> list[dict]:
-        """Return one explicit snapshot of currently active account games."""
+        """Return one validated snapshot of active games or fail closed.
+
+        The endpoint has a bounded response. Reaching the requested limit does
+        not prove the snapshot is complete, so callers must not use it as
+        evidence that no human game is active.
+        """
         if not 1 <= limit <= 50:
             raise ValueError("Количество активных партий должно быть от 1 до 50.")
         payload = self._json_call(
@@ -236,7 +241,28 @@ class LichessClient:
         games = payload.get("nowPlaying")
         if not isinstance(games, list):
             raise LichessError("Lichess вернул неожиданный список активных партий.")
-        return [game for game in games if isinstance(game, dict) and game.get("gameId")]
+        if len(games) >= limit:
+            raise LichessError(
+                "Список активных партий достиг лимита и может быть неполным."
+            )
+        validated = []
+        for index, game in enumerate(games):
+            if not isinstance(game, dict):
+                raise LichessError(
+                    f"Некорректная запись активной партии Lichess (элемент {index + 1})."
+                )
+            game_id = game.get("gameId")
+            opponent = game.get("opponent")
+            if (not isinstance(game_id, str) or not game_id.strip()
+                    or not isinstance(opponent, dict)
+                    or not isinstance(opponent.get("username"), str)
+                    or not opponent["username"].strip()
+                    or ("title" in opponent and not isinstance(opponent["title"], str))):
+                raise LichessError(
+                    f"Неполная запись активной партии Lichess (элемент {index + 1})."
+                )
+            validated.append(game)
+        return validated
 
     def export_game_pgn(self, token: str, game_id: str) -> str:
         """Fetch one explicitly selected game without requesting the user's archive."""
