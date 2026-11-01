@@ -1306,6 +1306,7 @@ class GameRepository:
                 if changed:
                     db.execute("UPDATE analysis_runs SET status=?,finished_at=?,error=NULL WHERE run_id=?",
                                (eval_status, now, run_id))
+                self._insert_derived_metrics_for_run(db, run_id, user_color=player_color)
             if middle_start is not None or end_start is not None:
                 db.execute("INSERT INTO game_phase_boundaries VALUES (?,?,?,?,?,?) "
                            "ON CONFLICT(game_id,line_revision) DO UPDATE SET "
@@ -1541,6 +1542,51 @@ class GameRepository:
             [(row["event_key"], tag, row["detector_version"], row["confidence_state"],
               row["evidence_json"]) for row in events for tag in row.get("tags", [])])
 
+    @classmethod
+    def _insert_derived_metrics_for_run(cls, db: sqlite3.Connection, run_id: str,
+                                        *, user_color: str | None = None) -> int:
+        """Materialize canonical v2 move facts from one persisted source run, without UCI."""
+        from .move_metrics import build_move_facts
+        from .event_detectors import detect_registered_events
+
+        run = db.execute("SELECT * FROM analysis_runs WHERE run_id=?", (run_id,)).fetchone()
+        if not run:
+            return 0
+        assessments = [dict(row) for row in db.execute(
+            "SELECT * FROM position_assessments WHERE run_id=? ORDER BY ply", (run_id,))]
+        for item in assessments:
+            item["pv"] = str(item.get("pv_uci") or "").split()
+        moves = [dict(row) for row in db.execute(
+            "SELECT ply,mover,uci FROM game_moves WHERE game_id=? AND line_revision=? ORDER BY ply",
+            (run["game_id"], run["line_revision"]))]
+        classifications = [dict(row) for row in db.execute(
+            "SELECT * FROM move_classifications WHERE run_id=? ORDER BY ply", (run_id,))]
+        metrics, events = build_move_facts(
+            assessments, moves, source=run["source"], run_id=run_id,
+            classifications=classifications)
+        for event in events:
+            event["tags"] = ["opportunity"]
+        game = db.execute("SELECT color FROM games WHERE game_id=?", (run["game_id"],)).fetchone()
+        events.extend(detect_registered_events(
+            assessments, moves, metrics, run_id=run_id, source=run["source"],
+            user_color=user_color or (game["color"] if game else None)))
+        db.executemany("""INSERT OR IGNORE INTO move_metrics (
+            run_id,game_id,line_revision,ply,metric_version,source,
+            white_cp_before,mate_white_before,white_cp_after,mate_white_after,
+            cp_loss,mate_discontinuity,wdl_before_json,wdl_after_json,wdl_model,
+            accuracy,accuracy_source,accuracy_formula_id,severity,
+            severity_policy_version,legacy_label
+        ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+            [(run_id, run["game_id"], run["line_revision"], row["ply"],
+              row["metric_version"], row["source"], row["white_cp_before"],
+              row["mate_white_before"], row["white_cp_after"], row["mate_white_after"],
+              row["cp_loss"], row["mate_discontinuity"], row["wdl_before_json"],
+              row["wdl_after_json"], row["wdl_model"], row["accuracy"],
+              row["accuracy_source"], row["accuracy_formula_id"], row["severity"],
+              row["severity_policy_version"], row["legacy_label"]) for row in metrics])
+        cls._insert_event_rows(db, events, run_id, run["game_id"], run["line_revision"], ignore=True)
+        return len(metrics)
+
     @staticmethod
     def _load_analysis_events(db: sqlite3.Connection, run_id: str) -> list[dict]:
         events = [dict(row) for row in db.execute(
@@ -1550,6 +1596,19 @@ class GameRepository:
                 "SELECT tag FROM event_tags WHERE event_key=? ORDER BY tag",
                 (event["event_key"],))]
         return events
+
+    @staticmethod
+    def _load_move_metrics(db: sqlite3.Connection, run_id: str) -> list[dict]:
+        rows = db.execute(
+            "SELECT mm.*,gm.mover,CASE WHEN pb.middle_start_ply IS NULL THEN 'middlegame' "
+            "WHEN mm.ply<pb.middle_start_ply THEN 'opening' WHEN pb.end_start_ply IS NULL "
+            "THEN 'middlegame' WHEN mm.ply<pb.end_start_ply THEN 'middlegame' ELSE 'endgame' END phase "
+            "FROM move_metrics mm JOIN game_moves gm ON gm.game_id=mm.game_id "
+            "AND gm.line_revision=mm.line_revision AND gm.ply=mm.ply "
+            "LEFT JOIN game_phase_boundaries pb ON pb.game_id=mm.game_id "
+            "AND pb.line_revision=mm.line_revision WHERE mm.run_id=? ORDER BY mm.ply",
+            (run_id,)).fetchall()
+        return [dict(row) for row in rows]
 
     def find_analysis_cache(self, game_id: str, line_revision: int, line_hash: str,
                             source: str, engine_version: str | None,
@@ -1571,8 +1630,7 @@ class GameRepository:
                 "SELECT * FROM position_assessments WHERE run_id=? ORDER BY ply", (run["run_id"],))]
             result["classifications"] = [dict(row) for row in db.execute(
                 "SELECT * FROM move_classifications WHERE run_id=? ORDER BY ply", (run["run_id"],))]
-            result["move_metrics"] = [dict(row) for row in db.execute(
-                "SELECT * FROM move_metrics WHERE run_id=? ORDER BY ply", (run["run_id"],))]
+            result["move_metrics"] = self._load_move_metrics(db, run["run_id"])
             result["alternatives"] = [dict(row) for row in db.execute(
                 "SELECT * FROM analysis_alternatives WHERE run_id=? ORDER BY ply,multipv_rank",
                 (run["run_id"],))]
@@ -1641,8 +1699,7 @@ class GameRepository:
             result["classifications"] = [dict(row) for row in db.execute(
                 "SELECT * FROM move_classifications WHERE run_id=? AND ply>0 ORDER BY ply",
                 (run["run_id"],))]
-            result["move_metrics"] = [dict(row) for row in db.execute(
-                "SELECT * FROM move_metrics WHERE run_id=? ORDER BY ply", (run["run_id"],))]
+            result["move_metrics"] = self._load_move_metrics(db, run["run_id"])
             result["alternatives"] = [dict(row) for row in db.execute(
                 "SELECT * FROM analysis_alternatives WHERE run_id=? ORDER BY ply,multipv_rank",
                 (run["run_id"],))]

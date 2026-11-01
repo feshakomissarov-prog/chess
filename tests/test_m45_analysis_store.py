@@ -10,6 +10,7 @@ import pytest
 from chess_coach.lichess.repository import GameRepository, SCHEMA_VERSION
 from chess_coach.lichess.archive import ArchiveSync
 from chess_coach.lichess.api import RateLimitError
+from chess_coach.lichess.statistics import StatisticsService
 
 
 def _seed_repository(path) -> tuple[GameRepository, str]:
@@ -311,6 +312,38 @@ def test_late_lichess_pgn_evaluations_merge_into_one_partial_run_without_erasing
                                   "FROM analysis_coverage WHERE run_id=?",
                                   (first_run_id,)).fetchone()
         assert tuple(coverage) == (2, 1)
+    finally:
+        repository.shutdown()
+
+
+def test_lichess_archive_move_metrics_drive_summary_without_legacy_classifications(tmp_path):
+    repository = GameRepository(tmp_path / "canonical-lichess-metrics.sqlite3")
+    try:
+        pgn = ('[Event "Synthetic"]\n[Site "Lichess"]\n[Date "2026.10.01"]\n'
+               '[White "Me"]\n[Black "Opponent"]\n[Result "1-0"]\n\n'
+               '1. e4 { [%eval 0.50,12] } e5 { [%eval 0.50,12] } '
+               '2. Nf3 { [%eval -1.00,12] } Nc6 { [%eval -1.00,12] } 1-0\n')
+        repository.import_archive_record("Me", {"id": "lichess-metrics", "pgn": pgn,
+                "accuracy": {"white": 76, "black": 81}}, checkpoint_ms=1, backfill=True)
+        account_id = repository.ensure_archive_account("Me")
+        run = repository.list_analyses("lichess-metrics")[0]
+        with repository._connection() as db:
+            legacy_count = db.execute(
+                "SELECT COUNT(*) FROM move_classifications WHERE run_id=?", (run["run_id"],)
+            ).fetchone()[0]
+        detail = repository.latest_analysis_detail("lichess-metrics", 1)
+        by_ply = {item["ply"]: item for item in detail["move_metrics"]}
+        assert legacy_count == 0
+        assert by_ply[3]["severity"] in {"mistake", "blunder"}
+        assert by_ply[3]["source"] == "lichess-pgn"
+        summary = StatisticsService(repository).summary(
+            account_id=account_id, analysis_source="lichess-pgn")
+        assert summary["own_assessed_moves"] == 1
+        assert summary["own_error_count"] == 1
+        assert summary["lichess_accuracy"]["white"] == 76
+        page = StatisticsService(repository).game_page(
+            account_id=account_id, analysis_source="lichess-pgn")
+        assert page["items"][0]["own_mistakes"] + page["items"][0]["own_blunders"] == 1
     finally:
         repository.shutdown()
 

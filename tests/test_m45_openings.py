@@ -85,15 +85,19 @@ def test_opening_conflict_is_visible_and_statistics_are_grouped_by_owner_color(t
         line = repo.current_line("conflict")
         repo.save_analysis("conflict", line_revision=1, line_hash=line["line_hash"],
             source="stockfish-fast", engine_name="fake", engine_version="1",
-            parameters={"nodes": 1}, assessments=[{"ply": 1, "white_cp": 20}],
+            parameters={"nodes": 1}, assessments=[{"ply": 0, "white_cp": 0},
+                                                   {"ply": 1, "white_cp": -120}],
             classifications=[{"ply": 1, "mover": "white", "eval_loss_cp": 80,
                               "label": "mistake", "phase": "opening",
                               "algorithm_version": "test"}])
+        with repo._connection() as db:
+            db.execute("INSERT INTO game_phase_boundaries(game_id,line_revision,middle_start_ply,"
+                       "end_start_ply,source,method_version) VALUES ('conflict',1,2,NULL,'synthetic','test')")
         by_source = StatisticsService(repo).opening_statistics(analysis_source="stockfish-fast")
         assert by_source[0]["analysis_source"] == "stockfish-fast"
         assert by_source[0]["evaluated_own_moves"] == 1
         assert by_source[0]["own_errors_per_100_evaluated"] == 100.0
-        assert by_source[0]["mean_opening_cpl_cp"] == 80
+        assert by_source[0]["mean_opening_cpl_cp"] == 120
     finally:
         repo.shutdown()
 

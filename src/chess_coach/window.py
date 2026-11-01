@@ -332,30 +332,32 @@ class StatisticsGameDialog(QDialog):
                 f"Оценено позиций: {scored_positions} / {total_positions}; "
                 f"источник: {source}; статус: {analysis.get('status', 'unknown')}; "
                 f"алгоритм ошибок: {CLASSIFIER_VERSION}"))
-            for item in analysis.get("classifications", []):
-                label = str(item.get("label", "unknown"))
+            metrics = analysis.get("move_metrics", [])
+            for item in metrics:
+                label = str(item.get("severity", "unknown"))
                 if label in {"mistake", "blunder", "inaccuracy"}:
                     row = QListWidgetItem(
                         f"Ход {item['ply']} · {label} · {item.get('phase') or 'фаза неизвестна'} · "
-                        f"{item.get('eval_loss_cp')} CP")
+                        f"{item.get('cp_loss')} CP · {item.get('source')}")
                     row.setData(Qt.ItemDataRole.UserRole, int(item["ply"]))
                     self.errors.addItem(row)
-            severity_counts = {label: sum(1 for item in analysis.get("classifications", [])
-                                          if item.get("mover") == color and item.get("label") == label)
+            severity_counts = {label: sum(1 for item in metrics
+                                          if item.get("mover") == color and item.get("severity") == label)
                                for label in ("inaccuracy", "mistake", "blunder")}
             own_phase_counts = {}
-            for item in analysis.get("classifications", []):
+            for item in metrics:
                 if item.get("mover") == color:
                     phase = item.get("phase") or "unknown"
                     own_phase_counts.setdefault(phase, {"inaccuracy": 0, "mistake": 0, "blunder": 0})
-                    if item.get("label") in own_phase_counts[phase]:
-                        own_phase_counts[phase][item["label"]] += 1
+                    if item.get("severity") in own_phase_counts[phase]:
+                        own_phase_counts[phase][item["severity"]] += 1
             phase_summary = " · ".join(
                 f"{phase}: {values['inaccuracy']}/{values['mistake']}/{values['blunder']}"
                 for phase, values in sorted(own_phase_counts.items())) or "нет классифицированных ходов"
             self.graph_layout.addWidget(QLabel(
                 f"Свои неточности/ошибки/зевки: {severity_counts['inaccuracy']}/"
-                f"{severity_counts['mistake']}/{severity_counts['blunder']}\n"
+                f"{severity_counts['mistake']}/{severity_counts['blunder']} "
+                f"(сопоставимых оценённых ходов: {sum(1 for item in metrics if item.get('mover') == color and item.get('cp_loss') is not None)})\n"
                 f"По фазам (неточности/ошибки/зевки): {phase_summary}\n"
                 "Локальная точность: недоступна, formula_id не утверждён."))
             for event in analysis.get("events", []):

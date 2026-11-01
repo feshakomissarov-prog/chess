@@ -172,33 +172,28 @@ class StatisticsService:
                 "JOIN position_assessments pa ON pa.run_id=c.run_id WHERE pa.ply>0 "
                 "AND (pa.white_cp IS NOT NULL OR pa.mate_white IS NOT NULL)",
                 [*params, *source_params]).fetchone()[0]
-            classification_sql = (selected + ", class_rows AS (SELECT mc.*,fg.my_color FROM chosen c "
-                "JOIN move_classifications mc ON mc.run_id=c.run_id "
-                "JOIN filtered_games fg ON fg.game_id=mc.game_id WHERE mc.ply>0) "
-                "SELECT COUNT(CASE WHEN mover=my_color AND eval_loss_cp IS NOT NULL THEN 1 END) AS own_count,"
-                "COUNT(CASE WHEN mover=my_color AND eval_loss_cp IS NOT NULL "
-                "AND label IN ('mistake','blunder') THEN 1 END) AS own_errors,"
-                "COUNT(CASE WHEN mover=my_color AND eval_loss_cp IS NOT NULL AND label='inaccuracy' "
-                "THEN 1 END) AS own_inaccuracies,"
-                "COUNT(CASE WHEN mover=my_color AND eval_loss_cp IS NOT NULL AND label='mistake' "
-                "THEN 1 END) AS own_mistakes,"
-                "COUNT(CASE WHEN mover=my_color AND eval_loss_cp IS NOT NULL AND label='blunder' "
-                "THEN 1 END) AS own_blunders,"
-                "AVG(CASE WHEN mover=my_color AND eval_loss_cp IS NOT NULL THEN eval_loss_cp END) AS avg_cpl,"
-                "COUNT(CASE WHEN mover=my_color AND eval_loss_cp>=200 THEN 1 END) AS swings "
+            classification_sql = (selected + ", class_rows AS (SELECT mm.*,gm.mover,fg.my_color FROM chosen c "
+                "JOIN move_metrics mm ON mm.run_id=c.run_id AND mm.metric_version='cc-move-metrics-v2' "
+                "JOIN game_moves gm ON gm.game_id=mm.game_id AND gm.line_revision=mm.line_revision AND gm.ply=mm.ply "
+                "JOIN filtered_games fg ON fg.game_id=mm.game_id WHERE mm.ply>0) "
+                "SELECT COUNT(CASE WHEN mover=my_color AND cp_loss IS NOT NULL THEN 1 END) AS own_count,"
+                "COUNT(CASE WHEN mover=my_color AND severity IN ('mistake','blunder') THEN 1 END) AS own_errors,"
+                "COUNT(CASE WHEN mover=my_color AND severity='inaccuracy' THEN 1 END) AS own_inaccuracies,"
+                "COUNT(CASE WHEN mover=my_color AND severity='mistake' THEN 1 END) AS own_mistakes,"
+                "COUNT(CASE WHEN mover=my_color AND severity='blunder' THEN 1 END) AS own_blunders,"
+                "AVG(CASE WHEN mover=my_color AND cp_loss IS NOT NULL THEN cp_loss END) AS avg_cpl,"
+                "COUNT(CASE WHEN mover=my_color AND cp_loss>=200 THEN 1 END) AS swings "
                 "FROM class_rows")
             own = db.execute(classification_sql, [*params, *source_params]).fetchone()
-            per_game = db.execute(selected + ", own_per_game AS (SELECT mc.game_id,"
-                "COUNT(CASE WHEN mc.mover=fg.my_color AND mc.eval_loss_cp IS NOT NULL "
+            per_game = db.execute(selected + ", own_per_game AS (SELECT mm.game_id,"
+                "COUNT(CASE WHEN gm.mover=fg.my_color AND mm.cp_loss IS NOT NULL "
                 "THEN 1 END) AS assessed,"
-                "SUM(CASE WHEN mc.mover=fg.my_color AND mc.eval_loss_cp IS NOT NULL "
-                "AND mc.label='inaccuracy' THEN 1 ELSE 0 END) AS inaccuracies,"
-                "SUM(CASE WHEN mc.mover=fg.my_color AND mc.eval_loss_cp IS NOT NULL "
-                "AND mc.label='mistake' THEN 1 ELSE 0 END) AS mistakes,"
-                "SUM(CASE WHEN mc.mover=fg.my_color AND mc.eval_loss_cp IS NOT NULL "
-                "AND mc.label='blunder' THEN 1 ELSE 0 END) AS blunders "
+                "SUM(CASE WHEN gm.mover=fg.my_color AND mm.severity='inaccuracy' THEN 1 ELSE 0 END) AS inaccuracies,"
+                "SUM(CASE WHEN gm.mover=fg.my_color AND mm.severity='mistake' THEN 1 ELSE 0 END) AS mistakes,"
+                "SUM(CASE WHEN gm.mover=fg.my_color AND mm.severity='blunder' THEN 1 ELSE 0 END) AS blunders "
                 "FROM chosen c JOIN filtered_games fg ON fg.game_id=c.game_id "
-                "LEFT JOIN move_classifications mc ON mc.run_id=c.run_id AND mc.ply>0 "
+                "LEFT JOIN move_metrics mm ON mm.run_id=c.run_id AND mm.metric_version='cc-move-metrics-v2' AND mm.ply>0 "
+                "LEFT JOIN game_moves gm ON gm.game_id=mm.game_id AND gm.line_revision=mm.line_revision AND gm.ply=mm.ply "
                 "GROUP BY fg.game_id) SELECT COUNT(CASE WHEN assessed>0 THEN 1 END) AS analyzed_games,"
                 "AVG(CASE WHEN assessed>0 THEN inaccuracies END) AS avg_inaccuracies,"
                 "AVG(CASE WHEN assessed>0 THEN mistakes END) AS avg_mistakes,"
@@ -206,12 +201,16 @@ class StatisticsService:
                 "AVG(CASE WHEN assessed>0 THEN CASE WHEN blunders>0 THEN 1.0 ELSE 0 END END) "
                 "AS share_games_with_blunder "
                 "FROM own_per_game", [*params, *source_params]).fetchone()
-            phase_rows = db.execute(selected + " SELECT COALESCE(mc.phase,'unknown') AS phase,"
-                "CASE WHEN mc.mover=fg.my_color THEN 'mine' ELSE 'opponent' END AS perspective,"
-                "mc.label,COUNT(*) AS count FROM chosen c "
-                "JOIN move_classifications mc ON mc.run_id=c.run_id "
-                "JOIN filtered_games fg ON fg.game_id=mc.game_id WHERE mc.ply>0 "
-                "GROUP BY COALESCE(mc.phase,'unknown'),perspective,mc.label",
+            phase_rows = db.execute(selected + " SELECT CASE WHEN pb.middle_start_ply IS NULL THEN 'middlegame' "
+                "WHEN mm.ply<pb.middle_start_ply THEN 'opening' WHEN pb.end_start_ply IS NULL THEN 'middlegame' "
+                "WHEN mm.ply<pb.end_start_ply THEN 'middlegame' ELSE 'endgame' END AS phase,"
+                "CASE WHEN gm.mover=fg.my_color THEN 'mine' ELSE 'opponent' END AS perspective,"
+                "mm.severity AS label,COUNT(*) AS count FROM chosen c "
+                "JOIN move_metrics mm ON mm.run_id=c.run_id AND mm.metric_version='cc-move-metrics-v2' "
+                "JOIN game_moves gm ON gm.game_id=mm.game_id AND gm.line_revision=mm.line_revision AND gm.ply=mm.ply "
+                "JOIN filtered_games fg ON fg.game_id=mm.game_id "
+                "LEFT JOIN game_phase_boundaries pb ON pb.game_id=mm.game_id AND pb.line_revision=mm.line_revision "
+                "WHERE mm.ply>0 GROUP BY phase,perspective,mm.severity",
                 [*params, *source_params]).fetchall()
             trend = db.execute(filtered + " SELECT started_at AS date,game_time_precision,"
                 "my_rating AS rating,game_id FROM filtered_games WHERE my_rating IS NOT NULL "
@@ -309,19 +308,21 @@ class StatisticsService:
                 "COALESCE(ag.color,g.color) AS my_color,g.source AS game_source,"
                 "COALESCE(ag.account_id,'local') AS account_scope,"
                 "COUNT(DISTINCT g.game_id) AS games,"
-                "COUNT(CASE WHEN mc.mover=COALESCE(ag.color,g.color) AND mc.ply>0 "
-                "AND mc.eval_loss_cp IS NOT NULL THEN 1 END) AS evaluated_own_moves,"
-                "COUNT(CASE WHEN mc.mover=COALESCE(ag.color,g.color) AND mc.ply>0 "
-                "AND mc.eval_loss_cp IS NOT NULL AND mc.label IN ('mistake','blunder') "
+                "COUNT(CASE WHEN gm.mover=COALESCE(ag.color,g.color) AND mm.ply>0 "
+                "AND mm.cp_loss IS NOT NULL THEN 1 END) AS evaluated_own_moves,"
+                "COUNT(CASE WHEN gm.mover=COALESCE(ag.color,g.color) AND mm.ply>0 "
+                "AND mm.severity IN ('mistake','blunder') "
                 "THEN 1 END) AS own_errors,"
-                "AVG(CASE WHEN mc.mover=COALESCE(ag.color,g.color) AND mc.ply>0 "
-                "AND mc.eval_loss_cp IS NOT NULL AND mc.phase='opening' "
-                "THEN mc.eval_loss_cp END) AS mean_opening_cpl_cp "
+                "AVG(CASE WHEN gm.mover=COALESCE(ag.color,g.color) AND mm.ply>0 "
+                "AND mm.cp_loss IS NOT NULL AND pb.middle_start_ply IS NOT NULL "
+                "AND mm.ply<pb.middle_start_ply THEN mm.cp_loss END) AS mean_opening_cpl_cp "
                 "FROM games g JOIN game_revisions gr ON gr.game_id=g.game_id "
                 "LEFT JOIN opening_matches om ON om.game_id=g.game_id AND om.line_revision=g.line_revision "
                 "LEFT JOIN account_games ag ON ag.game_id=g.game_id "
                 "LEFT JOIN chosen ar ON ar.game_id=g.game_id AND ar.line_revision=g.line_revision "
-                "LEFT JOIN move_classifications mc ON mc.run_id=ar.run_id "
+                "LEFT JOIN move_metrics mm ON mm.run_id=ar.run_id AND mm.metric_version='cc-move-metrics-v2' "
+                "LEFT JOIN game_moves gm ON gm.game_id=mm.game_id AND gm.line_revision=mm.line_revision AND gm.ply=mm.ply "
+                "LEFT JOIN game_phase_boundaries pb ON pb.game_id=mm.game_id AND pb.line_revision=mm.line_revision "
                 "WHERE " + " AND ".join(clauses) +
                 " GROUP BY COALESCE(om.eco,g.opening_eco,'unknown'),"
                 "COALESCE(om.name,g.opening_name,'unknown'),COALESCE(om.family,g.opening_name,'unknown'),"
@@ -482,28 +483,42 @@ class StatisticsService:
         self.repository._wait_before_read()
         with self.repository._connection() as db:
             openings = db.execute(cte + where + ") SELECT eco,opening,COUNT(DISTINCT scope.game_id) games,"
-                "COUNT(CASE WHEN mc.mover=my_color AND mc.eval_loss_cp IS NOT NULL THEN 1 END) evaluated_moves,"
-                "COUNT(CASE WHEN mc.mover=my_color AND mc.eval_loss_cp IS NOT NULL "
-                "AND mc.label IN ('mistake','blunder') THEN 1 END) errors "
-                "FROM scope LEFT JOIN move_classifications mc ON mc.run_id=scope.run_id AND mc.phase='opening' "
-                "AND mc.ply>0 GROUP BY eco,opening ORDER BY errors DESC,games DESC,eco LIMIT 20",
+                "COUNT(CASE WHEN gm.mover=my_color AND mm.cp_loss IS NOT NULL "
+                "AND pb.middle_start_ply IS NOT NULL AND mm.ply<pb.middle_start_ply THEN 1 END) evaluated_moves,"
+                "COUNT(CASE WHEN gm.mover=my_color AND mm.severity IN ('mistake','blunder') "
+                "AND pb.middle_start_ply IS NOT NULL AND mm.ply<pb.middle_start_ply THEN 1 END) errors "
+                "FROM scope LEFT JOIN move_metrics mm ON mm.run_id=scope.run_id "
+                "AND mm.metric_version='cc-move-metrics-v2' AND mm.ply>0 "
+                "LEFT JOIN game_moves gm ON gm.game_id=mm.game_id AND gm.line_revision=mm.line_revision AND gm.ply=mm.ply "
+                "LEFT JOIN game_phase_boundaries pb ON pb.game_id=mm.game_id AND pb.line_revision=mm.line_revision "
+                "GROUP BY eco,opening ORDER BY errors DESC,games DESC,eco LIMIT 20",
                 [*source_params, *params]).fetchall()
-            phases = db.execute(cte + where + ") SELECT COALESCE(mc.phase,'unknown') phase,"
-                "COUNT(CASE WHEN mc.mover=my_color AND mc.eval_loss_cp IS NOT NULL THEN 1 END) evaluated_moves,"
-                "COUNT(CASE WHEN mc.mover=my_color AND mc.eval_loss_cp IS NOT NULL "
-                "AND mc.label IN ('mistake','blunder') THEN 1 END) errors,"
-                "AVG(CASE WHEN mc.mover=my_color AND mc.eval_loss_cp IS NOT NULL THEN mc.eval_loss_cp END) mean_loss_cp "
-                "FROM scope LEFT JOIN move_classifications mc ON mc.run_id=scope.run_id AND mc.ply>0 "
-                "GROUP BY COALESCE(mc.phase,'unknown') ORDER BY errors DESC,phase",
+            phases = db.execute(cte + where + ") SELECT CASE WHEN pb.middle_start_ply IS NULL THEN 'middlegame' "
+                "WHEN mm.ply<pb.middle_start_ply THEN 'opening' WHEN pb.end_start_ply IS NULL THEN 'middlegame' "
+                "WHEN mm.ply<pb.end_start_ply THEN 'middlegame' ELSE 'endgame' END phase,"
+                "COUNT(CASE WHEN gm.mover=my_color AND mm.cp_loss IS NOT NULL THEN 1 END) evaluated_moves,"
+                "COUNT(CASE WHEN gm.mover=my_color AND mm.severity IN ('mistake','blunder') THEN 1 END) errors,"
+                "AVG(CASE WHEN gm.mover=my_color AND mm.cp_loss IS NOT NULL THEN mm.cp_loss END) mean_loss_cp "
+                "FROM scope LEFT JOIN move_metrics mm ON mm.run_id=scope.run_id "
+                "AND mm.metric_version='cc-move-metrics-v2' AND mm.ply>0 "
+                "LEFT JOIN game_moves gm ON gm.game_id=mm.game_id AND gm.line_revision=mm.line_revision AND gm.ply=mm.ply "
+                "LEFT JOIN game_phase_boundaries pb ON pb.game_id=mm.game_id AND pb.line_revision=mm.line_revision "
+                "GROUP BY phase ORDER BY errors DESC,phase",
                 [*source_params, *params]).fetchall()
-            evidence = db.execute(cte + where + ") SELECT scope.game_id,mc.ply,mc.phase,mc.label,"
-                "mc.eval_loss_cp,(SELECT aa.pv_uci FROM analysis_alternatives aa "
-                "WHERE aa.run_id=scope.run_id AND aa.ply=mc.ply-1 AND aa.multipv_rank=1) best_pv_uci,"
+            evidence = db.execute(cte + where + ") SELECT scope.game_id,mm.ply,"
+                "CASE WHEN pb.middle_start_ply IS NULL THEN 'middlegame' WHEN mm.ply<pb.middle_start_ply THEN 'opening' "
+                "WHEN pb.end_start_ply IS NULL THEN 'middlegame' WHEN mm.ply<pb.end_start_ply THEN 'middlegame' ELSE 'endgame' END phase,"
+                "mm.severity AS label,"
+                "mm.cp_loss,(SELECT aa.pv_uci FROM analysis_alternatives aa "
+                "WHERE aa.run_id=scope.run_id AND aa.ply=mm.ply-1 AND aa.multipv_rank=1) best_pv_uci,"
                 "scope.eco,scope.opening,"
                 "(SELECT ar.source FROM analysis_runs ar WHERE ar.run_id=scope.run_id) analysis_source "
-                "FROM scope JOIN move_classifications mc ON mc.run_id=scope.run_id "
-                "WHERE mc.mover=scope.my_color AND mc.ply>0 AND mc.eval_loss_cp IS NOT NULL "
-                "AND mc.label IN ('mistake','blunder') ORDER BY mc.eval_loss_cp DESC,scope.game_id,mc.ply LIMIT 20",
+                "FROM scope JOIN move_metrics mm ON mm.run_id=scope.run_id "
+                "AND mm.metric_version='cc-move-metrics-v2' "
+                "JOIN game_moves gm ON gm.game_id=mm.game_id AND gm.line_revision=mm.line_revision AND gm.ply=mm.ply "
+                "LEFT JOIN game_phase_boundaries pb ON pb.game_id=mm.game_id AND pb.line_revision=mm.line_revision "
+                "WHERE gm.mover=scope.my_color AND mm.ply>0 AND mm.cp_loss IS NOT NULL "
+                "AND mm.severity IN ('mistake','blunder') ORDER BY mm.cp_loss DESC,scope.game_id,mm.ply LIMIT 20",
                 [*source_params, *params]).fetchall()
         opening_rows = []
         for row in openings:
@@ -548,20 +563,26 @@ class StatisticsService:
                 "CASE WHEN g.started_at IS NULL THEN 'unknown' ELSE substr(g.started_at,1,7) END period,"
                 "CASE ag.color WHEN 'white' THEN g.lichess_accuracy_white "
                 "WHEN 'black' THEN g.lichess_accuracy_black END official_accuracy,"
-                "(SELECT COUNT(*) FROM move_classifications mc WHERE mc.run_id=ar.run_id "
-                "AND mc.ply>0 AND mc.mover=ag.color AND mc.eval_loss_cp IS NOT NULL) assessed_own_moves,"
-                "(SELECT COUNT(*) FROM move_classifications mc WHERE mc.run_id=ar.run_id "
-                "AND mc.ply>0 AND mc.mover=ag.color AND mc.eval_loss_cp IS NOT NULL "
-                "AND mc.label IN ('mistake','blunder')) own_errors,"
-                "(SELECT COUNT(*) FROM move_classifications mc WHERE mc.run_id=ar.run_id "
-                "AND mc.ply>0 AND mc.mover=ag.color AND mc.eval_loss_cp IS NOT NULL "
-                "AND mc.label='inaccuracy') own_inaccuracies,"
-                "(SELECT COUNT(*) FROM move_classifications mc WHERE mc.run_id=ar.run_id "
-                "AND mc.ply>0 AND mc.mover=ag.color AND mc.eval_loss_cp IS NOT NULL "
-                "AND mc.label='mistake') own_mistakes,"
-                "(SELECT COUNT(*) FROM move_classifications mc WHERE mc.run_id=ar.run_id "
-                "AND mc.ply>0 AND mc.mover=ag.color AND mc.eval_loss_cp IS NOT NULL "
-                "AND mc.label='blunder') own_blunders,"
+                "(SELECT COUNT(*) FROM move_metrics mm JOIN game_moves gm ON gm.game_id=mm.game_id "
+                "AND gm.line_revision=mm.line_revision AND gm.ply=mm.ply WHERE mm.run_id=ar.run_id "
+                "AND mm.metric_version='cc-move-metrics-v2' AND mm.ply>0 AND gm.mover=ag.color "
+                "AND mm.cp_loss IS NOT NULL) assessed_own_moves,"
+                "(SELECT COUNT(*) FROM move_metrics mm JOIN game_moves gm ON gm.game_id=mm.game_id "
+                "AND gm.line_revision=mm.line_revision AND gm.ply=mm.ply WHERE mm.run_id=ar.run_id "
+                "AND mm.metric_version='cc-move-metrics-v2' AND gm.mover=ag.color "
+                "AND mm.severity IN ('mistake','blunder')) own_errors,"
+                "(SELECT COUNT(*) FROM move_metrics mm JOIN game_moves gm ON gm.game_id=mm.game_id "
+                "AND gm.line_revision=mm.line_revision AND gm.ply=mm.ply WHERE mm.run_id=ar.run_id "
+                "AND mm.metric_version='cc-move-metrics-v2' AND gm.mover=ag.color "
+                "AND mm.severity='inaccuracy') own_inaccuracies,"
+                "(SELECT COUNT(*) FROM move_metrics mm JOIN game_moves gm ON gm.game_id=mm.game_id "
+                "AND gm.line_revision=mm.line_revision AND gm.ply=mm.ply WHERE mm.run_id=ar.run_id "
+                "AND mm.metric_version='cc-move-metrics-v2' AND gm.mover=ag.color "
+                "AND mm.severity='mistake') own_mistakes,"
+                "(SELECT COUNT(*) FROM move_metrics mm JOIN game_moves gm ON gm.game_id=mm.game_id "
+                "AND gm.line_revision=mm.line_revision AND gm.ply=mm.ply WHERE mm.run_id=ar.run_id "
+                "AND mm.metric_version='cc-move-metrics-v2' AND gm.mover=ag.color "
+                "AND mm.severity='blunder') own_blunders,"
                 "(SELECT COUNT(*) FROM analysis_events ae WHERE ae.run_id=ar.run_id "
                 "AND ae.event_type='missed_opportunity' AND ae.confidence_state='candidate') opportunity_candidates,"
                 "(SELECT COUNT(*) FROM analysis_events ae WHERE ae.run_id=ar.run_id "
@@ -674,12 +695,18 @@ class StatisticsService:
                     f"AND gp.line_revision=g.line_revision) AS total_positions, " \
                     f"(SELECT COUNT(*) FROM position_assessments pa WHERE pa.run_id=({latest_run}) " \
                     f"AND (pa.white_cp IS NOT NULL OR pa.mate_white IS NOT NULL)) AS scored_positions, " \
-                    f"(SELECT COUNT(*) FROM move_classifications mc WHERE mc.run_id=({latest_run}) " \
-                    f"AND mc.mover={owner_color} AND mc.label='inaccuracy') AS own_inaccuracies, " \
-                    f"(SELECT COUNT(*) FROM move_classifications mc WHERE mc.run_id=({latest_run}) " \
-                    f"AND mc.mover={owner_color} AND mc.label='mistake') AS own_mistakes, " \
-                    f"(SELECT COUNT(*) FROM move_classifications mc WHERE mc.run_id=({latest_run}) " \
-                    f"AND mc.mover={owner_color} AND mc.label='blunder') AS own_blunders, " \
+                    f"(SELECT COUNT(*) FROM move_metrics mm JOIN game_moves gm ON gm.game_id=mm.game_id " \
+                    f"AND gm.line_revision=mm.line_revision AND gm.ply=mm.ply WHERE mm.run_id=({latest_run}) " \
+                    f"AND mm.metric_version='cc-move-metrics-v2' AND gm.mover={owner_color} " \
+                    f"AND mm.severity='inaccuracy') AS own_inaccuracies, " \
+                    f"(SELECT COUNT(*) FROM move_metrics mm JOIN game_moves gm ON gm.game_id=mm.game_id " \
+                    f"AND gm.line_revision=mm.line_revision AND gm.ply=mm.ply WHERE mm.run_id=({latest_run}) " \
+                    f"AND mm.metric_version='cc-move-metrics-v2' AND gm.mover={owner_color} " \
+                    f"AND mm.severity='mistake') AS own_mistakes, " \
+                    f"(SELECT COUNT(*) FROM move_metrics mm JOIN game_moves gm ON gm.game_id=mm.game_id " \
+                    f"AND gm.line_revision=mm.line_revision AND gm.ply=mm.ply WHERE mm.run_id=({latest_run}) " \
+                    f"AND mm.metric_version='cc-move-metrics-v2' AND gm.mover={owner_color} " \
+                    f"AND mm.severity='blunder') AS own_blunders, " \
                     f"CASE {owner_color} WHEN 'white' THEN g.lichess_accuracy_white " \
                     f"WHEN 'black' THEN g.lichess_accuracy_black END AS owner_lichess_accuracy"
         page_params = ([analysis_source] * 7 if analysis_source else []) + [*params]

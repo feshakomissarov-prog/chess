@@ -18,6 +18,9 @@ def _add_account_game(repo, account_id, index, color, started_at, *, accuracy=85
         db.execute("UPDATE games SET source='lichess_archive',"
                    "lichess_accuracy_white=?,lichess_accuracy_black=? WHERE game_id=?",
                    (accuracy, accuracy + 2, game_id))
+        db.execute("INSERT INTO game_phase_boundaries(game_id,line_revision,middle_start_ply,"
+                   "end_start_ply,source,method_version) VALUES (?,1,3,NULL,'synthetic','test')",
+                   (game_id,))
         db.execute("INSERT INTO account_games(account_id,game_id,remote_id,imported_at,color,"
                    "player_rating,opponent_rating,opponent,player_name) VALUES (?,?,?,?,?,?,?,?,?)",
                    (account_id, game_id, game_id, datetime.now(timezone.utc).isoformat(),
@@ -25,8 +28,13 @@ def _add_account_game(repo, account_id, index, color, started_at, *, accuracy=85
     if complete:
         line = repo.current_line(game_id)
         count = len(moves.split())
-        assessments = [{"ply": ply, "white_cp": 0, "depth": 1}
-                       for ply in range(count + 1)]
+        scores = [0]
+        for ply in range(1, count + 1):
+            mover = "white" if ply % 2 else "black"
+            scores.append(scores[-1] + (-120 if label != "good" and mover == "white" else
+                                        120 if label != "good" and mover == "black" else 0))
+        assessments = [{"ply": ply, "white_cp": score, "depth": 1}
+                       for ply, score in enumerate(scores)]
         classes = [{"ply": ply, "mover": "white" if ply % 2 else "black",
                     "eval_loss_cp": 120 if label != "good" else 0, "label": label, "phase": "opening",
                     "algorithm_version": "synthetic"}
