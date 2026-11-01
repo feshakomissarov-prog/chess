@@ -18,7 +18,7 @@ import chess
 import chess.pgn
 
 
-SCHEMA_VERSION = 14
+SCHEMA_VERSION = 15
 DEFAULT_PAGE_SIZE = 100
 MAX_PAGE_SIZE = 500
 
@@ -198,6 +198,24 @@ class GameRepository:
                     FOREIGN KEY(game_id,line_revision)
                       REFERENCES game_revisions(game_id,line_revision) ON DELETE CASCADE
                 );
+                CREATE TABLE IF NOT EXISTS opening_matches (
+                    game_id TEXT NOT NULL,
+                    line_revision INTEGER NOT NULL,
+                    dataset_revision TEXT NOT NULL,
+                    algorithm_version TEXT NOT NULL,
+                    eco TEXT NOT NULL,
+                    name TEXT NOT NULL,
+                    family TEXT NOT NULL,
+                    variation TEXT,
+                    matched_ply INTEGER NOT NULL,
+                    lichess_conflict INTEGER NOT NULL DEFAULT 0,
+                    matched_at TEXT NOT NULL,
+                    PRIMARY KEY(game_id,line_revision),
+                    FOREIGN KEY(game_id,line_revision)
+                      REFERENCES game_revisions(game_id,line_revision) ON DELETE CASCADE
+                );
+                CREATE INDEX IF NOT EXISTS idx_opening_matches_eco
+                    ON opening_matches(eco,game_id,line_revision);
                 CREATE TABLE IF NOT EXISTS game_notes (
                     note_id TEXT PRIMARY KEY, game_id TEXT NOT NULL,
                     line_revision INTEGER, ply INTEGER, position_uid TEXT,
@@ -1102,9 +1120,19 @@ class GameRepository:
         imported_at = datetime.now(timezone.utc).isoformat()
         phase = record.get("division")
         middle_start = end_start = None
+        from .phases import PHASE_FALLBACK_VERSION, infer_phase_boundaries
         if isinstance(phase, dict):
             middle_start = _phase_ply(phase.get("middle"))
             end_start = _phase_ply(phase.get("end"))
+        fallback_middle = fallback_end = None
+        if middle_start is None and end_start is None:
+            phase_board = (chess.Board() if initial_fen == "startpos" else chess.Board(initial_fen))
+            phase_boards = [phase_board.copy(stack=False)]
+            for raw_move in moves.split():
+                move = chess.Move.from_uci(raw_move)
+                phase_board.push(move)
+                phase_boards.append(phase_board.copy(stack=False))
+            fallback_middle, fallback_end = infer_phase_boundaries(phase_boards)
 
         inserted_link = {"value": False}
 
@@ -1195,6 +1223,17 @@ class GameRepository:
                            "middle_start_ply=excluded.middle_start_ply,end_start_ply=excluded.end_start_ply,"
                            "source=excluded.source,method_version=excluded.method_version",
                            (game_id, revision, middle_start, end_start, "lichess", "lichess-division-v1"))
+            elif fallback_middle is not None or fallback_end is not None:
+                existing_phase = db.execute(
+                    "SELECT source FROM game_phase_boundaries WHERE game_id=? AND line_revision=?",
+                    (game_id, revision)).fetchone()
+                if not existing_phase or existing_phase["source"] != "lichess":
+                    db.execute("INSERT INTO game_phase_boundaries VALUES (?,?,?,?,?,?) "
+                               "ON CONFLICT(game_id,line_revision) DO UPDATE SET "
+                               "middle_start_ply=excluded.middle_start_ply,end_start_ply=excluded.end_start_ply,"
+                               "source=excluded.source,method_version=excluded.method_version",
+                               (game_id, revision, fallback_middle, fallback_end,
+                                "material-fallback", PHASE_FALLBACK_VERSION))
             if pilot_run_id:
                 db.execute("UPDATE archive_pilot_runs SET new_count=new_count+? WHERE run_id=?",
                            (int(not existing_account_link), pilot_run_id))
@@ -1647,6 +1686,92 @@ class GameRepository:
         if middle is not None and end is not None and middle <= ply < end:
             return "middlegame"
         return "unknown"
+
+    def phase_boundaries(self, game_id: str, line_revision: int) -> dict | None:
+        """Return phase boundaries together with their source and method version."""
+        with self._connection() as db:
+            row = db.execute("SELECT * FROM game_phase_boundaries WHERE game_id=? AND line_revision=?",
+                             (game_id, line_revision)).fetchone()
+        return dict(row) if row else None
+
+    def infer_missing_phase_boundaries(self, limit: int = 25) -> int:
+        """Explicit bounded phase-fallback backfill for current standard lines only."""
+        from .phases import PHASE_FALLBACK_VERSION, infer_phase_boundaries
+
+        limit = max(1, min(int(limit), 100))
+        with self._connection() as db:
+            ids = [str(row[0]) for row in db.execute(
+                "SELECT g.game_id FROM games g LEFT JOIN game_phase_boundaries p "
+                "ON p.game_id=g.game_id AND p.line_revision=g.line_revision "
+                "WHERE g.variant='standard' AND p.game_id IS NULL "
+                "AND g.import_error IS NULL ORDER BY COALESCE(g.started_at,g.updated_at) DESC,"
+                "g.game_id LIMIT ?", (limit,))]
+        saved = 0
+        for game_id in ids:
+            line = self.current_line(game_id)
+            if not line:
+                continue
+            try:
+                board = chess.Board() if line["initial_fen"] == "startpos" else chess.Board(line["initial_fen"])
+                if not board.is_valid():
+                    continue
+                boards = [board.copy(stack=False)]
+                for raw in str(line["moves"]).split():
+                    move = chess.Move.from_uci(raw)
+                    if move not in board.legal_moves:
+                        boards = []
+                        break
+                    board.push(move)
+                    boards.append(board.copy(stack=False))
+            except (ValueError, chess.InvalidMoveError, chess.IllegalMoveError):
+                continue
+            if not boards:
+                continue
+            middle, end = infer_phase_boundaries(boards)
+            if middle is None and end is None:
+                continue
+            with self._connection() as db:
+                cur = db.execute("INSERT OR IGNORE INTO game_phase_boundaries VALUES (?,?,?,?,?,?)",
+                    (game_id, int(line["line_revision"]), middle, end,
+                     "material-fallback", PHASE_FALLBACK_VERSION))
+                saved += int(cur.rowcount == 1)
+        return saved
+
+    def save_opening_match(self, game_id: str, line_revision: int, match: dict | None) -> None:
+        """Store a versioned opening reference without replacing Lichess metadata."""
+        self._wait_before_read(game_id)
+        with self._connection() as db:
+            if match is None:
+                db.execute("DELETE FROM opening_matches WHERE game_id=? AND line_revision=?",
+                           (game_id, line_revision))
+                return
+            game = db.execute("SELECT opening_eco,opening_name FROM games WHERE game_id=?",
+                              (game_id,)).fetchone()
+            if not game:
+                raise KeyError(game_id)
+            conflict = bool((game["opening_eco"] and game["opening_eco"] != match["eco"]) or
+                            (game["opening_name"] and game["opening_name"] != match["name"]))
+            db.execute("INSERT INTO opening_matches VALUES (?,?,?,?,?,?,?,?,?,?,?) "
+                       "ON CONFLICT(game_id,line_revision) DO UPDATE SET "
+                       "dataset_revision=excluded.dataset_revision,algorithm_version=excluded.algorithm_version,"
+                       "eco=excluded.eco,name=excluded.name,family=excluded.family,variation=excluded.variation,"
+                       "matched_ply=excluded.matched_ply,lichess_conflict=excluded.lichess_conflict,"
+                       "matched_at=excluded.matched_at",
+                       (game_id, line_revision, match["dataset_revision"], match["algorithm_version"],
+                        match["eco"], match["name"], match["family"], match.get("variation"),
+                        match["matched_ply"], int(conflict), datetime.now(timezone.utc).isoformat()))
+        self.invalidate_statistics_cache()
+
+    def opening_match(self, game_id: str, line_revision: int | None = None) -> dict | None:
+        with self._connection() as db:
+            if line_revision is None:
+                row = db.execute("SELECT om.* FROM opening_matches om JOIN games g "
+                                 "ON g.game_id=om.game_id AND g.line_revision=om.line_revision "
+                                 "WHERE om.game_id=?", (game_id,)).fetchone()
+            else:
+                row = db.execute("SELECT * FROM opening_matches WHERE game_id=? AND line_revision=?",
+                                 (game_id, line_revision)).fetchone()
+        return dict(row) if row else None
 
     def import_puzzle_activity(self, username: str, record: dict, *,
                                backfill: bool = False,

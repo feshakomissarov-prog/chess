@@ -68,8 +68,12 @@ class StatisticsService:
             clauses.append(f"{rating}<=?")
             params.append(rating_max)
         if opening:
-            clauses.append("(g.opening_name LIKE ? OR g.opening_eco LIKE ?)")
-            params.extend([f"%{opening}%", f"%{opening}%"])
+            clauses.append("(g.opening_name LIKE ? OR g.opening_eco LIKE ? OR EXISTS ("
+                           "SELECT 1 FROM opening_matches om WHERE om.game_id=g.game_id "
+                           "AND om.line_revision=g.line_revision AND "
+                           "(om.name LIKE ? OR om.eco LIKE ? OR om.family LIKE ?)))")
+            params.extend([f"%{opening}%", f"%{opening}%", f"%{opening}%",
+                           f"%{opening}%", f"%{opening}%"])
         if result == "win":
             clauses.append(f"g.winner={color}")
         elif result == "loss":
@@ -226,6 +230,82 @@ class StatisticsService:
                 "ORDER BY clock LIMIT 30")]
         return {"accounts": accounts, "clocks": clocks}
 
+    def opening_statistics(self, *, account_id: str | None = None,
+                           analysis_source: str | None = None,
+                           since: str | None = None, until: str | None = None,
+                           min_games: int = 1) -> list[dict[str, Any]]:
+        """Opening and own-color error aggregates with explicit SQL provenance.
+
+        This streams grouped rows from SQLite and does not materialize games or plies.
+        ``mean_cpl_cp`` uses only classified, non-mate comparable own moves.
+        """
+        clauses = ["g.status NOT IN ('created','started','started_soon','playing')",
+                   "g.variant='standard'", "g.line_revision=gr.line_revision",
+                   "gr.is_current=1"]
+        params: list[object] = []
+        if account_id:
+            clauses.append("ag.account_id=?")
+            params.append(account_id)
+        if since:
+            clauses.append("COALESCE(g.started_at,g.updated_at)>=?")
+            params.append(since)
+        if until:
+            clauses.append("COALESCE(g.started_at,g.updated_at)<?")
+            params.append(until)
+        if analysis_source:
+            clauses.append("ar.source=?")
+            params.append(analysis_source)
+        # Local games have no account_games row; use their stored perspective. Account
+        # aggregates use the account-specific color, avoiding mixed-account attribution.
+        self.repository._wait_before_read()
+        with self.repository._connection() as db:
+            rows = db.execute(
+                "WITH ranked AS (SELECT ar.*,ROW_NUMBER() OVER(PARTITION BY ar.game_id,"
+                "ar.line_revision ORDER BY CASE WHEN ar.status='complete' THEN 0 ELSE 1 END,"
+                "ar.finished_at DESC,ar.run_id DESC) AS rank FROM analysis_runs ar "
+                "JOIN game_revisions rr ON rr.game_id=ar.game_id AND rr.line_revision=ar.line_revision "
+                "WHERE rr.is_current=1 AND ar.status IN ('complete','partial') "
+                + ("AND ar.source=? " if analysis_source else "") + "), chosen AS ("
+                "SELECT * FROM ranked WHERE rank=1) "
+                "SELECT COALESCE(om.eco,g.opening_eco,'unknown') AS eco,"
+                "COALESCE(om.name,g.opening_name,'unknown') AS opening,"
+                "COALESCE(om.family,CASE WHEN g.opening_name IS NULL THEN 'unknown' "
+                "ELSE g.opening_name END) AS family,"
+                "COALESCE(ag.color,g.color) AS my_color,g.source AS game_source,"
+                "COALESCE(ag.account_id,'local') AS account_scope,"
+                "COUNT(DISTINCT g.game_id) AS games,"
+                "COUNT(CASE WHEN mc.mover=COALESCE(ag.color,g.color) AND mc.ply>0 "
+                "AND mc.eval_loss_cp IS NOT NULL THEN 1 END) AS evaluated_own_moves,"
+                "COUNT(CASE WHEN mc.mover=COALESCE(ag.color,g.color) AND mc.ply>0 "
+                "AND mc.eval_loss_cp IS NOT NULL AND mc.label IN ('mistake','blunder') "
+                "THEN 1 END) AS own_errors,"
+                "AVG(CASE WHEN mc.mover=COALESCE(ag.color,g.color) AND mc.ply>0 "
+                "AND mc.eval_loss_cp IS NOT NULL AND mc.phase='opening' "
+                "THEN mc.eval_loss_cp END) AS mean_opening_cpl_cp "
+                "FROM games g JOIN game_revisions gr ON gr.game_id=g.game_id "
+                "LEFT JOIN opening_matches om ON om.game_id=g.game_id AND om.line_revision=g.line_revision "
+                "LEFT JOIN account_games ag ON ag.game_id=g.game_id "
+                "LEFT JOIN chosen ar ON ar.game_id=g.game_id AND ar.line_revision=g.line_revision "
+                "LEFT JOIN move_classifications mc ON mc.run_id=ar.run_id "
+                "WHERE " + " AND ".join(clauses) +
+                " GROUP BY COALESCE(om.eco,g.opening_eco,'unknown'),"
+                "COALESCE(om.name,g.opening_name,'unknown'),COALESCE(om.family,g.opening_name,'unknown'),"
+                "COALESCE(ag.color,g.color),g.source,COALESCE(ag.account_id,'local') "
+                "ORDER BY games DESC,eco,opening,my_color,account_scope "
+                , [*([analysis_source] if analysis_source else []), *params]).fetchall()
+        output = []
+        for row in rows:
+            item = dict(row)
+            if int(item["games"] or 0) < max(1, int(min_games)):
+                continue
+            own_count = int(item["evaluated_own_moves"] or 0)
+            errors = int(item["own_errors"] or 0)
+            item["own_errors_per_100_evaluated"] = round(100 * errors / own_count, 1) if own_count else None
+            item["opening_provenance"] = "chess-coach-cc0" if item["eco"] != "unknown" else "unknown"
+            item["analysis_source"] = analysis_source or "latest-complete-preferred"
+            output.append(item)
+        return output
+
     def game_page(self, *, account_id: str | None = None, since: str | None = None,
                   until: str | None = None, opponent: str | None = None,
                   clock: str | None = None, game_source: str | None = None,
@@ -248,6 +328,10 @@ class StatisticsService:
         selected = ("g.game_id,g.status,g.winner,g.color,g.pgn,g.started_at,g.updated_at,"
                     "g.white_player,g.black_player,g.opponent,g.clock,g.source,g.opening_eco,"
                     "g.opening_name,g.lichess_accuracy_white,g.lichess_accuracy_black")
+        selected += ", (SELECT om.eco FROM opening_matches om WHERE om.game_id=g.game_id " \
+                    "AND om.line_revision=g.line_revision) AS matched_opening_eco, " \
+                    "(SELECT om.name FROM opening_matches om WHERE om.game_id=g.game_id " \
+                    "AND om.line_revision=g.line_revision) AS matched_opening_name"
         if account_id:
             selected += ",ag.opponent AS account_opponent,ag.player_name AS account_player_name,ag.color AS account_color"
         self.repository._wait_before_read()

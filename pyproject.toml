@@ -20,6 +20,9 @@ dev = ["pytest>=8,<10", "pytest-qt>=4.4,<5"]
 [tool.setuptools.packages.find]
 where = ["src"]
 
+[tool.setuptools.package-data]
+chess_coach = ["opening_data/*.tsv", "opening_data/NOTICE.md"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-q"
