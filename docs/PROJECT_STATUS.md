@@ -200,3 +200,7 @@ git pull --ff-only
 **Не удалять локальные изменения ради switch/pull.** При установленном ярлыке `Chess Coach.lnk` можно запускать двойным щелчком; он использует `.venv\Scripts\pythonw.exe` и может автоматически восстановить OAuth-соединение. Если нужен настоящий офлайн-тест, код должен явно гарантировать отсутствие обращений к сети. Для новой установки ориентироваться на `README.md` и Python >=3.12; пока версия 3.12 не подтверждена тестами.
 
 **Ближайшее решение (01.11.2026):** пользователь передаёт Codex одно большое ТЗ [M3_M4_DATA_ARCHIVE_ANALYTICS_PUZZLES.md](specs/M3_M4_DATA_ARCHIVE_ANALYTICS_PUZZLES.md), реализация внутри — по небольшим проверяемым блокам/PR. Сначала завершить P0 и осознанно принять #8, затем SQLite/импорт, после Stockfish/сводная аналитика и задачи Lichess. Голос позднее.
+
+## M4.5 — активная работа (2026-11-01)
+
+Исполняется единое утверждённое ТЗ v2.0 [M4_5_BATCH_ANALYSIS_PERSONAL_DIAGNOSTICS.md](specs/M4_5_BATCH_ANALYSIS_PERSONAL_DIAGNOSTICS.md), этапы 0–I в ветке `codex/m45-batch-analysis` от `main` `6c3692c827294386fd070da9f9e7f086429320d9`. Этап 0 подтвердил SQLite v9 и дефект поздних частичных Lichess eval: существующий complete run блокирует последующую загрузку оценок. Исходный локальный Windows/Python 3.12.10 baseline: 212 pytest PASS, compileall PASS; пользовательская БД/OAuth/Lichess/Stockfish не затронуты. Draft PR/CI ещё не созданы/не запущены. Подробные checkpoints: [журнал M4.5](handoffs/M4_5_EXECUTION_LOG.md).
