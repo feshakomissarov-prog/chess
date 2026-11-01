@@ -3,7 +3,6 @@
 import os
 
 os.environ["QT_QPA_PLATFORM"] = "offscreen"
-os.environ["CHESS_COACH_OFFLINE_TEST"] = "1"
 
 import pytest
 from PySide6.QtCore import QStandardPaths

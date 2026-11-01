@@ -1,0 +1,36 @@
+name: Windows tests
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - uses: actions/setup-python@v7.1.0
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Install application and test dependencies
+        run: python -m pip install -e ".[dev]"
+      - name: Report Python and Qt runtime versions
+        run: >-
+          python -c "import sys, platform, PySide6, shiboken6; from PySide6.QtCore import qVersion; print('Python:', sys.version); print('Windows:', platform.platform()); print('PySide6:', PySide6.__version__); print('Qt:', qVersion()); print('shiboken6:', shiboken6.__version__); print('shiboken6 module:', shiboken6.__file__)"
+      - name: Run offscreen tests
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: python -X faulthandler -m pytest -o addopts= -q
+      - name: Compile application and tests
+        run: python -m compileall -q src tests
+      - name: Initialize the isolated offline window
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: >-
+          python -X faulthandler -c "from PySide6.QtWidgets import QApplication; from chess_coach.window import MainWindow; app = QApplication([]); window = MainWindow(offline_mode=True); assert window.lichess is None; window.close()"

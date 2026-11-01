@@ -4,11 +4,14 @@ from __future__ import annotations
 
 import threading
 import random
+import time
 import webbrowser
 
 from PySide6.QtCore import QObject, Signal
 
 from .api import LichessClient, LichessError, RateLimitError
+from .archive import ArchiveSync
+from .puzzles import PuzzleActivitySync
 from .auth import (CLIENT_ID, OAuthCallbackServer, WindowsCredentialStore,
                    authorize_and_store, create_authorization_request)
 
@@ -20,26 +23,302 @@ class LichessService(QObject):
     challenge_ready = Signal(dict)
     challenge_status_changed = Signal(str, bool)
     invitation_cancelled = Signal(str)
+    active_games_received = Signal(object)
+    active_games_error = Signal(str)
+    analysis_safety_games_received = Signal(str, object)
+    analysis_safety_error = Signal(str, str)
     error = Signal(str)
     move_failed = Signal(str, str, str, int)
     takeback_action_completed = Signal(str, str, int)
     authenticated = Signal(str)
+    archive_progress = Signal(int, str)
+    archive_finished = Signal(int, str)
+    archive_pilot_progress = Signal(int, int, str)
+    archive_pilot_finished = Signal(int, int, str)
+    archive_game_refresh_finished = Signal(str, str)
+    puzzles_progress = Signal(int)
+    puzzles_scanned = Signal(int)
+    puzzles_finished = Signal(int, str)
+    background_sync_finished = Signal(str, str)
+    puzzle_pilot_progress = Signal(int, int)
+    puzzle_pilot_finished = Signal(int, int, str, str)
 
-    def __init__(self, client: LichessClient | None = None, token_store=None, parent=None):
+    def __init__(self, client: LichessClient | None = None, token_store=None,
+                 repository=None, parent=None):
         super().__init__(parent)
         self.client = client or LichessClient()
         self.token_store = token_store or WindowsCredentialStore()
+        self.repository = repository
+        self._archive_stop: threading.Event | None = None
+        self._puzzle_stop: threading.Event | None = None
+        self._puzzle_callback: OAuthCallbackServer | None = None
         self._stop = threading.Event()
         self._connection_stop = threading.Event()
         self._threads: list[threading.Thread] = []
+        self._thread_lock = threading.Lock()
+        self._closing = False
         self._game_stops: dict[str, threading.Event] = {}
         self._final_sync_game_ids: set[str] = set()
         self._event_lock = threading.Lock()
+        self._restore_lock = threading.Lock()
+        self._restore_running = False
         self._event_stream_started = False
         self.username: str | None = None
+        self.puzzle_username: str | None = None
         self._callback: OAuthCallbackServer | None = None
         self._username_challenge_stop: threading.Event | None = None
         self._username_challenge_id: str | None = None
+
+    def sync_archive(self, *, full: bool = False, background: bool = False) -> None:
+        """Sync archive in a worker; background runs never show modal dialogs."""
+        if self.repository is None:
+            if not background:
+                self.archive_finished.emit(0, "Хранилище архива не подключено.")
+            return
+        if self._archive_stop is not None:
+            if not background:
+                self.archive_finished.emit(0, "Синхронизация архива уже выполняется.")
+            return
+        stop = threading.Event()
+        self._archive_stop = stop
+        def work():
+            count = 0
+            try:
+                token = self.token_store.get()
+                if not token:
+                    raise LichessError("Сначала подключите аккаунт Lichess.")
+                username = self.username or str(self.client.get_account(token)["username"])
+                sync = ArchiveSync(self.client, self.repository)
+                count = sync.run(username, token, stop, full=full,
+                                 progress=(None if background else
+                                           lambda n, game_id: self.archive_progress.emit(n, game_id)))
+                message = "Отменено." if stop.is_set() else f"Завершено, новых партий: {count}"
+                if background:
+                    self.background_sync_finished.emit("партий", message)
+                else:
+                    self.archive_finished.emit(count, message)
+            except Exception as exc:
+                if background:
+                    self.background_sync_finished.emit("партий", f"Ошибка: {exc}")
+                else:
+                    self.archive_finished.emit(count, str(exc))
+            finally:
+                self._archive_stop = None
+        self._thread(work, "chess-coach-archive-sync")
+
+    def pilot_import_archive(self, *, max_games: int = 5) -> None:
+        """Run one explicitly requested 5–10 game sample, separate from backfill."""
+        if self.repository is None:
+            self.archive_pilot_finished.emit(0, 0, "Локальное хранилище архива недоступно.")
+            return
+        if self._archive_stop is not None and not self._archive_stop.is_set():
+            self.archive_pilot_finished.emit(0, 0, "Синхронизация архива уже выполняется.")
+            return
+        stop = threading.Event()
+        self._archive_stop = stop
+        def work():
+            try:
+                token = self.token_store.get()
+                if not token:
+                    raise LichessError("Сначала подключите аккаунт Lichess.")
+                username = self.username or str(self.client.get_account(token)["username"])
+                result = ArchiveSync(self.client, self.repository).run_pilot(
+                    username, token, stop, max_games=max_games,
+                    progress=lambda received, new, game_id:
+                    self.archive_pilot_progress.emit(received, new, game_id))
+                message = ("Пробный импорт отменён; уже записанные партии сохранены."
+                           if result["status"] == "interrupted" else "Пробный импорт завершён.")
+                self.archive_pilot_finished.emit(int(result["received"]), int(result["new"]), message)
+            except Exception as exc:
+                received = new = 0
+                if self.username:
+                    account_id = f"lichess:{self.username.strip().lower()}"
+                    runs = self.repository.list_archive_pilot_runs(account_id, limit=1)
+                    if runs:
+                        received, new = int(runs[0]["received_count"]), int(runs[0]["new_count"])
+                self.archive_pilot_finished.emit(received, new, f"Пробный импорт завершился ошибкой: {exc}")
+            finally:
+                self._archive_stop = None
+        self._thread(work, "chess-coach-archive-pilot")
+
+    def cancel_archive_sync(self) -> None:
+        if self._archive_stop is not None:
+            self._archive_stop.set()
+
+    def refresh_archive_game(self, game_id: str) -> None:
+        """Explicitly refresh one completed, already-linked game; never fetch the archive."""
+        if self.repository is None:
+            self.archive_game_refresh_finished.emit(game_id, "Локальное хранилище недоступно.")
+            return
+        def work():
+            try:
+                token = self.token_store.get()
+                if not token:
+                    raise LichessError("Сначала подключите аккаунт Lichess.")
+                username = self.username or str(self.client.get_account(token)["username"])
+                ArchiveSync(self.client, self.repository).refresh_game(username, token, game_id)
+                self.archive_game_refresh_finished.emit(
+                    game_id, "История этой партии обновлена из Lichess.")
+            except Exception as exc:
+                self.archive_game_refresh_finished.emit(game_id, str(exc))
+        self._thread(work, "chess-coach-archive-game-refresh")
+
+    def connect_and_sync_puzzle_activity(self, repository=None,
+                                         puzzle_token_store=None) -> None:
+        """Explicitly request puzzle:read in a separate credential slot, then sync history."""
+        repo = repository or self.repository
+        if repo is None:
+            self.puzzles_finished.emit(0, "Хранилище архива не подключено.")
+            return
+        if self._puzzle_stop is not None and not self._puzzle_stop.is_set():
+            self.puzzles_finished.emit(0, "Загрузка истории задач уже выполняется.")
+            return
+        stop = threading.Event()
+        self._puzzle_stop = stop
+        def work():
+            callback = None
+            try:
+                store = puzzle_token_store
+                if store is None:
+                    from .auth import WindowsCredentialStore
+                    store = WindowsCredentialStore(service="ChessCoach.Lichess.Puzzles",
+                                                   user="puzzle-activity-token")
+                puzzle_token = store.get()
+                if puzzle_token:
+                    username = str(self.client.get_account(puzzle_token)["username"])
+                else:
+                    callback = OAuthCallbackServer()
+                    self._puzzle_callback = callback
+                    request = create_authorization_request(callback.redirect_uri, CLIENT_ID,
+                                                           scopes="puzzle:read")
+                    if not webbrowser.open(request.url):
+                        raise LichessError("Не удалось открыть браузер для разрешения puzzle:read.")
+                    puzzle_token, username = authorize_and_store(self.client, store, callback, request)
+                if stop.is_set():
+                    self.puzzles_finished.emit(0, "Синхронизация отменена.")
+                    return
+                self.puzzle_username = username
+                sync = PuzzleActivitySync(self.client, repo)
+                count = sync.run(username, puzzle_token, stop,
+                                 progress=lambda n: self.puzzles_progress.emit(n),
+                                 scanned=lambda n: self.puzzles_scanned.emit(n))
+                status = "Синхронизация отменена." if stop.is_set() else "История задач синхронизирована."
+                if not stop.is_set():
+                    try:
+                        account_id = repo.ensure_archive_account(username)
+                        dashboard = self.client.get_puzzle_dashboard(puzzle_token, 30)
+                        repo.save_puzzle_dashboard(account_id, 30, dashboard)
+                    except Exception:
+                        status += " Сводка Lichess недоступна; локальная статистика сохранена."
+                self.puzzles_finished.emit(count, status)
+            except Exception as exc:
+                self.puzzles_finished.emit(0, str(exc))
+            finally:
+                self._puzzle_stop = None
+                self._puzzle_callback = None
+                if callback:
+                    callback.close()
+        self._thread(work, "chess-coach-puzzle-sync")
+
+    def sync_puzzle_activity_background(self, repository=None) -> None:
+        """Use an existing puzzle:read token only; never start OAuth automatically."""
+        repo = repository or self.repository
+        if repo is None or self._puzzle_stop is not None or not self.username:
+            return
+        stop = threading.Event()
+        self._puzzle_stop = stop
+        def work():
+            try:
+                store = WindowsCredentialStore(
+                    service="ChessCoach.Lichess.Puzzles", user="puzzle-activity-token")
+                token = store.get()
+                if not token:
+                    return  # First-time authorization requires a user click.
+                username = str(self.client.get_account(token)["username"])
+                if username.casefold() != (self.username or "").casefold():
+                    self.background_sync_finished.emit(
+                        "задач", "Аккаунты не совпадают; обновление пропущено")
+                    return
+                count = PuzzleActivitySync(self.client, repo).run(
+                    username, token, stop)
+                if not stop.is_set():
+                    self.background_sync_finished.emit(
+                        "задач", f"Завершено, новых попыток: {count}")
+            except Exception as exc:
+                self.background_sync_finished.emit("задач", f"Ошибка: {exc}")
+            finally:
+                self._puzzle_stop = None
+        self._thread(work, "chess-coach-puzzle-background")
+
+    def cancel_puzzle_sync(self) -> None:
+        if self._puzzle_stop is not None:
+            self._puzzle_stop.set()
+        if self._puzzle_callback is not None:
+            self._puzzle_callback.cancel()
+
+    def pilot_puzzle_activity(self, limit: int, repository=None,
+                              puzzle_token_store=None) -> None:
+        """Explicitly import a bounded sample using the separate puzzle:read token."""
+        repo = repository or self.repository
+        if repo is None:
+            self.puzzle_pilot_finished.emit(0, 0, "", "Хранилище архива не подключено.")
+            return
+        if limit not in (5, 10):
+            self.puzzle_pilot_finished.emit(0, 0, "", "Можно загрузить только 5 или 10 попыток.")
+            return
+        if self._puzzle_stop is not None and not self._puzzle_stop.is_set():
+            self.puzzle_pilot_finished.emit(0, 0, "", "Загрузка истории задач уже выполняется.")
+            return
+        stop = threading.Event()
+        self._puzzle_stop = stop
+
+        def work():
+            callback = None
+            received = new_count = 0
+            run_id = ""
+            try:
+                store = puzzle_token_store
+                if store is None:
+                    from .auth import WindowsCredentialStore
+                    store = WindowsCredentialStore(service="ChessCoach.Lichess.Puzzles",
+                                                   user="puzzle-activity-token")
+                puzzle_token = store.get()
+                if puzzle_token:
+                    username = str(self.client.get_account(puzzle_token)["username"])
+                else:
+                    callback = OAuthCallbackServer()
+                    self._puzzle_callback = callback
+                    request = create_authorization_request(callback.redirect_uri, CLIENT_ID,
+                                                           scopes="puzzle:read")
+                    if not webbrowser.open(request.url):
+                        raise LichessError("Не удалось открыть браузер для разрешения puzzle:read.")
+                    puzzle_token, username = authorize_and_store(self.client, store, callback, request)
+                if stop.is_set():
+                    self.puzzle_pilot_finished.emit(0, 0, "", "Пробный импорт отменён.")
+                    return
+                self.puzzle_username = username
+                sync = PuzzleActivitySync(self.client, repo)
+                result = sync.run_pilot(
+                    username, puzzle_token, stop, limit=limit,
+                    progress=lambda count, added: self.puzzle_pilot_progress.emit(count, added))
+                received = int(result["received_count"])
+                new_count = int(result["new_count"])
+                run_id = str(result["run_id"])
+                status = str(result["status"])
+                message = {"complete": "Пробная загрузка задач завершена.",
+                           "cancelled": "Пробная загрузка задач отменена.",
+                           "error": "Пробная загрузка завершилась ошибкой."}.get(status, status)
+                if result.get("error"):
+                    message += " " + str(result["error"])
+                self.puzzle_pilot_finished.emit(received, new_count, run_id, message)
+            except Exception as exc:
+                self.puzzle_pilot_finished.emit(received, new_count, run_id, str(exc))
+            finally:
+                self._puzzle_stop = None
+                self._puzzle_callback = None
+                if callback:
+                    callback.close()
+        self._thread(work, "chess-coach-puzzle-pilot")
 
     @property
     def token(self) -> str | None:
@@ -47,10 +326,18 @@ class LichessService(QObject):
 
     def _thread(self, target, name: str) -> None:
         thread = threading.Thread(target=target, name=name, daemon=True)
-        self._threads.append(thread)
-        thread.start()
+        with self._thread_lock:
+            if self._closing:
+                return
+            self._threads.append(thread)
+            thread.start()
 
     def restore(self) -> None:
+        with self._restore_lock:
+            if self._restore_running:
+                return
+            self._restore_running = True
+        self.status_changed.emit("Проверяем подключение…")
         def work():
             try:
                 token = self.token_store.get()
@@ -73,7 +360,38 @@ class LichessService(QObject):
                     )
                 else:
                     self.status_changed.emit("Ошибка подключения")
+            finally:
+                with self._restore_lock:
+                    self._restore_running = False
         self._thread(work, "chess-coach-restore-auth")
+
+    def fetch_active_games(self) -> None:
+        """Fetch a single account/playing snapshot on explicit user request."""
+        def work():
+            try:
+                token = self.token_store.get()
+                if not token:
+                    raise LichessError("Сначала подключите аккаунт Lichess.")
+                games = self.client.get_playing_games(token)
+                self.active_games_received.emit(games)
+            except Exception as exc:
+                self.active_games_error.emit(str(exc))
+
+        self._thread(work, "chess-coach-active-games")
+
+    def check_active_games_for_analysis(self, request_id: str) -> None:
+        """Take one explicit server snapshot before a user-started local analysis."""
+        def work():
+            try:
+                token = self.token_store.get()
+                if not token:
+                    raise LichessError("Токен Lichess недоступен; безопасность анализа не подтверждена.")
+                games = self.client.get_playing_games(token)
+                self.analysis_safety_games_received.emit(request_id, games)
+            except Exception as exc:
+                self.analysis_safety_error.emit(request_id, str(exc))
+
+        self._thread(work, "chess-coach-analysis-safety")
 
     def connect_account(self) -> None:
         def work():
@@ -163,7 +481,11 @@ class LichessService(QObject):
             finally:
                 with self._event_lock:
                     self._event_stream_started = False
-                if not self._stop.is_set() and not connection_stop.is_set():
+                # A fast account switch may have installed a new connection stop
+                # event while this worker was still unwinding. Start exactly one
+                # stream for that current connection after releasing the old one.
+                current_connection_stop = self._connection_stop
+                if not self._stop.is_set() and not current_connection_stop.is_set():
                     try:
                         self._start_event_stream(self.token_store.get())
                     except Exception:
@@ -418,14 +740,34 @@ class LichessService(QObject):
                 self.error.emit(str(exc))
         self._thread(work, "chess-coach-lichess-action")
 
-    def close(self) -> None:
+    def close(self, timeout: float = 1.0) -> bool:
+        """Stop workers cooperatively. Return False while any worker still owns resources."""
+        with self._thread_lock:
+            self._closing = True
         self._stop.set()
         self._connection_stop.set()
+        if self._archive_stop is not None:
+            self._archive_stop.set()
+        if self._puzzle_stop is not None:
+            self._puzzle_stop.set()
         if self._callback:
             self._callback.cancel()
             self._callback = None
+        if self._puzzle_callback:
+            self._puzzle_callback.cancel()
+            self._puzzle_callback = None
+        if self._username_challenge_stop:
+            self._username_challenge_stop.set()
         for stop in self._game_stops.values():
             stop.set()
-        for thread in self._threads:
+        deadline = time.monotonic() + max(0.0, timeout)
+        with self._thread_lock:
+            threads = list(self._threads)
+        for thread in threads:
             if thread.is_alive() and thread is not threading.current_thread():
-                thread.join(timeout=1.5)
+                thread.join(timeout=max(0.0, deadline - time.monotonic()))
+        alive = [thread for thread in threads if thread.is_alive()
+                 and thread is not threading.current_thread()]
+        with self._thread_lock:
+            self._threads = alive
+        return not alive

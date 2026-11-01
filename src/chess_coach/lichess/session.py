@@ -5,10 +5,60 @@ from __future__ import annotations
 from dataclasses import dataclass
 import time
 import uuid
+from typing import Any
 
 import chess
 
 from .repository import GameRepository
+
+
+LICHESS_GAME_SOURCES = frozenset({
+    "lobby", "friend", "ai", "api", "tournament", "position", "import",
+    "importlive", "simul", "relay", "pool", "arena", "swiss",
+})
+LICHESS_PLAYER_TITLES = frozenset({
+    "GM", "WGM", "IM", "WIM", "FM", "WFM", "NM", "CM", "WCM", "WNM", "LM",
+})
+
+
+def classify_lichess_opponent(game: Any) -> str:
+    """Classify a server game conservatively for fair-play decisions.
+
+    Only Lichess's explicit AI source/signature is the built-in AI exception.
+    BOT titles identify account opponents and are never an engine-safety allow.
+    """
+    if not isinstance(game, dict):
+        return "unknown"
+    source = game.get("source")
+    opponent = game.get("opponent")
+    if (not isinstance(source, str) or source not in LICHESS_GAME_SOURCES
+            or not isinstance(opponent, dict)):
+        return "unknown"
+
+    title = opponent.get("title")
+    if title is not None and not isinstance(title, str):
+        return "unknown"
+    if source == "ai":
+        level = opponent.get("ai")
+        if ("id" in opponent and opponent.get("id") is None
+                and type(level) is int and 1 <= level <= 8
+                and ("title" not in opponent or title is None)):
+            return "official_ai"
+        return "unknown"
+
+    # AI-shaped or null-identity records under another source are contradictory.
+    if "ai" in opponent or "id" not in opponent:
+        return "unknown"
+    opponent_id = opponent.get("id")
+    username = opponent.get("username")
+    if (not isinstance(opponent_id, str) or not opponent_id.strip()
+            or not isinstance(username, str) or not username.strip()):
+        return "unknown"
+    if title == "BOT":
+        return "bot_account"
+    if title is not None and title not in LICHESS_PLAYER_TITLES:
+        return "unknown"
+    return "human"
 
 
 @dataclass(frozen=True)
@@ -40,6 +90,9 @@ class LichessGameSession:
         self.moves = ""
         self.color = chess.WHITE
         self.opponent = "Соперник"
+        self.opponent_title: str | None = None
+        self.game_source: str | None = None
+        self.opponent_info: dict | None = None
         self.white_player: str | None = None
         self.black_player: str | None = None
         self.started_at: str | None = None
@@ -51,6 +104,9 @@ class LichessGameSession:
         self.rated = False
         self.winner = None
         self.final_sync_pending = False
+        # A newly opened game is not playable until its stream supplies and we
+        # validate a complete authoritative gameFull snapshot.
+        self.awaiting_authoritative_snapshot = True
         self.draw_offered_by_opponent = False
         self.takeback_requested_by_opponent = False
         self.takeback_requested_by_me = False
@@ -71,16 +127,38 @@ class LichessGameSession:
 
     @property
     def is_my_turn(self) -> bool:
-        return self.board.turn == self.color and self.status in {"started", "playing"}
+        return (not self.awaiting_authoritative_snapshot
+                and self.board.turn == self.color
+                and self.status in {"started", "playing"})
 
     @property
     def is_ai_opponent(self) -> bool:
-        identity = (self.opponent or "").casefold().replace("_", "-")
-        return "lichess ai" in identity or "lichess-ai" in identity
+        return classify_lichess_opponent({
+            "source": self.game_source,
+            "opponent": self.opponent_info,
+        }) == "official_ai"
+
+    def set_server_game_identity(self, game: dict) -> None:
+        """Store the immutable opponent identity from gameStart/account-playing."""
+        source = game.get("source")
+        self.game_source = source if isinstance(source, str) else None
+        opponent = game.get("opponent")
+        self.opponent_info = dict(opponent) if isinstance(opponent, dict) else None
+        self.opponent = "Соперник"
+        self.opponent_title = None
+        if self.opponent_info:
+            username = self.opponent_info.get("username")
+            opponent_id = self.opponent_info.get("id")
+            self.opponent = (username if isinstance(username, str) and username else
+                             opponent_id if isinstance(opponent_id, str) and opponent_id else
+                             "Соперник")
+            title = self.opponent_info.get("title")
+            self.opponent_title = title if isinstance(title, str) else None
 
     @property
     def input_locked(self) -> bool:
-        return bool(self.pending_uci or self.takeback_action_pending
+        return bool(self.awaiting_authoritative_snapshot
+                    or self.pending_uci or self.takeback_action_pending
                     or self.takeback_requested_by_me
                     or self.takeback_requested_by_opponent
                     or self.takeback_accept_pending or self.takeback_decline_pending)
@@ -102,6 +180,13 @@ class LichessGameSession:
         kind = event.get("type")
         if kind not in {"gameState", "gameFull"}:
             return self.snapshot()
+        if kind == "gameFull":
+            state = event.get("state")
+            initial_fen = event.get("initialFen")
+            if (not isinstance(state, dict) or not isinstance(state.get("moves"), str)
+                    or not isinstance(state.get("status"), str)
+                    or not isinstance(initial_fen, str) or not initial_fen):
+                raise ValueError("Lichess не прислал полный начальный снимок партии.")
         incoming_fen = event.get("initialFen", self.initial_fen) if kind == "gameFull" else self.initial_fen
         if self.moves and incoming_fen != self.initial_fen:
             return self.snapshot()
@@ -186,6 +271,8 @@ class LichessGameSession:
                 self.takeback_request_id = None
                 self._takeback_anchor = ()
             self._rebuild_board()
+            if kind == "gameFull":
+                self.awaiting_authoritative_snapshot = False
             if self.pending_uci and self._pending_ply is not None:
                 if (len(incoming_moves) >= self._pending_ply
                         and incoming_moves[:len(self._pending_prefix)] == self._pending_prefix
@@ -254,6 +341,8 @@ class LichessGameSession:
         self.white_inc = state.get("winc", self.white_inc)
         self.black_inc = state.get("binc", self.black_inc)
         self.board = board
+        if kind == "gameFull":
+            self.awaiting_authoritative_snapshot = False
         self.final_sync_pending = False
         self._clear_pending()
         self.premove = None
@@ -307,6 +396,7 @@ class LichessGameSession:
         if action not in {"offer", "accept", "decline"}:
             return None
         if (self.status not in {"started", "playing"} or self.pending_uci
+                or self.awaiting_authoritative_snapshot
                 or self.takeback_action_pending):
             return None
         if action == "accept" and self.takeback_accept_pending:

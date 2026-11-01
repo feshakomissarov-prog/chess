@@ -10,7 +10,7 @@ from chess_widgets import BoardWidget
 from PySide6.QtCore import QPointF, Qt, Signal
 from PySide6.QtGui import QGuiApplication
 from PySide6.QtGui import QColor, QFocusEvent, QMouseEvent, QPainter, QPen, QPolygonF
-from PySide6.QtWidgets import QInputDialog
+from PySide6.QtWidgets import QDialog, QPushButton, QVBoxLayout
 
 
 class BoardView(BoardWidget):
@@ -21,8 +21,10 @@ class BoardView(BoardWidget):
     """
 
     move_intent = Signal(object)
+    wheel_navigate = Signal(int)
     premove_intent = Signal(object)
     annotations_changed = Signal()
+    annotation_action = Signal(dict)
     cancel_premove_requested = Signal()
 
     def __init__(self, board: chess.Board, parent=None) -> None:
@@ -46,7 +48,22 @@ class BoardView(BoardWidget):
         self._premove_dragging = False
         self._premove_press_pos: Optional[QPointF] = None
         self._premove_target: Optional[int] = None
+        self._line_context: dict = {"game_id": None, "ply": len(self._board.move_stack),
+                                    "fen": self._board.fen()}
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+
+    def set_annotation_context(self, game_id: str | None, board: chess.Board | None = None) -> None:
+        """Attach manual annotation actions to their displayed game position."""
+        position = board or self._board
+        self._line_context = {
+            "game_id": game_id,
+            "ply": len(position.move_stack),
+            "fen": position.fen(),
+        }
+
+    def _record_annotation_action(self, action: str, kind: str, **details) -> None:
+        self.annotation_action.emit({**self._line_context, "action": action,
+                                     "kind": kind, **details})
 
     def set_position(self, board: chess.Board) -> None:
         """Replace render snapshot after the controller accepts an event."""
@@ -57,9 +74,29 @@ class BoardView(BoardWidget):
                      and board.chess960 == self._board.chess960)
         if unchanged:
             return
+        # The opponent can move while the user still holds a piece.
+        dragging = bool(self._premove_drag_active and self._premove_dragging)
+        start = self._premove_drag_start
+        source = self._board.piece_at(start) if start is not None else None
+        held = (dragging and source is not None
+                and board.piece_at(start) == source and not board.is_game_over())
+        press = self._premove_press_pos
+        target = self._premove_target
+        drag_pos = getattr(self, "_drag_pos", None)
         self._cancel_premove_gesture(clear_selection=True)
         self._queued_premove = None
         super().set_board(board.copy(stack=True))
+        if held:
+            self._premove_drag_active = True
+            self._premove_dragging = True
+            self._premove_drag_start = start
+            self._premove_press_pos = press
+            self._premove_target = target
+            self._drag_pos = drag_pos
+            self._dragged_square = start
+            self._is_dragging = True
+            self.update()
+        self.set_annotation_context(self._line_context.get("game_id"), board)
 
     def set_premove(self, move: Optional[chess.Move], color: chess.Color) -> None:
         if self._queued_premove == move and self._premove_color == color:
@@ -103,7 +140,9 @@ class BoardView(BoardWidget):
             self._queued_premove = None
         self.update()
 
-    def clear_annotations(self) -> None:
+    def clear_annotations(self, *, record_action: bool = True) -> None:
+        if record_action and (self._annotation_arrows or self._annotation_squares):
+            self._record_annotation_action("clear", "all")
         self._annotation_arrows.clear()
         self._annotation_squares.clear()
         self.annotations_changed.emit()
@@ -121,31 +160,50 @@ class BoardView(BoardWidget):
         if not candidates:
             return None
         promotions = [move for move in candidates if move.promotion]
-        if promotions and self._handling_input:
-            labels = [
-                (
-                    {
-                        chess.QUEEN: "Ферзь",
-                        chess.ROOK: "Ладья",
-                        chess.BISHOP: "Слон",
-                        chess.KNIGHT: "Конь",
-                    }[move.promotion],
-                    move,
-                )
-                for move in promotions
-            ]
-            choice, accepted = QInputDialog.getItem(
-                self,
-                "Превращение пешки",
-                "Выберите фигуру:",
-                [label for label, _ in labels],
-                0,
-                False,
-            )
-            if not accepted:
+        if promotions:
+            if not self._handling_input:
+                return next((m for m in promotions if m.promotion == chess.QUEEN), promotions[0])
+            source_piece = self._board.piece_at(from_sq)
+            color = source_piece.color if source_piece is not None else chess.WHITE
+            chosen = self._choose_promotion(color, to_sq)
+            if chosen is None:
                 return None
-            return next(move for label, move in labels if label == choice)
+            return next((m for m in promotions if m.promotion == chosen), None)
         return candidates[0]
+
+    def _choose_promotion(self, color: chess.Color, square: int) -> int | None:
+        """Graphical piece picker aligned to the promotion square."""
+        dialog = QDialog(self, Qt.WindowType.Popup)
+        dialog.setWindowTitle("Превращение пешки")
+        layout = QVBoxLayout(dialog)
+        layout.setContentsMargins(2, 2, 2, 2)
+        layout.setSpacing(1)
+        glyphs = {
+            chess.WHITE: ("♕", "♖", "♗", "♘"),
+            chess.BLACK: ("♛", "♜", "♝", "♞"),
+        }
+        types = (chess.QUEEN, chess.ROOK, chess.BISHOP, chess.KNIGHT)
+        side = max(36, int(self._get_board_rect().width() / 8))
+        row, _ = self._renderer.get_visual_coordinates(square, self._flipped)
+        choices = list(zip(types, glyphs[color]))
+        if row >= 4:
+            choices.reverse()
+        selected = [None]
+        for piece_type, glyph in choices:
+            button = QPushButton(glyph, dialog)
+            button.setAccessibleName(chess.piece_name(piece_type))
+            button.setFixedSize(side, side)
+            button.setStyleSheet("font-size: 32px; padding: 0; border-radius: 0;")
+            button.clicked.connect(
+                lambda _checked=False, value=piece_type:
+                (selected.__setitem__(0, value), dialog.accept()))
+            layout.addWidget(button)
+        rect = self._get_board_rect()
+        at = self._square_center(square)
+        top = rect.y() + (row if row < 4 else row - 3) * side
+        dialog.move(self.mapToGlobal(QPointF(at.x() - side / 2, top).toPoint()))
+        dialog.exec()
+        return selected[0]
 
     def paintEvent(self, event) -> None:  # noqa: N802 - Qt API
         old_highlight = self._renderer.highlight_last_move
@@ -239,13 +297,22 @@ class BoardView(BoardWidget):
                     arrow = (start, end)
                     if arrow in self._annotation_arrows:
                         self._annotation_arrows.remove(arrow)
+                        action = "remove"
                     else:
                         self._annotation_arrows.add(arrow)
+                        action = "add"
+                    self._record_annotation_action(action, "arrow",
+                                                  from_square=chess.square_name(start),
+                                                  to_square=chess.square_name(end))
                 else:
                     if start in self._annotation_squares:
                         self._annotation_squares.remove(start)
+                        action = "remove"
                     else:
                         self._annotation_squares.add(start)
+                        action = "add"
+                    self._record_annotation_action(action, "square",
+                                                  square=chess.square_name(start))
                 self.annotations_changed.emit()
             self._right_start = None
             self._right_end = None
@@ -261,7 +328,18 @@ class BoardView(BoardWidget):
             dragged = self._premove_dragging
             self._cancel_premove_gesture(clear_selection=dragged)
             if start is not None and end is not None and end != start:
-                self._emit_premove(start, end)
+                if not self._is_premove_turn():
+                    # Opponent moved while the mouse was down. Validate the
+                    # released destination against the authoritative new board.
+                    self._handling_input = True
+                    try:
+                        move = self._find_move(start, end)
+                    finally:
+                        self._handling_input = False
+                    if move is not None:
+                        self.move_intent.emit(move)
+                else:
+                    self._emit_premove(start, end)
             elif dragged:
                 self.update()
             elif end is not None:
@@ -278,6 +356,14 @@ class BoardView(BoardWidget):
             super().mouseReleaseEvent(event)
         finally:
             self._handling_input = False
+
+    def wheelEvent(self, event) -> None:  # noqa: N802 - Qt API
+        delta = event.angleDelta().y()
+        if delta:
+            self.wheel_navigate.emit(-1 if delta > 0 else 1)
+            event.accept()
+        else:
+            super().wheelEvent(event)
 
     def keyPressEvent(self, event) -> None:  # noqa: N802 - Qt API
         if event.key() == Qt.Key.Key_Escape:
@@ -343,15 +429,7 @@ class BoardView(BoardWidget):
         if piece and piece.piece_type == chess.PAWN:
             target_rank = chess.square_rank(end)
             if target_rank in (0, 7):
-                labels = ["Ферзь", "Ладья", "Слон", "Конь"]
-                choices = [chess.QUEEN, chess.ROOK, chess.BISHOP, chess.KNIGHT]
-                selected, accepted = QInputDialog.getItem(
-                    self, "Превращение предхода", "Выберите фигуру:", labels, 0, False
-                )
-                if not accepted:
-                    self.update()
-                    return
-                promotion = choices[labels.index(selected)]
+                promotion = chess.QUEEN  # automatic queen when premoving
         self.premove_intent.emit(chess.Move(start, end, promotion=promotion))
         self.update()
 
