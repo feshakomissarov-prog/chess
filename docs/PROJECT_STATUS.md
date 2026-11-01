@@ -6,7 +6,7 @@
 
 ## Актуализация 01.11.2026 — полный тренер и аудит PR #24 (текущая)
 
-**Продуктовая цель уточнена владельцем:** [PRODUCT_VISION.md](PRODUCT_VISION.md). Chess Coach должен быть **полноценным адаптивным тренером, снимающим непонимание во всех областях шахмат**, а не продуктом ради одной уникальной функции. Чужие проекты из [исследовательского каталога](research/OPEN_SOURCE_CHESS_PROJECTS.md) — технические образцы и идеи с учётом лицензий. Четыре волны ссылок уже включены в каталог.
+**Продуктовая цель уточнена владельцем:** [PRODUCT_VISION.md](PRODUCT_VISION.md). Chess Coach должен быть **полноценным адаптивным тренером, снимающим непонимание во всех областях шахмат**, а не продуктом ради одной уникальной функции. Чужие проекты из [исследовательского каталога](research/OPEN_SOURCE_CHESS_PROJECTS.md) — технические образцы и идеи с учётом лицензий. Пять волн ссылок уже включены в каталог (последняя — детекторы мотивов, обучение выбору плана и проверяемые объяснения).
 
 **Новый код M3–M4:** последовательные draft PR [#18](https://github.com/feshakomissarov-prog/chess/pull/18)→[#19](https://github.com/feshakomissarov-prog/chess/pull/19)→[#20](https://github.com/feshakomissarov-prog/chess/pull/20)→[#21](https://github.com/feshakomissarov-prog/chess/pull/21)→[#22](https://github.com/feshakomissarov-prog/chess/pull/22)→[#23](https://github.com/feshakomissarov-prog/chess/pull/23)→[#24](https://github.com/feshakomissarov-prog/chess/pull/24). **Последний SHA:** `e57926b976d31ec198add0da8373570ac26d1d17`, branch `codex/m3-windows-diagnostics`, base `codex/m3-puzzle-pilot`, draft. Не слит. В базе PR #8–#17; PR #15 закрыт как заменённый. Реальные Lichess/OAuth/Stockfish ещё NOT RUN.
 
