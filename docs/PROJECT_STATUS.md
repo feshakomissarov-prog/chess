@@ -208,3 +208,18 @@ git pull --ff-only
 Подтверждения кода: Windows Python 3.12.10 локально `python -m pytest -q` — **285 PASS**, включая корпус из 20 hand-authored synthetic mini-reports; compileall, pip check и diff-check PASS. Windows CI [run #76](https://github.com/feshakomissarov-prog/chess/actions/runs/41282799453) на SHA `415c9e1c7fa8cb0c3da1170ff2176bc87cd0e495`: **SUCCESS, 285 passed за 119.67 с**, Python 3.12.10, Qt/PySide6/shiboken6 6.12.0, compileall и изолированная офлайн-инициализация Qt окна PASS. Ранее run #75 на предыдущем code checkpoint также прошёл (265 PASS).
 
 Ограничения/приёмка: real opportunity conversion остаётся **PARTIAL** — нет подтверждённой связи candidate → последующее действие, поэтому процента нет. Большой набор из 20 отчётов не заменяет оценку на 20 реальных/контрольных партиях. Визуальная ручная проверка GUI, пользовательская SQLite/PGN, живые OAuth/Lichess и настоящий Stockfish — **NOT RUN/NOT TOUCHED**. PR остаётся draft; ничего не слито.
+
+## M4.5 second-pass review — текущий handoff (2026-11-01)
+
+В ветке `codex/m45-batch-analysis`, draft PR [#30](https://github.com/feshakomissarov-prog/chess/pull/30), реализуются R10–R17 из [second-pass spec](reviews/PR30_M45_SECOND_PASS_REVIEW_FIX_SPEC.md). Подробные коммиты, тесты и ограничения записаны в [execution log](handoffs/M4_5_EXECUTION_LOG.md).
+
+- R10: selective review newest-first, SQL pages, quota расходуется только на новые jobs; 200 synthetic games доказывают progression 10+10 без запуска UCI.
+- R11: schema v17 additive refresh checkpoint по account/game/revision/hash; no-eval/partial/changed/API failure и retry deadline; fake export 80 партий проходит 25+25+25+5, archive backfill cursor сохраняется.
+- R12: opportunity metrics account-relative по mover и выбранному account color; один shared analysis run на два linked accounts; глобальная owner-relative метка `opponent_blunder` больше не сохраняется.
+- R13: source score completeness отдельно от собственных сравнимых решений; PGN root `%eval` сохраняется в ply 0 только при наличии; GUI обозначает missing first-move baseline.
+- R14: opening provenance отдельно маркирует Lichess ECO и CC0 matcher, конфликт остаётся видимым.
+- R15: obsolete detector rows/tags остаются историей, но исключены из активного отчёта и review planning.
+- R16: локальная accuracy честно остаётся NULL/unsupported; UI поясняет причину и coverage, Lichess accuracy остаётся отдельной.
+- R17/CI: Windows Python 3.12.10 полный offscreen CI на финальном SHA ещё ожидается; локальный полный прогон достиг 100%, но двойной `-q` подавил явную summary, поэтому локальный PASS пока не утверждается. Обновить этот статус по фактическому Actions run.
+
+Реальные Lichess/OAuth, архив, личная SQLite и настоящий Stockfish не запускались/не открывались. Fair Play synthetic regressions включают активное изменение snapshot, timeout/429 и lease loss. PR не слит и должен оставаться draft.

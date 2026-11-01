@@ -182,6 +182,8 @@ class ArchiveSync:
             try:
                 before = self.repository.lichess_eval_score_count(
                     game["game_id"], int(game["line_revision"]))
+                before_pairs = self.repository.lichess_eval_pair_count(
+                    game["game_id"], int(game["line_revision"]))
                 pgn = self.client.export_game_pgn(token, game["game_id"])
                 # This import has no archive checkpoint; successful game-specific state
                 # is recorded only after the PGN and its derived metrics are persisted.
@@ -190,8 +192,11 @@ class ArchiveSync:
                     checkpoint_ms=None, backfill=False)
                 after = self.repository.lichess_eval_score_count(
                     game["game_id"], int(game["line_revision"]))
+                after_pairs = self.repository.lichess_eval_pair_count(
+                    game["game_id"], int(game["line_revision"]))
                 gained_now = max(0, after - before)
-                gained += gained_now
+                gained_pairs_now = max(0, after_pairs - before_pairs)
+                gained += gained_pairs_now
                 refreshed += 1
                 checked += 1
                 unchanged += int(gained_now == 0)

@@ -295,3 +295,17 @@
 - Regression проверяет null/status/reason/coverage и Qt текст. Конкретную версионированную модель локального accuracy для всех Stockfish-партий в этот fix не добавлял: требуется отдельно доказать шкалу и интерпретацию на синтетическом корпусе.
 - Проверено: Python 3.12.10, repository + Qt offscreen regressions — 2 PASS.
 - Далее: R17 — Fair Play regression, схема/rollback, scale workloads, полный офлайн/Qt набор, PROJECT_STATUS, Windows CI на итоговом SHA.
+
+## M4.5 second-pass review R10–R17 (2026-11-01; CI pending)
+
+- Исправления выполнены в исходной `codex/m45-batch-analysis` / PR #30; PR остаётся draft. Ветка обновлена документационным commit из актуального main, изменения R0–R9 не переписывались.
+- Checkpoints: R10 `f2c64153`; R11/schema v17 `92ec33d`; R12 `8a07f31`; R13 `375ab08`; R14 `827edfd`; R15 `272b769`; R16 `f94a5a6`. Текущий schema v17 — additive table/index; migration v16 backup/integrity/FK tested.
+- R17 локальная Windows Python 3.12.10 offscreen команда была запущена дважды без явного pytest failure и дошла до 100%; из-за project-level `-q` плюс CLI `-q` summary line была подавлена, поэтому локальный тестовый итог пока не записываю как PASS. Полный Windows CI на последнем SHA обязателен и остаётся следующим доказательством.
+- `compileall`, diff-check и CI — pending final checkpoint; scale/Fair Play synthetic cases include existing 10k/35k and timeout/429/lease regressions plus new 200-review/80-refresh fixtures.
+- Нет реальных Lichess/OAuth запросов, пользовательской SQLite, архива или настоящего UCI/Stockfish.
+
+### R17 checkpoint before CI (2026-11-01)
+
+- Адресная критическая регрессия на Python 3.12.10, Qt offscreen: `pytest -o addopts= -q` по 8 тестам R10/R11/v17 migration/R12/R13 UI/R15 — **8 passed in 26.03s, EXIT_CODE=0**.
+- `python -m compileall -q src tests` — PASS; `python -m pip check` — “No broken requirements found”; `git diff --check` — PASS.
+- Полный pytest offscreen был запущен и дошёл до 100%; проектный двойной quiet не показал summary, поэтому отдельный полный suite результат берётся из Windows CI, ожидающего push этого checkpoint.

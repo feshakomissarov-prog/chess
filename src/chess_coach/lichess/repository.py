@@ -304,6 +304,8 @@ class GameRepository:
                     ON lichess_eval_refresh_state(account_id,status,next_retry_at);
                 CREATE INDEX IF NOT EXISTS idx_puzzle_attempt_puzzle ON puzzle_attempts(puzzle_id,attempt_date_ms);
                 CREATE INDEX IF NOT EXISTS idx_games_updated ON games(updated_at DESC, game_id);
+                CREATE INDEX IF NOT EXISTS idx_games_started_recent
+                    ON games(started_at DESC,game_id DESC);
                 CREATE INDEX IF NOT EXISTS idx_games_opponent ON games(opponent);
                 CREATE INDEX IF NOT EXISTS idx_game_notes_position ON game_notes(position_uid);
                 CREATE INDEX IF NOT EXISTS idx_analysis_cache ON analysis_runs(game_id,line_revision,source,engine_version,status);
@@ -789,6 +791,21 @@ class GameRepository:
         with self._connection() as db:
             row = db.execute("SELECT COUNT(*) FROM game_moves WHERE game_id=? AND line_revision=?",
                              (game_id, int(line_revision))).fetchone()
+        return int(row[0])
+
+    def lichess_eval_pair_count(self, game_id: str, line_revision: int) -> int:
+        with self._connection() as db:
+            row = db.execute(
+                "SELECT COUNT(*) FROM game_moves gm WHERE gm.game_id=? AND gm.line_revision=? "
+                "AND EXISTS (SELECT 1 FROM position_assessments pre JOIN analysis_runs ar "
+                "ON ar.run_id=pre.run_id WHERE ar.game_id=gm.game_id "
+                "AND ar.line_revision=gm.line_revision AND ar.source='lichess-pgn' "
+                "AND pre.ply=gm.ply-1 AND (pre.white_cp IS NOT NULL OR pre.mate_white IS NOT NULL)) "
+                "AND EXISTS (SELECT 1 FROM position_assessments post JOIN analysis_runs ar "
+                "ON ar.run_id=post.run_id WHERE ar.game_id=gm.game_id "
+                "AND ar.line_revision=gm.line_revision AND ar.source='lichess-pgn' "
+                "AND post.ply=gm.ply AND (post.white_cp IS NOT NULL OR post.mate_white IS NOT NULL))",
+                (game_id, int(line_revision))).fetchone()
         return int(row[0])
 
     def record_lichess_eval_refresh(self, account_id: str, game_id: str, *,
