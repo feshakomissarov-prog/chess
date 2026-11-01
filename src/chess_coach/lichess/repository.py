@@ -1666,9 +1666,10 @@ class GameRepository:
     @staticmethod
     def _load_move_metrics(db: sqlite3.Connection, run_id: str) -> list[dict]:
         rows = db.execute(
-            "SELECT mm.*,gm.mover,CASE WHEN pb.middle_start_ply IS NULL THEN 'middlegame' "
-            "WHEN mm.ply<pb.middle_start_ply THEN 'opening' WHEN pb.end_start_ply IS NULL "
-            "THEN 'middlegame' WHEN mm.ply<pb.end_start_ply THEN 'middlegame' ELSE 'endgame' END phase "
+            "SELECT mm.*,gm.mover,CASE WHEN pb.middle_start_ply IS NOT NULL "
+            "AND mm.ply<pb.middle_start_ply THEN 'opening' WHEN pb.end_start_ply IS NOT NULL "
+            "AND mm.ply>=pb.end_start_ply THEN 'endgame' WHEN pb.middle_start_ply IS NOT NULL "
+            "AND mm.ply>=pb.middle_start_ply THEN 'middlegame' ELSE 'unknown' END phase "
             "FROM move_metrics mm JOIN game_moves gm ON gm.game_id=mm.game_id "
             "AND gm.line_revision=mm.line_revision AND gm.ply=mm.ply "
             "LEFT JOIN game_phase_boundaries pb ON pb.game_id=mm.game_id "
@@ -1884,21 +1885,12 @@ class GameRepository:
                                        budget_total=budget_total)
 
     def phase_for_ply(self, game_id: str, line_revision: int, ply: int) -> str:
+        from .phases import phase_at_ply
+
         with self._connection() as db:
             row = db.execute("SELECT middle_start_ply,end_start_ply FROM game_phase_boundaries "
                              "WHERE game_id=? AND line_revision=?", (game_id,line_revision)).fetchone()
-        if not row:
-            return "unknown"
-        middle, end = row["middle_start_ply"], row["end_start_ply"]
-        if middle is None and end is None:
-            return "unknown"
-        if middle is not None and ply < middle:
-            return "opening"
-        if end is not None and ply >= end:
-            return "endgame"
-        if middle is not None and end is not None and middle <= ply < end:
-            return "middlegame"
-        return "unknown"
+        return phase_at_ply(row["middle_start_ply"], row["end_start_ply"], int(ply)) if row else "unknown"
 
     def phase_boundaries(self, game_id: str, line_revision: int) -> dict | None:
         """Return phase boundaries together with their source and method version."""

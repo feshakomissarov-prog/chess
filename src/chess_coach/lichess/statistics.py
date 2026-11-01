@@ -201,9 +201,10 @@ class StatisticsService:
                 "AVG(CASE WHEN assessed>0 THEN CASE WHEN blunders>0 THEN 1.0 ELSE 0 END END) "
                 "AS share_games_with_blunder "
                 "FROM own_per_game", [*params, *source_params]).fetchone()
-            phase_rows = db.execute(selected + " SELECT CASE WHEN pb.middle_start_ply IS NULL THEN 'middlegame' "
-                "WHEN mm.ply<pb.middle_start_ply THEN 'opening' WHEN pb.end_start_ply IS NULL THEN 'middlegame' "
-                "WHEN mm.ply<pb.end_start_ply THEN 'middlegame' ELSE 'endgame' END AS phase,"
+            phase_rows = db.execute(selected + " SELECT CASE WHEN pb.middle_start_ply IS NOT NULL "
+                "AND mm.ply<pb.middle_start_ply THEN 'opening' WHEN pb.end_start_ply IS NOT NULL "
+                "AND mm.ply>=pb.end_start_ply THEN 'endgame' WHEN pb.middle_start_ply IS NOT NULL "
+                "AND mm.ply>=pb.middle_start_ply THEN 'middlegame' ELSE 'unknown' END AS phase,"
                 "CASE WHEN gm.mover=fg.my_color THEN 'mine' ELSE 'opponent' END AS perspective,"
                 "mm.severity AS label,COUNT(*) AS count FROM chosen c "
                 "JOIN move_metrics mm ON mm.run_id=c.run_id AND mm.metric_version='cc-move-metrics-v2' "
@@ -493,9 +494,10 @@ class StatisticsService:
                 "LEFT JOIN game_phase_boundaries pb ON pb.game_id=mm.game_id AND pb.line_revision=mm.line_revision "
                 "GROUP BY eco,opening ORDER BY errors DESC,games DESC,eco LIMIT 20",
                 [*source_params, *params]).fetchall()
-            phases = db.execute(cte + where + ") SELECT CASE WHEN pb.middle_start_ply IS NULL THEN 'middlegame' "
-                "WHEN mm.ply<pb.middle_start_ply THEN 'opening' WHEN pb.end_start_ply IS NULL THEN 'middlegame' "
-                "WHEN mm.ply<pb.end_start_ply THEN 'middlegame' ELSE 'endgame' END phase,"
+            phases = db.execute(cte + where + ") SELECT CASE WHEN pb.middle_start_ply IS NOT NULL "
+                "AND mm.ply<pb.middle_start_ply THEN 'opening' WHEN pb.end_start_ply IS NOT NULL "
+                "AND mm.ply>=pb.end_start_ply THEN 'endgame' WHEN pb.middle_start_ply IS NOT NULL "
+                "AND mm.ply>=pb.middle_start_ply THEN 'middlegame' ELSE 'unknown' END phase,"
                 "COUNT(CASE WHEN gm.mover=my_color AND mm.cp_loss IS NOT NULL THEN 1 END) evaluated_moves,"
                 "COUNT(CASE WHEN gm.mover=my_color AND mm.severity IN ('mistake','blunder') THEN 1 END) errors,"
                 "AVG(CASE WHEN gm.mover=my_color AND mm.cp_loss IS NOT NULL THEN mm.cp_loss END) mean_loss_cp "
@@ -506,8 +508,10 @@ class StatisticsService:
                 "GROUP BY phase ORDER BY errors DESC,phase",
                 [*source_params, *params]).fetchall()
             evidence = db.execute(cte + where + ") SELECT scope.game_id,mm.ply,"
-                "CASE WHEN pb.middle_start_ply IS NULL THEN 'middlegame' WHEN mm.ply<pb.middle_start_ply THEN 'opening' "
-                "WHEN pb.end_start_ply IS NULL THEN 'middlegame' WHEN mm.ply<pb.end_start_ply THEN 'middlegame' ELSE 'endgame' END phase,"
+                "CASE WHEN pb.middle_start_ply IS NOT NULL AND mm.ply<pb.middle_start_ply THEN 'opening' "
+                "WHEN pb.end_start_ply IS NOT NULL AND mm.ply>=pb.end_start_ply THEN 'endgame' "
+                "WHEN pb.middle_start_ply IS NOT NULL AND mm.ply>=pb.middle_start_ply THEN 'middlegame' "
+                "ELSE 'unknown' END phase,"
                 "mm.severity AS label,"
                 "mm.cp_loss,(SELECT aa.pv_uci FROM analysis_alternatives aa "
                 "WHERE aa.run_id=scope.run_id AND aa.ply=mm.ply-1 AND aa.multipv_rank=1) best_pv_uci,"

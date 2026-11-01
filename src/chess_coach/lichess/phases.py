@@ -48,6 +48,6 @@ def phase_at_ply(middle_start: int | None, end_start: int | None, ply: int) -> s
         return "opening"
     if end_start is not None and ply >= end_start:
         return "endgame"
-    if middle_start is not None and end_start is not None and middle_start <= ply < end_start:
+    if middle_start is not None and ply >= middle_start:
         return "middlegame"
     return "unknown"

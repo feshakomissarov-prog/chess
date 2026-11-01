@@ -7,7 +7,7 @@ import chess
 from chess_coach.lichess.opening_matcher import (
     DATASET_REVISION, OpeningMatcher, _dataset_digest, epd_key,
 )
-from chess_coach.lichess.phases import PHASE_FALLBACK_VERSION, infer_phase_boundaries
+from chess_coach.lichess.phases import PHASE_FALLBACK_VERSION, infer_phase_boundaries, phase_at_ply
 from chess_coach.lichess.repository import GameRepository, SCHEMA_VERSION
 from chess_coach.lichess.statistics import StatisticsService
 
@@ -140,6 +140,46 @@ def test_phase_fallback_uses_board_facts_and_lichess_division_wins(tmp_path):
         with repo._connection() as db:
             label = db.execute("SELECT phase FROM move_classifications WHERE game_id='fallback' ").fetchone()[0]
         assert label == "opening"
+    finally:
+        repo.shutdown()
+
+
+def test_phase_boundaries_handle_unknown_end_and_late_hydration(tmp_path):
+    assert phase_at_ply(4, None, 3) == "opening"
+    assert phase_at_ply(4, None, 4) == "middlegame"
+    assert phase_at_ply(4, None, 99) == "middlegame"
+    assert phase_at_ply(None, 6, 5) == "unknown"
+    assert phase_at_ply(None, 6, 6) == "endgame"
+    assert phase_at_ply(None, None, 4) == "unknown"
+    assert phase_at_ply(1, 1, 1) == "endgame"
+
+    repo = GameRepository(tmp_path / "late-phase-hydration.sqlite3")
+    try:
+        repo.save_snapshot("phase-late", "startpos", "e2e4 e7e5", "white", "Friend",
+                           False, "300+0", "finished", "white")
+        line = repo.current_line("phase-late")
+        repo.save_analysis("phase-late", line_revision=1, line_hash=line["line_hash"],
+            source="stockfish", engine_name="synthetic", engine_version="1",
+            parameters={"nodes": 100}, assessments=[{"ply": 0, "white_cp": 0},
+                                                   {"ply": 1, "white_cp": 100},
+                                                   {"ply": 2, "white_cp": 100}],
+            classifications=[{"ply": 1, "mover": "white", "label": "good",
+                              "algorithm_version": "synthetic"},
+                             {"ply": 2, "mover": "black", "label": "good",
+                              "algorithm_version": "synthetic"}])
+        assert repo.phase_for_ply("phase-late", 1, 2) == "unknown"
+        with repo._connection() as db:
+            db.execute("INSERT INTO game_phase_boundaries VALUES (?,?,?,?,?,?)",
+                       ("phase-late", 1, 2, None, "synthetic", "test"))
+            repo._apply_phase_labels(db, "phase-late", 1, 2, None)
+        detail = repo.latest_analysis_detail("phase-late", 1)
+        phases = {row["ply"]: row["phase"] for row in detail["move_metrics"]}
+        assert repo.phase_for_ply("phase-late", 1, 2) == "middlegame"
+        assert phases == {1: "opening", 2: "middlegame"}
+        with repo._connection() as db:
+            legacy_phases = {row["ply"]: row["phase"] for row in db.execute(
+                "SELECT ply,phase FROM move_classifications WHERE game_id='phase-late'")}
+        assert legacy_phases == {1: "opening", 2: "middlegame"}
     finally:
         repo.shutdown()
 
