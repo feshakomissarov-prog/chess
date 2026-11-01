@@ -25,6 +25,31 @@ _ENGINE_FINGERPRINT_LOCK = threading.Lock()
 class AnalysisOptions:
     nodes: int = 100_000
     multipv: int = 1
+    threads: int = 1
+    hash_mb: int = 128
+    limit_kind: str = "nodes"
+    limit_value: int | None = None
+
+    def normalized(self) -> "AnalysisOptions":
+        kind = self.limit_kind if self.limit_kind in {"nodes", "depth", "time"} else "nodes"
+        requested = self.nodes if kind == "nodes" and self.limit_value is None else self.limit_value
+        value = max(1, min(int(requested or 1), 3_600_000 if kind == "time" else 100_000_000))
+        return AnalysisOptions(
+            nodes=value if kind == "nodes" else max(1, int(self.nodes)),
+            multipv=1,
+            threads=max(1, min(8, int(self.threads))),
+            hash_mb=max(16, min(512, int(self.hash_mb))),
+            limit_kind=kind,
+            limit_value=value,
+        )
+
+    def engine_limit(self) -> chess.engine.Limit:
+        options = self.normalized()
+        return {
+            "nodes": chess.engine.Limit(nodes=options.limit_value),
+            "depth": chess.engine.Limit(depth=options.limit_value),
+            "time": chess.engine.Limit(time=options.limit_value / 1000.0),
+        }[options.limit_kind]
 
 
 class CompletedGameAnalyzer:
@@ -51,8 +76,11 @@ class CompletedGameAnalyzer:
         revision = self.repository.current_line(game_id)
         if not revision:
             raise ValueError("У партии нет проверенной нормализованной линии.")
-        parameters = {"nodes": max(1, int(options.nodes)), "multipv": 1,
-                      "classifier_version": CLASSIFIER_VERSION}
+        options = options.normalized()
+        parameters = {"limit_kind": options.limit_kind,
+                      "limit_value": options.limit_value,
+                      "threads": options.threads, "hash_mb": options.hash_mb,
+                      "multipv": 1, "classifier_version": CLASSIFIER_VERSION}
         initial_fen = revision["initial_fen"]
         board = chess.Board() if initial_fen == "startpos" else chess.Board(initial_fen)
         boards = [board.copy()]
@@ -78,7 +106,8 @@ class CompletedGameAnalyzer:
             if cache:
                 cache["cached"] = True
                 return cache
-            engine.configure({"MultiPV": 1})
+            engine.configure({"MultiPV": 1, "Threads": options.threads,
+                              "Hash": options.hash_mb})
             if stop_event is not None and stop_event.is_set():
                 raise InterruptedError("Анализ отменён.")
             assessments = []
@@ -86,7 +115,7 @@ class CompletedGameAnalyzer:
                 if stop_event is not None and stop_event.is_set():
                     raise InterruptedError("Анализ отменён.")
                 info = _analyze_interruptibly(
-                    engine, position, chess.engine.Limit(nodes=parameters["nodes"]), stop_event)
+                    engine, position, options.engine_limit(), stop_event)
                 score = info["score"].pov(chess.WHITE)
                 cp = score.score(mate_score=None)
                 assessments.append({

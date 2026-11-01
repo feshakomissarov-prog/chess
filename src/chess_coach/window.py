@@ -8,7 +8,7 @@ import threading
 from datetime import datetime
 from pathlib import Path
 import tempfile
-from PySide6.QtCore import QSettings, Qt, QStandardPaths, QTimer, Signal
+from PySide6.QtCore import QProcess, QSettings, Qt, QStandardPaths, QTimer, Signal
 from PySide6.QtGui import QKeySequence, QShortcut, QColor, QPainter, QPen
 from PySide6.QtWidgets import (
     QCheckBox,
@@ -166,6 +166,67 @@ class SettingsDialog(QDialog):
         self.allow_premoves = QCheckBox("Разрешить предходы")
         self.allow_premoves.setChecked(settings.value("allow_premoves", True, type=bool))
         layout.addWidget(self.allow_premoves)
+        layout.addWidget(QLabel("Локальный Stockfish (не загружается приложением)"))
+        engine_row = QHBoxLayout()
+        self.engine_path = QLineEdit(settings.value("stockfish_path", "", type=str))
+        self.engine_path.setPlaceholderText("Выберите установленный UCI executable")
+        engine_row.addWidget(self.engine_path, 1)
+        browse_engine = QPushButton("Обзор…")
+        browse_engine.clicked.connect(self._browse_engine)
+        engine_row.addWidget(browse_engine)
+        layout.addLayout(engine_row)
+        self.engine_test = QPushButton("Проверить движок (до 5 секунд)")
+        self.engine_test.clicked.connect(self._test_engine)
+        layout.addWidget(self.engine_test)
+        self.engine_test_status = QLabel("Проверка запускается только по этой кнопке.")
+        self.engine_test_status.setWordWrap(True)
+        layout.addWidget(self.engine_test_status)
+        license_note = QLabel(
+            'Stockfish распространяется по GPL v3. Используйте '
+            '<a href="https://stockfishchess.org/download/">официальный выпуск</a> '
+            'и соблюдайте его лицензию; приложение не скачивает бинарник.')
+        license_note.setOpenExternalLinks(True)
+        license_note.setWordWrap(True)
+        layout.addWidget(license_note)
+        self.analysis_preset = QComboBox()
+        self.analysis_preset.addItem("Быстрый · 25 000 узлов", "quick")
+        self.analysis_preset.addItem("Обычный · 100 000 узлов", "normal")
+        self.analysis_preset.addItem("Подробный · 500 000 узлов", "detailed")
+        preset = settings.value("analysis_preset", "normal", type=str)
+        self.analysis_preset.setCurrentIndex(max(0, self.analysis_preset.findData(preset)))
+        self.analysis_preset.currentIndexChanged.connect(self._apply_analysis_preset)
+        layout.addWidget(QLabel("Профиль анализа"))
+        layout.addWidget(self.analysis_preset)
+        self.analysis_limit = QComboBox()
+        self.analysis_limit.addItem("Узлы", "nodes")
+        self.analysis_limit.addItem("Глубина", "depth")
+        self.analysis_limit.addItem("Секунды на позицию", "time")
+        limit_kind = settings.value("analysis_limit_kind", "nodes", type=str)
+        self.analysis_limit.setCurrentIndex(max(0, self.analysis_limit.findData(limit_kind)))
+        layout.addWidget(QLabel("Ограничение на позицию"))
+        layout.addWidget(self.analysis_limit)
+        self.analysis_limit_value = QSpinBox()
+        self.analysis_limit_value.setRange(1, 1_000_000)
+        self.analysis_limit_value.setValue(settings.value("analysis_limit_value", 100_000, type=int))
+        layout.addWidget(self.analysis_limit_value)
+        self.analysis_limit.currentIndexChanged.connect(self._update_limit_range)
+        self._update_limit_range()
+        self._apply_analysis_preset()
+        self.engine_threads = QSpinBox()
+        self.engine_threads.setRange(1, 8)
+        self.engine_threads.setValue(settings.value("stockfish_threads", 1, type=int))
+        layout.addWidget(QLabel("Потоки Stockfish (1–8)"))
+        layout.addWidget(self.engine_threads)
+        self.engine_hash = QSpinBox()
+        self.engine_hash.setRange(16, 512)
+        self.engine_hash.setSuffix(" МБ")
+        self.engine_hash.setValue(settings.value("stockfish_hash_mb", 128, type=int))
+        layout.addWidget(QLabel("Память Hash (16–512 МБ)"))
+        layout.addWidget(self.engine_hash)
+        self._engine_process: QProcess | None = None
+        self._engine_probe_timer: QTimer | None = None
+        self._engine_probe_buffer = bytearray()
+        self.finished.connect(lambda _result: self._stop_engine_probe())
         buttons = QDialogButtonBox(
             QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
         )
@@ -180,7 +241,116 @@ class SettingsDialog(QDialog):
         settings.setValue("show_last_move", self.last.isChecked())
         settings.setValue("annotations_enabled", self.annotations.isChecked())
         settings.setValue("allow_premoves", self.allow_premoves.isChecked())
+        settings.setValue("stockfish_path", self.engine_path.text().strip())
+        settings.setValue("analysis_preset", self.analysis_preset.currentData())
+        settings.setValue("analysis_limit_kind", self.analysis_limit.currentData())
+        settings.setValue("analysis_limit_value", self.analysis_limit_value.value())
+        settings.setValue("stockfish_threads", self.engine_threads.value())
+        settings.setValue("stockfish_hash_mb", self.engine_hash.value())
         settings.sync()
+
+    def _browse_engine(self) -> None:
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Выберите установленный Stockfish UCI executable", self.engine_path.text(),
+            "Программы (*.exe);;Все файлы (*)")
+        if path:
+            self.engine_path.setText(path)
+
+    def _update_limit_range(self) -> None:
+        kind = self.analysis_limit.currentData()
+        ranges = {"nodes": (1_000, 100_000_000, 100_000),
+                  "depth": (1, 100, 16), "time": (1, 3_600, 5)}
+        minimum, maximum, default = ranges.get(kind, ranges["nodes"])
+        old_value = self.analysis_limit_value.value()
+        self.analysis_limit_value.setRange(minimum, maximum)
+        self.analysis_limit_value.setValue(old_value if minimum <= old_value <= maximum else default)
+        if kind == "nodes":
+            preset_nodes = {"quick": 25_000, "normal": 100_000, "detailed": 500_000}
+            self.analysis_limit_value.setValue(
+                preset_nodes.get(self.analysis_preset.currentData(), self.analysis_limit_value.value()))
+
+    def _apply_analysis_preset(self) -> None:
+        if self.analysis_limit.currentData() != "nodes":
+            return
+        values = {"quick": 25_000, "normal": 100_000, "detailed": 500_000}
+        self.analysis_limit_value.setValue(
+            values.get(self.analysis_preset.currentData(), self.analysis_limit_value.value()))
+
+    def analysis_options(self) -> AnalysisOptions:
+        kind = self.analysis_limit.currentData()
+        value = self.analysis_limit_value.value()
+        if kind == "time":
+            value *= 1000
+        return AnalysisOptions(limit_kind=kind, limit_value=value,
+                              threads=self.engine_threads.value(),
+                              hash_mb=self.engine_hash.value())
+
+    def _test_engine(self) -> None:
+        path = self.engine_path.text().strip()
+        if not path:
+            self.engine_test_status.setText("Сначала выберите локальный executable.")
+            return
+        if self._engine_process is not None:
+            return
+        process = QProcess(self)
+        self._engine_process = process
+        self._engine_probe_buffer.clear()
+        self.engine_test.setEnabled(False)
+        self.engine_test_status.setText("Запущена ограниченная UCI-проверка…")
+        process.started.connect(lambda: process.write(b"uci\n"))
+        process.readyReadStandardOutput.connect(self._read_engine_probe)
+        process.errorOccurred.connect(self._engine_probe_error)
+        process.finished.connect(self._engine_probe_finished)
+        timer = QTimer(self)
+        timer.setSingleShot(True)
+        timer.timeout.connect(self._engine_probe_timeout)
+        self._engine_probe_timer = timer
+        timer.start(5_000)
+        process.start(path, [])
+
+    def _read_engine_probe(self) -> None:
+        process = self._engine_process
+        if process is None:
+            return
+        self._engine_probe_buffer.extend(bytes(process.readAllStandardOutput()))
+        output = self._engine_probe_buffer.decode("utf-8", errors="replace")
+        if "uciok" in output:
+            name = next((line.partition(" ")[2] for line in output.splitlines()
+                         if line.startswith("id name ")), "UCI engine")
+            self.engine_test_status.setText(f"UCI отвечает: {name}")
+            self._finish_engine_probe()
+
+    def _engine_probe_error(self, _error) -> None:
+        process = self._engine_process
+        if process is not None and process.state() == QProcess.ProcessState.NotRunning:
+            self.engine_test_status.setText(f"Не удалось запустить движок: {process.errorString()}")
+            self._finish_engine_probe()
+
+    def _engine_probe_finished(self, _code, _status) -> None:
+        if self._engine_process is not None:
+            if "uciok" not in self._engine_probe_buffer.decode("utf-8", errors="replace"):
+                self.engine_test_status.setText("Процесс завершился до ответа uciok.")
+            self._finish_engine_probe()
+
+    def _engine_probe_timeout(self) -> None:
+        self.engine_test_status.setText("UCI не ответил за 5 секунд; процесс остановлен.")
+        self._finish_engine_probe()
+
+    def _finish_engine_probe(self) -> None:
+        process = self._engine_process
+        self._engine_process = None
+        if self._engine_probe_timer is not None:
+            self._engine_probe_timer.stop()
+            self._engine_probe_timer.deleteLater()
+            self._engine_probe_timer = None
+        if process is not None:
+            if process.state() != QProcess.ProcessState.NotRunning:
+                process.kill()
+            process.deleteLater()
+        self.engine_test.setEnabled(True)
+
+    def _stop_engine_probe(self) -> None:
+        self._finish_engine_probe()
 
 
 class ActiveGamesDialog(QDialog):
@@ -2125,12 +2295,15 @@ class MainWindow(QMainWindow):
                 QMessageBox.information(dialog, "Stockfish",
                                         "Движок доступен только после завершения партии.")
                 return
-            engine_path, _ = QFileDialog.getOpenFileName(
-                dialog, "Выберите локальный Stockfish UCI executable", "",
-                "Программы (*.exe);;Все файлы (*)")
-            if engine_path:
-                dialog.accept()
-                self._start_game_analysis(game["game_id"], engine_path)
+            engine_path = self.settings.value("stockfish_path", "", type=str).strip()
+            if not engine_path:
+                QMessageBox.information(
+                    dialog, "Stockfish не настроен",
+                    "Сначала укажите локальный executable и проверьте его в Настройках. "
+                    "Приложение не скачивает движок автоматически.")
+                return
+            dialog.accept()
+            self._start_game_analysis(game["game_id"], engine_path)
         def refresh_selected():
             game = selected_game()
             if not game or not self.lichess or not self._lichess_connected:
@@ -2168,13 +2341,14 @@ class MainWindow(QMainWindow):
         stop = threading.Event()
         self._analysis_stop = stop
         dialog.canceled.connect(stop.set)
+        options = self._analysis_options_from_settings()
         active_human_ids = {session.game_id for session in self.online_sessions.values()
                             if session.status in {"started", "playing"}
                             and not session.is_ai_opponent}
         def work():
             try:
                 result = CompletedGameAnalyzer(self.game_repository).analyze(
-                    game_id, engine_path, AnalysisOptions(),
+                    game_id, engine_path, options,
                     active_human_game_ids=active_human_ids,
                     progress=lambda done, total: self.analysis_progress.emit(game_id, done, total),
                     stop_event=stop)
@@ -2184,6 +2358,21 @@ class MainWindow(QMainWindow):
         thread = threading.Thread(target=work, name="chess-coach-analysis", daemon=True)
         self._analysis_thread = thread
         thread.start()
+
+    def _analysis_options_from_settings(self) -> AnalysisOptions:
+        kind = self.settings.value("analysis_limit_kind", "nodes", type=str)
+        value = self.settings.value("analysis_limit_value", 100_000, type=int)
+        if kind not in {"nodes", "depth", "time"}:
+            kind = "nodes"
+        if kind == "nodes":
+            value = max(1_000, min(value, 100_000_000))
+        elif kind == "time":
+            value *= 1000
+        return AnalysisOptions(
+            limit_kind=kind, limit_value=value,
+            threads=self.settings.value("stockfish_threads", 1, type=int),
+            hash_mb=self.settings.value("stockfish_hash_mb", 128, type=int),
+        ).normalized()
 
     def _analysis_progress(self, game_id: str, done: int, total: int) -> None:
         if self._shutdown_requested:

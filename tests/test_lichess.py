@@ -731,7 +731,7 @@ def test_completed_analyzer_is_gated_caches_by_engine_and_closes_engine(tmp_path
             self.closed = False
             self.protocol_has_stop = False
         def configure(self, options):
-            assert options == {"MultiPV": 1}
+            assert options == {"MultiPV": 1, "Threads": 1, "Hash": 128}
         def analysis(self, board, limit):
             self.analyzed += 1
             score = chess.engine.PovScore(chess.engine.Cp(20 if board.ply() else 0), chess.WHITE)
@@ -769,6 +769,60 @@ def test_completed_analyzer_is_gated_caches_by_engine_and_closes_engine(tmp_path
     assert second["cached"] is True
     assert engines[1].closed and engines[1].analyzed == 0
     assert len(repo.list_analyses("done")) == 1
+
+
+def test_analysis_options_normalize_bounds_and_build_uci_limits():
+    from chess_coach.lichess.analysis import AnalysisOptions
+
+    nodes = AnalysisOptions(limit_kind="nodes", limit_value=42_000,
+                            threads=99, hash_mb=0).normalized()
+    assert nodes.threads == 8 and nodes.hash_mb == 16
+    assert nodes.engine_limit().nodes == 42_000
+    depth = AnalysisOptions(limit_kind="depth", limit_value=19).normalized()
+    assert depth.engine_limit().depth == 19
+    timed = AnalysisOptions(limit_kind="time", limit_value=2_500).normalized()
+    assert timed.engine_limit().time == 2.5
+
+
+def test_completed_analyzer_applies_settings_and_separates_cache_keys(tmp_path):
+    from chess_coach.lichess.analysis import AnalysisOptions, CompletedGameAnalyzer
+
+    repo = GameRepository(tmp_path / "engine-options.sqlite3")
+    repo.save_snapshot("options", "startpos", "", "white", "Friend",
+                       False, "-", "finished", "white")
+    engine_path = tmp_path / "fake-engine.exe"
+    engine_path.write_text("fake", encoding="utf-8")
+    configurations = []
+
+    class FakeEngine:
+        id = {"name": "OptionsFish", "author": "test"}
+        def configure(self, options): configurations.append(options)
+        def analysis(self, board, limit):
+            assert limit.depth == 14
+            info = {"score": chess.engine.PovScore(chess.engine.Cp(0), chess.WHITE),
+                    "depth": 14, "nodes": 10, "pv": []}
+            class Result:
+                def __init__(self): self.info = info
+                def __enter__(self): return self
+                def __exit__(self, *_args): pass
+                def __iter__(self): return iter([info])
+            return Result()
+        def quit(self): pass
+
+    result = CompletedGameAnalyzer(repo, lambda _path: FakeEngine()).analyze(
+        "options", engine_path,
+        AnalysisOptions(limit_kind="depth", limit_value=14, threads=3, hash_mb=256))
+    assert configurations == [{"MultiPV": 1, "Threads": 3, "Hash": 256}]
+    import json
+    stored = repo.list_analyses("options")[0]
+    stored_parameters = json.loads(stored["parameters_json"])
+    assert stored_parameters["limit_kind"] == "depth"
+    assert stored_parameters["limit_value"] == 14
+    assert stored_parameters["threads"] == 3
+    assert repo.find_analysis_cache(
+        "options", 1, stored["line_hash"], "stockfish", stored["engine_version"],
+        {**stored_parameters, "hash_mb": 128}) is None
+    assert result["cached"] is False
 
 
 def test_completed_analyzer_rejects_live_game_before_engine_start(tmp_path):

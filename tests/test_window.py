@@ -555,6 +555,87 @@ def test_visual_preferences_persist_in_qsettings(tmp_path) -> None:
     assert loaded.value("annotations_enabled", type=bool) is True
 
 
+def test_stockfish_settings_persist_without_launching_engine(tmp_path) -> None:
+    from chess_coach.lichess.analysis import AnalysisOptions
+
+    path = str(tmp_path / "stockfish-settings.ini")
+    settings = QSettings(path, QSettings.Format.IniFormat)
+    dialog = SettingsDialog(settings)
+    dialog.engine_path.setText(str(tmp_path / "user-installed-stockfish.exe"))
+    dialog.analysis_preset.setCurrentIndex(dialog.analysis_preset.findData("detailed"))
+    dialog.analysis_limit.setCurrentIndex(dialog.analysis_limit.findData("depth"))
+    dialog.analysis_limit_value.setValue(18)
+    dialog.engine_threads.setValue(4)
+    dialog.engine_hash.setValue(256)
+    options = dialog.analysis_options()
+    assert options == AnalysisOptions(limit_kind="depth", limit_value=18,
+                                     threads=4, hash_mb=256)
+    assert dialog.engine_test_status.text().startswith("Проверка запускается")
+    assert dialog._engine_process is None
+    dialog.save(settings)
+    loaded = QSettings(path, QSettings.Format.IniFormat)
+    assert loaded.value("stockfish_path") == str(tmp_path / "user-installed-stockfish.exe")
+    assert loaded.value("analysis_limit_kind") == "depth"
+    assert loaded.value("analysis_limit_value", type=int) == 18
+    assert loaded.value("stockfish_threads", type=int) == 4
+    assert loaded.value("stockfish_hash_mb", type=int) == 256
+
+
+def test_stockfish_uci_probe_is_explicit_and_stops_on_timeout(qtbot, tmp_path, monkeypatch):
+    import chess_coach.window as window_module
+
+    class FakeSignal:
+        def connect(self, callback): self.callback = callback
+
+    class FakeProcess:
+        class ProcessState:
+            NotRunning = 0
+            Running = 1
+        ProcessState = ProcessState
+        def __init__(self, _parent):
+            self.started = FakeSignal()
+            self.readyReadStandardOutput = FakeSignal()
+            self.errorOccurred = FakeSignal()
+            self.finished = FakeSignal()
+            self.current_state = self.ProcessState.NotRunning
+            self.program = None
+            self.terminated = False
+            self.killed = False
+        def start(self, program, _args):
+            self.program = program
+            self.current_state = self.ProcessState.Running
+        def state(self): return self.current_state
+        def terminate(self):
+            self.terminated = True
+            self.current_state = self.ProcessState.NotRunning
+        def kill(self):
+            self.killed = True
+            self.current_state = self.ProcessState.NotRunning
+        def deleteLater(self): pass
+        def errorString(self): return "test error"
+
+    created = []
+    def process_factory(parent):
+        process = FakeProcess(parent)
+        created.append(process)
+        return process
+
+    monkeypatch.setattr(window_module, "QProcess", process_factory)
+    dialog = SettingsDialog(QSettings(str(tmp_path / "probe.ini"), QSettings.Format.IniFormat))
+    qtbot.addWidget(dialog)
+    dialog.engine_path.setText("C:/user-selected/stockfish.exe")
+    assert created == []
+    dialog.engine_test.click()
+    assert len(created) == 1
+    assert created[0].program == "C:/user-selected/stockfish.exe"
+    assert dialog._engine_process is created[0]
+    dialog._engine_probe_timeout()
+    assert created[0].killed
+    assert dialog._engine_process is None
+    assert dialog.engine_test.isEnabled()
+    assert "5 секунд" in dialog.engine_test_status.text()
+
+
 def test_cancel_premove_button_clears_queued_intent(qtbot, tmp_path) -> None:
     import chess
 
