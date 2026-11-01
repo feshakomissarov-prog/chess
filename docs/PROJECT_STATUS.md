@@ -223,3 +223,7 @@ git pull --ff-only
 - R17/CI: Windows Python 3.12.10 полный offscreen CI на финальном SHA ещё ожидается; локальный полный прогон достиг 100%, но двойной `-q` подавил явную summary, поэтому локальный PASS пока не утверждается. Обновить этот статус по фактическому Actions run.
 
 Реальные Lichess/OAuth, архив, личная SQLite и настоящий Stockfish не запускались/не открывались. Fair Play synthetic regressions включают активное изменение snapshot, timeout/429 и lease loss. PR не слит и должен оставаться draft.
+
+### Второй проход review R10–R17 — CI checkpoint
+
+Windows Actions run [#86](https://github.com/feshakomissarov-prog/chess/actions/runs/41329457378) на code SHA `44782f00374456f35cfc9ab45b453b8fdb3d0ce6` — **SUCCESS**, 310 passed за 201.80 с; Windows Server 2025, Python 3.12.10 x64, PySide6/Qt/shiboken6 6.12.0. `compileall` и isolated offline window initialization PASS. Подробный status каждого R10–R17 и ручные ограничения — в [execution log](handoffs/M4_5_EXECUTION_LOG.md). Документальный итоговый commit после этого запускает повторный CI на новом точном SHA.

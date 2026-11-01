@@ -309,3 +309,8 @@
 - Адресная критическая регрессия на Python 3.12.10, Qt offscreen: `pytest -o addopts= -q` по 8 тестам R10/R11/v17 migration/R12/R13 UI/R15 — **8 passed in 26.03s, EXIT_CODE=0**.
 - `python -m compileall -q src tests` — PASS; `python -m pip check` — “No broken requirements found”; `git diff --check` — PASS.
 - Полный pytest offscreen был запущен и дошёл до 100%; проектный двойной quiet не показал summary, поэтому отдельный полный suite результат берётся из Windows CI, ожидающего push этого checkpoint.
+
+### R17 Windows CI result (run #86)
+
+- На кодовом checkpoint SHA `44782f00374456f35cfc9ab45b453b8fdb3d0ce6` полный Windows CI завершился **SUCCESS**: 310 passed in 201.80s; compileall PASS; offline window initialization PASS. Windows Server 2025, CPython 3.12.10 x64, PySide6/Qt/shiboken6 6.12.0. [Actions run #86](https://github.com/feshakomissarov-prog/chess/actions/runs/41329457378).
+- Отдельный документальный R17 commit добавляет это подтверждение; CI повторяется на resulting exact head. Полный CI использовал fake/synthetic DB, API и UCI; реальная Lichess/OAuth, пользовательская SQLite и настоящий Stockfish не запускались.
