@@ -17,7 +17,7 @@
 | A | Аддитивные миграции, coverage | DONE | `d4c61816424fd61f181411b815f1d0956f4d7b94`, PR #30 | schema v10; 215 pytest PASS; v9 backup/integrity/rollback PASS |
 | B | Частичные и поздние оценки Lichess | DONE | `d2da1445ad3573df07af7c7fb6c7d2eccf07c2d1`, PR #30 | 218 pytest PASS; fake export/429 PASS; real network NOT RUN |
 | C | Быстрая очередь Stockfish, recent-first | DONE | `c918e5e49ad531a13530851f5e9bdb7672f709a8`, PR #30 | schema v11; 228 pytest PASS; fake UCI/lease/fair-play PASS |
-| D | Метрики, severity, события и возможности | TODO | — | — |
+| D | Метрики, severity, события и возможности | DONE | `f9ae45f1e407099350f13103f416594e20f49d1b`, PR #30 | schema v12; 233 pytest PASS; synthetic CP/mate/WDL/source/opportunity tests PASS |
 | E | Выборочное уточнение, тактические мотивы | TODO | — | — |
 | F | CC0 дебюты, фазы игры | TODO | — | — |
 | G | Паспорт партии, список и графики | TODO | — | — |
@@ -87,3 +87,14 @@
 - `BatchAnalysisRunner` использует один явный локальный UCI process последовательно на несколько jobs; не скачивает/не выбирает бинарник сам. Перед каждой job требуется внешний safety snapshot, только `True` пропускает job. False/unknown/exception ставит job на паузу до создания engine. Появившаяся человеческая партия останавливает следующую job. Stop во время текущей позиции не сохраняет незавершённый run; cancel гасит очередь, pause сохраняет последующие queued jobs. Lease recovery тестирует перехват после имитации падения/expiry.
 - Fake UCI / temp SQLite регрессии: idempotent enqueue, recent-first, reuse одного engine и результата, legacy cache reuse, fail-closed unknown/active opponent, появление human game между партиями, interrupt+cancel, pause+resume, lease expiry, stale revision, миграции. Реальный Stockfish — NOT RUN.
 - Полный Windows/Python 3.12.10 headless тестовый набор: `QT_QPA_PLATFORM=offscreen .venv312/Scripts/python.exe -m pytest -q -ra` — exit 0, 228 PASS; compileall — PASS; diff-check — PASS. Личная SQLite/OAuth/Lichess — NOT TOUCHED/NOT RUN. CI для текущего SHA проверяется после публикации.
+
+## Этап D — версионированные метрики ходов и события-кандидаты (2026-11-01)
+
+- Ветка `codex/m45-batch-analysis` → draft [PR #30](https://github.com/feshakomissarov-prog/chess/pull/30), base `main`; code commit `f9ae45f1e407099350f13103f416594e20f49d1b`. Schema `12`; documentation checkpoint будет отдельным следующим commit.
+- Аддитивно созданы `move_metrics` и `analysis_events`; `games`, PGN, позиции и v1 `move_classifications` не перестраивались. Запись метрик/событий атомарна вместе с `analysis_runs`; coverage view сообщает измеренные ходы и candidate events.
+- `move_metrics.py` рассчитывает CP-loss строго с перспективы ходившей стороны, сохраняет White-POV CP и отдельные mate scores, выставляет `cp_loss=null` при mate discontinuity/неполных оценках, severity v2 отдельно от legacy label. WDL рассчитывается только при наличии обеих typed scores через python-chess SF model; версия библиотеки включена в `wdl_model`. Accuracy ходов не выдумывается и остаётся null без утверждённой formula_id. Официальная Lichess game accuracy отдается отдельно с source и выбранным цветом.
+- Возможность наказать ошибку соперника сохраняется как `missed_opportunity/candidate`, не verified: требуется comparable потеря на ходе соперника и ответе пользователя; evidence связывает ход соперника, ответ и best move из позиции ДО ошибки, если PV доступен. Это вход в selective review, а не подтверждённая тактическая классификация.
+- Старые analysis runs получают v2 facts лениво при запросе паспорта из сохранённых оценок; это bounded на одну партию и не вызывает UCI. Миграция v11→v12 тестирует backup/integrity и сохранность старых party/analysis rows; v9/v10 rollback/upgrade проверки обновлены до v12.
+- Полный локальный Windows/Python 3.12.10 headless набор: `QT_QPA_PLATFORM=offscreen .venv312/Scripts/python.exe -m pytest -q -ra` — exit 0, **233 PASS**. Целевые migration/metrics tests после последней правки PV — **11 PASS**; `compileall` и `git diff --check` — PASS.
+- Личная SQLite/PGN, OAuth, живой Lichess и реальный Stockfish — NOT TOUCHED/NOT RUN. WDL — обозначенная python-chess SF model, не официальный Lichess WDL; opportunity остается candidate и не учитывается как verified conversion. Windows CI для нового SHA — проверить после push.
+- Следующий этап E: ограниченный selective review pass и расширяемый pure detector registry с synthetic positive/negative fixtures, без движкового повторного прохода при классификации.
