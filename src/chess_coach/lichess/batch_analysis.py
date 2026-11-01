@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 import threading
+import time
 import uuid
 from typing import Callable
 
@@ -51,7 +52,8 @@ class BatchAnalysisRunner:
                  *, options: FastPassOptions = FastPassOptions(),
                  analyzer: CompletedGameAnalyzer | None = None,
                  engine_factory: Callable[[str], chess.engine.SimpleEngine] | None = None,
-                 lease_seconds: int = 300) -> None:
+                 lease_seconds: int = 300,
+                 safety_refresh_seconds: float = 10.0) -> None:
         self.repository = repository
         self.engine_path = Path(engine_path)
         if not self.engine_path.is_file():
@@ -62,6 +64,7 @@ class BatchAnalysisRunner:
         self.binary_sha256 = _binary_fingerprint(self.engine_path)
         self.engine_key = "stockfish-sha256:" + self.binary_sha256
         self.lease_seconds = max(30, min(3600, int(lease_seconds)))
+        self.safety_refresh_seconds = max(0.01, min(60.0, float(safety_refresh_seconds)))
         self.analyzer = analyzer or CompletedGameAnalyzer(repository, engine_factory)
         self.worker_id = uuid.uuid4().hex
 
@@ -84,12 +87,39 @@ class BatchAnalysisRunner:
         stop_reason: str | None = None
         analysis_stop = threading.Event()
         monitor_stop = threading.Event()
+        active_job_lock = threading.Lock()
+        safety_call_lock = threading.Lock()
+        active_job: dict | None = None
+        safety_lost = threading.Event()
+        safety_failure: list[str] = []
+
+        def check_active_safety(job: dict) -> bool:
+            try:
+                with safety_call_lock:
+                    result = safety_check(job)
+            except Exception as exc:
+                result = None
+                safety_failure[:] = [f"safety check failed: {type(exc).__name__}"]
+            if result is not True:
+                if not safety_failure:
+                    safety_failure[:] = ["Fair-play snapshot is unsafe, stale, or unknown."]
+                safety_lost.set()
+                analysis_stop.set()
+                return False
+            return True
 
         def monitor_controls() -> None:
+            next_refresh = time.monotonic() + self.safety_refresh_seconds
             while not monitor_stop.wait(0.05):
                 if stop_event.is_set() or (pause_event is not None and pause_event.is_set()):
                     analysis_stop.set()
                     return
+                with active_job_lock:
+                    job = active_job
+                if job is not None and time.monotonic() >= next_refresh:
+                    if not check_active_safety(job):
+                        return
+                    next_refresh = time.monotonic() + self.safety_refresh_seconds
 
         monitor = threading.Thread(target=monitor_controls,
                                    name="chess-coach-batch-control", daemon=True)
@@ -110,23 +140,22 @@ class BatchAnalysisRunner:
                     lease_seconds=self.lease_seconds)
                 if job is None:
                     break
-                try:
-                    safety = safety_check(job)
-                except Exception as exc:
-                    safety = None
-                    stop_reason = f"safety check failed: {type(exc).__name__}"
-                if safety is not True:
+                safety_failure.clear()
+                safety_lost.clear()
+                if not check_active_safety(job):
                     cancelled = stop_event.is_set()
                     paused = not cancelled
                     self.repository.finish_analysis_job(
                         job["job_id"], self.worker_id,
                         status="cancelled" if cancelled else "paused",
-                        error=stop_reason or "Safety state unknown or active human game detected.")
+                        error=stop_reason or safety_failure[0])
                     stop_reason = stop_reason or ("cancelled during safety check" if cancelled
-                                                   else "safety blocked")
+                                                   else safety_failure[0])
                     break
                 if engine is None:
                     engine = self.analyzer.engine_factory(str(self.engine_path))
+                with active_job_lock:
+                    active_job = job
 
                 def on_progress(done: int, total: int) -> None:
                     if not self.repository.renew_analysis_job_lease(
@@ -151,16 +180,24 @@ class BatchAnalysisRunner:
                         status = "paused"
                         paused = True
                         stop_reason = "paused"
+                    elif safety_lost.is_set():
+                        status = "paused"
+                        paused = True
+                        stop_reason = safety_failure[0]
                     else:
                         status = "cancelled"
                         cancelled = True
                         stop_reason = str(exc)
                     self.repository.finish_analysis_job(
                         job["job_id"], self.worker_id, status=status, error=str(exc))
+                    with active_job_lock:
+                        active_job = None
                     break
                 except Exception as exc:
                     self.repository.finish_analysis_job(
                         job["job_id"], self.worker_id, status="failed", error=str(exc))
+                    with active_job_lock:
+                        active_job = None
                     failed += 1
                     stop_reason = f"{type(exc).__name__}: {exc}"
                     break
@@ -168,6 +205,8 @@ class BatchAnalysisRunner:
                     self.repository.finish_analysis_job(
                         job["job_id"], self.worker_id, status="complete",
                         result_run_id=result.get("run_id"))
+                    with active_job_lock:
+                        active_job = None
                     processed += 1
         finally:
             monitor_stop.set()

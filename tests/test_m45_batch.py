@@ -265,6 +265,58 @@ def test_batch_detects_new_human_game_before_next_job_and_stops_engine(tmp_path)
         repository.shutdown()
 
 
+@pytest.mark.parametrize("unsafe_snapshot", [False, None, "429", "timeout"])
+def test_batch_revalidates_fair_play_during_active_analysis_without_qt_event(
+        tmp_path, unsafe_snapshot):
+    repository = GameRepository(tmp_path / "mid-game-human-appears.sqlite3")
+    engines = []
+    try:
+        _save_game(repository, "first", "2026-10-02T00:00:00+00:00")
+        _save_game(repository, "second", "2026-10-01T00:00:00+00:00")
+        runner = _runner(repository, tmp_path, engines)
+        runner.safety_refresh_seconds = 0.02
+        runner.enqueue_missing()
+        calls = []
+
+        def factory(_path):
+            engine = FakeEngine()
+            engines.append(engine)
+            return engine
+
+        class BlockingAnalyzer:
+            engine_factory = staticmethod(factory)
+
+            def analyze(self, _game_id, _path, _options, *, stop_event, **_kwargs):
+                assert stop_event.wait(2), "safety monitor did not stop the active UCI search"
+                raise InterruptedError("safe-state TTL expired during the game")
+
+        runner.analyzer = BlockingAnalyzer()
+
+        def safety(_job):
+            calls.append(len(calls))
+            # Initial authorization is valid. The next periodic authoritative
+            # snapshot sees a human game in another browser session; no Qt event.
+            if len(calls) == 1:
+                return True
+            if unsafe_snapshot == "429":
+                raise RuntimeError("HTTP 429 Retry-After")
+            if unsafe_snapshot == "timeout":
+                raise TimeoutError("snapshot timed out")
+            return unsafe_snapshot
+
+        result = runner.run(stop_event=threading.Event(), safety_check=safety)
+        assert result["paused"] is True and result["cancelled"] is False
+        assert result["processed"] == 0
+        assert len(calls) >= 2
+        assert len(engines) == 1 and engines[0].quit_calls == 1
+        assert repository.analysis_job_counts(engine_version=runner.engine_key) == {
+            "paused": 1, "queued": 1}
+        assert repository.list_analyses("first") == []
+        assert repository.list_analyses("second") == []
+    finally:
+        repository.shutdown()
+
+
 def test_pause_and_cancel_stop_current_job_and_persist_remaining_state(tmp_path):
     repository = GameRepository(tmp_path / "stop-batch.sqlite3")
     engines = []
