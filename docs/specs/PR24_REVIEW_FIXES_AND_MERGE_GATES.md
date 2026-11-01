@@ -18,6 +18,14 @@
 
 ## Обязательные исправления перед merge
 
+### P0 — идемпотентность Puzzle Activity нарушается при изменении метаданных задачи
+
+**Точное место:** `src/chess_coach/lichess/repository.py::import_puzzle_activities()` (~1039–1100), также `src/chess_coach/lichess/puzzles.py::_key()` (~163). Сейчас `attempt_uid = sha256(username + json.dumps(record,sort_keys=True))`; поле `record.puzzle` входит целиком. **Официальный Lichess `PuzzleActivity` включает `puzzle.plays`, `puzzle.rating`, `themes`, `solution`**, которые могут меняться после решения или уточнения задачи. Источники: [схема Lichess](https://github.com/lichess-org/api/blob/master/doc/specs/schemas/PuzzleActivity.yaml) и [API Activity](https://github.com/lichess-org/api/blob/master/doc/specs/tags/puzzles/api-puzzle-activity.yaml). Таким образом **то же самое решение той же задачи в ту же дату, с тем же win**, но с обновлённым `puzzle.rating` или `plays` приводит к **НОВОМ attempt_uid**, дублированию `puzzle_attempts`, росту ложного `attempts`/win-rate и неверному `new_count` повторного пилота.
+
+**Исправить:** отделить **стабильную идентичность события попытки** от изменяемого содержимого задачи. Ключ должен учитывать `account_id`, `puzzle.id`, `date` (Unix milliseconds), `win` (или явный неподменяемый server attempt id, если официальный API когда-нибудь предоставит), **не** `puzzle.plays/rating/themes/solution/fen`. Если один и тот же puzzle мог быть решён несколько раз в один миллисекундный timestamp с одинаковым результатом, явным образом документировать невозможность различить записи без серверного ID; не придумывать факт отдельной попытки. Применить ту же идентичность в `_expand_boundary/_key`, пилоте, бэкфилле и инкрементальной синхронизации. `puzzles` обновлять свежей metadata, а `puzzle_attempts` — не создавать повторно. **Существующим пользовательским `attempt_uid` нужен аддитивный, резервируемый миграционный путь** с дедупликацией, сохранением ссылок `puzzle_pilot_run_attempts`, counters и пользовательских данных; backup/integrity_check, без удаления личной базы.
+
+**Тесты с настоящей SQLite:** дважды импортировать одну попытку с одинаковыми `account+puzzle.id+date+win`, но `plays: 100→101`, `rating: 1400→1430`, `themes` в другом порядке → `attempts=1`, `new_count=0`, рейтинг задачи обновлён; решить тот же puzzle **в другое время** → отдельная попытка; повторить в другом аккаунте → другой event; pilot→full→incremental без дублей; миграция старой v8 SQLite с двумя ошибочно раздвоенными UID и сохранением связей. Добавить тест `_key` на стабильность при изменении `rating/plays`.
+
 ### P0 — статистика полного архива: unbounded SQL `IN (...)` и O(total moves) в памяти
 
 **Точное место:** `src/chess_coach/lichess/statistics.py::StatisticsService.summary()`, ~строки 29–227.
