@@ -54,10 +54,28 @@ def classify_severity(cp_loss: int | None) -> str:
 
 def build_move_facts(assessments: list[dict[str, Any]], moves: list[dict[str, Any]], *,
                      source: str, run_id: str,
-                     classifications: list[dict[str, Any]] | None = None) -> tuple[list[dict], list[dict]]:
+                     classifications: list[dict[str, Any]] | None = None,
+                     initial_fen: str = "startpos") -> tuple[list[dict], list[dict]]:
     """Build typed per-move facts. Mate discontinuities never become fake centipawns."""
     by_ply = {int(row["ply"]): row for row in assessments}
     legacy = {int(row["ply"]): row for row in classifications or []}
+    reply_positions: dict[int, chess.Board] = {}
+    try:
+        board = chess.Board() if initial_fen == "startpos" else chess.Board(initial_fen)
+        for move in sorted(moves, key=lambda item: int(item["ply"])):
+            raw_uci = move.get("uci")
+            if not raw_uci:
+                reply_positions = {}
+                break
+            parsed = chess.Move.from_uci(str(raw_uci))
+            expected_mover = "white" if board.turn == chess.WHITE else "black"
+            if parsed not in board.legal_moves or str(move.get("mover") or expected_mover) != expected_mover:
+                reply_positions = {}
+                break
+            board.push(parsed)
+            reply_positions[int(move["ply"])] = board.copy(stack=False)
+    except (ValueError, chess.InvalidMoveError, chess.IllegalMoveError, chess.AmbiguousMoveError):
+        reply_positions = {}
     facts: list[dict] = []
     for move in moves:
         ply = int(move["ply"])
@@ -97,9 +115,21 @@ def build_move_facts(assessments: list[dict[str, Any]], moves: list[dict[str, An
         opponent = facts[index - 1]
         if opponent["mover"] == fact["mover"] or opponent["cp_loss"] is None or opponent["cp_loss"] < 50:
             continue
-        opponent_before = by_ply.get(int(opponent["ply"]) - 1)
+        reply_position_ply = int(opponent["ply"])
+        reply_position_eval = by_ply.get(reply_position_ply)
         reply_eval = by_ply.get(int(fact["ply"]))
-        best_uci = _first_pv_move(opponent_before or {})
+        best_uci = _first_pv_move(reply_position_eval or {})
+        board_after_opponent = reply_positions.get(reply_position_ply)
+        if (not best_uci or board_after_opponent is None
+                or board_after_opponent.turn != (chess.WHITE if fact["mover"] == "white" else chess.BLACK)):
+            best_uci = None
+        else:
+            try:
+                reply_move = chess.Move.from_uci(best_uci)
+                if reply_move not in board_after_opponent.legal_moves:
+                    best_uci = None
+            except (ValueError, chess.InvalidMoveError):
+                best_uci = None
         events.append({
             "event_key": f"{source}:{run_id}:missed-opportunity:{fact['ply']}",
             "ply": fact["ply"], "event_type": "missed_opportunity",
@@ -110,7 +140,7 @@ def build_move_facts(assessments: list[dict[str, Any]], moves: list[dict[str, An
                 "reply_cp_loss": fact["cp_loss"],
                 "best_move_uci": best_uci,
                 "best_move_available": bool(best_uci),
-                "best_move_position_ply": int(opponent["ply"]) - 1,
+                "best_move_position_ply": reply_position_ply,
                 "reason": "single-PV opportunity; selective confirmation required",
                 "analysis_run_id": run_id,
                 "reply_eval_white_cp": None if reply_eval is None else reply_eval.get("white_cp"),

@@ -1549,9 +1549,12 @@ class GameRepository:
             moves = [dict(row) for row in db.execute(
                 "SELECT ply,mover,uci FROM game_moves WHERE game_id=? AND line_revision=? ORDER BY ply",
                 (game_id, line_revision))]
+            revision_row = db.execute("SELECT initial_fen FROM game_revisions WHERE game_id=? "
+                                      "AND line_revision=?", (game_id, line_revision)).fetchone()
             metrics, events = build_move_facts(
                 assessments, moves, source=source, run_id=run_id,
-                classifications=classifications)
+                classifications=classifications,
+                initial_fen=revision_row["initial_fen"] if revision_row else "startpos")
             for event in events:
                 event["tags"] = ["opportunity"]
             from .event_detectors import detect_registered_events
@@ -1612,11 +1615,14 @@ class GameRepository:
         moves = [dict(row) for row in db.execute(
             "SELECT ply,mover,uci FROM game_moves WHERE game_id=? AND line_revision=? ORDER BY ply",
             (run["game_id"], run["line_revision"]))]
+        revision = db.execute("SELECT initial_fen FROM game_revisions WHERE game_id=? "
+                              "AND line_revision=?", (run["game_id"], run["line_revision"])).fetchone()
         classifications = [dict(row) for row in db.execute(
             "SELECT * FROM move_classifications WHERE run_id=? ORDER BY ply", (run_id,))]
         metrics, events = build_move_facts(
             assessments, moves, source=run["source"], run_id=run_id,
-            classifications=classifications)
+            classifications=classifications,
+            initial_fen=revision["initial_fen"] if revision else "startpos")
         for event in events:
             event["tags"] = ["opportunity"]
         game = db.execute("SELECT color FROM games WHERE game_id=?", (run["game_id"],)).fetchone()
