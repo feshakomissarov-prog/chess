@@ -18,7 +18,7 @@
 | B | Частичные и поздние оценки Lichess | DONE | `d2da1445ad3573df07af7c7fb6c7d2eccf07c2d1`, PR #30 | 218 pytest PASS; fake export/429 PASS; real network NOT RUN |
 | C | Быстрая очередь Stockfish, recent-first | DONE | `c918e5e49ad531a13530851f5e9bdb7672f709a8`, PR #30 | schema v11; 228 pytest PASS; fake UCI/lease/fair-play PASS |
 | D | Метрики, severity, события и возможности | DONE | `f9ae45f1e407099350f13103f416594e20f49d1b`, PR #30 | schema v12; 233 pytest PASS; synthetic CP/mate/WDL/source/opportunity tests PASS |
-| E | Выборочное уточнение, тактические мотивы | TODO | — | — |
+| E | Выборочное уточнение, тактические мотивы | DONE | `366635f7a67ca6cb3c12f5b323fb3d64d0dc8c57`, PR #30 | schema v14; 243 pytest PASS; fake UCI MultiPV/cancel/cache PASS |
 | F | CC0 дебюты, фазы игры | TODO | — | — |
 | G | Паспорт партии, список и графики | TODO | — | — |
 | H | Агрегаты, точность, текущая и историческая статистика | TODO | — | — |
@@ -98,3 +98,14 @@
 - Полный локальный Windows/Python 3.12.10 headless набор: `QT_QPA_PLATFORM=offscreen .venv312/Scripts/python.exe -m pytest -q -ra` — exit 0, **233 PASS**. Целевые migration/metrics tests после последней правки PV — **11 PASS**; `compileall` и `git diff --check` — PASS.
 - Личная SQLite/PGN, OAuth, живой Lichess и реальный Stockfish — NOT TOUCHED/NOT RUN. WDL — обозначенная python-chess SF model, не официальный Lichess WDL; opportunity остается candidate и не учитывается как verified conversion. Windows CI для нового SHA — проверить после push.
 - Следующий этап E: ограниченный selective review pass и расширяемый pure detector registry с synthetic positive/negative fixtures, без движкового повторного прохода при классификации.
+
+## Этап E — selective review и event detector registry (2026-11-01)
+
+- Ветка `codex/m45-batch-analysis` → draft [PR #30](https://github.com/feshakomissarov-prog/chess/pull/30), base `main`; code commit `366635f7a67ca6cb3c12f5b323fb3d64d0dc8c57`. Schema `14`.
+- Добавлен полный расширяемый каталог M4.5 event codes. Реализованные, candidate-only и deferred коды помечены раздельно; tactical motifs без надёжных детекторов зарегистрированы как deferred и никогда не генерируются. Pure detectors сохраняют played move, best move/PV и CP/mate evidence; severity и event/tag — независимые оси.
+- `event_tags` — M:N таблица с detector version/confidence/evidence. Повторный `reclassify_analysis_events(run_id)` строит метки только из сохранённых assessments и является идемпотентным. Старые результаты не удаляются.
+- Selective review планирует не более 12 ходов на партию с приоритетом mate/тяжёлых потерь и общим явным лимитом. `CompletedGameAnalyzer.review_selected_positions()` оценивает только before/after позиции выбранных ходов, ограничивает бюджет до 300k nodes, Threads=1, Hash=128 MB, MultiPV 1..3; требует positive safety callback перед запуском и повторно перед каждым поиском, поддерживает cancel. Реальный UCI не открывается автоматически.
+- Результаты альтернатив сохраняются в additive `analysis_alternatives` (schema v14), связанной с существующими positions/run; не перезаписывают обычный analysis. Review cache key включает binary SHA, line revision/hash, plies, nodes, MultiPV и policy; cache hit не создаёт процесс. Статистика и report detail предпочитают полный run partial selective review, чтобы частичный проход не уменьшал покрытие.
+- Регрессии: полный каталог/deferred motifs, event confidence и multi-tags, отсутствие ложных fork/pin labels, лимиты planner, real SQLite tag persistence и reclassification no-op, миграции v12/v13→v14 с backup/integrity и сохранением tags/assessments, fake UCI MultiPV alternative persistence/cache reuse/cancel/fail-closed, complete-run preference для stats. Полный локальный Windows/Python 3.12.10 набор — **243 PASS**; compileall и diff-check PASS.
+- Реальный Stockfish, OAuth, Lichess, пользовательские игры/SQLite — NOT RUN/NOT TOUCHED. Часть широкого каталога остаётся зарегистрированной, но deferred; candidates не засчитываются как подтверждённые ошибки/конверсии. Windows CI для SHA `1958142…` этапа D был SUCCESS; CI SHA этапа E будет проверен после push.
+- Следующий этап F: проверить происхождение/CC0 условий chess-openings, добавить нормализованное EPD matching с транспозициями и provenance phase bounds; считать opening stats по цвету без автоматического диагноза.
