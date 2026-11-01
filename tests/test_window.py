@@ -593,6 +593,7 @@ def test_stockfish_uci_probe_is_explicit_and_stops_on_timeout(qtbot, tmp_path, m
             Running = 1
         ProcessState = ProcessState
         def __init__(self, _parent):
+            created.append(self)
             self.started = FakeSignal()
             self.readyReadStandardOutput = FakeSignal()
             self.errorOccurred = FakeSignal()
@@ -615,12 +616,7 @@ def test_stockfish_uci_probe_is_explicit_and_stops_on_timeout(qtbot, tmp_path, m
         def errorString(self): return "test error"
 
     created = []
-    def process_factory(parent):
-        process = FakeProcess(parent)
-        created.append(process)
-        return process
-
-    monkeypatch.setattr(window_module, "QProcess", process_factory)
+    monkeypatch.setattr(window_module, "QProcess", FakeProcess)
     dialog = SettingsDialog(QSettings(str(tmp_path / "probe.ini"), QSettings.Format.IniFormat))
     qtbot.addWidget(dialog)
     dialog.engine_path.setText("C:/user-selected/stockfish.exe")
