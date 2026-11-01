@@ -18,7 +18,7 @@ import chess
 import chess.pgn
 
 
-SCHEMA_VERSION = 12
+SCHEMA_VERSION = 14
 DEFAULT_PAGE_SIZE = 100
 MAX_PAGE_SIZE = 500
 
@@ -439,6 +439,27 @@ class GameRepository:
         )""")
         db.execute("CREATE INDEX IF NOT EXISTS idx_analysis_events_scope "
                    "ON analysis_events(game_id,line_revision,event_type,confidence_state,ply)")
+        db.execute("""CREATE TABLE IF NOT EXISTS event_tags (
+            event_key TEXT NOT NULL REFERENCES analysis_events(event_key) ON DELETE CASCADE,
+            tag TEXT NOT NULL, detector_version TEXT NOT NULL,
+            confidence_state TEXT NOT NULL
+                CHECK(confidence_state IN ('verified','candidate','unknown','rejected')),
+            evidence_json TEXT NOT NULL,
+            PRIMARY KEY(event_key,tag,detector_version)
+        )""")
+        db.execute("CREATE INDEX IF NOT EXISTS idx_event_tags_tag "
+                   "ON event_tags(tag,confidence_state,event_key)")
+        db.execute("""CREATE TABLE IF NOT EXISTS analysis_alternatives (
+            run_id TEXT NOT NULL REFERENCES analysis_runs(run_id) ON DELETE CASCADE,
+            game_id TEXT NOT NULL, line_revision INTEGER NOT NULL, ply INTEGER NOT NULL,
+            multipv_rank INTEGER NOT NULL CHECK(multipv_rank >= 1),
+            white_cp INTEGER, mate_white INTEGER, depth INTEGER, nodes INTEGER, pv_uci TEXT,
+            PRIMARY KEY(run_id,ply,multipv_rank),
+            FOREIGN KEY(game_id,line_revision,ply)
+                REFERENCES game_positions(game_id,line_revision,ply) ON DELETE CASCADE
+        )""")
+        db.execute("CREATE INDEX IF NOT EXISTS idx_analysis_alternatives_game "
+                   "ON analysis_alternatives(game_id,line_revision,ply,run_id)")
         db.execute("DROP VIEW IF EXISTS analysis_coverage")
         db.execute("""CREATE VIEW IF NOT EXISTS analysis_coverage AS
             SELECT ar.run_id,ar.game_id,ar.line_revision,ar.line_hash,ar.source,
@@ -1313,7 +1334,8 @@ class GameRepository:
                       source: str, engine_name: str | None, engine_version: str | None,
                       parameters: dict, assessments: list[dict],
                       classifications: list[dict], status: str = "complete",
-                      error: str | None = None) -> str:
+                      error: str | None = None,
+                      alternatives: list[dict] | None = None) -> str:
         from .move_metrics import build_move_facts
 
         self._wait_before_read(game_id)
@@ -1328,17 +1350,32 @@ class GameRepository:
                            [(run_id, game_id, line_revision, item["ply"], item.get("white_cp"),
                              item.get("mate_white"), item.get("depth"), item.get("nodes"),
                              " ".join(item.get("pv", []))) for item in assessments])
+            db.executemany("""INSERT INTO analysis_alternatives (
+                run_id,game_id,line_revision,ply,multipv_rank,white_cp,mate_white,
+                depth,nodes,pv_uci
+            ) VALUES (?,?,?,?,?,?,?,?,?,?)""",
+                [(run_id, game_id, line_revision, item["ply"], item["multipv_rank"],
+                  item.get("white_cp"), item.get("mate_white"), item.get("depth"),
+                  item.get("nodes"), " ".join(item.get("pv", [])))
+                 for item in alternatives or []])
             db.executemany("INSERT INTO move_classifications VALUES (?,?,?,?,?,?,?,?,?)",
                            [(run_id, game_id, line_revision, item["ply"], item["mover"],
                              item.get("phase", "unknown"), item.get("eval_loss_cp"),
                              item.get("label", "unknown"), item.get("algorithm_version", ""))
                             for item in classifications])
             moves = [dict(row) for row in db.execute(
-                "SELECT ply,mover FROM game_moves WHERE game_id=? AND line_revision=? ORDER BY ply",
+                "SELECT ply,mover,uci FROM game_moves WHERE game_id=? AND line_revision=? ORDER BY ply",
                 (game_id, line_revision))]
             metrics, events = build_move_facts(
                 assessments, moves, source=source, run_id=run_id,
                 classifications=classifications)
+            for event in events:
+                event["tags"] = ["opportunity"]
+            from .event_detectors import detect_registered_events
+            game = db.execute("SELECT color FROM games WHERE game_id=?", (game_id,)).fetchone()
+            events.extend(detect_registered_events(
+                assessments, moves, metrics, run_id=run_id, source=source,
+                user_color=game["color"] if game else None))
             db.executemany("""INSERT INTO move_metrics (
                 run_id,game_id,line_revision,ply,metric_version,source,
                 white_cp_before,mate_white_before,white_cp_after,mate_white_after,
@@ -1353,21 +1390,43 @@ class GameRepository:
                   row["accuracy"], row["accuracy_source"], row["accuracy_formula_id"],
                   row["severity"], row["severity_policy_version"], row["legacy_label"])
                  for row in metrics])
-            db.executemany("""INSERT INTO analysis_events (
-                event_key,run_id,game_id,line_revision,ply,event_type,confidence_state,
-                source,detector_version,evidence_json
-            ) VALUES (?,?,?,?,?,?,?,?,?,?)""",
-                [(row["event_key"], run_id, game_id, line_revision, row["ply"],
-                  row["event_type"], row["confidence_state"], row["source"],
-                  row["detector_version"], row["evidence_json"]) for row in events])
+            self._insert_event_rows(db, events, run_id, game_id, line_revision)
         self.invalidate_statistics_cache()
         return run_id
+
+    @staticmethod
+    def _insert_event_rows(db: sqlite3.Connection, events: list[dict], run_id: str,
+                           game_id: str, line_revision: int, *, ignore: bool = False) -> None:
+        insert = "INSERT OR IGNORE" if ignore else "INSERT"
+        db.executemany(f"""{insert} INTO analysis_events (
+            event_key,run_id,game_id,line_revision,ply,event_type,confidence_state,
+            source,detector_version,evidence_json
+        ) VALUES (?,?,?,?,?,?,?,?,?,?)""",
+            [(row["event_key"], run_id, game_id, line_revision, row["ply"],
+              row["event_type"], row["confidence_state"], row["source"],
+              row["detector_version"], row["evidence_json"]) for row in events])
+        db.executemany("""INSERT OR IGNORE INTO event_tags (
+            event_key,tag,detector_version,confidence_state,evidence_json
+        ) VALUES (?,?,?,?,?)""",
+            [(row["event_key"], tag, row["detector_version"], row["confidence_state"],
+              row["evidence_json"]) for row in events for tag in row.get("tags", [])])
+
+    @staticmethod
+    def _load_analysis_events(db: sqlite3.Connection, run_id: str) -> list[dict]:
+        events = [dict(row) for row in db.execute(
+            "SELECT * FROM analysis_events WHERE run_id=? ORDER BY ply,event_type", (run_id,))]
+        for event in events:
+            event["tags"] = [row[0] for row in db.execute(
+                "SELECT tag FROM event_tags WHERE event_key=? ORDER BY tag",
+                (event["event_key"],))]
+        return events
 
     def find_analysis_cache(self, game_id: str, line_revision: int, line_hash: str,
                             source: str, engine_version: str | None,
                             parameters: dict) -> dict | None:
         params_json = json.dumps(parameters, sort_keys=True)
-        usable_statuses = "('complete','partial')" if source == "lichess-pgn" else "('complete')"
+        usable_statuses = ("('complete','partial')" if source == "lichess-pgn" or
+                           parameters.get("analysis_pass") == "review" else "('complete')")
         with self._connection() as db:
             run = db.execute("SELECT * FROM analysis_runs WHERE game_id=? AND line_revision=? "
                              "AND line_hash=? AND source=? AND engine_version IS ? "
@@ -1384,8 +1443,10 @@ class GameRepository:
                 "SELECT * FROM move_classifications WHERE run_id=? ORDER BY ply", (run["run_id"],))]
             result["move_metrics"] = [dict(row) for row in db.execute(
                 "SELECT * FROM move_metrics WHERE run_id=? ORDER BY ply", (run["run_id"],))]
-            result["events"] = [dict(row) for row in db.execute(
-                "SELECT * FROM analysis_events WHERE run_id=? ORDER BY ply,event_type", (run["run_id"],))]
+            result["alternatives"] = [dict(row) for row in db.execute(
+                "SELECT * FROM analysis_alternatives WHERE run_id=? ORDER BY ply,multipv_rank",
+                (run["run_id"],))]
+            result["events"] = self._load_analysis_events(db, run["run_id"])
             coverage = db.execute("SELECT * FROM analysis_coverage WHERE run_id=?",
                                   (run["run_id"],)).fetchone()
             game = db.execute("SELECT source,color,lichess_accuracy_white,lichess_accuracy_black "
@@ -1422,7 +1483,8 @@ class GameRepository:
                 "SELECT ar.run_id FROM analysis_runs ar JOIN game_revisions gr "
                 "ON gr.game_id=ar.game_id AND gr.line_revision=ar.line_revision "
                 "WHERE ar.game_id=? AND ar.line_revision=? AND gr.is_current=1 "
-                "AND ar.status IN ('complete','partial') ORDER BY ar.finished_at DESC,"
+                "AND ar.status IN ('complete','partial') ORDER BY "
+                "CASE WHEN ar.status='complete' THEN 0 ELSE 1 END,ar.finished_at DESC,"
                 "ar.run_id DESC LIMIT 1", (game_id, line_revision)).fetchone()
             if materialize:
                 has_metrics = db.execute("SELECT 1 FROM move_metrics WHERE run_id=? LIMIT 1",
@@ -1438,7 +1500,8 @@ class GameRepository:
                 "ON gr.game_id=ar.game_id AND gr.line_revision=ar.line_revision "
                 "WHERE ar.game_id=? AND ar.line_revision=? AND gr.is_current=1 "
                 "AND ar.status IN ('complete','partial') "
-                "ORDER BY ar.finished_at DESC,ar.run_id DESC LIMIT 1",
+                "ORDER BY CASE WHEN ar.status='complete' THEN 0 ELSE 1 END,"
+                "ar.finished_at DESC,ar.run_id DESC LIMIT 1",
                 (game_id, line_revision)).fetchone()
             if not run:
                 return None
@@ -1450,8 +1513,10 @@ class GameRepository:
                 (run["run_id"],))]
             result["move_metrics"] = [dict(row) for row in db.execute(
                 "SELECT * FROM move_metrics WHERE run_id=? ORDER BY ply", (run["run_id"],))]
-            result["events"] = [dict(row) for row in db.execute(
-                "SELECT * FROM analysis_events WHERE run_id=? ORDER BY ply,event_type", (run["run_id"],))]
+            result["alternatives"] = [dict(row) for row in db.execute(
+                "SELECT * FROM analysis_alternatives WHERE run_id=? ORDER BY ply,multipv_rank",
+                (run["run_id"],))]
+            result["events"] = self._load_analysis_events(db, run["run_id"])
             coverage = db.execute("SELECT * FROM analysis_coverage WHERE run_id=?",
                                   (run["run_id"],)).fetchone()
             game = db.execute("SELECT source,color,lichess_accuracy_white,lichess_accuracy_black "
@@ -1484,13 +1549,22 @@ class GameRepository:
             for row in assessments:
                 row["pv"] = row.get("pv_uci", "").split()
             moves = [dict(row) for row in db.execute(
-                "SELECT ply,mover FROM game_moves WHERE game_id=? AND line_revision=? ORDER BY ply",
+                "SELECT ply,mover,uci FROM game_moves WHERE game_id=? AND line_revision=? ORDER BY ply",
                 (run["game_id"], run["line_revision"]))]
             classifications = [dict(row) for row in db.execute(
                 "SELECT * FROM move_classifications WHERE run_id=? ORDER BY ply", (run_id,))]
         metrics, events = build_move_facts(
             assessments, moves, source=run["source"], run_id=run_id,
             classifications=classifications)
+        for event in events:
+            event["tags"] = ["opportunity"]
+        from .event_detectors import detect_registered_events
+        with self._connection() as db:
+            game = db.execute("SELECT color FROM games WHERE game_id=?",
+                              (run["game_id"],)).fetchone()
+        events.extend(detect_registered_events(
+            assessments, moves, metrics, run_id=run_id, source=run["source"],
+            user_color=game["color"] if game else None))
         with self._connection() as db:
             db.execute("BEGIN IMMEDIATE")
             db.executemany("""INSERT OR IGNORE INTO move_metrics (
@@ -1507,14 +1581,55 @@ class GameRepository:
                   row["wdl_after_json"], row["wdl_model"], row["accuracy"],
                   row["accuracy_source"], row["accuracy_formula_id"], row["severity"],
                   row["severity_policy_version"], row["legacy_label"]) for row in metrics])
-            db.executemany("""INSERT OR IGNORE INTO analysis_events (
-                event_key,run_id,game_id,line_revision,ply,event_type,confidence_state,
-                source,detector_version,evidence_json
-            ) VALUES (?,?,?,?,?,?,?,?,?,?)""",
-                [(row["event_key"], run_id, run["game_id"], run["line_revision"],
-                  row["ply"], row["event_type"], row["confidence_state"], row["source"],
-                  row["detector_version"], row["evidence_json"]) for row in events])
+            self._insert_event_rows(db, events, run_id, run["game_id"],
+                                    run["line_revision"], ignore=True)
         return len(metrics)
+
+    def reclassify_analysis_events(self, run_id: str) -> int:
+        """Run registered pure detectors over one saved run, with no Stockfish access."""
+        from .event_detectors import detect_registered_events
+
+        with self._connection() as db:
+            run = db.execute("SELECT * FROM analysis_runs WHERE run_id=?", (run_id,)).fetchone()
+            if not run:
+                return 0
+            assessments = [dict(row) for row in db.execute(
+                "SELECT * FROM position_assessments WHERE run_id=? ORDER BY ply", (run_id,))]
+            for row in assessments:
+                row["pv"] = row.get("pv_uci", "").split()
+            moves = [dict(row) for row in db.execute(
+                "SELECT ply,mover,uci FROM game_moves WHERE game_id=? AND line_revision=? ORDER BY ply",
+                (run["game_id"], run["line_revision"]))]
+            metrics = [dict(row) for row in db.execute(
+                "SELECT * FROM move_metrics WHERE run_id=? AND metric_version='cc-move-metrics-v2' "
+                "ORDER BY ply", (run_id,))]
+            game = db.execute("SELECT color FROM games WHERE game_id=?",
+                              (run["game_id"],)).fetchone()
+            before = int(db.execute("SELECT COUNT(*) FROM analysis_events WHERE run_id=?",
+                                    (run_id,)).fetchone()[0])
+        events = detect_registered_events(
+            assessments, moves, metrics, run_id=run_id, source=run["source"],
+            user_color=game["color"] if game else None)
+        with self._connection() as db:
+            db.execute("BEGIN IMMEDIATE")
+            self._insert_event_rows(db, events, run_id, run["game_id"],
+                                    run["line_revision"], ignore=True)
+            after = int(db.execute("SELECT COUNT(*) FROM analysis_events WHERE run_id=?",
+                                   (run_id,)).fetchone()[0])
+        return max(0, after - before)
+
+    def plan_review_positions(self, run_id: str, *, budget_per_game: int = 12,
+                              budget_total: int = 100) -> list[dict]:
+        """Return a capped review plan from stored metrics; this method never starts UCI."""
+        from .event_detectors import select_review_positions
+
+        with self._connection() as db:
+            metrics = [dict(row) for row in db.execute(
+                "SELECT * FROM move_metrics WHERE run_id=? AND metric_version='cc-move-metrics-v2' "
+                "ORDER BY ply", (run_id,))]
+            events = self._load_analysis_events(db, run_id)
+        return select_review_positions(metrics, events, budget_per_game=budget_per_game,
+                                       budget_total=budget_total)
 
     def phase_for_ply(self, game_id: str, line_revision: int, ply: int) -> str:
         with self._connection() as db:

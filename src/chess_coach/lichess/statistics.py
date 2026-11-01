@@ -133,7 +133,8 @@ class StatisticsService:
         filtered = self._filtered_cte(join, where, account_id)
         latest = (", latest AS (SELECT ar.game_id,ar.line_revision,ar.run_id,"
                   "ROW_NUMBER() OVER (PARTITION BY ar.game_id,ar.line_revision "
-                  "ORDER BY ar.finished_at DESC,ar.run_id DESC) AS rank "
+                  "ORDER BY CASE WHEN ar.status='complete' THEN 0 ELSE 1 END,"
+                  "ar.finished_at DESC,ar.run_id DESC) AS rank "
                   "FROM analysis_runs ar JOIN game_revisions gr "
                   "ON gr.game_id=ar.game_id AND gr.line_revision=ar.line_revision "
                   "JOIN filtered_games fg ON fg.game_id=ar.game_id "
