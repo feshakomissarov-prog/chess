@@ -164,6 +164,17 @@ class LichessGameSession:
                     or self.takeback_accept_pending or self.takeback_decline_pending)
 
     @property
+    def can_queue_speculative_premove(self) -> bool:
+        """A single premove may be entered on the optimistic board while our POST awaits ACK."""
+        if (not self.pending_uci or self.premove is not None
+                or self.awaiting_authoritative_snapshot
+                or self.status not in {"started", "playing"}
+                or self.takeback_action_pending or self.takeback_requested_by_me
+                or self.takeback_requested_by_opponent):
+            return False
+        return self.render_board.turn != self.color
+
+    @property
     def render_board(self) -> chess.Board:
         """Disposable board for rendering; confirmed board/history stay untouched."""
         shown = self.board.copy(stack=True)
@@ -205,6 +216,12 @@ class LichessGameSession:
         is_shorter = len(incoming_moves) < len(confirmed_moves)
         is_prefix = incoming_moves == confirmed_moves[:len(incoming_moves)]
         is_extension = incoming_moves[:len(confirmed_moves)] == confirmed_moves
+        if (self.pending_uci and kind == "gameState" and incoming_moves
+                and not is_prefix and not is_extension):
+            # A diverging stream is not a reason to retry an ambiguous POST, but
+            # the speculative intent can no longer be safely tied to this line.
+            self._clear_pending()
+            self.premove = None
         # Shortening requires explicit takeback context or a fresh gameFull resync.
         shorter_is_authoritative = (
             kind == "gameFull" or self.takeback_requested_by_me
@@ -278,10 +295,17 @@ class LichessGameSession:
                         and incoming_moves[:len(self._pending_prefix)] == self._pending_prefix
                         and incoming_moves[self._pending_ply - 1] == self.pending_uci):
                     self._clear_pending()
+                elif (len(incoming_moves) >= self._pending_ply
+                      and incoming_moves[:len(self._pending_prefix)] == self._pending_prefix):
+                    # The authoritative server selected another move at the
+                    # pending ply. Never resend or execute its dependent premove.
+                    self._clear_pending()
+                    self.premove = None
                 elif kind == "gameFull":
                     # gameFull is a fresh snapshot after reconnect, so it resolves an
                     # ambiguous POST outcome without retrying the move.
                     self._clear_pending()
+                    self.premove = None
                 elif self.status not in {"started", "created", "playing"}:
                     self._clear_pending()
             self._save()
@@ -366,6 +390,7 @@ class LichessGameSession:
         if not definitive:
             return False
         self._clear_pending()
+        self.premove = None
         return True
 
     def _clear_pending(self) -> None:
@@ -374,11 +399,20 @@ class LichessGameSession:
         self._pending_ply = None
         self._pending_prefix = ()
 
+    def clear_unconfirmed_move_intent(self) -> None:
+        """Drop UI-only move intent on disconnect without retrying an ambiguous POST."""
+        self._clear_pending()
+        self.premove = None
+
     def queue_premove(self, move: chess.Move) -> bool:
-        if (self.status not in {"started", "playing"} or self.is_my_turn
-                or self.premove is not None or self.input_locked):
+        speculative = self.can_queue_speculative_premove
+        if (self.status not in {"started", "playing"}
+                or (self.is_my_turn and not speculative)
+                or self.premove is not None
+                or (self.input_locked and not speculative)):
             return False
-        piece = self.board.piece_at(move.from_square)
+        board = self.render_board if speculative else self.board
+        piece = board.piece_at(move.from_square)
         if piece is None or piece.color != self.color:
             return False
         self.premove = move

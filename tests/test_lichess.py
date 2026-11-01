@@ -1996,6 +1996,84 @@ def test_pending_move_has_render_only_position_until_server_confirmation(tmp_pat
     assert repo_moves(session.repository, "optimistic") == "e2e4"
 
 
+@pytest.mark.parametrize(("fen", "own_move", "premove", "reply"), [
+    ("7k/P7/8/8/8/8/R7/7K w - - 0 1", "a2a3", "a7a8q", "h8g8"),
+    ("4k3/8/8/3p4/4P3/8/8/R3K3 w - - 0 1", "a1a2", "e4d5", "e8e7"),
+    ("4k3/8/8/8/8/8/P7/4K2R w K - 0 1", "a2a3", "e1g1", "e8e7"),
+])
+def test_speculative_premove_waits_for_ack_and_opponent_then_revalidates(
+    tmp_path, fen, own_move, premove, reply
+):
+    session = LichessGameSession("speculative", GameRepository(tmp_path / "speculative.sqlite3"))
+    session.color = chess.WHITE
+    session.apply_event({"type": "gameFull", "initialFen": fen,
+                         "state": {"moves": "", "status": "started"}})
+    own = chess.Move.from_uci(own_move)
+    queued = chess.Move.from_uci(premove)
+    assert session.begin_submission(own)
+    request_id = session.pending_request_id
+    assert session.can_queue_speculative_premove
+    assert session.queue_premove(queued)
+    assert not session.begin_submission(own)  # one POST at a time
+    assert not session.fail_submission(request_id, definitive=False)
+    assert session.pending_uci == own_move and session.premove == queued
+
+    session.apply_event({"type": "gameState", "moves": own_move, "status": "started"})
+    assert session.pending_uci is None
+    assert session.premove == queued
+    assert session.take_ready_premove() is None  # own move ACK alone is insufficient
+    session.apply_event({"type": "gameState", "moves": f"{own_move} {reply}",
+                         "status": "started"})
+    assert session.take_ready_premove() == queued
+    assert session.begin_submission(queued)
+    assert session.pending_uci == premove
+
+
+def test_definitive_rejection_or_reconnect_snapshot_discards_dependent_premove(tmp_path):
+    for scenario in ("rejected", "snapshot"):
+        session = LichessGameSession(scenario, GameRepository(tmp_path / f"{scenario}.sqlite3"))
+        session.color = chess.WHITE
+        session.apply_event({"type": "gameFull", "initialFen": "startpos",
+                             "state": {"moves": "", "status": "started"}})
+        own = chess.Move.from_uci("e2e4")
+        assert session.begin_submission(own)
+        request_id = session.pending_request_id
+        assert session.queue_premove(chess.Move.from_uci("g1f3"))
+        if scenario == "rejected":
+            assert session.fail_submission(request_id, definitive=True)
+        else:
+            session.apply_event({"type": "gameFull", "initialFen": "startpos",
+                                 "state": {"moves": "", "status": "started"}})
+        assert session.pending_uci is None
+        assert session.premove is None
+
+
+def test_diverging_authoritative_stream_discards_pending_and_premove_without_retry(tmp_path):
+    session = LichessGameSession("diverging", GameRepository(tmp_path / "diverging.sqlite3"))
+    session.color = chess.WHITE
+    session.apply_event({"type": "gameFull", "initialFen": "startpos",
+                         "state": {"moves": "", "status": "started"}})
+    assert session.begin_submission(chess.Move.from_uci("e2e4"))
+    assert session.queue_premove(chess.Move.from_uci("g1f3"))
+    session.apply_event({"type": "gameState", "moves": "d2d4", "status": "started"})
+    assert session.moves == ""
+    assert session.pending_uci is None
+    assert session.premove is None
+
+
+def test_disconnect_clears_unconfirmed_move_and_dependent_premove_without_resend(tmp_path):
+    session = LichessGameSession("disconnect-premove", GameRepository(tmp_path / "disconnect.sqlite3"))
+    assert not session.queue_premove(chess.Move.from_uci("g1f3"))  # unknown initial state
+    session.color = chess.WHITE
+    session.apply_event({"type": "gameFull", "initialFen": "startpos",
+                         "state": {"moves": "", "status": "started"}})
+    assert session.begin_submission(chess.Move.from_uci("e2e4"))
+    assert session.queue_premove(chess.Move.from_uci("g1f3"))
+    session.clear_unconfirmed_move_intent()
+    assert session.pending_uci is None and session.premove is None
+    assert session.moves == ""  # wait for a future fresh authoritative snapshot
+
+
 def repo_moves(repository, game_id):
     return repository.get_game(game_id)["moves"]
 

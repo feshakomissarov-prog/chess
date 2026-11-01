@@ -327,3 +327,11 @@
 - SQLite и учётные данные на этом этапе не читались. Для контроля используем только временные `tmp_path` базы и fake services/engines.
 - U2 измеримая регрессия добавлена отдельно: после `e2e4` оставлять ACK отложенным на 2 секунды и выполнять premove кликом и drag; проверять число POST, authoritative PGN и последующую отправку только после server moves. Предварительный targeted run: **13 passed** (`test_window.py -k "premove or pending_move_is_rendered"`), включая 2 новых 2-секундных сценария.
 - Следующий checkpoint U2: подтвердить definitive/ambiguous failure, reconnect/gameFull и тесты session, затем коммит.
+
+## M4.5.1 U2 — optimistic online premoves (2026-11-01)
+
+- Устранена блокировка всей доски во время `pending_uci`: отображаемая оптимистичная позиция принимает один premove интерактивом; `begin_submission` по-прежнему блокирует второй POST. Предход остаётся отдельным намерением и не меняет подтверждённый ход/PGN.
+- Реализация только разрешает выбор на render-only позиции, но не исполняет intent до authoritative ACK собственного хода и ответа соперника; затем повторно проверяется законность через подтверждённый `board.legal_moves`. Для ambiguity POST повторная отправка не делается. Definitive reject, расходящаяся серверная линия, свежий `gameFull` reconnect и disconnect очищают намерения; неизвестный начальный snapshot остаётся заблокированным.
+- Регрессии Qt проверяют 2-секундное ожидание ACK с click-click и drag-drop, один POST до подтверждения, запись только подтверждённой истории и отправку после ответа соперника. Session tests дополнительно покрывают underpromotion, capture-premove, castling-premove, ambiguous/definitive отказ, mismatch, reconnect и disconnect.
+- Проверено на Windows Python 3.12.10, Qt offscreen: `pytest tests/test_lichess.py tests/test_window.py -k "speculative_premove or online_premove or pending_move or premove_is_discarded or delayed_ack or definitive_rejection or disconnect_clears_unconfirmed"` — **17 passed, 168 deselected in 6.71s**; compileall и `git diff --check` — PASS. Использованы только временные SQLite/fake Lichess; реальные сетевые запросы не запускались.
+- U2 выполнен для известных ветвей сценария; дополнительно потребуется полный suite в U9. Стрелки/правая кнопка не менялись.

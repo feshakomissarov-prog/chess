@@ -1160,6 +1160,67 @@ def test_online_pending_move_is_rendered_optimistically_without_persisting_until
     assert len(calls) == 1
 
 
+@pytest.mark.parametrize("gesture", ["click", "drag"])
+def test_online_premove_can_be_entered_on_optimistic_board_during_delayed_ack(
+    qtbot, tmp_path, monkeypatch, gesture
+):
+    """A slow move acknowledgement must not freeze the next premove interaction."""
+    from PySide6.QtCore import QPoint
+
+    window = MainWindow(QSettings(str(tmp_path / f"pending-{gesture}.ini"),
+                                  QSettings.Format.IniFormat))
+    qtbot.addWidget(window)
+    calls = []
+    monkeypatch.setattr(window.lichess, "send_move", lambda *args: calls.append(args))
+    session = LichessGameSession(f"pending-{gesture}",
+                                 GameRepository(tmp_path / f"pending-{gesture}.sqlite3"))
+    session.color = chess.WHITE
+    session.apply_event({"type": "gameFull", "initialFen": "startpos",
+                         "state": {"moves": "", "status": "started"}})
+    select_online(window, session)
+    window.online_view_ply = None
+    window.show()
+
+    window.on_move_intent(chess.Move.from_uci("e2e4"))
+    assert len(calls) == 1
+    assert session.pending_uci == "e2e4"
+    assert window.board._interaction_enabled
+    qtbot.wait(2000)  # deterministic reproduction of the reported delayed ACK window
+    assert session.pending_uci == "e2e4"
+    assert window.board._interaction_enabled
+
+    rect = window.board._get_board_rect()
+    side = rect.width() / 8
+
+    def center(square):
+        row, col = window.board._renderer.get_visual_coordinates(square, window.board._flipped)
+        return QPoint(int(rect.x() + (col + .5) * side), int(rect.y() + (row + .5) * side))
+
+    start, end = center(chess.G1), center(chess.F3)
+    if gesture == "click":
+        qtbot.mouseClick(window.board, Qt.MouseButton.LeftButton, pos=start)
+        qtbot.mouseClick(window.board, Qt.MouseButton.LeftButton, pos=end)
+    else:
+        qtbot.mousePress(window.board, Qt.MouseButton.LeftButton, pos=start)
+        qtbot.mouseMove(window.board, end, delay=20)
+        qtbot.mouseRelease(window.board, Qt.MouseButton.LeftButton, pos=end)
+
+    assert session.premove == chess.Move.from_uci("g1f3")
+    assert session.moves == ""  # neither optimistic move mutates authoritative history
+    assert len(calls) == 1  # no duplicate real POST before authoritative ACK
+    assert window.cancel_premove_button.isVisible()
+
+    window._lichess_game_event(session.game_id, {"type": "gameState", "moves": "e2e4",
+                                                  "status": "started"})
+    assert session.pending_uci is None
+    assert session.premove == chess.Move.from_uci("g1f3")
+    assert len(calls) == 1
+    window._lichess_game_event(session.game_id, {"type": "gameState", "moves": "e2e4 e7e5",
+                                                  "status": "started"})
+    assert session.pending_uci == "g1f3"
+    assert len(calls) == 2
+
+
 def test_takeback_offer_ui_accept_and_server_rewind_refresh_history_and_pgn(qtbot, tmp_path, monkeypatch):
     window = MainWindow(QSettings(str(tmp_path / "takeback-ui.ini"), QSettings.Format.IniFormat))
     qtbot.addWidget(window)

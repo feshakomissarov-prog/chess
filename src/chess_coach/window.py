@@ -2789,6 +2789,10 @@ class MainWindow(QMainWindow):
         if status == "Не подключено":
             self._invalidate_analysis_preflight()
             self._lichess_connected = False
+            for session in self.online_sessions.values():
+                session.clear_unconfirmed_move_intent()
+            if self.online_session is not None:
+                self._refresh_online("Соединение потеряно; неподтверждённый ход и предход сняты. Повторно отправлять их нельзя.")
             for button in (self.friend_link_button, self.username_button, self.ai_button):
                 button.setVisible(False)
             self.active_games_button.setEnabled(False)
@@ -3257,7 +3261,12 @@ class MainWindow(QMainWindow):
         active = (session.status in {"started", "playing"}
                   and self._screen_mode != "review"
                   and not session.awaiting_authoritative_snapshot)
-        self.board.set_interaction_enabled(live and active and not session.input_locked)
+        # While a move POST is pending, the optimistic rendering is already one
+        # ply ahead. Allow only the dedicated premove gesture on that position;
+        # begin_submission still rejects a second real POST until server ACK.
+        input_available = (not session.input_locked
+                           or session.can_queue_speculative_premove)
+        self.board.set_interaction_enabled(live and active and input_available)
         self._apply_preferences()
         self.board.set_premove(session.premove, session.color)
         self.opponent_label.setText(f"Соперник  ·  {session.opponent}")
