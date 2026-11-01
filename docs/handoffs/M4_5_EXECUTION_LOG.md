@@ -14,7 +14,7 @@
 | Этап | Цель | Статус | SHA/PR | Тесты/ограничения |
 | --- | --- | --- | --- | --- |
 | 0 | Аудит схемы v9 и договоры о метриках | DONE | `6bf0078fff22977869f3be786c19b492e4ece39a`, PR #30 | 212 pytest PASS; compileall PASS; baseline main `6c3692c`; личные данные NOT TOUCHED |
-| A | Аддитивные миграции, coverage | TODO | — | — |
+| A | Аддитивные миграции, coverage | DONE | `d4c61816424fd61f181411b815f1d0956f4d7b94`, PR #30 | schema v10; 215 pytest PASS; v9 backup/integrity/rollback PASS |
 | B | Частичные и поздние оценки Lichess | TODO | — | — |
 | C | Быстрая очередь Stockfish, recent-first | TODO | — | — |
 | D | Метрики, severity, события и возможности | TODO | — | — |
@@ -60,3 +60,12 @@
 - Fair-play gate сохраняется перед каждым запуском/возобновлением и при изменении активных игр; неизвестное состояние — fail-closed. OAuth и пользовательская БД в этой задаче не читаются/изменяются.
 - Этап 0 PASS: `QT_QPA_PLATFORM=offscreen .venv312/Scripts/python.exe -m pytest -q` — exit 0; 212 тестов (подтверждено `--collect-only`). `python -m compileall -q src tests` — exit 0. База/PGN владельца — NOT TOUCHED, Lichess/OAuth/Stockfish — NOT RUN. Baseline относится к `main` SHA выше.
 - Известные baseline риски: одиночный analyzer использует до 100k nodes/position и не подходит как неограниченный batch default; выбор анализа в статистике чувствителен к provenance/settings. Следующий этап — Stage A с синтетическими SQLite fixtures и additive DDL. GitHub Windows CI для audit commit проверяется отдельно; финальный CI ветки ещё NOT RUN.
+
+## Этап A — база массового анализа (2026-11-01)
+
+- Code commit: `d4c61816424fd61f181411b815f1d0956f4d7b94` (schema `10`); текущий draft PR: [#30](https://github.com/feshakomissarov-prog/chess/pull/30), base `main`.
+- Добавлены только `analysis_jobs` (персистентная очередь с revision/hash/engine/config/pass/status/priority и уникальным idempotency key) и read-only `analysis_coverage` view. Существующие `games`, PGN, revisions, moves, positions, notes, analysis runs/assessments не перемещались и не перестраивались. Покрытие учитывает позицию ply 0 и сопоставимые пары pre/post.
+- Новые SQLite-тесты на временных синтетических файлах: свежая схема и view; upgrade v9→v10 с непрерывностью старых party/note/analysis facts; консистентный `.pre-m3-v10.bak` + `integrity_check`; намеренная ошибка после DDL с rollback user_version/schema/data и успешное повторное восстановление. Старые тесты миграции обновлены под версию 10.
+- Проверки после изменений: `QT_QPA_PLATFORM=offscreen .venv312/Scripts/python.exe -m pytest -q -ra` — exit 0, 215 тестов; `python -m compileall -q src tests` — PASS; `git diff --check` — PASS. Сначала обнаружились три устаревших ожидания `user_version=9` и ошибка теста на ply index; все исправлены, повторный полный набор зелёный.
+- Личная SQLite/PGN/OAuth — NOT TOUCHED; реальные Lichess/Stockfish — NOT RUN. Windows CI для нового SHA ожидается отдельно; миграция на владельческом профиле не запускалась.
+- Следующий этап B: исправить partial/late Lichess eval hydration в существующем импортере на тех же синтетических repository fixtures, без OAuth/API вызовов.
