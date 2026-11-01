@@ -18,7 +18,7 @@ import chess
 import chess.pgn
 
 
-SCHEMA_VERSION = 16
+SCHEMA_VERSION = 17
 DEFAULT_PAGE_SIZE = 100
 MAX_PAGE_SIZE = 500
 
@@ -267,6 +267,18 @@ class GameRepository:
                     last_sync_new_count INTEGER NOT NULL DEFAULT 0,
                     last_error TEXT, updated_at TEXT NOT NULL
                 );
+                CREATE TABLE IF NOT EXISTS lichess_eval_refresh_state (
+                    account_id TEXT NOT NULL REFERENCES accounts(account_id) ON DELETE CASCADE,
+                    game_id TEXT NOT NULL REFERENCES games(game_id) ON DELETE CASCADE,
+                    line_revision INTEGER NOT NULL,
+                    line_hash TEXT NOT NULL,
+                    status TEXT NOT NULL CHECK(status IN
+                      ('checked_no_evals','partial','changed','api_failure')),
+                    last_checked_at TEXT,
+                    next_retry_at TEXT,
+                    last_error TEXT,
+                    PRIMARY KEY(account_id,game_id,line_revision,line_hash)
+                );
                 CREATE TABLE IF NOT EXISTS puzzle_dashboard_snapshots (
                     snapshot_id TEXT PRIMARY KEY, account_id TEXT NOT NULL REFERENCES accounts(account_id),
                     days INTEGER NOT NULL, fetched_at TEXT NOT NULL, payload_json TEXT NOT NULL
@@ -288,6 +300,8 @@ class GameRepository:
                     PRIMARY KEY(run_id,attempt_uid)
                 );
                 CREATE INDEX IF NOT EXISTS idx_puzzle_attempt_date ON puzzle_attempts(account_id,attempt_date_ms);
+                CREATE INDEX IF NOT EXISTS idx_eval_refresh_status
+                    ON lichess_eval_refresh_state(account_id,status,next_retry_at);
                 CREATE INDEX IF NOT EXISTS idx_puzzle_attempt_puzzle ON puzzle_attempts(puzzle_id,attempt_date_ms);
                 CREATE INDEX IF NOT EXISTS idx_games_updated ON games(updated_at DESC, game_id);
                 CREATE INDEX IF NOT EXISTS idx_games_opponent ON games(opponent);
@@ -724,14 +738,29 @@ class GameRepository:
             return [dict(row) for row in db.execute(query)]
 
     def list_games_missing_lichess_evaluations(self, account_id: str, *,
-                                                limit: int = 25) -> list[dict]:
-        """Return a bounded recent-first list whose current Lichess PGN evals are incomplete."""
+                                                limit: int = 25,
+                                                recheck_checked: bool = False) -> list[dict]:
+        """Return unchecked incomplete Lichess lines, newest first and in bounded pages."""
         limit = max(1, min(100, int(limit)))
+        checked_filter = "" if recheck_checked else (
+            "AND (ers.status IS NULL OR ers.status NOT IN "
+            "('checked_no_evals','partial','changed','api_failure') OR "
+            "(ers.status='api_failure' AND ers.next_retry_at IS NOT NULL "
+            "AND ers.next_retry_at<=?)) "
+        )
+        params: list[object] = [account_id]
+        if not recheck_checked:
+            params.append(datetime.now(timezone.utc).isoformat())
+        params.append(limit)
         with self._connection() as db:
             rows = db.execute(
-                "SELECT g.game_id,gr.line_revision,gr.line_hash,g.started_at,g.variant "
+                "SELECT g.game_id,gr.line_revision,gr.line_hash,g.started_at,g.variant,"
+                "COALESCE(ers.status,'not_checked') AS refresh_status,ers.last_checked_at "
                 "FROM games g JOIN account_games ag ON ag.game_id=g.game_id "
                 "JOIN game_revisions gr ON gr.game_id=g.game_id AND gr.is_current=1 "
+                "LEFT JOIN lichess_eval_refresh_state ers ON ers.account_id=ag.account_id "
+                "AND ers.game_id=g.game_id AND ers.line_revision=gr.line_revision "
+                "AND ers.line_hash=gr.line_hash "
                 "WHERE ag.account_id=? AND g.status NOT IN "
                 "('created','started','started_soon','playing') AND g.variant='standard' "
                 "AND NOT EXISTS (SELECT 1 FROM analysis_runs ar "
@@ -741,10 +770,46 @@ class GameRepository:
                 "(SELECT COUNT(*) FROM position_assessments pa WHERE pa.run_id=ar.run_id "
                 "AND (pa.white_cp IS NOT NULL OR pa.mate_white IS NOT NULL)) >= "
                 "(SELECT COUNT(*) FROM game_moves gm WHERE gm.game_id=g.game_id "
-                "AND gm.line_revision=gr.line_revision)) "
+                "AND gm.line_revision=gr.line_revision)) " + checked_filter +
                 "ORDER BY CASE WHEN g.started_at IS NULL THEN 1 ELSE 0 END,"
-                "g.started_at DESC,g.game_id DESC LIMIT ?", (account_id, limit)).fetchall()
+                "g.started_at DESC,g.game_id DESC LIMIT ?", params).fetchall()
         return [dict(row) for row in rows]
+
+    def lichess_eval_score_count(self, game_id: str, line_revision: int) -> int:
+        with self._connection() as db:
+            row = db.execute(
+                "SELECT COUNT(DISTINCT pa.ply) FROM position_assessments pa "
+                "JOIN analysis_runs ar ON ar.run_id=pa.run_id "
+                "WHERE ar.game_id=? AND ar.line_revision=? AND ar.source='lichess-pgn' "
+                "AND (pa.white_cp IS NOT NULL OR pa.mate_white IS NOT NULL)",
+                (game_id, int(line_revision))).fetchone()
+        return int(row[0])
+
+    def game_move_count(self, game_id: str, line_revision: int) -> int:
+        with self._connection() as db:
+            row = db.execute("SELECT COUNT(*) FROM game_moves WHERE game_id=? AND line_revision=?",
+                             (game_id, int(line_revision))).fetchone()
+        return int(row[0])
+
+    def record_lichess_eval_refresh(self, account_id: str, game_id: str, *,
+                                    line_revision: int, line_hash: str, status: str,
+                                    error: str | None = None, retry_after_seconds: int = 0) -> None:
+        allowed = {"checked_no_evals", "partial", "changed", "api_failure"}
+        if status not in allowed:
+            raise ValueError("Invalid targeted evaluation refresh status")
+        now = datetime.now(timezone.utc)
+        last_checked = None if status == "api_failure" else now.isoformat()
+        retry_at = ((now + timedelta(seconds=max(1, int(retry_after_seconds)))).isoformat()
+                    if retry_after_seconds else None)
+        with self._connection() as db:
+            db.execute(
+                "INSERT INTO lichess_eval_refresh_state(account_id,game_id,line_revision,line_hash,"
+                "status,last_checked_at,next_retry_at,last_error) VALUES(?,?,?,?,?,?,?,?) "
+                "ON CONFLICT(account_id,game_id,line_revision,line_hash) DO UPDATE SET "
+                "status=excluded.status,last_checked_at=excluded.last_checked_at,"
+                "next_retry_at=excluded.next_retry_at,last_error=excluded.last_error",
+                (account_id, game_id, int(line_revision), line_hash, status,
+                 last_checked, retry_at, error))
 
     def list_games_needing_fast_analysis(self, *, account_id: str | None = None,
                                          limit: int = 1000,

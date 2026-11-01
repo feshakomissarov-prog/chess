@@ -251,3 +251,11 @@
 - Regression: 200 синтетических игр с `game_id`, намеренно противоположным дате; `budget_total=10` ставит первые 10 newest, после completion следующий вызов ставит следующие 10. Проверяются уникальные job IDs и отсутствие UCI.
 - Проверено: Windows Python 3.12.10, `pytest tests/test_m45_batch.py -q` — PASS; предыдущая адресная проверка R10 также прошла. Реальные архив, Stockfish и пользовательская SQLite не использовались.
 - Следующий блок: R11 persistent bounded state для targeted Lichess eval refresh; сеть останется fake-only.
+
+## PR #30 second-pass review — R11 (2026-11-01)
+
+- R11: targeted Lichess eval refresh теперь хранит состояние проверки по `(account_id, game_id, line_revision, line_hash)`: checked-no-evals / partial / changed / api-failure, `last_checked_at`, `next_retry_at`, error. Повторный обычный запуск выбирает следующие необследованные партии; явный `recheck_checked=True` разрешает перепроверку. Ошибка/429 не помечается успешной проверкой, для 429 применяется Retry-After и останавливается текущий обход. Отчёт содержит selected/checked/gained_scored_pairs/unchanged/failed; `refreshed` сохранён как совместимый счётчик успешных fetch. Архивные backfill cursors не меняются.
+- Additive migration schema v16→v17 создаёт только таблицу состояния/индекс, проверены SQLite backup, integrity, FK и сохранение games/notes/moves/assessments. Транзакция инициализации откатывает DDL при ошибке по общему миграционному механизму.
+- Fake-client regressions: 80 synthetic missing games обходятся четырьмя вызовами 25+25+25+5 без повторов и без eval/engine; no-eval ответы становятся `checked_no_evals`; частичное появление eval отражается как прирост; 429 фиксирует retry deadline, не отмечает `last_checked_at` и не теряет unchecked items.
+- Проверено: Python 3.12.10, 4 адресных теста миграции/refresh PASS, compileall PASS. Реальные Lichess/OAuth/Stockfish и пользовательская SQLite не использовались.
+- Следующий блок: R12 account-relative opportunity aggregation; движковый run остаётся общим для связанных аккаунтов.
