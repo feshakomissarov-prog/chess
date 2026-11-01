@@ -7,11 +7,13 @@ from pathlib import Path
 import hashlib
 import json
 import threading
+import time
 from typing import Callable
 
 import chess
 import chess.engine
 
+from ..diagnostics import log_event
 from .repository import GameRepository
 
 
@@ -114,16 +116,27 @@ class CompletedGameAnalyzer:
             if cache:
                 cache["cached"] = True
                 return cache
-            engine_instance.configure({"MultiPV": 1, "Threads": options.threads,
+            # MultiPV is marked as a managed UCI option by python-chess. For a
+            # single line, leave it at the engine default and do not pass it to
+            # SimpleEngine.configure().
+            engine_instance.configure({"Threads": options.threads,
                                        "Hash": options.hash_mb})
+            log_event("uci_engine_configured", "analysis")
             if stop_event is not None and stop_event.is_set():
                 raise InterruptedError("Анализ отменён.")
             assessments = []
             for ply, position in enumerate(boards):
                 if stop_event is not None and stop_event.is_set():
                     raise InterruptedError("Анализ отменён.")
+                position_started = time.monotonic()
+                log_event("uci_analysis_started", "analysis",
+                          mode="selective" if analysis_pass == "review" else "fast")
                 info = _analyze_interruptibly(
                     engine_instance, position, options.engine_limit(), stop_event)
+                log_event("uci_analysis_position_completed", "analysis",
+                          duration_ms=(time.monotonic() - position_started) * 1000,
+                          count=ply + 1,
+                          mode="selective" if analysis_pass == "review" else "fast")
                 score = info["score"].pov(chess.WHITE)
                 cp = score.score(mate_score=None)
                 assessments.append({
@@ -225,7 +238,11 @@ class CompletedGameAnalyzer:
         try:
             identity = dict(engine_instance.id)
             engine_name = str(identity.get("name") or "UCI engine")
-            engine_instance.configure({"MultiPV": multipv, "Threads": 1, "Hash": 128})
+            # MultiPV is configured per search via engine.analysis(...,
+            # multipv=N). python-chess owns the UCI option while that analysis
+            # is running and rejects changing it through configure().
+            engine_instance.configure({"Threads": 1, "Hash": 128})
+            log_event("uci_engine_configured", "analysis", mode="selective")
             assessments: list[dict] = []
             alternatives: list[dict] = []
             for index, ply in enumerate(position_plies):
@@ -233,9 +250,14 @@ class CompletedGameAnalyzer:
                     raise InterruptedError("Fair-play safety state changed; review stopped.")
                 if stop_event is not None and stop_event.is_set():
                     raise InterruptedError("Selective review cancelled.")
+                position_started = time.monotonic()
+                log_event("uci_analysis_started", "analysis", mode="selective")
                 result = _analyze_interruptibly(
                     engine_instance, boards[ply], options.engine_limit(), stop_event,
                     multipv=multipv)
+                log_event("uci_analysis_position_completed", "analysis",
+                          duration_ms=(time.monotonic() - position_started) * 1000,
+                          count=index + 1, mode="selective")
                 lines = result if isinstance(result, list) else [result]
                 lines = lines[:multipv]
                 if not lines:

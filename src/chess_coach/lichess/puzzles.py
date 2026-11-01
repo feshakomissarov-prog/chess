@@ -4,10 +4,12 @@ from __future__ import annotations
 
 import threading
 import time
+import uuid
 from typing import Callable
 
 from .api import LichessClient
 from .repository import GameRepository, puzzle_attempt_uid
+from ..diagnostics import log_event, reset_context, set_context
 
 _LICHESS_EPOCH_MS = 1_356_998_400_070
 
@@ -21,16 +23,21 @@ class PuzzleActivitySync:
             page_size: int = 1000, progress: Callable[[int], None] | None = None,
         scanned: Callable[[int], None] | None = None) -> int:
         account_id = self.repository.ensure_archive_account(username)
+        sync_context = set_context(run_id=uuid.uuid4().hex)
         try:
             count = self._run(username, token, stop_event, page_size=page_size,
                               progress=progress, scanned=scanned)
             if stop_event.is_set():
                 self.repository.record_puzzle_error(
                     account_id, "Синхронизация остановлена; сохранённый курсор можно возобновить.")
+                log_event("puzzle_sync_cancelled", "puzzle_sync", status="cancelled")
             return count
         except Exception as exc:
             self.repository.record_puzzle_error(account_id, str(exc))
+            log_event("puzzle_sync_failed", "puzzle_sync", error=exc)
             raise
+        finally:
+            reset_context(sync_context)
 
     def run_pilot(self, username: str, token: str, stop_event: threading.Event, *,
                   limit: int, progress: Callable[[int, int], None] | None = None) -> dict:
@@ -69,9 +76,13 @@ class PuzzleActivitySync:
         state = self.repository.puzzle_sync_state(account_id)
         count = 0
         inspected = 0
+        sync_started = time.monotonic()
+        log_event("puzzle_sync_started", "puzzle_sync",
+                  mode="backfill" if not state.get("backfill_complete") else "incremental")
 
         def import_page(records: list[dict], *, backfill: bool = False) -> None:
             nonlocal count, inspected
+            db_started = time.monotonic()
             inspected += len(records)
             if scanned:
                 scanned(inspected)
@@ -87,6 +98,10 @@ class PuzzleActivitySync:
                     count += 1
                     if progress:
                         progress(count)
+            log_event("puzzle_sync_page_imported", "puzzle_sync",
+                      duration_ms=(time.monotonic() - db_started) * 1000,
+                      records=len(records), checked_count=inspected, new_count=count,
+                      mode="backfill" if backfill else "incremental")
 
         if not state.get("backfill_complete"):
             cursor = int(state.get("backfill_before") or time.time() * 1000)
@@ -106,26 +121,36 @@ class PuzzleActivitySync:
                     break
                 oldest = min(dates) if dates else cursor
                 next_cursor = oldest
-                if next_cursor >= cursor or not fresh:
+                if next_cursor >= cursor:
                     raise RuntimeError("Lichess puzzle pagination made no progress; high-watermark unchanged.")
                 if oldest <= _LICHESS_EPOCH_MS:
                     break
                 cursor = next_cursor
             if not stop_event.is_set():
                 self.repository.finish_puzzle_backfill(account_id)
+                log_event("puzzle_sync_checkpoint_saved", "puzzle_sync",
+                          status="backfill_complete", mode="backfill")
         if stop_event.is_set():
             return count
 
         state = self.repository.puzzle_sync_state(account_id)
         watermark = int(state.get("incremental_since") or 0)
+        # A one-millisecond overlap handles inclusive/exclusive cursor semantics
+        # and multiple attempts sharing the newest timestamp without re-reading
+        # recent pages on every refresh. Lichess timestamps are millisecond precision.
+        # One millisecond of
+        # overlap catches inclusive/exclusive cursor boundaries and late entries
+        # sharing the watermark timestamp while avoiding replay of recent pages.
+        overlap_ms = 1
         lower_bound = max(_LICHESS_EPOCH_MS - 1,
-                          watermark - 86_400_000 if watermark else _LICHESS_EPOCH_MS - 1)
+                          watermark - overlap_ms if watermark else _LICHESS_EPOCH_MS - 1)
         target = int(state.get("incremental_target") or time.time() * 1000)
         cursor = int(state.get("incremental_before") or target)
         seen = set()
         while not stop_event.is_set():
             records = list(self.client.stream_puzzle_activity(
-                token, stop_event, before=cursor, max_items=page_size))
+                token, stop_event, since=lower_bound + 1, before=cursor,
+                max_items=page_size))
             if stop_event.is_set():
                 break
             records = self._expand_boundary(token, stop_event, records, page_size, account_id)
@@ -140,15 +165,20 @@ class PuzzleActivitySync:
                 break
             oldest = min(dates) if dates else cursor
             next_cursor = oldest
-            if next_cursor >= cursor or not fresh:
+            if next_cursor >= cursor:
                 raise RuntimeError("Lichess puzzle incremental pagination made no progress; high-watermark unchanged.")
             if oldest <= _LICHESS_EPOCH_MS:
                 break
             cursor = next_cursor
             # Attempts are durable before the resumable page cursor is advanced.
             self.repository.set_puzzle_incremental_progress(account_id, cursor, target)
+            log_event("puzzle_sync_checkpoint_saved", "puzzle_sync",
+                      checked_count=inspected, mode="incremental")
         if not stop_event.is_set():
             self.repository.finish_puzzle_incremental(account_id, target, count)
+            log_event("puzzle_sync_finished", "puzzle_sync",
+                      duration_ms=(time.monotonic() - sync_started) * 1000,
+                      checked_count=inspected, new_count=count, mode="incremental")
         return count
 
     def _expand_boundary(self, token: str, stop_event: threading.Event,

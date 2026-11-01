@@ -15,13 +15,14 @@ from chess_coach.lichess.repository import GameRepository
 
 
 class FakeResult:
-    def __init__(self, board: chess.Board):
+    def __init__(self, board: chess.Board, multipv: int = 1):
         self.info = {
             "score": chess.engine.PovScore(chess.engine.Cp(0), chess.WHITE),
             "depth": 1,
             "nodes": 1,
             "pv": [next(iter(board.legal_moves))] if board.legal_moves else [],
         }
+        self.multipv = [dict(self.info) for _ in range(multipv)]
         self.stop_called = False
 
     def __enter__(self):
@@ -42,14 +43,22 @@ class FakeEngine:
         self.id = {"name": "Synthetic UCI", "author": "tests"}
         self.configure_calls = []
         self.analysis_calls = 0
+        self.analysis_multipv = []
         self.quit_calls = 0
 
     def configure(self, options):
+        managed = {"MultiPV", "UCI_Chess960", "UCI_Variant", "Ponder"}
+        invalid = managed.intersection(options)
+        if invalid:
+            raise chess.engine.EngineError(
+                f"cannot set {sorted(invalid)[0]} which is automatically managed")
         self.configure_calls.append(dict(options))
 
-    def analysis(self, board, _limit, **_kwargs):
+    def analysis(self, board, _limit, **kwargs):
         self.analysis_calls += 1
-        return FakeResult(board)
+        multipv = int(kwargs.get("multipv", 1))
+        self.analysis_multipv.append(multipv)
+        return FakeResult(board, multipv)
 
     def quit(self):
         self.quit_calls += 1
@@ -98,6 +107,8 @@ def test_batch_queue_is_idempotent_recent_first_and_reuses_one_fake_engine(tmp_p
         assert safety_calls == ["newer", "older"]
         assert len(engines) == 1
         assert engines[0].analysis_calls == 6
+        assert engines[0].analysis_multipv == [1] * 6
+        assert engines[0].configure_calls == [{"Threads": 1, "Hash": 128}] * 2
         assert engines[0].quit_calls == 1
         assert len(repository.list_analyses("newer")) == 1
         assert len(repository.list_analyses("older")) == 1
@@ -216,6 +227,47 @@ def test_batch_revalidates_eligibility_before_creating_uci_process(tmp_path):
         assert result["failed"] == 1
         assert not engines
         assert repository.analysis_job_counts(engine_version=runner.engine_key) == {"failed": 1}
+    finally:
+        repository.shutdown()
+
+
+def test_managed_multipv_error_marks_job_failed_without_saving_run_or_retrying(tmp_path):
+    repository = GameRepository(tmp_path / "multipv-failure.sqlite3")
+    engine_path = tmp_path / "strict-synthetic-engine.exe"
+    engine_path.write_bytes(b"not executed by strict fake")
+
+    class BrokenEngine(FakeEngine):
+        def configure(self, options):
+            raise chess.engine.EngineError(
+                "cannot set MultiPV which is automatically managed")
+
+    engines = []
+
+    def factory(_path):
+        engine = BrokenEngine()
+        engines.append(engine)
+        return engine
+
+    try:
+        _save_game(repository, "multipv-error", "2026-10-01T00:00:00+00:00")
+        runner = BatchAnalysisRunner(repository, engine_path,
+            analyzer=CompletedGameAnalyzer(repository, factory))
+        runner.enqueue_missing(limit=1)
+        result = runner.run(stop_event=threading.Event(), safety_check=lambda _job: True,
+                            max_fast_jobs=1)
+
+        assert result["processed"] == 0 and result["failed"] == 1
+        assert result["last_failed_job_id"] is not None
+        assert "automatically managed" in result["last_failure"]
+        assert repository.analysis_job_counts(engine_version=runner.engine_key) == {"failed": 1}
+        assert repository.list_analyses("multipv-error") == []
+        assert runner.enqueue_missing(limit=1)["queued"] == 0
+        with repository._connection() as db:
+            row = db.execute("SELECT status,error,result_run_id FROM analysis_jobs").fetchone()
+            assert row["status"] == "failed"
+            assert "MultiPV" in row["error"]
+            assert row["result_run_id"] is None
+        assert len(engines) == 1 and engines[0].quit_calls == 1
     finally:
         repository.shutdown()
 

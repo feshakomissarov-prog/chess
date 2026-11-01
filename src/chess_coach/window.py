@@ -15,8 +15,8 @@ import uuid
 import weakref
 import PySide6
 import shiboken6
-from PySide6.QtCore import QProcess, QSettings, Qt, QStandardPaths, QTimer, Signal, qVersion
-from PySide6.QtGui import QKeySequence, QShortcut, QColor, QPainter, QPen
+from PySide6.QtCore import QProcess, QSettings, Qt, QStandardPaths, QTimer, Signal, qVersion, QUrl
+from PySide6.QtGui import QKeySequence, QShortcut, QColor, QPainter, QPen, QDesktopServices
 from PySide6.QtWidgets import (
     QCheckBox,
     QApplication,
@@ -53,10 +53,11 @@ from .position_analysis import evaluate_position
 from .lichess.auth import CredentialStorageError, WindowsCredentialStore
 from .lichess.analysis import AnalysisOptions, CLASSIFIER_VERSION, CompletedGameAnalyzer
 from .lichess.batch_analysis import BatchAnalysisRunner, FastPassOptions
-from .lichess.repository import GameRepository
+from .lichess.repository import GameRepository, SCHEMA_VERSION
 from .lichess.service import LichessService
 from .lichess.session import LichessGameSession, classify_lichess_opponent
 from .lichess.statistics import StatisticsService
+from .diagnostics import anonymized_report, log_event, logs_directory
 
 
 def _puzzle_attempt_summary(attempts: list[dict]) -> str:
@@ -988,7 +989,7 @@ class StatisticsDialog(QDialog):
 class SettingsDialog(QDialog):
     install_requested = Signal()
 
-    def __init__(self, settings: QSettings, parent=None) -> None:
+    def __init__(self, settings: QSettings, parent=None, repository: GameRepository | None = None) -> None:
         super().__init__(parent)
         self.setWindowTitle("Настройки")
         self.setModal(True)
@@ -1081,6 +1082,19 @@ class SettingsDialog(QDialog):
         self.engine_hash.setValue(settings.value("stockfish_hash_mb", 128, type=int))
         layout.addWidget(QLabel("Память Hash (16–512 МБ)"))
         layout.addWidget(self.engine_hash)
+        diagnostics_box = QGroupBox("Диагностика")
+        diagnostics_layout = QVBoxLayout(diagnostics_box)
+        self.open_logs_button = QPushButton("Открыть папку логов")
+        self.open_logs_button.clicked.connect(
+            lambda: QDesktopServices.openUrl(QUrl.fromLocalFile(str(logs_directory()))))
+        diagnostics_layout.addWidget(self.open_logs_button)
+        self.copy_report_button = QPushButton("Скопировать обезличенный отчёт")
+        self.copy_report_button.clicked.connect(self._copy_diagnostic_report)
+        diagnostics_layout.addWidget(self.copy_report_button)
+        self.share_report = QCheckBox("Разрешаю включить этот отчёт в сообщение поддержки")
+        diagnostics_layout.addWidget(self.share_report)
+        layout.addWidget(diagnostics_box)
+        self._diagnostics_repository = repository
         self._engine_process: QProcess | None = None
         self._engine_probe_timer: QTimer | None = None
         self._engine_probe_shutdown_timer: QTimer | None = None
@@ -1097,6 +1111,19 @@ class SettingsDialog(QDialog):
         buttons.accepted.connect(self.accept)
         buttons.rejected.connect(self.reject)
         layout.addWidget(buttons)
+
+    def _copy_diagnostic_report(self) -> None:
+        if not self.share_report.isChecked():
+            self.engine_test_status.setText(
+                "Сначала отметьте согласие на включение обезличенного отчёта в сообщение.")
+            return
+        QApplication.clipboard().setText(anonymized_report(
+            schema_version=SCHEMA_VERSION,
+            engine_verified=bool(self._engine_verified_path and
+                                 Path(self._engine_verified_path).is_file()),
+            recent_counts=(self._diagnostics_repository.analysis_job_counts()
+                           if self._diagnostics_repository is not None else {})))
+        self.engine_test_status.setText("Обезличенный диагностический отчёт скопирован.")
 
 
     def save(self, settings: QSettings) -> None:
@@ -1332,6 +1359,7 @@ class BatchAnalysisDialog(QDialog):
     engine_settings_requested = Signal()
     worker_progress = Signal(str)
     worker_queue_status = Signal(str)
+    worker_run_status = Signal(str)
     worker_finished = Signal(bool, str)
 
     def __init__(self, parent=None) -> None:
@@ -1372,6 +1400,9 @@ class BatchAnalysisDialog(QDialog):
         self.queue_label = QLabel("Очередь ещё не загружена")
         self.queue_label.setWordWrap(True)
         layout.addWidget(self.queue_label)
+        self.run_label = QLabel("В текущем запуске: 0 заданий")
+        self.run_label.setWordWrap(True)
+        layout.addWidget(self.run_label)
         self.progress_label = QLabel("Движок не запущен")
         self.progress_label.setWordWrap(True)
         layout.addWidget(self.progress_label)
@@ -1404,7 +1435,12 @@ class BatchAnalysisDialog(QDialog):
         layout.addWidget(self.close_button)
         self.worker_progress.connect(self.progress_label.setText)
         self.worker_queue_status.connect(self.queue_label.setText)
+        self.worker_run_status.connect(self.run_label.setText)
         self.worker_finished.connect(self._worker_finished)
+        self.diagnostics_button = QPushButton("Открыть папку диагностических логов")
+        self.diagnostics_button.clicked.connect(
+            lambda: QDesktopServices.openUrl(QUrl.fromLocalFile(str(logs_directory()))))
+        layout.addWidget(self.diagnostics_button)
 
     def set_readiness(self, engine_path: str, engine_verified: bool, account_connected: bool,
                       account_reason: str | None = None) -> None:
@@ -1430,6 +1466,9 @@ class BatchAnalysisDialog(QDialog):
     def _worker_finished(self, paused: bool, message: str) -> None:
         self._paused = bool(paused)
         self.set_running(False)
+        self.run_label.setText(
+            "Текущий запуск приостановлен; состояние общей очереди указано ниже."
+            if paused else "Текущий запуск завершён; итоговые счётчики указаны ниже.")
         self.progress_label.setText(message)
 
     def set_running(self, running: bool) -> None:
@@ -1700,6 +1739,7 @@ class MainWindow(QMainWindow):
         service.archive_game_refresh_finished.connect(self._archive_game_refresh_finished)
         service.puzzles_progress.connect(self._puzzles_progress)
         service.puzzles_scanned.connect(self._puzzles_scanned)
+        service.puzzles_started.connect(self._puzzles_started)
         service.background_sync_finished.connect(self._background_sync_finished)
         service.puzzles_finished.connect(self._puzzles_finished)
         service.puzzle_pilot_progress.connect(self._puzzle_pilot_progress)
@@ -2462,6 +2502,10 @@ class MainWindow(QMainWindow):
                         f"Партия {game_id}: позиции {done}/{total} · "
                         f"очередь: {counts.get('queued', 0)} · готово: {counts.get('complete', 0)} · "
                         f"ошибки: {counts.get('failed', 0)}")
+                    dialog.worker_run_status.emit(
+                        f"В текущем запуске: идёт партия · позиции {done}/{total}; "
+                        f"общая очередь: {counts.get('complete', 0)} готово, "
+                        f"{counts.get('failed', 0)} ошибок")
 
                 result = runner.run(stop_event=stop, pause_event=pause,
                                     safety_check=safety_check, progress=progress,
@@ -2487,7 +2531,9 @@ class MainWindow(QMainWindow):
                     f"отменено: {counts.get('cancelled', 0)}\n"
                     f"Selective review: добавлено {result.get('review_queued', 0)}, "
                     f"очередь {review_counts.get('queued', 0)}, готово {review_counts.get('complete', 0)}\n"
-                    f"{result.get('reason') or ''}")
+                    f"{result.get('reason') or ''}\n"
+                    f"Последнее задание с ошибкой: {result.get('last_failed_job_id') or 'нет'} · "
+                    f"{result.get('last_failure') or 'ошибок в этом запуске нет'}")
             except Exception as exc:
                 dialog.worker_finished.emit(False, f"Очередь не запущена или остановлена: {exc}")
 
@@ -2545,6 +2591,8 @@ class MainWindow(QMainWindow):
         self._puzzle_progress_dialog = dialog
         self._puzzles_scanned_count = 0
         self._puzzles_new_count = 0
+        self._puzzle_sync_mode = "ожидание разрешения"
+        self._puzzle_sync_started_at = time.monotonic()
         dialog.show()
         self.lichess.connect_and_sync_puzzle_activity(self.game_repository)
 
@@ -2603,11 +2651,16 @@ class MainWindow(QMainWindow):
         self._puzzles_scanned_count = count
         self._update_puzzle_sync_progress()
 
+    def _puzzles_started(self, mode: str) -> None:
+        self._puzzle_sync_mode = str(mode)
+
     def _update_puzzle_sync_progress(self) -> None:
         if self._puzzle_progress_dialog:
             self._puzzle_progress_dialog.setLabelText(
-                f"Проверено попыток: {getattr(self, '_puzzles_scanned_count', 0)}"
-                f" · новых: {getattr(self, '_puzzles_new_count', 0)}")
+                f"Режим: {getattr(self, '_puzzle_sync_mode', 'синхронизация')}"
+                f" · проверено: {getattr(self, '_puzzles_scanned_count', 0)}"
+                f" · новых: {getattr(self, '_puzzles_new_count', 0)}"
+                f" · уже было: {max(0, getattr(self, '_puzzles_scanned_count', 0) - getattr(self, '_puzzles_new_count', 0))}")
 
     def _puzzles_finished(self, count: int, message: str) -> None:
         if self._puzzle_progress_dialog:
@@ -2624,7 +2677,14 @@ class MainWindow(QMainWindow):
             resumable = ("Да" if sync_state.get("last_error")
                          or not sync_state.get("backfill_complete")
                          or sync_state.get("incremental_before") else "Нет")
-            result = (f"Всего попыток: {stats['attempts']}\n"
+            duration = max(0.0, time.monotonic() -
+                           getattr(self, "_puzzle_sync_started_at", time.monotonic()))
+            checked = getattr(self, "_puzzles_scanned_count", count)
+            result = (f"Режим: {getattr(self, '_puzzle_sync_mode', 'синхронизация')}\n"
+                      f"Проверено: {checked} · новых: {count} · уже было: {max(0, checked-count)}\n"
+                      f"Итог: {'ошибка/прерывание' if sync_state.get('last_error') else 'завершено'} · "
+                      f"время: {duration:.1f} с\n"
+                      f"Всего попыток: {stats['attempts']}\n"
                       f"Новых попыток в этом запуске: {count}\n"
                       f"Решено: {stats['wins']} · Ошибок: {stats['failures']}\n"
                       f"Доля успеха: {rate if rate is not None else 'н/д'}%\n"
@@ -3461,7 +3521,7 @@ class MainWindow(QMainWindow):
         self.refresh("Новая локальная партия.")
 
     def open_settings(self) -> None:
-        dialog = SettingsDialog(self.settings, self)
+        dialog = SettingsDialog(self.settings, self, repository=self.game_repository)
         dialog.install_requested.connect(
             lambda current=dialog: self._install_official_stockfish(current))
         dialog.finished.connect(lambda _result: self._cancel_stockfish_install())

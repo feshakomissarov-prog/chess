@@ -14,6 +14,7 @@ import chess.engine
 
 from .analysis import AnalysisOptions, CLASSIFIER_VERSION, CompletedGameAnalyzer, _binary_fingerprint
 from .repository import GameRepository
+from ..diagnostics import log_event, reset_context, set_context
 
 
 @dataclass(frozen=True)
@@ -92,6 +93,8 @@ class BatchAnalysisRunner:
             raise ValueError("A fail-closed per-game safety check is required.")
         engine: chess.engine.SimpleEngine | None = None
         processed = failed = 0
+        last_failed_job_id: str | None = None
+        last_failure: str | None = None
         attempted_fast = 0
         paused = cancelled = False
         stop_reason: str | None = None
@@ -105,6 +108,11 @@ class BatchAnalysisRunner:
         analysis_pass = "fast"
         review_scheduled = False
         review_queued = 0
+        run_id = uuid.uuid4().hex
+        run_started = time.monotonic()
+        run_context = set_context(run_id=run_id)
+        log_event("batch_run_started", "batch_analysis", run_id=run_id,
+                  mode="selective" if include_selective_review else "fast")
 
         def check_active_safety(job: dict) -> bool:
             try:
@@ -175,6 +183,8 @@ class BatchAnalysisRunner:
                         lease_seconds=self.lease_seconds)
                 if job is None:
                     break
+                log_event("batch_job_claimed", "batch_analysis", run_id=run_id,
+                          job_id=job.get("job_id"), mode=str(job.get("analysis_pass", "fast")))
                 if analysis_pass == "fast":
                     attempted_fast += 1
                 safety_failure.clear()
@@ -190,13 +200,16 @@ class BatchAnalysisRunner:
                                                    else safety_failure[0])
                     break
                 if not self._job_has_eligible_legal_line(job):
+                    last_failed_job_id = str(job["job_id"])
+                    last_failure = "The game is no longer a completed standard game with a legal current line."
                     self.repository.finish_analysis_job(
                         job["job_id"], self.worker_id, status="failed",
-                        error="The game is no longer a completed standard game with a legal current line.")
+                        error=last_failure)
                     failed += 1
+                    log_event("batch_job_failed", "batch_analysis", run_id=run_id,
+                              job_id=job.get("job_id"), error_code="ineligible_game_line")
                     continue
-                if engine is None:
-                    engine = self.analyzer.engine_factory(str(self.engine_path))
+                job_context = set_context(job_id=str(job.get("job_id", "")))
                 with active_job_lock:
                     active_job = job
 
@@ -210,6 +223,9 @@ class BatchAnalysisRunner:
                         progress(str(job["game_id"]), done, total)
 
                 try:
+                    if engine is None:
+                        engine = self.analyzer.engine_factory(str(self.engine_path))
+                        log_event("uci_engine_opened", "batch_analysis", run_id=run_id)
                     if job["analysis_pass"] == "fast":
                         result = self.analyzer.analyze(
                             str(job["game_id"]), self.engine_path, self.analysis_options,
@@ -253,12 +269,16 @@ class BatchAnalysisRunner:
                         active_job = None
                     break
                 except Exception as exc:
+                    log_event("batch_job_failed", "batch_analysis", run_id=run_id,
+                              job_id=job.get("job_id"), error=exc)
                     self.repository.finish_analysis_job(
                         job["job_id"], self.worker_id, status="failed", error=str(exc))
                     with active_job_lock:
                         active_job = None
                     failed += 1
                     stop_reason = f"{type(exc).__name__}: {exc}"
+                    last_failed_job_id = str(job["job_id"])
+                    last_failure = stop_reason
                     break
                 else:
                     self.repository.finish_analysis_job(
@@ -267,6 +287,10 @@ class BatchAnalysisRunner:
                     with active_job_lock:
                         active_job = None
                     processed += 1
+                    log_event("batch_job_completed", "batch_analysis", run_id=run_id,
+                              job_id=job.get("job_id"), status="complete")
+                finally:
+                    reset_context(job_context)
         finally:
             monitor_stop.set()
             monitor.join()
@@ -276,8 +300,16 @@ class BatchAnalysisRunner:
                 self.repository.cancel_queued_analysis_jobs(
                     engine_version=self.engine_key, parameters=self.parameters)
                 self.repository.cancel_queued_analysis_jobs(engine_version=self.review_engine_key)
+            reset_context(run_context)
+        log_event("batch_run_finished", "batch_analysis", run_id=run_id,
+                  duration_ms=(time.monotonic() - run_started) * 1000,
+                  count=processed, new_count=failed,
+                  status="cancelled" if cancelled else "paused" if paused else "complete")
         return {"processed": processed, "failed": failed, "paused": paused,
                 "cancelled": cancelled, "reason": stop_reason,
+                "last_failed_job_id": last_failed_job_id,
+                "last_failure": last_failure,
+                "attempted_fast": attempted_fast,
                 "queue": self.repository.analysis_job_counts(engine_version=self.engine_key,
                                                                parameters=self.parameters),
                 "review_queue": self.repository.analysis_job_counts(

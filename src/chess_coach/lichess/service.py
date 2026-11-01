@@ -40,6 +40,7 @@ class LichessService(QObject):
     archive_eval_refresh_finished = Signal(int, int, str)
     puzzles_progress = Signal(int)
     puzzles_scanned = Signal(int)
+    puzzles_started = Signal(str)
     puzzles_finished = Signal(int, str)
     background_sync_finished = Signal(str, str)
     puzzle_pilot_progress = Signal(int, int)
@@ -234,18 +235,24 @@ class LichessService(QObject):
                     self.puzzles_finished.emit(0, "Синхронизация отменена.")
                     return
                 self.puzzle_username = username
+                account_id = repo.ensure_archive_account(username)
+                sync_mode = ("incremental" if repo.puzzle_sync_state(account_id).get("backfill_complete")
+                             else "initial backfill")
+                self.puzzles_started.emit(sync_mode)
                 sync = PuzzleActivitySync(self.client, repo)
                 count = sync.run(username, puzzle_token, stop,
                                  progress=lambda n: self.puzzles_progress.emit(n),
                                  scanned=lambda n: self.puzzles_scanned.emit(n))
                 status = "Синхронизация отменена." if stop.is_set() else "История задач синхронизирована."
-                if not stop.is_set():
+                if not stop.is_set() and count > 0:
                     try:
                         account_id = repo.ensure_archive_account(username)
                         dashboard = self.client.get_puzzle_dashboard(puzzle_token, 30)
                         repo.save_puzzle_dashboard(account_id, 30, dashboard)
                     except Exception:
                         status += " Сводка Lichess недоступна; локальная статистика сохранена."
+                elif not stop.is_set():
+                    status += " Новых попыток нет; сводный endpoint не запрашивался повторно."
                 self.puzzles_finished.emit(count, status)
             except Exception as exc:
                 self.puzzles_finished.emit(0, str(exc))

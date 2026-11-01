@@ -241,3 +241,9 @@ Windows Actions run [#86](https://github.com/feshakomissarov-prog/chess/actions/
 - GUI-пилот, Lichess, OAuth, пользовательские данные и анализ двух партий остаются **НЕ ПРОВЕРЕНЫ**. Следующая ручная приёмка должна ограничиться ровно двумя завершёнными партиями после создания пользователем резервной копии собственной SQLite.
 
 PR остаётся draft. M4.6 не начинать до отдельного принятия M4.5/M4.5.1 владельцем.
+
+## M4.5.1 B0–B4 — текущая работа (2026-11-02)
+
+Продолжение в `codex/m45-batch-analysis`, draft PR #30; применено ТЗ [B0–B4 live pilot](https://github.com/feshakomissarov-prog/chess/blob/chatgpt/pr30-live-pilot-multipv-puzzles-logs-arrows/docs/reviews/PR30_M451_LIVE_PILOT_ENGINE_PUZZLES_LOGGING_ARROWS.md). MultiPV больше не задаётся через `SimpleEngine.configure`; selective режим передаёт `multipv` параметр поиску, ошибки остаются `failed` без автоматического retry. Добавлены постоянные обезличенные ротационные логи и доступ/opt-in отчёт в настройках, `since`-ограничение и пропуск неизменённых Lichess puzzle записей, нулевой sync больше не запрашивает dashboard, ручные стрелки ПКМ заметно толще при сохранении отдельного тонкого предхода.
+
+Локально Windows Python 3.12.10, Qt offscreen: полный набор **360 тестов PASS за 115.92 с** (целевой набор из затронутых файлов ранее — 180 PASS). Установленный Stockfish 19 (не переустанавливался) реально завершил анализ синтетической партии `e2e4 e7e5`, 3 позиции × 3000 узлов; analysis run записан в изолированную временную SQLite. Реальные Lichess/OAuth/архив/личная SQLite и массовый Stockfish не запускались. Windows Actions CI точного SHA ожидает публикации финального коммита.

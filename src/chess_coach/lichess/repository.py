@@ -2192,20 +2192,51 @@ class GameRepository:
 
         results: list[tuple[str, bool]] = []
         with self._connection() as db:
+            existing: set[str] = set()
+            puzzle_metadata: dict[str, tuple] = {}
+            # SQLite builds on Windows often cap bound variables at 999. Chunk
+            # the preflight so large puzzle pages remain portable.
+            for offset in range(0, len(prepared), 500):
+                chunk = prepared[offset:offset + 500]
+                if not chunk:
+                    continue
+                placeholders = ",".join("?" for _ in chunk)
+                existing.update(row[0] for row in db.execute(
+                    f"SELECT attempt_uid FROM puzzle_attempts WHERE attempt_uid IN ({placeholders})",
+                    tuple(item[0] for item in chunk)).fetchall())
+            puzzle_ids = list(dict.fromkeys(item[1] for item in prepared))
+            for offset in range(0, len(puzzle_ids), 500):
+                chunk_ids = puzzle_ids[offset:offset + 500]
+                placeholders = ",".join("?" for _ in chunk_ids)
+                for row in db.execute(
+                        "SELECT puzzle_id,fen,solution_json,themes_json,puzzle_rating,plays "
+                        f"FROM puzzles WHERE puzzle_id IN ({placeholders})", chunk_ids).fetchall():
+                    puzzle_metadata[str(row["puzzle_id"])] = tuple(row[key] for key in
+                        ("fen", "solution_json", "themes_json", "puzzle_rating", "plays"))
             for attempt_uid, puzzle_id, attempt_date, record, stable in prepared:
                 puzzle = record["puzzle"]
                 now = datetime.now(timezone.utc).isoformat()
                 solution = puzzle.get("solution") if isinstance(puzzle.get("solution"), list) else []
                 themes = puzzle.get("themes") if isinstance(puzzle.get("themes"), list) else []
-                db.execute("INSERT INTO puzzles VALUES (?,?,?,?,?,?,?) ON CONFLICT(puzzle_id) "
-                           "DO UPDATE SET fen=excluded.fen,solution_json=excluded.solution_json, "
-                           "themes_json=excluded.themes_json,puzzle_rating=excluded.puzzle_rating, "
-                           "plays=excluded.plays,updated_at=excluded.updated_at",
-                           (puzzle_id, puzzle["fen"], json.dumps(solution), json.dumps(themes),
-                            puzzle.get("rating"), puzzle.get("plays"), now))
-                inserted = db.execute("INSERT OR IGNORE INTO puzzle_attempts VALUES (?,?,?,?,?,?,?,?)",
-                                      (attempt_uid, account_id, puzzle_id, attempt_date,
-                                       int(bool(record.get("win"))), "lichess", stable, now)).rowcount
+                incoming_puzzle = (puzzle["fen"], json.dumps(solution), json.dumps(themes),
+                                   puzzle.get("rating"), puzzle.get("plays"))
+                if puzzle_metadata.get(puzzle_id) != incoming_puzzle:
+                    db.execute("INSERT INTO puzzles VALUES (?,?,?,?,?,?,?) ON CONFLICT(puzzle_id) "
+                               "DO UPDATE SET fen=excluded.fen,solution_json=excluded.solution_json, "
+                               "themes_json=excluded.themes_json,puzzle_rating=excluded.puzzle_rating, "
+                               "plays=excluded.plays,updated_at=excluded.updated_at",
+                               (puzzle_id, *incoming_puzzle,
+                                now))
+                    puzzle_metadata[puzzle_id] = incoming_puzzle
+                if attempt_uid in existing:
+                    inserted = 0
+                else:
+                    inserted = db.execute(
+                        "INSERT OR IGNORE INTO puzzle_attempts VALUES (?,?,?,?,?,?,?,?)",
+                        (attempt_uid, account_id, puzzle_id, attempt_date,
+                         int(bool(record.get("win"))), "lichess", stable, now)).rowcount
+                    if inserted:
+                        existing.add(attempt_uid)
                 if pilot_run_id is not None:
                     run = db.execute("SELECT account_id,status FROM puzzle_pilot_runs WHERE run_id=?",
                                      (pilot_run_id,)).fetchone()
@@ -2225,10 +2256,10 @@ class GameRepository:
                         db.execute("UPDATE puzzle_sync_state SET backfill_before=?, "
                                    "imported_count=imported_count+?,updated_at=? WHERE account_id=?",
                                    (attempt_date + 1, int(bool(inserted)), now, account_id))
-                    else:
+                    elif inserted:
                         db.execute("UPDATE puzzle_sync_state SET imported_count=imported_count+?, "
                                    "last_error=NULL,updated_at=? WHERE account_id=?",
-                                   (int(bool(inserted)), now, account_id))
+                                   (1, now, account_id))
                 results.append((attempt_uid, bool(inserted)))
         return results
 

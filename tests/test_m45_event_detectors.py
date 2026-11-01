@@ -165,13 +165,21 @@ def test_selective_review_runs_only_capped_positions_and_persists_multipv_altern
 
         def __init__(self):
             self.positions = []
+            self.multipv_values = []
+            self.configure_calls = []
             self.quit_calls = 0
 
-        def configure(self, _options):
-            return None
+        def configure(self, options):
+            managed = {"MultiPV", "UCI_Chess960", "UCI_Variant", "Ponder"}
+            invalid = managed.intersection(options)
+            if invalid:
+                raise chess.engine.EngineError(
+                    f"cannot set {sorted(invalid)[0]} which is automatically managed")
+            self.configure_calls.append(dict(options))
 
         def analysis(self, board, _limit, *, multipv=1):
             self.positions.append(board.fen())
+            self.multipv_values.append(multipv)
             return FakeReviewResult(board, multipv)
 
         def quit(self):
@@ -193,6 +201,8 @@ def test_selective_review_runs_only_capped_positions_and_persists_multipv_altern
             nodes=999_999, multipv=8)
         assert result["review_position_plies"] == [0, 1]
         assert len(engine.positions) == 2
+        assert engine.multipv_values == [3, 3]
+        assert engine.configure_calls == [{"Threads": 1, "Hash": 128}]
         assert len(result["alternatives"]) == 4
         assert all(item["multipv_rank"] in {1, 2} for item in result["alternatives"])
         assert len(checks) == 3  # before process start and before each search

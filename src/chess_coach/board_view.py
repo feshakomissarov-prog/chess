@@ -464,15 +464,24 @@ class BoardView(BoardWidget):
         tip = QPointF(b.x() - cos(angle) * side * 0.19, b.y() - sin(angle) * side * 0.19)
         base = QPointF(tip.x() - cos(angle) * side * 0.32, tip.y() - sin(angle) * side * 0.32)
         painter.save()
-        painter.setPen(QPen(color, max(4.0, side * 0.12 * thickness), Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
+        # Manual right-button arrows are intentionally prominent. Keep queued
+        # premoves visually distinct and thinner through their smaller factor.
+        manual = thickness >= 0.85
+        width = self._arrow_width(side, thickness)
+        painter.setPen(QPen(color, width, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
         painter.drawLine(a, base)
-        wing = side * 0.18
+        wing = side * (0.34 if manual else 0.18)
         left = QPointF(tip.x() - cos(angle - 0.55) * wing, tip.y() - sin(angle - 0.55) * wing)
         right = QPointF(tip.x() - cos(angle + 0.55) * wing, tip.y() - sin(angle + 0.55) * wing)
         painter.setPen(Qt.PenStyle.NoPen)
         painter.setBrush(color)
         painter.drawPolygon(QPolygonF([tip, left, right]))
         painter.restore()
+
+    @staticmethod
+    def _arrow_width(side: float, thickness: float) -> float:
+        manual = thickness >= 0.85
+        return min(17.0, max(8.0, side * (0.22 if manual else 0.10 * thickness)))
 
     def _draw_square_mark(self, painter: QPainter, square: int, color: QColor) -> None:
         rect = self._get_board_rect()
