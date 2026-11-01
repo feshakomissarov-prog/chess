@@ -1314,6 +1314,13 @@ class GameRepository:
                 started_at = None
                 time_precision = "unknown"
         lichess_assessments = []
+        initial_evaluation = parsed.eval()
+        if initial_evaluation is not None:
+            initial_score = initial_evaluation.pov(chess.WHITE)
+            lichess_assessments.append({
+                "ply": 0, "white_cp": initial_score.score(mate_score=None),
+                "mate_white": initial_score.mate(), "depth": parsed.eval_depth(),
+            })
         for ply, node in enumerate(parsed.mainline(), start=1):
             evaluation = node.eval()
             if evaluation is None:
@@ -1641,10 +1648,8 @@ class GameRepository:
             for event in events:
                 event["tags"] = ["opportunity"]
             from .event_detectors import detect_registered_events
-            game = db.execute("SELECT color FROM games WHERE game_id=?", (game_id,)).fetchone()
             events.extend(detect_registered_events(
-                assessments, moves, metrics, run_id=run_id, source=source,
-                user_color=game["color"] if game else None))
+                assessments, moves, metrics, run_id=run_id, source=source))
             db.executemany("""INSERT INTO move_metrics (
                 run_id,game_id,line_revision,ply,metric_version,source,
                 white_cp_before,mate_white_before,white_cp_after,mate_white_after,
@@ -1708,10 +1713,8 @@ class GameRepository:
             initial_fen=revision["initial_fen"] if revision else "startpos")
         for event in events:
             event["tags"] = ["opportunity"]
-        game = db.execute("SELECT color FROM games WHERE game_id=?", (run["game_id"],)).fetchone()
         events.extend(detect_registered_events(
-            assessments, moves, metrics, run_id=run_id, source=run["source"],
-            user_color=user_color or (game["color"] if game else None)))
+            assessments, moves, metrics, run_id=run_id, source=run["source"]))
         if replace:
             from .move_metrics import METRIC_VERSION
             db.execute("DELETE FROM move_metrics WHERE run_id=? AND metric_version=?",
@@ -1811,6 +1814,8 @@ class GameRepository:
             coverage = db.execute("SELECT * FROM analysis_coverage WHERE run_id=?",
                                   (run["run_id"],)).fetchone()
             result["coverage"] = dict(coverage) if coverage else None
+            result["decision_coverage"] = self._decision_coverage(
+                db, result, game_id, account_id=account_id, user_color=user_color)
             result["review_coverage"] = self._load_review_coverage(
                 db, game_id, int(run["line_revision"]), str(run["line_hash"]))
             self._attach_official_accuracy(db, result, game_id, account_id=account_id,
@@ -1878,6 +1883,8 @@ class GameRepository:
             coverage = db.execute("SELECT * FROM analysis_coverage WHERE run_id=?",
                                   (run["run_id"],)).fetchone()
             result["coverage"] = dict(coverage) if coverage else None
+            result["decision_coverage"] = self._decision_coverage(
+                db, result, game_id, account_id=account_id, user_color=user_color)
             result["review_coverage"] = self._load_review_coverage(
                 db, game_id, int(run["line_revision"]), str(run["line_hash"]))
             self._attach_official_accuracy(db, result, game_id, account_id=account_id,
@@ -1885,6 +1892,47 @@ class GameRepository:
             result["local_game_accuracy"] = None
             result["local_game_accuracy_formula_id"] = None
             return result
+
+    @staticmethod
+    def _decision_coverage(db: sqlite3.Connection, analysis: dict, game_id: str, *,
+                           account_id: str | None, user_color: str | None) -> dict:
+        game = db.execute("SELECT color FROM games WHERE game_id=?", (game_id,)).fetchone()
+        linked = (db.execute("SELECT color FROM account_games WHERE account_id=? AND game_id=?",
+                             (account_id, game_id)).fetchone() if account_id else None)
+        color = (linked["color"] if linked else None) or (
+            user_color if user_color in {"white", "black"} else
+            game["color"] if game else None)
+        if color not in {"white", "black"}:
+            return {"owner_color": None, "own_moves": 0, "comparable_own_moves": 0,
+                    "missing_own_move_plies": [], "first_own_move_missing_baseline": False}
+        run_id = str(analysis["run_id"])
+        revision = int(analysis["line_revision"])
+        own_moves = int(db.execute(
+            "SELECT COUNT(*) FROM game_moves WHERE game_id=? AND line_revision=? AND mover=?",
+            (game_id, revision, color)).fetchone()[0])
+        comparable = int(db.execute(
+            "SELECT COUNT(*) FROM move_metrics mm JOIN game_moves gm ON gm.game_id=mm.game_id "
+            "AND gm.line_revision=mm.line_revision AND gm.ply=mm.ply "
+            "WHERE mm.run_id=? AND gm.mover=? AND mm.cp_loss IS NOT NULL",
+            (run_id, color)).fetchone()[0])
+        missing = [int(row[0]) for row in db.execute(
+            "SELECT gm.ply FROM game_moves gm WHERE gm.game_id=? AND gm.line_revision=? "
+            "AND gm.mover=? AND NOT EXISTS (SELECT 1 FROM position_assessments pre "
+            "WHERE pre.run_id=? AND pre.ply=gm.ply-1 AND "
+            "(pre.white_cp IS NOT NULL OR pre.mate_white IS NOT NULL)) ORDER BY gm.ply",
+            (game_id, revision, color, run_id))]
+        source_post_scores = int(db.execute(
+            "SELECT COUNT(*) FROM position_assessments WHERE run_id=? AND ply>0 "
+            "AND (white_cp IS NOT NULL OR mate_white IS NOT NULL)", (run_id,)).fetchone()[0])
+        expected = int(db.execute("SELECT COUNT(*) FROM game_moves WHERE game_id=? AND line_revision=?",
+                                  (game_id, revision)).fetchone()[0])
+        return {"owner_color": color, "own_moves": own_moves,
+                "comparable_own_moves": comparable, "missing_own_move_plies": missing,
+                "first_own_move_missing_baseline": bool(missing and min(missing) == (
+                    1 if color == "white" else 2)),
+                "source_eval_scored_post_moves": source_post_scores,
+                "source_eval_expected_post_moves": expected,
+                "source_eval_complete": source_post_scores >= expected if expected else False}
 
     @staticmethod
     def _attach_official_accuracy(db: sqlite3.Connection, result: dict, game_id: str, *,
@@ -1943,13 +1991,10 @@ class GameRepository:
             metrics = [dict(row) for row in db.execute(
                 "SELECT * FROM move_metrics WHERE run_id=? AND metric_version='cc-move-metrics-v2' "
                 "ORDER BY ply", (run_id,))]
-            game = db.execute("SELECT color FROM games WHERE game_id=?",
-                              (run["game_id"],)).fetchone()
             before = int(db.execute("SELECT COUNT(*) FROM analysis_events WHERE run_id=?",
                                     (run_id,)).fetchone()[0])
         events = detect_registered_events(
-            assessments, moves, metrics, run_id=run_id, source=run["source"],
-            user_color=game["color"] if game else None)
+            assessments, moves, metrics, run_id=run_id, source=run["source"])
         with self._connection() as db:
             db.execute("BEGIN IMMEDIATE")
             self._insert_event_rows(db, events, run_id, run["game_id"],

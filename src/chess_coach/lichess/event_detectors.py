@@ -81,7 +81,7 @@ def _own_cp(assessment: dict[str, Any] | None, color: str) -> int | None:
 
 def detect_registered_events(assessments: list[dict[str, Any]], moves: list[dict[str, Any]],
                             metrics: list[dict[str, Any]], *, run_id: str,
-                            source: str, user_color: str | None) -> list[dict[str, Any]]:
+                            source: str, user_color: str | None = None) -> list[dict[str, Any]]:
     """Emit only deterministic CP/PV facts; tactical motifs remain deferred."""
     by_ply = {int(row["ply"]): row for row in assessments}
     metric_by_ply = {int(row["ply"]): row for row in metrics}
@@ -129,9 +129,9 @@ def detect_registered_events(assessments: list[dict[str, Any]], moves: list[dict
         best = evidence["best_move_uci"]
         if played and best and played == best:
             emit(ply, "best_move_confirmed", "candidate", evidence, ["positive", "best-move"])
-        if (user_color in {"white", "black"} and mover != user_color
-                and metric.get("cp_loss") is not None and metric["cp_loss"] >= 100):
-            emit(ply, "opponent_blunder", "candidate", evidence, ["opponent", "opportunity"])
+        # Opponent-relative labels cannot be persisted on a shared run: one game
+        # may be linked to both white and black accounts. Derive that perspective
+        # only in an account-scoped read model.
 
         before_own = _own_cp(before, mover)
         after_own = _own_cp(after, mover)

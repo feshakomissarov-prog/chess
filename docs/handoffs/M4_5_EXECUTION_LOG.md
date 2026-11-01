@@ -259,3 +259,10 @@
 - Fake-client regressions: 80 synthetic missing games обходятся четырьмя вызовами 25+25+25+5 без повторов и без eval/engine; no-eval ответы становятся `checked_no_evals`; частичное появление eval отражается как прирост; 429 фиксирует retry deadline, не отмечает `last_checked_at` и не теряет unchecked items.
 - Проверено: Python 3.12.10, 4 адресных теста миграции/refresh PASS, compileall PASS. Реальные Lichess/OAuth/Stockfish и пользовательская SQLite не использовались.
 - Следующий блок: R12 account-relative opportunity aggregation; движковый run остаётся общим для связанных аккаунтов.
+
+## PR #30 second-pass review — R12 (2026-11-01)
+
+- R12: missed/used opportunity events остаются сырыми move-relative фактами одного общего analysis run. В `historical_timeline` оба счётчика теперь считают только события, где `game_moves.mover` совпадает с цветом выбранного `account_games` link. Глобальное событие `opponent_blunder` удалено из persisted detector output: оно не может корректно обозначать соперника для двух аккаунтов на одном run; perspective строится при чтении. Движковый run не дублируется.
+- Synthetic dual-account regression связывает одну партию с белым и чёрным аккаунтами, сохраняет один run и события на ходах обеих сторон; оба профиля видят только собственный opportunity event, и run не содержит ложного глобального `opponent_blunder`.
+- Проверено: Python 3.12.10, targeted profile/event/move-metric suite — **14 PASS**. Реальные аккаунты и пользовательские данные не использовались.
+- Следующий блок: R13 разделяет post-move Lichess source coverage и сравнимость собственных решений, включая явное отсутствие оценки до первого хода.

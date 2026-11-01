@@ -67,7 +67,7 @@ def test_selective_review_plan_has_priority_and_enforces_caps():
                                    budget_total=20) == []
 
 
-def test_repository_persists_multiple_tags_and_reclassification_is_idempotent(tmp_path):
+def test_repository_persists_account_neutral_events_and_reclassification_is_idempotent(tmp_path):
     repository = GameRepository(tmp_path / "events.sqlite3")
     try:
         repository.save_snapshot(
@@ -89,10 +89,8 @@ def test_repository_persists_multiple_tags_and_reclassification_is_idempotent(tm
         with repository._connection() as db:
             opponent = db.execute("SELECT * FROM analysis_events WHERE run_id=? "
                                   "AND event_type='opponent_blunder'", (run_id,)).fetchone()
-            assert opponent is not None and opponent["confidence_state"] == "candidate"
-            tags = {row[0] for row in db.execute(
-                "SELECT tag FROM event_tags WHERE event_key=?", (opponent["event_key"],))}
-            assert {"base", "opponent", "opportunity"} <= tags
+            # A global run has no account perspective; opponent labels are projected at read time.
+            assert opponent is None
             event_count = db.execute("SELECT COUNT(*) FROM analysis_events WHERE run_id=?",
                                      (run_id,)).fetchone()[0]
         assert repository.reclassify_analysis_events(run_id) == 0

@@ -136,6 +136,50 @@ def test_opportunity_conversion_stays_unknown_without_candidate_action_link(tmp_
         repo.shutdown()
 
 
+def test_opportunity_events_are_projected_for_each_linked_account_color(tmp_path):
+    repo = GameRepository(tmp_path / "dual-account-opportunities.sqlite3")
+    try:
+        white = repo.ensure_archive_account("WhiteOwner")
+        black = repo.ensure_archive_account("BlackOwner")
+        game_id = "shared-color-game"
+        repo.save_snapshot(game_id, "startpos", "e2e4 e7e5 g1f3 b8c6", "white", "Opponent",
+                           False, "300+0", "finished", "white",
+                           white_player="WhiteOwner", black_player="BlackOwner",
+                           started_at="2026-10-30T12:00:00+00:00")
+        line = repo.current_line(game_id)
+        with repo._connection() as db:
+            for account_id, color in ((white, "white"), (black, "black")):
+                db.execute("INSERT INTO account_games(account_id,game_id,remote_id,imported_at,color,"
+                           "player_name,opponent) VALUES (?,?,?,?,?,?,?)",
+                           (account_id, game_id, game_id, "2026-10-30", color,
+                            "WhiteOwner" if color == "white" else "BlackOwner", "other"))
+        run_id = repo.save_analysis(
+            game_id, line_revision=1, line_hash=line["line_hash"], source="stockfish",
+            engine_name="Synthetic", engine_version="shared", parameters={"nodes": 1},
+            assessments=[{"ply": 0, "white_cp": 0}, {"ply": 1, "white_cp": 0},
+                         {"ply": 2, "white_cp": 0}, {"ply": 3, "white_cp": 0},
+                         {"ply": 4, "white_cp": 0}], classifications=[], status="complete")
+        with repo._connection() as db:
+            db.executemany("INSERT INTO analysis_events(event_key,run_id,game_id,line_revision,ply,"
+                           "event_type,confidence_state,source,detector_version,evidence_json) "
+                           "VALUES (?,?,?,?,?,?,?,?,?,?)", [
+                ("miss-white", run_id, game_id, 1, 1, "missed_opportunity", "candidate",
+                 "stockfish", "synthetic-v1", "{}"),
+                ("miss-black", run_id, game_id, 1, 2, "missed_opportunity", "candidate",
+                 "stockfish", "synthetic-v1", "{}"),
+            ])
+            assert db.execute("SELECT COUNT(*) FROM analysis_runs WHERE game_id=?", (game_id,)).fetchone()[0] == 1
+            assert db.execute("SELECT COUNT(*) FROM analysis_events WHERE run_id=? "
+                              "AND event_type='opponent_blunder'", (run_id,)).fetchone()[0] == 0
+        white_row = StatisticsService(repo).historical_timeline(account_id=white)[0]
+        black_row = StatisticsService(repo).historical_timeline(account_id=black)[0]
+        assert white_row["opportunity_candidates"] == 1
+        assert black_row["opportunity_candidates"] == 1
+        assert white_row["verified_opportunities_used"] == black_row["verified_opportunities_used"] == 0
+    finally:
+        repo.shutdown()
+
+
 def test_period_comparison_requires_large_samples_and_similar_analysis_coverage(tmp_path):
     repo = GameRepository(tmp_path / "period-comparison.sqlite3")
     try:
