@@ -112,6 +112,12 @@ def test_phase_fallback_uses_board_facts_and_lichess_division_wins(tmp_path):
         assert phase["source"] == "material-fallback"
         assert phase["method_version"] == PHASE_FALLBACK_VERSION
         assert repo.phase_boundaries("fallback", 1)["source"] == "material-fallback"
+        line = repo.current_line("fallback")
+        repo.save_analysis("fallback", line_revision=1, line_hash=line["line_hash"],
+            source="stockfish", engine_name="fake", engine_version="1",
+            parameters={"nodes": 1}, assessments=[{"ply": 1, "white_cp": 0}],
+            classifications=[{"ply": 1, "mover": "white", "label": "good",
+                              "phase": "unknown", "algorithm_version": "test"}])
         # Explicit server division replaces the fallback for a subsequent import.
         repo.import_archive_record("Me", {"id": "fallback", "pgn": pgn,
             "division": {"middle": {"begin": 5}, "end": {"begin": 6}}},
@@ -120,6 +126,9 @@ def test_phase_fallback_uses_board_facts_and_lichess_division_wins(tmp_path):
             phase = db.execute("SELECT * FROM game_phase_boundaries WHERE game_id='fallback'").fetchone()
         assert phase["source"] == "lichess"
         assert phase["middle_start_ply"] == 5
+        with repo._connection() as db:
+            label = db.execute("SELECT phase FROM move_classifications WHERE game_id='fallback' ").fetchone()[0]
+        assert label == "opening"
     finally:
         repo.shutdown()
 

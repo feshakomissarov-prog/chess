@@ -119,9 +119,11 @@ class EvaluationGraph(QWidget):
     """Small evaluation-over-ply chart; score is always from White's point of view."""
     selected_ply = Signal(int)
 
-    def __init__(self, assessments: list[dict], parent=None) -> None:
+    def __init__(self, assessments: list[dict], parent=None,
+                 phase_boundaries: dict | None = None) -> None:
         super().__init__(parent)
         self.assessments = assessments
+        self.phase_boundaries = phase_boundaries
         self.setMinimumHeight(210)
         self.setMinimumWidth(420)
 
@@ -139,13 +141,39 @@ class EvaluationGraph(QWidget):
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
         rect = self.rect().adjusted(32, 12, -12, -26)
+        points = self._points()
+        max_ply = max(1, max((ply for ply, _ in points), default=0))
+        boundaries = self.phase_boundaries or {}
+        middle = boundaries.get("middle_start_ply")
+        end = boundaries.get("end_start_ply")
+        regions = []
+        if middle is not None:
+            regions.append((0, min(max_ply, int(middle)), "Дебют", QColor(225, 239, 228, 115)))
+            if end is not None and int(end) >= int(middle):
+                regions.append((int(middle), min(max_ply, int(end)), "Миттельшпиль",
+                                QColor(237, 231, 214, 105)))
+                regions.append((int(end), max_ply, "Эндшпиль", QColor(225, 232, 243, 115)))
+            else:
+                regions.append((int(middle), max_ply, "Фаза неизвестна",
+                                QColor(235, 235, 235, 125)))
+        elif end is not None:
+            regions.append((0, min(max_ply, int(end)), "Фаза неизвестна",
+                            QColor(235, 235, 235, 125)))
+            regions.append((int(end), max_ply, "Эндшпиль", QColor(225, 232, 243, 115)))
+        else:
+            regions.append((0, max_ply, "Фаза неизвестна", QColor(235, 235, 235, 125)))
+        for start, finish, label, color in regions:
+            left = rect.left() + int(rect.width() * start / max_ply)
+            right = rect.left() + int(rect.width() * finish / max_ply)
+            if right > left:
+                painter.fillRect(left, rect.top(), right - left, rect.height(), color)
+                painter.setPen(QPen(QColor("#777777"), 1))
+                painter.drawText(left + 3, rect.top() + 16, label)
         painter.setPen(QPen(QColor("#777777"), 1))
         painter.drawLine(rect.left(), rect.center().y(), rect.right(), rect.center().y())
-        points = self._points()
         if not points:
             painter.drawText(rect, Qt.AlignmentFlag.AlignCenter, "Нет оценок для графика")
             return
-        max_ply = max(1, max(ply for ply, _ in points))
         coords = []
         for ply, score in points:
             x = rect.left() + int((rect.width() * ply) / max_ply)
@@ -157,6 +185,11 @@ class EvaluationGraph(QWidget):
         painter.setBrush(QColor("#315f9b"))
         for x, y in coords:
             painter.drawEllipse(x - 3, y - 3, 6, 6)
+        for boundary in (middle, end):
+            if boundary is not None and 0 <= int(boundary) <= max_ply:
+                x = rect.left() + int(rect.width() * int(boundary) / max_ply)
+                painter.setPen(QPen(QColor("#777777"), 1, Qt.PenStyle.DashLine))
+                painter.drawLine(x, rect.top(), x, rect.bottom())
         painter.setPen(QPen(QColor("#555555"), 1))
         painter.drawText(2, rect.top() + 8, "+10 pawns")
         painter.drawText(2, rect.bottom(), "−10")
@@ -235,17 +268,30 @@ class StatisticsGameDialog(QDialog):
         line = repository.current_line(game["game_id"])
         analysis = repository.latest_analysis_detail(
             game["game_id"], int(line["line_revision"])) if line else None
+        revision = int(line["line_revision"]) if line else int(game.get("line_revision", 1))
+        opening = repository.opening_match(game["game_id"], revision)
+        phases = repository.phase_boundaries(game["game_id"], revision)
         source = (analysis.get("source") if analysis else "нет локальной оценки")
         accuracy = game.get("lichess_accuracy_white"), game.get("lichess_accuracy_black")
         accuracy_text = (f"Lichess accuracy: белые {accuracy[0]}, чёрные {accuracy[1]}"
                          if any(value is not None for value in accuracy) else
                          "Lichess accuracy: нет данных от Lichess")
-        layout.addWidget(QLabel(
+        opening_text = (f"Справочник: {opening['eco']} {opening['name']} · совпадение до ply {opening['matched_ply']}"
+                        if opening else "Справочник дебютов: совпадения пока нет")
+        if opening and opening.get("lichess_conflict"):
+            opening_text += (f" · конфликт с Lichess: {game.get('opening_eco') or 'ECO —'} "
+                             f"{game.get('opening_name') or ''}")
+        phase_text = (f"Фазы: {phases['source']} / {phases['method_version']} · "
+                      f"middlegame={phases['middle_start_ply']}, endgame={phases['end_start_ply']}"
+                      if phases else "Границы фаз неизвестны")
+        header = QLabel(
             f"{game.get('started_at') or game.get('updated_at') or 'дата неизвестна'} · "
             f"{game.get('white_player') or 'Белые'} — {game.get('black_player') or 'Чёрные'}\n"
             f"Ваш цвет: {color}; соперник: {opponent}; результат: {result}\n"
             f"Источник оценки: {source}; дебют: {game.get('opening_eco') or ''} "
-            f"{game.get('opening_name') or 'не указан'}\n{accuracy_text}"))
+            f"{game.get('opening_name') or 'не указан'}\n{opening_text}\n{accuracy_text}\n{phase_text}")
+        header.setWordWrap(True)
+        layout.addWidget(header)
         details = QGridLayout()
         self.moves = QListWidget()
         self.moves.setMaximumHeight(170)
@@ -254,15 +300,21 @@ class StatisticsGameDialog(QDialog):
         self.notes.setMaximumHeight(130)
         self.errors = QListWidget()
         self.errors.setMaximumHeight(170)
+        self.events = QListWidget()
+        self.events.setMaximumHeight(145)
         self.graph_host = QWidget()
         self.graph_layout = QVBoxLayout(self.graph_host)
         if analysis and analysis.get("assessments"):
-            self.graph = EvaluationGraph(analysis["assessments"], self)
+            coverage = analysis.get("coverage") or {}
+            total_positions = int(coverage.get("total_positions") or (len(line["moves"].split()) + 1))
+            scored_positions = int(coverage.get("scored_positions") or 0)
+            self.graph = EvaluationGraph(analysis["assessments"], self, phases)
             self.graph.selected_ply.connect(self._request_position)
             self.graph_layout.addWidget(self.graph)
             self.graph_layout.addWidget(QLabel(
-                f"Оценено позиций: {len(analysis['assessments'])} / {len(line['moves'].split()) + 1}; "
-                f"источник: {source}; алгоритм ошибок: {CLASSIFIER_VERSION}"))
+                f"Оценено позиций: {scored_positions} / {total_positions}; "
+                f"источник: {source}; статус: {analysis.get('status', 'unknown')}; "
+                f"алгоритм ошибок: {CLASSIFIER_VERSION}"))
             for item in analysis.get("classifications", []):
                 label = str(item.get("label", "unknown"))
                 if label in {"mistake", "blunder", "inaccuracy"}:
@@ -271,6 +323,36 @@ class StatisticsGameDialog(QDialog):
                         f"{item.get('eval_loss_cp')} CP")
                     row.setData(Qt.ItemDataRole.UserRole, int(item["ply"]))
                     self.errors.addItem(row)
+            severity_counts = {label: sum(1 for item in analysis.get("classifications", [])
+                                          if item.get("mover") == color and item.get("label") == label)
+                               for label in ("inaccuracy", "mistake", "blunder")}
+            own_phase_counts = {}
+            for item in analysis.get("classifications", []):
+                if item.get("mover") == color:
+                    phase = item.get("phase") or "unknown"
+                    own_phase_counts.setdefault(phase, {"inaccuracy": 0, "mistake": 0, "blunder": 0})
+                    if item.get("label") in own_phase_counts[phase]:
+                        own_phase_counts[phase][item["label"]] += 1
+            phase_summary = " · ".join(
+                f"{phase}: {values['inaccuracy']}/{values['mistake']}/{values['blunder']}"
+                for phase, values in sorted(own_phase_counts.items())) or "нет классифицированных ходов"
+            self.graph_layout.addWidget(QLabel(
+                f"Свои неточности/ошибки/зевки: {severity_counts['inaccuracy']}/"
+                f"{severity_counts['mistake']}/{severity_counts['blunder']}\n"
+                f"По фазам (неточности/ошибки/зевки): {phase_summary}\n"
+                "Локальная точность: недоступна, formula_id не утверждён."))
+            for event in analysis.get("events", []):
+                confidence = event.get("confidence_state", "unknown")
+                try:
+                    evidence = json.loads(event.get("evidence_json") or "{}")
+                except (TypeError, json.JSONDecodeError):
+                    evidence = {}
+                label = (f"Ход {event.get('ply')} · {event.get('event_type')} · "
+                         f"{confidence} · {event.get('source')}")
+                item = QListWidgetItem(label)
+                item.setData(Qt.ItemDataRole.UserRole, int(event.get("ply") or 0))
+                item.setToolTip(json.dumps(evidence, ensure_ascii=False, indent=2))
+                self.events.addItem(item)
         else:
             self.graph_layout.addWidget(QLabel(
                 "Нет сохранённой оценки. Анализ запускается отдельно из библиотеки "
@@ -295,6 +377,8 @@ class StatisticsGameDialog(QDialog):
         details.addWidget(QLabel("Заметки"), 2, 0)
         details.addWidget(self.notes, 3, 0)
         details.addWidget(self.graph_host, 2, 1, 2, 1)
+        details.addWidget(QLabel("События анализа (двойной щелчок открывает позицию до хода; подсказка содержит доказательства)"), 4, 0, 1, 2)
+        details.addWidget(self.events, 5, 0, 1, 2)
         layout.addLayout(details, 1)
         pgn = QTextEdit()
         pgn.setReadOnly(True)
@@ -313,6 +397,7 @@ class StatisticsGameDialog(QDialog):
         layout.addLayout(actions)
         self.moves.itemDoubleClicked.connect(self._open_selected_move)
         self.errors.itemDoubleClicked.connect(self._open_error_position)
+        self.events.itemDoubleClicked.connect(self._open_event_position)
 
     def _open_selected_move(self, *_args) -> None:
         item = self.moves.currentItem()
@@ -320,7 +405,11 @@ class StatisticsGameDialog(QDialog):
             self._request_position(int(item.data(Qt.ItemDataRole.UserRole)))
 
     def _open_error_position(self, item) -> None:
-        self._request_position(int(item.data(Qt.ItemDataRole.UserRole)))
+        self._request_position(max(0, int(item.data(Qt.ItemDataRole.UserRole)) - 1))
+
+    def _open_event_position(self, item) -> None:
+        # Event ply identifies the played move; show the position before that decision.
+        self._request_position(max(0, int(item.data(Qt.ItemDataRole.UserRole)) - 1))
 
     def _request_position(self, ply: int) -> None:
         self.accept()
@@ -332,6 +421,8 @@ class StatisticsDialog(QDialog):
     query_finished = Signal(object)
     worker_started = Signal(object)
     worker_finished = Signal(object)
+    opening_loaded = Signal(object)
+    opening_finished = Signal(object)
     position_requested = Signal(str, int)
 
     def __init__(self, repository: GameRepository, parent=None) -> None:
@@ -342,6 +433,7 @@ class StatisticsDialog(QDialog):
         self.resize(980, 820)
         self._generation = 0
         self._query_thread: threading.Thread | None = None
+        self._opening_thread: threading.Thread | None = None
         self._pending_refresh = False
         self._close_when_idle = False
         self._rows: list[dict] = []
@@ -401,6 +493,16 @@ class StatisticsDialog(QDialog):
         self.summary_label = QLabel("Загружаем статистику…")
         self.summary_label.setWordWrap(True)
         root.addWidget(self.summary_label)
+        opening_actions = QHBoxLayout()
+        self.opening_refresh_button = QPushButton("Сопоставить дебюты и фазы для 25 партий")
+        self.opening_refresh_button.setToolTip(
+            "Явный локальный пакет: только 25 новых партий, без сети и движка.")
+        self.opening_refresh_button.clicked.connect(self._start_opening_refresh)
+        opening_actions.addWidget(self.opening_refresh_button)
+        self.opening_summary = QLabel("Локальные opening/phase агрегаты доступны по кнопке.")
+        self.opening_summary.setWordWrap(True)
+        opening_actions.addWidget(self.opening_summary, 1)
+        root.addLayout(opening_actions)
         self.trend = RatingTrendGraph([])
         self.trend.game_selected.connect(self._select_game_id)
         root.addWidget(self.trend)
@@ -428,6 +530,8 @@ class StatisticsDialog(QDialog):
         self._refresh_timer.timeout.connect(self._refresh_now)
         self.loaded.connect(self._apply_result)
         self.query_finished.connect(self._query_finished)
+        self.opening_loaded.connect(self._opening_result)
+        self.opening_finished.connect(self._opening_query_finished)
         for widget in (self.account, self.period, self.clock, self.side, self.result_filter,
                        self.game_source, self.analyzed, self.analysis_source):
             widget.currentIndexChanged.connect(self._schedule_refresh)
@@ -467,6 +571,8 @@ class StatisticsDialog(QDialog):
         }
 
     def _schedule_refresh(self, *_args) -> None:
+        if self._close_when_idle:
+            return
         self._page = 0
         self._refresh_timer.start()
 
@@ -475,6 +581,8 @@ class StatisticsDialog(QDialog):
         self._refresh_timer.start(0)
 
     def _refresh_now(self) -> None:
+        if self._close_when_idle:
+            return
         if self._query_thread is not None and self._query_thread.is_alive():
             self._pending_refresh = True
             return
@@ -497,6 +605,58 @@ class StatisticsDialog(QDialog):
         self.worker_started.emit(thread)
         thread.start()
 
+    def _start_opening_refresh(self) -> None:
+        if self._opening_thread is not None and self._opening_thread.is_alive():
+            return
+        filters = self._filters()
+        self.opening_refresh_button.setEnabled(False)
+        self.opening_summary.setText("Сопоставляем локальный справочник для 25 последних партий…")
+
+        def work() -> None:
+            try:
+                from .lichess.opening_matcher import OpeningMatcher
+                matched = OpeningMatcher().match_recent(self.repository, limit=25)
+                phases = self.repository.infer_missing_phase_boundaries(limit=25)
+                groups = StatisticsService(self.repository).opening_statistics(
+                    account_id=filters["account_id"], analysis_source=filters["analysis_source"],
+                    since=filters["since"], until=filters["until"], min_games=1)
+                payload = {"matched": matched, "phases": phases, "groups": groups}
+            except Exception as exc:
+                payload = {"error": str(exc)}
+            self.opening_loaded.emit(payload)
+            self.opening_finished.emit(threading.current_thread())
+
+        thread = threading.Thread(target=work, name="chess-coach-opening-index", daemon=True)
+        self._opening_thread = thread
+        self.worker_started.emit(thread)
+        thread.start()
+
+    def _opening_result(self, payload: object) -> None:
+        if not isinstance(payload, dict):
+            return
+        if payload.get("error"):
+            self.opening_summary.setText(f"Не удалось обновить opening/phase facts: {payload['error']}")
+            return
+        groups = payload.get("groups") or []
+        lines = [f"Дебютов/цветовых групп: {len(groups)} · новых совпадений: {payload['matched']} · "
+                 f"границ фаз: {payload['phases']}"]
+        lines.extend(f"{row['eco']} {row['opening']} · {row['my_color']} · "
+                     f"партий {row['games']} · оценено своих ходов {row['evaluated_own_moves']} · "
+                     f"ошибок/100 {row['own_errors_per_100_evaluated'] if row['own_errors_per_100_evaluated'] is not None else 'н/д'} · "
+                     f"{row['analysis_source']}"
+                     for row in groups[:8])
+        self.opening_summary.setText("\n".join(lines))
+        self._schedule_refresh()
+
+    def _opening_query_finished(self, thread: threading.Thread) -> None:
+        thread.join(timeout=0.05)
+        if self._opening_thread is thread:
+            self._opening_thread = None
+        self.opening_refresh_button.setEnabled(True)
+        self.worker_finished.emit(thread)
+        if self._close_when_idle and self._query_thread is None:
+            super().accept()
+
     def _apply_result(self, generation: int, summary: object, parties: object, error: object) -> None:
         if error:
             self.summary_label.setText(f"Не удалось построить статистику: {error}")
@@ -509,9 +669,21 @@ class StatisticsDialog(QDialog):
                                         game.get("winner"), game.get("status", ""))
                 player = game.get("account_player_name") or "Вы"
                 opponent = game.get("account_opponent") or game.get("opponent") or "соперник"
+                eco = game.get("matched_opening_eco") or game.get("opening_eco") or "ECO —"
+                opening_name = game.get("matched_opening_name") or game.get("opening_name") or "дебют неизвестен"
+                coverage = (f"{game.get('scored_positions') or 0}/{game.get('total_positions') or 0} поз. "
+                            f"({game.get('analysis_status')})"
+                            if game.get("analysis_status") else "анализ не запускался")
+                error_counts = (f"н/о/з {game.get('own_inaccuracies') or 0}/"
+                                f"{game.get('own_mistakes') or 0}/{game.get('own_blunders') or 0}")
+                accuracy = game.get("owner_lichess_accuracy")
+                accuracy_label = f"Lichess {accuracy:.1f}%" if accuracy is not None else "точность н/д"
+                conflict = " · конфликт названия" if game.get("opening_conflict") else ""
                 item = QListWidgetItem(
                     f"{game.get('started_at') or game.get('updated_at')} · {outcome} · "
-                    f"{player} vs {opponent} · {game.get('opening_eco') or 'ECO —'}")
+                    f"{player} vs {opponent} · {eco} {opening_name}{conflict}\n"
+                    f"{accuracy_label} · {error_counts} · {coverage} · "
+                    f"{game.get('selected_analysis_source') or 'источник оценки отсутствует'}")
                 item.setData(Qt.ItemDataRole.UserRole, game["game_id"])
                 self.games.addItem(item)
             total = summary["games"]
@@ -555,7 +727,7 @@ class StatisticsDialog(QDialog):
         if self._pending_refresh:
             self._pending_refresh = False
             self._refresh_timer.start(0)
-        elif self._close_when_idle:
+        elif self._close_when_idle and self._opening_thread is None:
             super().accept()
 
     def _selection_changed(self, row: int) -> None:
@@ -584,7 +756,8 @@ class StatisticsDialog(QDialog):
         self.opening.clear()
 
     def closeEvent(self, event) -> None:
-        if self._query_thread is not None and self._query_thread.is_alive():
+        if ((self._query_thread is not None and self._query_thread.is_alive())
+                or (self._opening_thread is not None and self._opening_thread.is_alive())):
             self._close_when_idle = True
             self.summary_label.setText("Завершаем текущую выборку; окно закроется после сохранения результата.")
             event.ignore()
@@ -592,7 +765,8 @@ class StatisticsDialog(QDialog):
         super().closeEvent(event)
 
     def accept(self) -> None:
-        if self._query_thread is not None and self._query_thread.is_alive():
+        if ((self._query_thread is not None and self._query_thread.is_alive())
+                or (self._opening_thread is not None and self._opening_thread.is_alive())):
             self._close_when_idle = True
             self.summary_label.setText("Завершаем текущую выборку перед закрытием экрана.")
             return

@@ -1223,6 +1223,7 @@ class GameRepository:
                            "middle_start_ply=excluded.middle_start_ply,end_start_ply=excluded.end_start_ply,"
                            "source=excluded.source,method_version=excluded.method_version",
                            (game_id, revision, middle_start, end_start, "lichess", "lichess-division-v1"))
+                self._apply_phase_labels(db, game_id, revision, middle_start, end_start)
             elif fallback_middle is not None or fallback_end is not None:
                 existing_phase = db.execute(
                     "SELECT source FROM game_phase_boundaries WHERE game_id=? AND line_revision=?",
@@ -1234,6 +1235,7 @@ class GameRepository:
                                "source=excluded.source,method_version=excluded.method_version",
                                (game_id, revision, fallback_middle, fallback_end,
                                 "material-fallback", PHASE_FALLBACK_VERSION))
+                    self._apply_phase_labels(db, game_id, revision, fallback_middle, fallback_end)
             if pilot_run_id:
                 db.execute("UPDATE archive_pilot_runs SET new_count=new_count+? WHERE run_id=?",
                            (int(not existing_account_link), pilot_run_id))
@@ -1704,6 +1706,7 @@ class GameRepository:
                 "SELECT g.game_id FROM games g LEFT JOIN game_phase_boundaries p "
                 "ON p.game_id=g.game_id AND p.line_revision=g.line_revision "
                 "WHERE g.variant='standard' AND p.game_id IS NULL "
+                "AND g.status NOT IN ('created','started','started_soon','playing') "
                 "AND g.import_error IS NULL ORDER BY COALESCE(g.started_at,g.updated_at) DESC,"
                 "g.game_id LIMIT ?", (limit,))]
         saved = 0
@@ -1735,7 +1738,22 @@ class GameRepository:
                     (game_id, int(line["line_revision"]), middle, end,
                      "material-fallback", PHASE_FALLBACK_VERSION))
                 saved += int(cur.rowcount == 1)
+                if cur.rowcount == 1:
+                    self._apply_phase_labels(db, game_id, int(line["line_revision"]), middle, end)
         return saved
+
+    @staticmethod
+    def _apply_phase_labels(db: sqlite3.Connection, game_id: str, line_revision: int,
+                            middle: int | None, end: int | None) -> None:
+        from .phases import phase_at_ply
+
+        rows = db.execute("SELECT mc.run_id,mc.ply FROM move_classifications mc "
+                          "JOIN analysis_runs ar ON ar.run_id=mc.run_id "
+                          "WHERE mc.game_id=? AND mc.line_revision=?",
+                          (game_id, line_revision)).fetchall()
+        db.executemany("UPDATE move_classifications SET phase=? WHERE run_id=? AND ply=?",
+                       [(phase_at_ply(middle, end, int(row["ply"])), row["run_id"], row["ply"])
+                        for row in rows])
 
     def save_opening_match(self, game_id: str, line_revision: int, match: dict | None) -> None:
         """Store a versioned opening reference without replacing Lichess metadata."""

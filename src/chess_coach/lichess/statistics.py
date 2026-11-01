@@ -331,9 +331,35 @@ class StatisticsService:
         selected += ", (SELECT om.eco FROM opening_matches om WHERE om.game_id=g.game_id " \
                     "AND om.line_revision=g.line_revision) AS matched_opening_eco, " \
                     "(SELECT om.name FROM opening_matches om WHERE om.game_id=g.game_id " \
-                    "AND om.line_revision=g.line_revision) AS matched_opening_name"
+                    "AND om.line_revision=g.line_revision) AS matched_opening_name, " \
+                    "(SELECT om.lichess_conflict FROM opening_matches om WHERE om.game_id=g.game_id " \
+                    "AND om.line_revision=g.line_revision) AS opening_conflict"
         if account_id:
             selected += ",ag.opponent AS account_opponent,ag.player_name AS account_player_name,ag.color AS account_color"
+        owner_color = "ag.color" if account_id else "g.color"
+        latest_run = ("SELECT ar.run_id FROM analysis_runs ar JOIN game_revisions rr "
+                      "ON rr.game_id=ar.game_id AND rr.line_revision=ar.line_revision "
+                      "WHERE ar.game_id=g.game_id AND ar.line_revision=g.line_revision "
+                      "AND rr.is_current=1 AND ar.status IN ('complete','partial') "
+                      + ("AND ar.source=? " if analysis_source else "") +
+                      "ORDER BY CASE WHEN ar.status='complete' THEN 0 ELSE 1 END,"
+                      "ar.finished_at DESC,ar.run_id DESC LIMIT 1")
+        selected += f", ({latest_run}) AS latest_run_id, " \
+                    f"(SELECT ar.status FROM analysis_runs ar WHERE ar.run_id=({latest_run})) AS analysis_status, " \
+                    f"(SELECT ar.source FROM analysis_runs ar WHERE ar.run_id=({latest_run})) AS selected_analysis_source, " \
+                    f"(SELECT COUNT(*) FROM game_positions gp WHERE gp.game_id=g.game_id " \
+                    f"AND gp.line_revision=g.line_revision) AS total_positions, " \
+                    f"(SELECT COUNT(*) FROM position_assessments pa WHERE pa.run_id=({latest_run}) " \
+                    f"AND (pa.white_cp IS NOT NULL OR pa.mate_white IS NOT NULL)) AS scored_positions, " \
+                    f"(SELECT COUNT(*) FROM move_classifications mc WHERE mc.run_id=({latest_run}) " \
+                    f"AND mc.mover={owner_color} AND mc.label='inaccuracy') AS own_inaccuracies, " \
+                    f"(SELECT COUNT(*) FROM move_classifications mc WHERE mc.run_id=({latest_run}) " \
+                    f"AND mc.mover={owner_color} AND mc.label='mistake') AS own_mistakes, " \
+                    f"(SELECT COUNT(*) FROM move_classifications mc WHERE mc.run_id=({latest_run}) " \
+                    f"AND mc.mover={owner_color} AND mc.label='blunder') AS own_blunders, " \
+                    f"CASE {owner_color} WHEN 'white' THEN g.lichess_accuracy_white " \
+                    f"WHEN 'black' THEN g.lichess_accuracy_black END AS owner_lichess_accuracy"
+        page_params = ([analysis_source] * 7 if analysis_source else []) + [*params]
         self.repository._wait_before_read()
         with self.repository._connection() as db:
             total = db.execute(f"SELECT COUNT(DISTINCT g.game_id) FROM games g{join} WHERE {where}",
@@ -341,7 +367,7 @@ class StatisticsService:
             rows = db.execute(
                 f"SELECT DISTINCT {selected} FROM games g{join} WHERE {where} "
                 "ORDER BY COALESCE(g.started_at,g.updated_at) DESC,g.game_id LIMIT ? OFFSET ?",
-                [*params, page_size, page * page_size]).fetchall()
+                [*page_params, page_size, page * page_size]).fetchall()
         return self._store_cached(cache_key, {"items": [dict(row) for row in rows], "total": total,
                 "page": page, "page_size": page_size,
                 "pages": (total + page_size - 1) // page_size})

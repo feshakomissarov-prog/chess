@@ -91,26 +91,106 @@ def test_evaluation_graph_click_emits_nearest_ply(qtbot):
     assert selected == [2]
 
 
+def test_evaluation_graph_keeps_phase_boundaries_for_rendering(qtbot):
+    graph = EvaluationGraph([{"ply": 0, "white_cp": 0}, {"ply": 4, "white_cp": 10}],
+                            phase_boundaries={"middle_start_ply": 2, "end_start_ply": 4,
+                                              "source": "lichess"})
+    qtbot.addWidget(graph)
+    graph.resize(460, 220)
+    graph.show()
+    qtbot.wait(20)
+    assert graph.phase_boundaries["source"] == "lichess"
+
+
 def test_statistics_screen_filters_asynchronously_and_resets(qtbot, tmp_path):
     repo = GameRepository(tmp_path / "statistics-screen.sqlite3")
     repo.save_snapshot("screen-win", "startpos", "e2e4", "white", "Alice",
                        False, "180+2", "finished", "white")
     repo.save_snapshot("screen-draw", "startpos", "d2d4", "black", "Bob",
                        False, "600+0", "draw", None)
+    line = repo.current_line("screen-win")
+    repo.save_analysis("screen-win", line_revision=1, line_hash=line["line_hash"],
+        source="stockfish", engine_name="FixtureFish", engine_version="1",
+        parameters={"nodes": 1}, assessments=[{"ply": 0, "white_cp": 0},
+                                              {"ply": 1, "white_cp": -40}],
+        classifications=[{"ply": 1, "mover": "white", "eval_loss_cp": 100,
+                          "label": "mistake", "phase": "opening",
+                          "algorithm_version": "test"}])
     dialog = StatisticsDialog(repo)
     qtbot.addWidget(dialog)
     dialog.show()
     qtbot.waitUntil(lambda: dialog._query_thread is None
                     and dialog.summary_label.text().startswith("Партии:"), timeout=5000)
     assert dialog.games.count() == 2
+    win_item = next(dialog.games.item(index) for index in range(dialog.games.count())
+                    if dialog.games.item(index).data(Qt.ItemDataRole.UserRole) == "screen-win")
+    assert "н/о/з 0/1/0" in win_item.text()
+    assert "2/2 поз." in win_item.text()
+    assert "stockfish" in win_item.text()
     dialog.result_filter.setCurrentIndex(dialog.result_filter.findData("draw"))
-    qtbot.waitUntil(lambda: dialog._query_thread is None and dialog.games.count() == 1,
+    qtbot.waitUntil(lambda: dialog._query_thread is None and dialog.games.count() == 1
+                    and dialog.games.item(0).data(Qt.ItemDataRole.UserRole) == "screen-draw",
                     timeout=5000)
     assert dialog.games.item(0).data(Qt.ItemDataRole.UserRole) == "screen-draw"
+    dialog.result_filter.setCurrentIndex(dialog.result_filter.findData(""))
+    dialog.analysis_source.setCurrentIndex(dialog.analysis_source.findData("stockfish"))
+    qtbot.waitUntil(lambda: dialog._query_thread is None and dialog.games.count() == 1
+                    and dialog.games.item(0).data(Qt.ItemDataRole.UserRole) == "screen-win",
+                    timeout=5000)
+    assert dialog.games.item(0).data(Qt.ItemDataRole.UserRole) == "screen-win"
     dialog.reset_filters()
     qtbot.waitUntil(lambda: dialog._query_thread is None and dialog.games.count() == 2,
                     timeout=5000)
     assert "Смешанные локальные аккаунты" in dialog.mixed_warning.text()
+
+
+def test_opening_phase_refresh_is_explicit_bounded_and_runs_in_worker(qtbot, tmp_path,
+                                                                      monkeypatch):
+    repo = GameRepository(tmp_path / "opening-worker.sqlite3")
+    repo.save_snapshot("worker-game", "startpos", "e2e4", "white", "Friend", False,
+                       "180+2", "finished", "white")
+    repo.infer_missing_phase_boundaries = lambda limit=25: (1 if limit == 25 else 0)
+
+    class FakeOpeningMatcher:
+        def match_recent(self, repository, limit=10):
+            assert repository is repo
+            assert limit == 25
+            return 1
+
+    monkeypatch.setattr("chess_coach.lichess.opening_matcher.OpeningMatcher", FakeOpeningMatcher)
+    dialog = StatisticsDialog(repo)
+    qtbot.addWidget(dialog)
+    dialog.show()
+    qtbot.waitUntil(lambda: dialog._query_thread is None, timeout=5000)
+    qtbot.mouseClick(dialog.opening_refresh_button, Qt.MouseButton.LeftButton)
+    qtbot.waitUntil(lambda: dialog._opening_thread is None
+                    and "новых совпадений: 1" in dialog.opening_summary.text(), timeout=5000)
+    assert "границ фаз: 1" in dialog.opening_summary.text()
+
+
+def test_opening_refresh_defers_dialog_close_until_worker_finishes(qtbot, tmp_path,
+                                                                    monkeypatch):
+    import time
+
+    repo = GameRepository(tmp_path / "opening-close.sqlite3")
+    repo.infer_missing_phase_boundaries = lambda limit=25: 0
+
+    class SlowOpeningMatcher:
+        def match_recent(self, _repository, limit=10):
+            time.sleep(0.1)
+            return 0
+
+    monkeypatch.setattr("chess_coach.lichess.opening_matcher.OpeningMatcher", SlowOpeningMatcher)
+    dialog = StatisticsDialog(repo)
+    qtbot.addWidget(dialog)
+    dialog.show()
+    qtbot.waitUntil(lambda: dialog._query_thread is None, timeout=5000)
+    qtbot.mouseClick(dialog.opening_refresh_button, Qt.MouseButton.LeftButton)
+    qtbot.waitUntil(lambda: dialog._opening_thread is not None, timeout=5000)
+    dialog.accept()
+    assert dialog._close_when_idle
+    qtbot.waitUntil(lambda: dialog._opening_thread is None, timeout=5000)
+    assert not dialog.isVisible()
 
 
 def test_statistics_game_detail_move_selection_emits_position(qtbot, tmp_path):
@@ -118,7 +198,7 @@ def test_statistics_game_detail_move_selection_emits_position(qtbot, tmp_path):
     repo.save_snapshot("detail-game", "startpos", "e2e4 e7e5", "white", "Friend",
                        False, "180+2", "finished", "white")
     line = repo.current_line("detail-game")
-    repo.save_analysis("detail-game", line_revision=line["line_revision"],
+    run_id = repo.save_analysis("detail-game", line_revision=line["line_revision"],
         line_hash=line["line_hash"], source="stockfish", engine_name="FixtureFish",
         engine_version="fixture", parameters={"nodes": 1},
         assessments=[{"ply": 0, "white_cp": 0}, {"ply": 1, "white_cp": 15},
@@ -126,6 +206,10 @@ def test_statistics_game_detail_move_selection_emits_position(qtbot, tmp_path):
         classifications=[{"ply": 1, "mover": "white", "eval_loss_cp": 10,
                           "label": "good", "phase": "opening",
                           "algorithm_version": "test"}])
+    with repo._connection() as db:
+        db.execute("INSERT INTO analysis_events VALUES (?,?,?,?,?,?,?,?,?,?)",
+                   ("fixture-event", run_id, "detail-game", 1, 1, "missed_opportunity",
+                    "candidate", "stockfish", "fixture-v1", '{"before_move":"e2e4"}'))
     dialog = StatisticsGameDialog(repo, repo.get_game("detail-game"))
     qtbot.addWidget(dialog)
     selected = []
@@ -134,6 +218,10 @@ def test_statistics_game_detail_move_selection_emits_position(qtbot, tmp_path):
     dialog.open_position.click()
     assert selected == [("detail-game", 2)]
     assert dialog.graph.assessments[1]["ply"] == 1
+    assert dialog.events.count() == 1
+    assert "before_move" in dialog.events.item(0).toolTip()
+    dialog._open_event_position(dialog.events.item(0))
+    assert selected[-1] == ("detail-game", 0)
 
 
 def test_free_local_board_moves_both_sides_by_clicks_and_drag(qtbot, tmp_path):
