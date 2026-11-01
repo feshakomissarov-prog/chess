@@ -38,10 +38,21 @@ def discover_stockfish(configured: str = "", *, environ: dict | None = None) -> 
     local = env.get("LOCALAPPDATA")
     if local:
         root = Path(local)
-        candidates.extend((root / "ChessCoach" / "engines" / "stockfish" / "19" /
-                           "stockfish-windows-x86-64-avx2.exe",
-                           root / "ChessCoach" / "engines" / "stockfish" / "19" /
-                           "stockfish.exe",
+        managed_release = root / "ChessCoach" / "engines" / "stockfish" / "19"
+        # The official Windows ZIP keeps the executable in a nested `stockfish/`
+        # directory. Keep discovery bounded to documented names under our own
+        # managed release root; never walk the user's disk looking for EXEs.
+        candidates.extend(
+            managed_release / "stockfish" / name
+            for name in (
+                "stockfish-windows-x86-64-universal.exe",
+                "stockfish-windows-x86-64-avx2.exe",
+                "stockfish-windows-x86-64-avx512.exe",
+                "stockfish.exe",
+            )
+        )
+        candidates.extend((managed_release / "stockfish.exe",
+                           managed_release / "stockfish-windows-x86-64-avx2.exe",
                            root / "Programs" / "Stockfish" / "stockfish.exe"))
     for program_root in (env.get("ProgramFiles"), env.get("ProgramFiles(x86)")):
         if program_root:

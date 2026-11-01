@@ -45,6 +45,34 @@ def test_discovery_checks_only_configured_path_and_small_standard_paths(tmp_path
     assert found == str(custom.resolve())
 
 
+def test_discovery_finds_nested_managed_universal_install_for_unicode_user(tmp_path):
+    local_app_data = tmp_path / "Пользователь" / "AppData" / "Local"
+    installed = (local_app_data / "ChessCoach" / "engines" / "stockfish" / "19"
+                 / "stockfish" / "stockfish-windows-x86-64-universal.exe")
+    installed.parent.mkdir(parents=True)
+    installed.write_bytes(b"managed synthetic engine")
+    unrelated = tmp_path / "outside" / "stockfish.exe"
+    unrelated.parent.mkdir()
+    unrelated.write_bytes(b"must not be discovered")
+
+    found = em.discover_stockfish(
+        environ={"LOCALAPPDATA": str(local_app_data), "PATH": ""})
+
+    assert found == str(installed.resolve())
+    # Discovery is path-only; verification remains an explicit separate action.
+
+
+def test_discovery_does_not_search_outside_allowlisted_managed_names(tmp_path):
+    local_app_data = tmp_path / "AppData" / "Local"
+    unexpected = (local_app_data / "ChessCoach" / "engines" / "stockfish" / "19"
+                  / "nested" / "other-engine.exe")
+    unexpected.parent.mkdir(parents=True)
+    unexpected.write_bytes(b"not a supported Stockfish filename")
+
+    assert em.discover_stockfish(
+        environ={"LOCALAPPDATA": str(local_app_data), "PATH": ""}) is None
+
+
 def test_official_install_verifies_hash_extracts_and_installs_atomically(tmp_path, monkeypatch):
     payload = _zip_bytes({"stockfish/stockfish.exe": b"fake-engine", "stockfish/Copying.txt": b"GPL"})
     _patch_asset(monkeypatch, payload)
