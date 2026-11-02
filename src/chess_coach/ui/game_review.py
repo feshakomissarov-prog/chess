@@ -531,9 +531,14 @@ class GameReviewWorkspace(QWidget):
             self.training_block_reason = training_block_reason
         self.selected_ply = 0
         analysis = self.review["analysis"] or {}
+        if not self.evaluation_allowed:
+            # Preserve stored runs in the repository/read model, but do not
+            # consult them to build presentation state before a fresh lease.
+            analysis = {}
         game_finished = game.get("status") not in {
             "created", "started", "started_soon", "playing"}
-        has_engine_analysis = (analysis.get("source") == "stockfish" and
+        has_engine_analysis = (self.evaluation_allowed and
+                               analysis.get("source") == "stockfish" and
                                analysis.get("status") == "complete")
         self.analysis_button.setVisible(game_finished)
         self.analysis_button.setText("Повторить анализ Stockfish" if has_engine_analysis
@@ -612,9 +617,16 @@ class GameReviewWorkspace(QWidget):
             f"{side_counts('black' if color == 'white' else 'white')}\n{accuracy_text}"
             if self.evaluation_allowed else
             (self.training_block_reason or "Оценки скрыты до проверки безопасности."))
-        self.side_metrics_summary.setToolTip(source_short(source)[1])
-        self.phase_summary.setText(self._phase_metrics_text(color))
-        self.selected_move_summary.setToolTip(source_short(source)[1])
+        self.side_metrics_summary.setToolTip(
+            source_short(source)[1] if self.evaluation_allowed else "")
+        self.phase_summary.setText(
+            self._phase_metrics_text(color) if self.evaluation_allowed
+            else self._blocked_analysis_text())
+        self.phase_summary.setToolTip(
+            "Фазовые показатели рассчитаны по сохранённым меткам классификатора."
+            if self.evaluation_allowed else "Фазовая аналитика скрыта правилами Fair Play.")
+        self.selected_move_summary.setToolTip(
+            source_short(source)[1] if self.evaluation_allowed else "")
         self.notes_list.clear()
         for note in self.review["notes"]:
             self.notes_list.addItem(f"ply {note.get('ply', 0)} · {note.get('body', '')}")
@@ -623,11 +635,14 @@ class GameReviewWorkspace(QWidget):
         self.graph.full_ply_count = len(self.review["moves"])
         self.graph.analysis_source = str(analysis.get("source") or "")
         self.graph.analysis_status = str(analysis.get("status") or "")
-        self.graph.move_san = {int(move.ply): str(move.san)
-                               for move in self.review["moves"]}
-        coverage = self.review.get("coverage", {})
-        self.graph.coverage_text = f"{coverage.get('scored', 0)}/{coverage.get('total', 0)} позиций"
-        phase_by_ply = self._phase_by_ply()
+        self.graph.move_san = ({int(move.ply): str(move.san)
+                                for move in self.review["moves"]}
+                               if self.evaluation_allowed else {})
+        coverage = self.review.get("coverage", {}) if self.evaluation_allowed else {}
+        self.graph.coverage_text = (
+            f"{coverage.get('scored', 0)}/{coverage.get('total', 0)} позиций"
+            if self.evaluation_allowed else "")
+        phase_by_ply = self._phase_by_ply() if self.evaluation_allowed else {}
         self.graph.markers = ({move.ply: {"severity": move.severity, "mover": move.mover,
                                           "phase": phase_by_ply.get(move.ply)}
                                for move in self.review["moves"]}
@@ -635,7 +650,7 @@ class GameReviewWorkspace(QWidget):
         self.graph.set_safety_gate(self.evaluation_allowed, self.training_block_reason)
         self.graph.select_ply(0)
         self._refresh_selected_ply_events()
-        eligible = eligible_error_moves(self.review)
+        eligible = eligible_error_moves(self.review) if self.evaluation_allowed else []
         self.previous_error_button.setVisible(self.evaluation_allowed and bool(eligible))
         self.next_error_button.setVisible(self.evaluation_allowed and bool(eligible))
         self.training_button.setText(
@@ -643,20 +658,20 @@ class GameReviewWorkspace(QWidget):
             else "Разобрать мои ошибки")
         reason = self.training_block_reason
         has_errors = bool(eligible)
-        has_saved_analysis = bool(analysis and (analysis.get("assessments") or
-                                                analysis.get("events") or
-                                                analysis.get("alternatives")))
+        has_saved_analysis = bool(self.evaluation_allowed and analysis and (
+            analysis.get("assessments") or analysis.get("events") or
+            analysis.get("alternatives")))
         allowed = self.training_allowed and has_errors
         self.training_button.setEnabled(allowed)
         self.training_button.setToolTip(reason if not self.training_allowed else
             "Нет завершённых собственных ошибок с проверенным улучшенным ходом." if not eligible else "")
-        self.training_safety_button.setVisible(
-            has_saved_analysis and not self.training_allowed)
-        self.training_safety_button.setEnabled(
-            has_saved_analysis and not self.training_allowed)
+        self.training_safety_button.setVisible(game_finished and not self.training_allowed)
+        self.training_safety_button.setEnabled(game_finished and not self.training_allowed)
         self.training_safety_button.setToolTip(reason or "Проверить текущие активные партии Lichess.")
         self.training_status.setText("" if allowed else reason or (
             "Нет ошибок, для которых сохранённые оценки позволяют проверить улучшение."))
+        if not self.evaluation_allowed:
+            self.mask_review_analysis(self.training_block_reason)
 
     def navigate_error(self, direction: int):
         if not self.evaluation_allowed or not self.review or self.training_mode:
@@ -680,6 +695,62 @@ class GameReviewWorkspace(QWidget):
             self.training_status.setText("Проверяем активные партии; подсказки пока скрыты.")
             self.safety_requested.emit(str(self.review["game"]["game_id"]))
 
+    def _blocked_analysis_text(self) -> str:
+        return (self.training_block_reason or
+                "Аналитика заблокирована до свежей проверки Fair Play.")
+
+    def mask_review_analysis(self, reason: str = "") -> None:
+        """Clear all rendered/accessibility analysis while retaining saved data."""
+        if reason:
+            self.training_block_reason = reason
+        self.evaluation_allowed = False
+        self.training_allowed = False
+        message = self._blocked_analysis_text()
+        if self.training_mode:
+            self.stop_training(message)
+        if self.review:
+            self.graph.set_safety_gate(False, message)
+            self.graph.assessments = []
+            self.graph.markers = {}
+            self.graph.analysis_source = ""
+            self.graph.analysis_status = ""
+            self.graph.coverage_text = ""
+            self.graph.move_san = {}
+            self.graph.setToolTip(message)
+            self.graph.setAccessibleDescription("Оценки и классификация скрыты правилами Fair Play.")
+            self.graph_legend.setText("Оценки и классификация скрыты правилами Fair Play.")
+            self.graph_legend.setToolTip("")
+            self.graph_legend.setAccessibleDescription(
+                "Сохранённая аналитика недоступна до новой проверки безопасности.")
+            self.review_board.set_hint_arrows(())
+            self.moves_list.set_rows(self.review["moves"], scores={}, enabled=False,
+                                     show_severity=False)
+            self.moves_list.setAccessibleDescription(
+                "Нотация доступна; оценки и классы ходов скрыты правилами Fair Play.")
+            self.event_list.clear()
+        for label in (self.side_metrics_summary, self.left_metrics_label,
+                      self.phase_summary, self.metrics_label,
+                      self.selected_move_summary, self.move_detail, self.event_detail):
+            label.setText(message)
+            label.setToolTip("")
+            label.setAccessibleDescription("Аналитика скрыта до свежей проверки Fair Play.")
+        self.side_metrics_summary.setAccessibleName("Аналитика скрыта")
+        self.phase_summary.setStyleSheet("")
+        self.advantage_bar.set_evaluation(None, allowed=False)
+        self.advantage_label.setText("Оценки скрыты")
+        self.advantage_label.setToolTip("")
+        self.training_proven = {}
+        self.training_candidate = None
+        self.training_button.setEnabled(False)
+        self.previous_error_button.setVisible(False)
+        self.next_error_button.setVisible(False)
+        for button in (self.check_button, self.hint_button, self.skip_button,
+                       self.continue_button, self.repeat_button):
+            button.setVisible(False)
+        self.training_status.setText(message)
+        self.training_status.setToolTip("")
+        self.graph.update()
+
     def set_training_safety_result(self, allowed: bool, reason: str = ""):
         self.training_allowed = bool(allowed)
         self.evaluation_allowed = bool(allowed)
@@ -689,6 +760,8 @@ class GameReviewWorkspace(QWidget):
             self.training_candidate = None
         if not allowed and self.training_mode:
             self.stop_training(reason or "Упражнение остановлено: безопасность не подтверждена.")
+        if not allowed:
+            self.mask_review_analysis(reason)
         if self.review:
             game = self.review["game"]
             self.load_game(game, training_allowed=allowed,
@@ -699,26 +772,10 @@ class GameReviewWorkspace(QWidget):
         self.training_allowed = False
         self.evaluation_allowed = False
         self.training_block_reason = reason
-        if self.training_mode:
-            self.stop_training(reason)
-        if self.review:
-            self.graph.set_safety_gate(False, reason)
-            self.graph.assessments = []
-            self.graph.markers = {}
-            self.review_board.set_hint_arrows(())
-            self.selected_move_summary.setText(reason)
-            self.moves_list.set_rows(self.review["moves"], scores={}, enabled=False,
-                                     show_severity=False)
-            self.event_list.clear()
-            self.event_detail.setText(reason)
-            self.metrics_label.setText(reason)
-            self.left_metrics_label.setText(reason)
-            self.advantage_bar.set_evaluation(None, allowed=False)
-            self.move_detail.setText(reason)
-        self.training_button.setEnabled(False)
-        self.training_safety_button.setEnabled(True)
+        self.mask_review_analysis(reason)
+        self.training_safety_button.setEnabled(False)
         self.training_safety_button.setText("Проверяем…")
-        self.training_status.setText(reason)
+        self.training_status.setText(reason or self._blocked_analysis_text())
 
     def revoke_safety(self, reason: str) -> None:
         self.set_training_safety_result(False, reason)
@@ -732,12 +789,14 @@ class GameReviewWorkspace(QWidget):
             return
         ply = max(0, min(len(self.review["moves"]), int(ply)))
         self.selected_ply = ply
-        phase_name = phase_label(self._phase_by_ply().get(ply))
+        phase = self._phase_by_ply().get(ply) if self.evaluation_allowed else None
+        phase_name = phase_label(phase)
         self.phase_summary.setStyleSheet(
             "font-weight: 700; color: #d7a84b;"
-            if self._phase_by_ply().get(ply) in {"opening", "middlegame", "endgame"} else "")
+            if self.evaluation_allowed and phase in {"opening", "middlegame", "endgame"} else "")
         self.phase_summary.setToolTip(
-            f"Выбранная позиция: {phase_name}. Фазовая точность: н/д без отдельной метрики.")
+            f"Выбранная позиция: {phase_name}. Фазовая точность: н/д без отдельной метрики."
+            if self.evaluation_allowed else "Фазовая аналитика скрыта правилами Fair Play.")
         self.review_board.set_position(self.review["positions"][ply])
         self.review_board.set_hint_arrows(())
         position_analysis = self.review.get("analysis") or {}
@@ -830,6 +889,8 @@ class GameReviewWorkspace(QWidget):
         self.position_selected.emit(str(self.review["game"]["game_id"]), ply)
 
     def _phase_metrics_text(self, owner_color: str) -> str:
+        if not self.evaluation_allowed:
+            return self._blocked_analysis_text()
         if not self.review:
             return "Фазы: н/д"
         phase_by_ply = self._phase_by_ply()

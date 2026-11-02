@@ -1,4 +1,5 @@
 import chess
+import pytest
 
 from chess_coach.ui.game_review import GameReviewWorkspace, ReviewGraph
 from chess_coach.lichess.game_review import (
@@ -203,7 +204,7 @@ def test_saved_finished_review_exposes_explicit_stockfish_request(qtbot, tmp_pat
         qtbot.addWidget(workspace)
         workspace.load_game(game)
         assert not workspace.analysis_button.isHidden()
-        assert workspace.analysis_button.text() == "Повторить анализ Stockfish"
+        assert workspace.analysis_button.text() == "Проанализировать Stockfish"
         requested = []
         workspace.analysis_requested.connect(requested.append)
         workspace.analysis_button.click()
@@ -297,6 +298,94 @@ def test_phase_summary_shows_both_sides_coverage_and_never_fabricates_accuracy(q
         assert "сильных н/д" in text
         workspace.select_ply(2)
         assert "дебют" in workspace.phase_summary.toolTip()
+    finally:
+        repo.shutdown()
+
+
+@pytest.mark.parametrize("transition", [
+    "pending", "revoke", "denial", "reconnect", "human-gameStart",
+])
+def test_fair_play_revocation_masks_every_rendered_analysis_surface(
+        qtbot, tmp_path, transition):
+    from PySide6.QtCore import QCoreApplication, Qt
+    from PySide6.QtWidgets import QLabel, QTableWidget, QToolTip
+
+    repo, game = _review_repo(tmp_path / f"review-mask-{transition}.sqlite3")
+    try:
+        workspace = GameReviewWorkspace(repo, training_allowed=True)
+        qtbot.addWidget(workspace)
+        workspace.load_game(game)
+        workspace.select_ply(2)
+        workspace.show()
+        QCoreApplication.processEvents()
+
+        assert "зевков 1" in workspace.phase_summary.text()
+        assert "+2.5" in workspace.moves_list.item_by_ply(2).text()
+        assert workspace.graph._values()
+        assert workspace.review_board._hint_arrows
+        assert "Сохранённое продолжение" in workspace.event_detail.text()
+        assert workspace.side_metrics_summary.text() != ""
+
+        reason = {
+            "pending": "Проверяем активные партии; оценки скрыты.",
+            "revoke": "Разрешение Fair Play отозвано.",
+            "denial": "Обнаружена человеческая партия.",
+            "reconnect": "Переподключение к Lichess.",
+            "human-gameStart": "Lichess сообщил о партии с человеком.",
+        }[transition]
+        if transition in {"pending", "reconnect"}:
+            workspace.set_safety_pending(reason)
+        elif transition == "revoke":
+            workspace.revoke_safety(reason)
+        else:
+            workspace.set_training_safety_result(False, reason)
+
+        QCoreApplication.processEvents()
+        screenshot = workspace.grab()
+        assert not screenshot.isNull()
+        visible_strings = []
+        for label in workspace.findChildren(QLabel):
+            visible_strings.extend((label.text(), label.toolTip(),
+                                    label.accessibleName(), label.accessibleDescription()))
+        for widget in workspace.findChildren(QTableWidget):
+            visible_strings.extend((widget.toolTip(), widget.accessibleName(),
+                                    widget.accessibleDescription()))
+            for row in range(widget.rowCount()):
+                for column in range(widget.columnCount()):
+                    item = widget.item(row, column)
+                    if item is not None:
+                        visible_strings.extend((item.text(), item.toolTip(),
+                                                str(item.data(Qt.ItemDataRole.AccessibleTextRole) or ""),
+                                                str(item.data(Qt.ItemDataRole.AccessibleDescriptionRole) or "")))
+        visible_strings.extend((workspace.graph.toolTip(), workspace.graph.accessibleName(),
+                                workspace.graph.accessibleDescription(), QToolTip.text()))
+        rendered = "\n".join(value for value in visible_strings if value)
+        for secret in ("+2.5", "ошибок 1", "зевков 1", "неточн. 0",
+                       "Сохранённое продолжение", "Сохранённые варианты", "Зевок",
+                       "охват 1/", "Stockfish", "phase coverage"):
+            assert secret.casefold() not in rendered.casefold(), (transition, secret, rendered)
+
+        assert workspace.phase_summary.text() == reason
+        assert workspace.side_metrics_summary.text() == reason
+        assert workspace.graph._values() == []
+        assert workspace.graph.assessments == []
+        assert workspace.graph.markers == {}
+        assert workspace.moves_list.item_by_ply(2).text() == "e5"
+        assert not workspace.advantage_bar.isVisible()
+        assert workspace.advantage_label.text() == "Оценки скрыты"
+        assert workspace.review_board._hint_arrows == set()
+        assert workspace.event_list.count() == 0
+
+        # A stale/denied result leaves the surfaces masked; only a new accepted
+        # complete preflight can repopulate the view from persisted assessments.
+        if transition == "pending":
+            workspace.set_training_safety_result(False, reason)
+            QCoreApplication.processEvents()
+            assert workspace.phase_summary.text() == reason
+            workspace.set_training_safety_result(True)
+            QCoreApplication.processEvents()
+            assert "зевков 1" in workspace.phase_summary.text()
+            assert workspace.graph._values()
     finally:
         repo.shutdown()
 

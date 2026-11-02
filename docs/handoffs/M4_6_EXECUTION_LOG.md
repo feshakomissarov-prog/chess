@@ -1,5 +1,13 @@
 # M4.6 — Desktop Experience execution log
 
+### 02.11.2026 — PR #41: Video pilot round 3, checkpoint 1 — P0-V3-01
+
+- Added a single synchronous `mask_review_analysis()` path for pending/revoked/denied Fair Play states. It clears side and phase summaries, old tooltips/accessibility descriptions, move detail, event/PV content, graph points/markers/source/coverage, severity colors, advantage bar, engine arrows and training feedback. Neutral PGN SAN, position and game identity remain. Persisted analysis is not deleted.
+- `load_game()` no longer reads saved analysis into presentation state while permission is false; it does not call `_phase_metrics_text()` in that state. Changing the selected ply while locked does not reinsert a saved phase label or tooltip. A denied analysis CTA stays generic and does not disclose whether a complete engine run exists. Only accepted current safety result reloads data for presentation.
+- Negative synthetic Qt tests first verify visible saved values, then exercise pending, revoke, denial, reconnect and human `gameStart`; after `processEvents()` and `grab()`, they inspect QLabel text/tooltips/accessibility, QTableWidget cells/roles, QToolTip, graph values/markers, advantage bar, arrows and event details. Additional MainWindow tests cover human `gameStart`, stale auth-generation response and disconnect.
+- Local Windows CPython 3.12.10 / Qt offscreen: `tests/test_game_review.py` **22 passed**; focused P0/workspace integration set **8 passed**; `compileall -q src tests` and `git diff --check` — PASS.
+- All remaining V3 UI tasks are intentionally not started until this P0 checkpoint is committed and its tests pass. Full hosted CI will run at the final SHA.
+
 **Статус:** реализация начата 2026-11-02. Рабочая ветка `codex/m46-desktop-experience`, отдельный draft PR. Источник требований — [`M4_6_DESKTOP_EXPERIENCE.md`](../specs/M4_6_DESKTOP_EXPERIENCE.md) v1.1 и issue [#40](https://github.com/feshakomissarov-prog/chess/issues/40). Не выполнять merge самостоятельно.
 
 ## Базовая точка
