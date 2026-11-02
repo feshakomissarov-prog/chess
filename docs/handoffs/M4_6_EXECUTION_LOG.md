@@ -17,7 +17,7 @@
 | A | Аудит маршрутов/read-model, дизайн-токены, baseline | Выполнен; tokens вынесены в `ui/theme.py` |
 | B | AppShell, header/sidebar, responsive route navigation | Выполнен локально; commit checkpoint ниже |
 | C | Главная, честные KPI, последние три реальные партии/empty states | Выполнен, checkpoint ниже |
-| D | Board workspace sizes/inspector; единый GameReviewWorkspace; интерактивный graph и per-side summary; улучшение ошибки | Ожидает C |
+| D | Board workspace sizes/inspector; единый GameReviewWorkspace; интерактивный graph и per-side summary; улучшение ошибки | Выполнен локально, checkpoint ниже |
 | E | Оригинальные звуки, mute/volume и dedup событий | Ожидает D |
 | F | CMD/debug launcher, optional shortcut action, single instance, startup diagnostics | Ожидает E |
 | G | Workspace restore, loading/notifications/accessibility/responsive behavior | Ожидает F |
@@ -63,3 +63,15 @@
 - Регрессии на временной реальной SQLite проверяют пустую базу, результаты/ограничение до 3 карточек и неизвестный цвет. Совместный Qt-прогон `tests/test_theme.py tests/test_dashboard.py tests/test_window.py`: **103 passed** (Python 3.12.10, Qt offscreen). `compileall`/`git diff --check` повторно проверены при checkpoint.
 - Результаты корректны относительно `games.color`; для одной игры, связанной с несколькими аккаунтами, домашний свод использует owner color поля games и не умножает строки join-ом. Экран статистики остаётся отдельным фильтруемым источником.
 - Следующий этап: D — size presets и единое рабочее пространство разбора; миграция схемы пока не нужна.
+
+### D — Board workspace, unified review, ошибка-упражнение
+
+- Основная и обзорная доски поддерживают 400/480/560/640 dp; применяются фактические approved board light/dark/selection цвета через renderer `chess-widgets`, взаимодействия библиотеки сохранены. Target preset persistится, доступный квадрат clamp-ится до 320dp.
+- Добавлен `lichess/game_review.py`: read-only модель current revision, SAN/UCI + before/after FEN snapshots, обе стороны отдельно, owner color, source-tagged official Lichess accuracy, analysis source/status/coverage, notes. Никаких UCI/network calls при открытии; открытие сохранённой/завершённой партии и Statistics-dialog переходят в единый `GameReviewWorkspace`.
+- Workspace синхронизирует позицию доски, список ходов, график и selected move. Маркеры имеют отдельные формы good/inaccuracy/mistake/blunder; mate label остаётся mate, не конвертируется в отображаемый CP. Обе стороны показывают count + comparable coverage; denominator=0 отображается «н/д», partial count имеет явную подпись. Официальная accuracy не смешивается с локальными move classes.
+- Exercise строится только по собственным mistake/blunder на завершённой стандартной текущей линии. Safe evidence policy `saved-stockfish-pv-improvement-v1`: тот же complete Stockfish run, legal PV/alternative на pre-move ply, depth>=15 ИЛИ nodes>=50k, improvement против сыгранной позиции не менее 30cp с учётом цвета. Нет engine-on-click; неопределённые варианты не называются ошибочными. На время решения скрыты график, inspector/список ходов и детали; локальная копия начинается на ply−1. После подтверждения показывается сравнение; исходная партия/PGN не меняются. Есть hint по запросу, repeat, skip и итог попытки.
+- Для подключённого Lichess exercise остаётся закрытым до явного preflight `/api/account/playing`; пустой/только встроенный AI snapshot разрешает; человек, неизвестное/обрезанное состояние, 429/error или устаревший generation блокируют. В изолированном `--offline` учебный локальный сценарий доступен без сети.
+- Временная SQLite покрывает owner color/две стороны, source/status/coverage, legal + improved PV, низкое качество/partial, запрет Lichess-engine source, UI синхронизацию и неизменность PGN. API preflight покрыт fake AI/human/unknown и stale generation. Размеры, board palette, unified route и старые window сценарии включены.
+- Windows CPython 3.12.10 / Qt offscreen: `compileall src tests` PASS; `pytest tests/test_theme.py tests/test_dashboard.py tests/test_game_review.py tests/test_board_view.py tests/test_window.py`: **138 passed**; `git diff --check` PASS.
+- Stockfish real binary, online preflight, Lichess OAuth, 150–200% DPI, визуальная композиция на 1024×700 и пользовательская SQLite — **НЕ ПРОВЕРЯЛИСЬ**.
+- Следующий этап: E — оригинальные локальные chess sound cues, mute/volume and event dedup.

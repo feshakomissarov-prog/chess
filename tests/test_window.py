@@ -65,9 +65,11 @@ def test_saved_game_orientation_uses_selected_account_color(qtbot, tmp_path):
     window = MainWindow(QSettings(str(tmp_path / "saved-orientation.ini"),
                                   QSettings.Format.IniFormat), offline_mode=True)
     qtbot.addWidget(window)
-    game = {"game_id": "saved-black", "initial_fen": "startpos", "moves": "e2e4",
-            "color": "white", "account_color": "black", "opponent": "Opponent",
-            "status": "mate", "winner": "white", "clock": "-"}
+    window.game_repository.save_snapshot("saved-black", "startpos", "e2e4", "white",
+        "Opponent", False, "-", "mate", "white", white_player="Owner", black_player="Opponent")
+    game = window.game_repository.get_game("saved-black")
+    game["account_color"] = "black"
+    game["account_opponent"] = "Opponent"
     assert window._open_saved_game(game)
     assert window.online_session.color == chess.BLACK
     assert window.board._flipped
@@ -164,6 +166,74 @@ def test_m46_shell_uses_expanded_sidebar_at_wide_home_and_compact_board(qtbot, t
     assert window.sidebar.width() == 212
     window.start_local_game()
     assert window.sidebar.width() == 60
+
+
+@pytest.mark.parametrize("size", [400, 480, 560, 640])
+def test_m46_board_size_presets_are_available_and_persisted(qtbot, tmp_path, size):
+    settings = QSettings(str(tmp_path / f"board-size-{size}.ini"), QSettings.Format.IniFormat)
+    window = MainWindow(settings, offline_mode=True)
+    qtbot.addWidget(window)
+    assert [window.board_size_combo.itemData(i) for i in range(window.board_size_combo.count())] == [
+        400, 480, 560, 640]
+    window.board_size_combo.setCurrentIndex(window.board_size_combo.findData(size))
+    assert window.settings.value("board_target_size", type=int) == size
+    assert window.board.width() <= size
+    assert window.board.height() <= size
+    assert window.board.width() >= 320
+
+
+@pytest.mark.parametrize(("games", "allowed"), [
+    ([{"source": "ai", "opponent": {"ai": 3, "id": None}}], True),
+    ([{"source": "friend", "opponent": {"id": "human"}}], False),
+    ([{"source": "ai", "opponent": {"ai": 9, "id": None}}], False),
+])
+def test_review_training_safety_requires_complete_ai_only_snapshot(
+        qtbot, tmp_path, monkeypatch, games, allowed):
+    window = MainWindow(QSettings(str(tmp_path / "review-safety.ini"),
+                                  QSettings.Format.IniFormat), offline_mode=True)
+    qtbot.addWidget(window)
+    class FakeClient:
+        rate_limit_remaining = 0
+    class FakeService:
+        username = "Owner"
+        client = FakeClient()
+        def check_active_games_for_analysis(self, request_id):
+            self.request_id = request_id
+        def close(self, timeout=1.0): return True
+    window.lichess = FakeService()
+    window.offline_mode = False
+    window._lichess_connected = True
+    monkeypatch.setattr(window, "_online_actions_allowed", lambda: True)
+    window._request_review_training_safety("review-id")
+    request_id = window.lichess.request_id
+    window._analysis_safety_games_received(request_id, games)
+    assert window.review_workspace.training_allowed is allowed
+
+
+def test_review_training_safety_rejects_stale_response_after_auth_generation_change(
+        qtbot, tmp_path, monkeypatch):
+    window = MainWindow(QSettings(str(tmp_path / "review-safety-stale.ini"),
+                                  QSettings.Format.IniFormat), offline_mode=True)
+    qtbot.addWidget(window)
+    class FakeClient:
+        rate_limit_remaining = 0
+    class FakeService:
+        username = "Owner"
+        client = FakeClient()
+        def check_active_games_for_analysis(self, request_id):
+            self.request_id = request_id
+        def close(self, timeout=1.0): return True
+    window.lichess = FakeService()
+    window.offline_mode = False
+    window._lichess_connected = True
+    monkeypatch.setattr(window, "_online_actions_allowed", lambda: True)
+    window._request_review_training_safety("review-id")
+    request_id = window.lichess.request_id
+    window._analysis_session_generation += 1
+    window._analysis_safety_games_received(
+        request_id, [{"source": "ai", "opponent": {"ai": 3, "id": None}}])
+    assert not window.review_workspace.training_allowed
+    assert "устарел" in window.review_workspace.training_block_reason
 
 
 def test_evaluation_graph_click_emits_nearest_ply(qtbot):
@@ -1917,8 +1987,8 @@ def test_home_game_result_review_home_and_new_game_flow(qtbot, tmp_path):
 
     qtbot.mouseClick(window.result_review_button, Qt.MouseButton.LeftButton)
     assert window._screen_mode == "review"
-    assert window.screen_stack.currentWidget() is window.game_page
-    assert not window.board._interaction_enabled
+    assert window.screen_stack.currentWidget() is window.review_workspace
+    assert not window.review_workspace.review_board._interaction_enabled
     assert not window.resign_button.isVisible()
     window.leave_online_game()
     assert window.screen_stack.currentWidget() is window.home_page
@@ -2049,11 +2119,13 @@ def test_game_finished_while_home_updates_resume_action_without_switching_screen
 def test_game_finish_for_selected_review_does_not_replace_review(qtbot, tmp_path):
     window = MainWindow(QSettings(str(tmp_path / "review-not-stolen.ini"), QSettings.Format.IniFormat))
     qtbot.addWidget(window)
-    live = LichessGameSession("review-id", GameRepository(tmp_path / "review-not-stolen.sqlite3"))
+    live = LichessGameSession("review-id", window.game_repository)
     live.color = chess.WHITE
     live.apply_event({"type": "gameFull", "initialFen": "startpos",
                       "state": {"moves": "e2e4", "status": "started"}})
     window.online_sessions[live.game_id] = live
+    window.game_repository.save_snapshot(live.game_id, "startpos", "d2d4", "black",
+        "Archive", False, "-", "mate", "black")
     saved = {"game_id": live.game_id, "initial_fen": "startpos", "moves": "d2d4",
              "color": "black", "opponent": "Archive", "status": "mate",
              "winner": "black", "clock": "-"}

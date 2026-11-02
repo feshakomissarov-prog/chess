@@ -62,6 +62,7 @@ from .lichess.statistics import StatisticsService
 from .diagnostics import anonymized_report, log_event, logs_directory
 from .ui.theme import stylesheet as desktop_stylesheet
 from .ui.dashboard import dashboard_snapshot, game_card_text
+from .ui.game_review import GameReviewWorkspace
 
 
 def _puzzle_attempt_summary(attempts: list[dict]) -> str:
@@ -472,6 +473,7 @@ class StatisticsDialog(QDialog):
     opening_loaded = Signal(object)
     opening_finished = Signal(object)
     position_requested = Signal(str, int)
+    game_requested = Signal(str)
 
     def __init__(self, repository: GameRepository, parent=None) -> None:
         super().__init__(parent)
@@ -960,9 +962,7 @@ class StatisticsDialog(QDialog):
         index = self.games.currentRow()
         if not 0 <= index < len(self._rows):
             return
-        detail = StatisticsGameDialog(self.repository, self._rows[index], self)
-        detail.position_requested.connect(self.position_requested.emit)
-        detail.exec()
+        self.game_requested.emit(str(self._rows[index]["game_id"]))
 
     def reset_filters(self) -> None:
         for combo in (self.account, self.clock, self.side, self.result_filter,
@@ -1784,6 +1784,8 @@ class MainWindow(QMainWindow):
         self._analysis_safety_request_id: str | None = None
         self._analysis_safety_context: tuple | None = None
         self._analysis_safety_phase: str | None = None
+        self._review_safety_request_id: str | None = None
+        self._review_safety_context: tuple | None = None
         self._analysis_session_generation = 0
         self._engine_probe_processes: set[QProcess] = set()
         self._engine_install_stop: threading.Event | None = None
@@ -1972,7 +1974,7 @@ class MainWindow(QMainWindow):
         self.opponent_label.setStyleSheet("font-size: 15px; font-weight: 600; padding: 2px 4px;")
         board_layout.addWidget(self.opponent_label)
         self.board = BoardView(self.controller.board)
-        self.board.setMinimumSize(440, 440)
+        self.board.setMinimumSize(320, 320)
         self.board.set_premove(self.controller.premove, self.controller.player_color)
         self.board.move_intent.connect(self.on_move_intent)
         self.board.wheel_navigate.connect(self.navigate_by)
@@ -2008,6 +2010,18 @@ class MainWindow(QMainWindow):
         side_layout.addWidget(self.local_mode_combo)
         self.local_mode_label.setVisible(False)
         self.local_mode_combo.setVisible(False)
+        self.board_size_label = QLabel("Размер доски")
+        side_layout.addWidget(self.board_size_label)
+        self.board_size_combo = QComboBox()
+        for label, size in (("Компактная · 400", 400), ("Средняя · 480", 480),
+                            ("Большая · 560", 560), ("Максимальная · 640", 640)):
+            self.board_size_combo.addItem(label, size)
+        stored_size = self.settings.value("board_target_size", 480, type=int)
+        index = self.board_size_combo.findData(stored_size)
+        self.board_size_combo.setCurrentIndex(index if index >= 0 else 1)
+        self.settings.setValue("board_target_size", int(self.board_size_combo.currentData()))
+        self.board_size_combo.currentIndexChanged.connect(self._board_size_changed)
+        side_layout.addWidget(self.board_size_combo)
         self.clock_label = QLabel("Без часов")
         self.clock_label.setStyleSheet("font-size: 18px; font-weight: 700;")
         side_layout.addWidget(self.clock_label)
@@ -2131,13 +2145,49 @@ class MainWindow(QMainWindow):
         self.screen_stack.addWidget(self.game_page)
         self.result_page = self._build_result_page()
         self.screen_stack.addWidget(self.result_page)
+        self.review_workspace = GameReviewWorkspace(self.game_repository, parent=self)
+        self.review_workspace.return_requested.connect(self.show_home)
+        self.review_workspace.export_requested.connect(self._export_review_pgn)
+        self.review_workspace.safety_requested.connect(self._request_review_training_safety)
+        self.screen_stack.addWidget(self.review_workspace)
         self.screen_stack.setCurrentWidget(self.home_page)
         self.screen_stack.currentChanged.connect(self._shell_screen_changed)
         outer.addWidget(self.screen_stack, 1)
         self.setCentralWidget(root)
         self.setStyleSheet(desktop_stylesheet())
+        self._apply_board_size()
         self._set_sidebar_collapsed(self.width() < 1160)
         self._set_active_route("home")
+
+    def _board_size_changed(self, _index: int) -> None:
+        if not hasattr(self, "board_size_combo"):
+            return
+        size = int(self.board_size_combo.currentData() or 480)
+        self.settings.setValue("board_target_size", size)
+        self._apply_board_size()
+
+    def _apply_board_size(self) -> None:
+        if not hasattr(self, "board"):
+            return
+        target = int(self.settings.value("board_target_size", 480, type=int))
+        sidebar_width = self.sidebar.width() if hasattr(self, "sidebar") else 212
+        inspector_min = 320
+        available_width = max(320, self.width() - sidebar_width - inspector_min - 96)
+        available_height = max(320, self.height() - 64 - 210)
+        actual = max(320, min(target, available_width, available_height))
+        self.board.setFixedSize(actual, actual)
+        if hasattr(self, "review_workspace"):
+            review_width = max(320, self.width() - sidebar_width - 320 - 96)
+            review_height = max(320, self.height() - 64 - 210)
+            review_size = max(320, min(target, review_width, review_height))
+            self.review_workspace.review_board.setFixedSize(review_size, review_size)
+
+    def resizeEvent(self, event) -> None:
+        super().resizeEvent(event)
+        if (hasattr(self, "sidebar") and not self._sidebar_explicit_override
+                and self.width() < 1160):
+            self._set_sidebar_collapsed(True)
+        self._apply_board_size()
 
     def _build_sidebar(self) -> QWidget:
         sidebar = QFrame()
@@ -2194,12 +2244,16 @@ class MainWindow(QMainWindow):
             button.setText(icons[key] if collapsed else f"{icons[key]}   {label}")
             button.setToolTip(label if collapsed else "")
         self.header_brand.setVisible(collapsed)
+        self._apply_board_size()
 
     def _shell_screen_changed(self, _index: int) -> None:
         if not hasattr(self, "sidebar"):
             return
-        is_board = self.screen_stack.currentWidget() in (self.game_page, self.result_page)
-        route = "play" if is_board else "home"
+        is_board = self.screen_stack.currentWidget() in (
+            self.game_page, self.result_page, getattr(self, "review_workspace", None))
+        current = self.screen_stack.currentWidget()
+        route = ("games" if current is getattr(self, "review_workspace", None) else
+                 "play" if is_board else "home")
         self._set_active_route(route)
         if not self._sidebar_explicit_override:
             self._set_sidebar_collapsed(is_board or self.width() < 1160)
@@ -2209,12 +2263,6 @@ class MainWindow(QMainWindow):
             button.setProperty("active", key == route)
             button.style().unpolish(button)
             button.style().polish(button)
-
-    def resizeEvent(self, event) -> None:
-        super().resizeEvent(event)
-        if (hasattr(self, "sidebar") and not self._sidebar_explicit_override
-                and self.width() < 1160):
-            self._set_sidebar_collapsed(True)
 
     def _build_home_page(self) -> QWidget:
         page = QWidget()
@@ -2696,8 +2744,13 @@ class MainWindow(QMainWindow):
         dialog.worker_started.connect(self._statistics_worker_started)
         dialog.worker_finished.connect(self._statistics_worker_finished)
         dialog.position_requested.connect(self._open_statistics_position)
+        dialog.game_requested.connect(lambda game_id: self._open_statistics_game(dialog, game_id))
         dialog.exec()
         self._statistics_dialog = None
+
+    def _open_statistics_game(self, dialog: StatisticsDialog, game_id: str) -> None:
+        dialog.accept()
+        self._open_analysis_position(game_id, 0)
 
     def show_batch_analysis(self) -> None:
         if self._batch_dialog is not None:
@@ -3443,13 +3496,96 @@ class MainWindow(QMainWindow):
         session = self.online_session
         if not session or session.status in {"started", "playing", "created"}:
             return
-        self._disable_position_evaluation("Открыта завершённая партия; выполните новую проверку безопасности.")
-        self._review_session = session
-        self._screen_mode = "review"
-        self.screen_title.setText("Просмотр завершённой партии")
-        self.online_view_ply = None
-        self.screen_stack.setCurrentWidget(self.game_page)
-        self.refresh("Просмотр сохранённой партии (только чтение).")
+        game = self.game_repository.get_game(session.game_id)
+        if game:
+            self._open_saved_game(game)
+
+    def _review_training_safety(self) -> tuple[bool, str]:
+        if self.offline_mode:
+            return True, ""
+        if any(session.status in {"started", "playing"} and not session.is_ai_opponent
+               for session in self.online_sessions.values()):
+            return False, "Заблокировано: у вас есть активная партия с человеком."
+        if self.lichess and self._lichess_connected:
+            return False, "Проверьте активные партии Lichess перед упражнением."
+        return False, "Заблокировано: безопасность аккаунта не подтверждена. Подключите Lichess."
+
+    def _request_review_training_safety(self, game_id: str) -> None:
+        service = self.lichess
+        username = str(getattr(service, "username", "") or "").strip()
+        if not service or not username or not self._online_actions_allowed():
+            self.review_workspace.set_training_safety_result(
+                False, "Заблокировано: не удалось проверить активные партии Lichess.")
+            return
+        active_human = any(
+            session.status in {"started", "playing"} and not session.is_ai_opponent
+            for session in self.online_sessions.values())
+        if active_human:
+            self.review_workspace.set_training_safety_result(
+                False, "Заблокировано: у вас есть активная партия с человеком.")
+            return
+        request_id = uuid.uuid4().hex
+        self._review_safety_request_id = request_id
+        self._review_safety_context = (
+            self._analysis_session_generation, username.casefold(), service, game_id)
+        self.review_workspace.training_status.setText(
+            "Проверяем активные партии; учебные варианты пока скрыты.")
+        service.check_active_games_for_analysis(request_id)
+
+    def _review_safety_reply_is_current(self, request_id: str) -> bool:
+        context = self._review_safety_context
+        if request_id != self._review_safety_request_id or not context:
+            return False
+        generation, account_id, service, _game_id = context
+        current_account = str(getattr(self.lichess, "username", "") or "").strip().casefold()
+        if (service is not self.lichess or generation != self._analysis_session_generation
+                or account_id != current_account or not self._lichess_connected
+                or not self._online_actions_allowed()):
+            self._review_safety_request_id = None
+            self._review_safety_context = None
+            self.review_workspace.set_training_safety_result(
+                False, "Заблокировано: ответ проверки устарел после смены аккаунта/сеанса.")
+            return False
+        return True
+
+    def _review_safety_games_received(self, request_id: str, games: object) -> bool:
+        if request_id != self._review_safety_request_id:
+            return False
+        if not self._review_safety_reply_is_current(request_id):
+            return True
+        if not isinstance(games, list) or len(games) >= 50:
+            reason = "Заблокировано: список активных партий неполный или некорректный."
+            safe = False
+        elif any(classify_lichess_opponent(game) != "official_ai" for game in games):
+            reason = "Заблокировано: обнаружена активная партия с человеком или неизвестным соперником."
+            safe = False
+        else:
+            safe, reason = True, "Безопасность подтверждена Lichess; упражнение использует только сохранённый анализ."
+        context = self._review_safety_context
+        self._review_safety_request_id = None
+        self._review_safety_context = None
+        if context:
+            self.review_workspace.set_training_safety_result(safe, reason)
+        return True
+
+    def _review_safety_error_received(self, request_id: str, message: str) -> bool:
+        if request_id != self._review_safety_request_id:
+            return False
+        if self._review_safety_reply_is_current(request_id):
+            self._review_safety_request_id = None
+            self._review_safety_context = None
+            self.review_workspace.set_training_safety_result(
+                False, f"Заблокировано: проверка Lichess не выполнена ({message}).")
+        return True
+
+    def _export_review_pgn(self, game_id: str) -> None:
+        game = self.game_repository.get_game(game_id)
+        if not game:
+            return
+        self.online_session = self.online_session or LichessGameSession(
+            game_id, self.game_repository)
+        self.online_session.game_id = game_id
+        self.export_current_pgn()
 
     def export_current_pgn(self) -> None:
         session = self.online_session
@@ -4085,6 +4221,11 @@ class MainWindow(QMainWindow):
     def _invalidate_analysis_preflight(self) -> None:
         """Invalidate a pending safety reply when the authenticated session changes."""
         self._analysis_session_generation += 1
+        if self._review_safety_request_id is not None:
+            self._review_safety_request_id = None
+            self._review_safety_context = None
+            self.review_workspace.set_training_safety_result(
+                False, "Заблокировано: изменилось состояние подключения; проверьте безопасность повторно.")
         self._pause_batch_analysis()
         self._disable_position_evaluation(
             "Проверка Stockfish остановлена: изменилось состояние подключения Lichess.")
@@ -5094,6 +5235,8 @@ class MainWindow(QMainWindow):
         return classify_lichess_opponent(game) != "official_ai"
 
     def _analysis_safety_games_received(self, request_id: str, games: list[dict]) -> None:
+        if self._review_safety_games_received(request_id, games):
+            return
         if request_id == self._position_eval_preflight_id:
             self._position_eval_preflight_received(request_id, games)
             return
@@ -5135,6 +5278,8 @@ class MainWindow(QMainWindow):
                                    request_id=request_id)
 
     def _analysis_safety_error(self, request_id: str, message: str) -> None:
+        if self._review_safety_error_received(request_id, message):
+            return
         if request_id == self._position_eval_preflight_id:
             self._position_eval_preflight_error(request_id, message)
             return
@@ -5252,7 +5397,7 @@ class MainWindow(QMainWindow):
         if not self._open_saved_game(game):
             self.home_status.setText(self._raw_only_game_message(game))
             return
-        self.navigate_to(ply)
+        self.review_workspace.select_ply(ply)
 
     @staticmethod
     def _is_standard_board_game(game: dict) -> bool:
@@ -5278,7 +5423,8 @@ class MainWindow(QMainWindow):
         session.moves = game["moves"]
         account_color = game.get("account_color") or game.get("color")
         session.color = chess.WHITE if account_color == "white" else chess.BLACK
-        session.opponent = game["opponent"]
+        session.opponent = (game.get("account_opponent") or game.get("opponent") or
+                            game.get("black_player") or "Соперник")
         session.status = game["status"]
         session.winner = game["winner"]
         session.clock_control = game["clock"]
@@ -5287,9 +5433,17 @@ class MainWindow(QMainWindow):
         self._review_session = session
         self.online_view_ply = None
         self._screen_mode = "review"
+        self.board.set_flipped(session.color == chess.BLACK)
         self.screen_title.setText("Просмотр сохранённой партии")
-        self.screen_stack.setCurrentWidget(self.game_page)
-        self.refresh("Открыта локально сохранённая партия (только просмотр).")
+        allowed, reason = self._review_training_safety()
+        try:
+            self.review_workspace.load_game(game, training_allowed=allowed,
+                                            training_block_reason=reason)
+        except (KeyError, ValueError) as exc:
+            self.home_status.setText(f"Не удалось открыть сохранённую линию: {exc}")
+            return False
+        self.screen_stack.setCurrentWidget(self.review_workspace)
+        self.game_status.setText("Сохранённая завершённая партия · только чтение")
         return True
 
     def leave_online_game(self) -> None:

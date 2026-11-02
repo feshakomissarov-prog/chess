@@ -3,6 +3,7 @@ from PySide6.QtCore import QPoint, Qt
 from PySide6.QtWidgets import QDialog
 
 from chess_coach.board_view import BoardView
+from chess_coach.ui.theme import TOKENS
 
 
 def center(board_widget: BoardView, square: int) -> tuple[int, int]:
@@ -10,6 +11,13 @@ def center(board_widget: BoardView, square: int) -> tuple[int, int]:
     side = rect.width() / 8
     row, col = board_widget._renderer.get_visual_coordinates(square, board_widget._flipped)
     return int(rect.x() + (col + 0.5) * side), int(rect.y() + (row + 0.5) * side)
+
+
+def test_m46_board_uses_approved_wood_palette_without_changing_widget_base():
+    widget = BoardView(chess.Board())
+    assert widget._renderer.light_color.name().upper() == TOKENS.board_light
+    assert widget._renderer.dark_color.name().upper() == TOKENS.board_dark
+    assert widget._renderer.selected_color.name().upper() == TOKENS.board_selection
 
 
 def test_click_click_emits_move_intent_without_mutating_widget_board(qtbot) -> None:

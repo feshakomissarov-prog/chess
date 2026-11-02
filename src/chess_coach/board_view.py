@@ -11,6 +11,7 @@ from PySide6.QtCore import QPointF, Qt, Signal
 from PySide6.QtGui import QGuiApplication
 from PySide6.QtGui import QColor, QFocusEvent, QMouseEvent, QPainter, QPen, QPolygonF
 from PySide6.QtWidgets import QDialog, QPushButton, QVBoxLayout
+from .ui.theme import TOKENS
 
 
 class BoardView(BoardWidget):
@@ -29,6 +30,17 @@ class BoardView(BoardWidget):
 
     def __init__(self, board: chess.Board, parent=None) -> None:
         super().__init__(parent, board.copy(stack=True))
+        # Keep chess-widgets rendering/interaction; apply the approved M4.6 board palette.
+        self._renderer.light_color = QColor(TOKENS.board_light)
+        self._renderer.dark_color = QColor(TOKENS.board_dark)
+        self._renderer.highlight_color = QColor(TOKENS.board_last_move)
+        self._renderer.highlight_color.setAlpha(112)
+        self._renderer.selected_color = QColor(TOKENS.board_selection)
+        self._renderer.selected_color.setAlpha(145)
+        self._renderer.move_hint_color = QColor(TOKENS.accent)
+        self._renderer.move_hint_color.setAlpha(52)
+        self._renderer.capture_hint_color = QColor(TOKENS.accent_hover)
+        self._renderer.capture_hint_color.setAlpha(86)
         self._show_legal_moves = True
         self._show_last_move = True
         self._annotations_enabled = True
