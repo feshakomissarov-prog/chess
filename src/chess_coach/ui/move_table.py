@@ -29,16 +29,39 @@ def _score_tenth(white_cp: int) -> str:
     return format(score, "+.1f")
 
 
+class _PlyTable(QTableWidget):
+    wheel_navigate = Signal(int)
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._wheel_accum = 0
+
+    def wheelEvent(self, event):  # noqa: N802 - Qt API
+        if event.modifiers() & Qt.KeyboardModifier.ControlModifier:
+            super().wheelEvent(event)
+            return
+        delta = event.angleDelta().y() or event.pixelDelta().y() * 3
+        self._wheel_accum += delta
+        steps = int(self._wheel_accum / 120)
+        if steps:
+            self._wheel_accum -= steps * 120
+            for _ in range(min(8, abs(steps))):
+                self.wheel_navigate.emit(-1 if steps > 0 else 1)
+        event.accept()
+
+
 class MoveTable(QWidget):
     """One row per full move; each SAN cell retains its exact ply identity."""
 
     ply_selected = Signal(int)
+    wheel_navigate = Signal(int)
 
     def __init__(self, parent=None):
         super().__init__(parent)
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
-        self.table = QTableWidget(0, 3, self)
+        self.table = _PlyTable(0, 3, self)
+        self.table.wheel_navigate.connect(self.wheel_navigate)
         self.table.setHorizontalHeaderLabels(("№", "Белые", "Чёрные"))
         self.table.setAccessibleName("Нотация партии по полным ходам")
         self.table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectItems)
@@ -94,6 +117,11 @@ class MoveTable(QWidget):
                     score_text = None
                 if score_text:
                     label += f"   {score_text} · белые"
+                delta_white = score.get("delta_white")
+                delta_mover = score.get("delta_mover")
+                if delta_white is not None and delta_mover is not None:
+                    label += (f"  Δб {int(delta_white) / 100:+.1f}"
+                              f" / Δход {int(delta_mover) / 100:+.1f}")
             if severity in _SEVERITY:
                 icon, description = _SEVERITY[severity]
                 label = f"{icon} {label}"
@@ -152,6 +180,9 @@ class MoveTable(QWidget):
                           _score_tenth(cp) if cp is not None else None)
             if score_text:
                 label += f"   {score_text} · белые"
+            if score.get("delta_white") is not None and score.get("delta_mover") is not None:
+                label += (f"  Δб {int(score['delta_white']) / 100:+.1f}"
+                          f" / Δход {int(score['delta_mover']) / 100:+.1f}")
         severity = getattr(move, "severity", None) or (
             move.get("severity") if isinstance(move, dict) else None)
         if severity in _SEVERITY:
@@ -230,6 +261,7 @@ class MoveTable(QWidget):
                 item = self.table.item(row, column)
                 if item is not None and item.data(Qt.ItemDataRole.UserRole) == ply:
                     self.table.setCurrentItem(item)
+                    self.table.scrollToItem(item, QAbstractItemView.ScrollHint.EnsureVisible)
                     return
         self.table.clearSelection()
 

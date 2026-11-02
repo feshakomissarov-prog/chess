@@ -99,6 +99,8 @@ def test_review_moves_graph_and_training_share_position_without_mutating_saved_p
         workspace = GameReviewWorkspace(repo, training_allowed=True)
         qtbot.addWidget(workspace)
         workspace.load_game(game)
+        assert "1–0" in workspace.title.text()
+        assert "Stockfish" not in workspace.subtitle.text()
         workspace.moves_list.setCurrentRow(2)
         assert workspace.selected_ply == 2
         assert workspace.review_board._board.fen() == workspace.review["positions"][2].fen()
@@ -280,3 +282,93 @@ def test_review_events_and_saved_pv_follow_selection_and_fair_play_gate(qtbot, t
         assert "Сохранённый PV" not in workspace.event_detail.text()
     finally:
         repo.shutdown()
+
+
+def test_phase_summary_shows_both_sides_coverage_and_never_fabricates_accuracy(qtbot, tmp_path):
+    repo, game = _review_repo(tmp_path / "review-phases.sqlite3")
+    try:
+        workspace = GameReviewWorkspace(repo, training_allowed=True)
+        qtbot.addWidget(workspace)
+        workspace.load_game(game)
+        text = workspace.phase_summary.text()
+        assert "Дебют · точность н/д" in text
+        assert "Я:" in text and "Соперник:" in text
+        assert "охват" in text and "неточн." in text and "зевков" in text
+        assert "сильных н/д" in text
+        workspace.select_ply(2)
+        assert "дебют" in workspace.phase_summary.toolTip()
+    finally:
+        repo.shutdown()
+
+
+def test_review_layout_has_no_outer_scroll_and_renders_at_desktop_sizes(qtbot, tmp_path):
+    from PySide6.QtWidgets import QScrollArea
+
+    repo, game = _review_repo(tmp_path / "review-layout.sqlite3")
+    try:
+        workspace = GameReviewWorkspace(repo, training_allowed=True)
+        qtbot.addWidget(workspace)
+        workspace.load_game(game)
+        assert not workspace.findChildren(QScrollArea)
+        for width, height in ((1024, 700), (1360, 860), (1920, 1080)):
+            workspace.setFixedSize(width, height)
+            workspace.show()
+            qtbot.wait(10)
+            assert workspace.review_board.width() > 0
+            assert workspace.moves_list.width() > 0
+            assert workspace.graph.width() > 0
+            shot = workspace.grab()
+            assert shot.width() == width and shot.height() == height
+        assert workspace.workspace_splitter.orientation().name == "Horizontal"
+    finally:
+        repo.shutdown()
+
+
+def test_board_and_move_table_wheel_keep_position_score_and_notation_synchronized(qtbot, tmp_path):
+    from PySide6.QtCore import QPoint, QPointF, Qt
+    from PySide6.QtGui import QWheelEvent
+
+    repo, game = _review_repo(tmp_path / "review-wheel.sqlite3")
+    try:
+        workspace = GameReviewWorkspace(repo, training_allowed=True)
+        qtbot.addWidget(workspace)
+        workspace.load_game(game)
+        def wheel(widget, delta):
+            event = QWheelEvent(QPointF(10, 10), QPointF(10, 10), QPoint(0, 0),
+                                QPoint(0, delta), Qt.MouseButton.NoButton,
+                                Qt.KeyboardModifier.NoModifier, Qt.ScrollPhase.ScrollUpdate,
+                                False)
+            widget.wheelEvent(event)
+            assert event.isAccepted()
+        wheel(workspace.review_board, -120)
+        assert workspace.selected_ply == 1
+        assert workspace.review_board._board.fen() == workspace.review["positions"][1].fen()
+        wheel(workspace.moves_list.table, -120)
+        assert workspace.selected_ply == 2
+        assert workspace.moves_list.table.currentItem().data(Qt.ItemDataRole.UserRole) == 2
+        assert workspace.advantage_bar.white_cp == 250
+        assert workspace.graph.current_ply == 2
+        wheel(workspace.review_board, 120)
+        assert workspace.selected_ply == 1
+        workspace.select_ply(3)
+        wheel(workspace.moves_list.table, -120)
+        assert workspace.selected_ply == 3  # no wrap past the final ply
+        workspace.select_ply(0)
+        wheel(workspace.review_board, 120)
+        assert workspace.selected_ply == 0  # no wrap before the initial position
+    finally:
+        repo.shutdown()
+
+
+def test_review_graph_delta_omits_missing_and_mate_neighbors_and_markers_default_off(qtbot):
+    graph = ReviewGraph([
+        {"ply": 0, "white_cp": 0},
+        {"ply": 1, "white_cp": 100},
+        {"ply": 2, "white_cp": None, "mate_white": 3},
+        {"ply": 3, "white_cp": 200},
+        {"ply": 5, "white_cp": 250},
+    ], [{"ply": 1, "severity": "blunder"}])
+    qtbot.addWidget(graph)
+    assert graph.markers_visible is False
+    graph.set_delta_mode(True)
+    assert graph._values() == [(1, 100, None)]
