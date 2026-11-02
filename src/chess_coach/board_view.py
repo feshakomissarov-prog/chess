@@ -55,6 +55,7 @@ class BoardView(BoardWidget):
         self._handling_input = False
         self._premove_color = chess.WHITE
         self._queued_premove: Optional[chess.Move] = None
+        self._wheel_accum = 0
         self._premove_selected: Optional[int] = None
         self._premove_drag_start: Optional[int] = None
         self._premove_drag_active = False
@@ -250,7 +251,7 @@ class BoardView(BoardWidget):
                 self._queued_premove.from_square,
                 self._queued_premove.to_square,
                 QColor(80, 110, 190, 185),
-                0.76,
+                0.82,
             )
         if self._premove_selected is not None:
             self._renderer.highlight_square(
@@ -279,6 +280,13 @@ class BoardView(BoardWidget):
         if not self._interaction_enabled:
             return
         if self._is_premove_turn():
+            square = self._pos_to_square(event.position())
+            piece = self._board.piece_at(square) if square is not None else None
+            if (self._queued_premove is not None and piece is not None
+                    and piece.color == self._premove_color):
+                self.cancel_premove_requested.emit()
+                event.accept()
+                return
             self._start_premove_gesture(event.position())
             return
         self._handling_input = True
@@ -378,12 +386,19 @@ class BoardView(BoardWidget):
             self._handling_input = False
 
     def wheelEvent(self, event) -> None:  # noqa: N802 - Qt API
-        delta = event.angleDelta().y()
-        if delta:
-            self.wheel_navigate.emit(-1 if delta > 0 else 1)
+        if event.modifiers() & Qt.KeyboardModifier.ControlModifier:
+            super().wheelEvent(event)
+            return
+        delta = event.angleDelta().y() or event.pixelDelta().y() * 3
+        self._wheel_accum += delta
+        steps = int(self._wheel_accum / 120)
+        if steps:
+            self._wheel_accum -= steps * 120
+            for _ in range(min(8, abs(steps))):
+                self.wheel_navigate.emit(-1 if steps > 0 else 1)
             event.accept()
         else:
-            super().wheelEvent(event)
+            event.accept()
 
     def keyPressEvent(self, event) -> None:  # noqa: N802 - Qt API
         if event.key() == Qt.Key.Key_Escape:
@@ -490,7 +505,7 @@ class BoardView(BoardWidget):
         width = self._arrow_width(side, thickness)
         painter.setPen(QPen(color, width, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
         painter.drawLine(a, base)
-        wing = side * (0.34 if manual else 0.18)
+        wing = side * (0.34 if manual else 0.24)
         left = QPointF(tip.x() - cos(angle - 0.55) * wing, tip.y() - sin(angle - 0.55) * wing)
         right = QPointF(tip.x() - cos(angle + 0.55) * wing, tip.y() - sin(angle + 0.55) * wing)
         painter.setPen(Qt.PenStyle.NoPen)
@@ -501,7 +516,9 @@ class BoardView(BoardWidget):
     @staticmethod
     def _arrow_width(side: float, thickness: float) -> float:
         manual = thickness >= 0.85
-        return min(17.0, max(8.0, side * (0.22 if manual else 0.10 * thickness)))
+        if manual:
+            return min(17.0, max(8.0, side * 0.22))
+        return min(18.0, max(14.0, side * 0.18 * thickness))
 
     def _draw_square_mark(self, painter: QPainter, square: int, color: QColor) -> None:
         rect = self._get_board_rect()

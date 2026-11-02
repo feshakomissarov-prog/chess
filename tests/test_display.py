@@ -1,3 +1,6 @@
+import csv
+from pathlib import Path
+
 from chess_coach.ui.display import (
     format_clock_control, format_game_date, russian_opening_name, source_short,
 )
@@ -30,6 +33,14 @@ def test_opening_families_translate_deterministically_and_keep_eco():
     assert russian_opening_name("D05", "Queen's Pawn Game: Colle System") == (
         "D05 · Дебют ферзевой пешки")
     assert russian_opening_name("D05", "") == "D05 · дебют не классифицирован"
+    assert russian_opening_name("D01", "Unknown Indian line") == (
+        "D01 · дебют не классифицирован")
+    assert russian_opening_name("D03", "Unknown Queen Pawn variation") == (
+        "D03 · дебют не классифицирован")
+    assert russian_opening_name("C40", "Philidor Defense: Hanham Variation") == (
+        "C40 · Защита Филидора")
+    assert russian_opening_name("A00", "Grob Opening: Grob Gambit") == (
+        "A00 · Дебют Гроба")
     assert russian_opening_name("Z99", "Rare English line") == "Z99 · дебют не классифицирован"
     assert russian_opening_name("", "French Defense: Exchange") == "Французская защита"
 
@@ -38,3 +49,17 @@ def test_source_badges_have_accessible_explanations():
     assert source_short("stockfish")[0] == "S"
     assert "Lichess" in source_short("lichess")[1]
     assert source_short(None) == ("—", "Оценка отсутствует")
+
+
+def test_opening_catalog_translation_coverage_is_reported_and_high_without_guessing():
+    root = Path(__file__).parents[1] / "src" / "chess_coach" / "opening_data"
+    pairs = set()
+    for path in root.glob("*.tsv"):
+        with path.open(encoding="utf-8", newline="") as source:
+            pairs.update((row["eco"], row["name"])
+                         for row in csv.DictReader(source, delimiter="\t"))
+    translated = [(eco, name) for eco, name in pairs
+                  if "не классифицирован" not in russian_opening_name(eco, name)]
+    assert len(pairs) == 3332
+    assert len(translated) / len(pairs) >= 0.99
+    assert russian_opening_name("D03", "") == "D03 · дебют не классифицирован"

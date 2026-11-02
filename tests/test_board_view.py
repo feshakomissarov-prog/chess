@@ -1,4 +1,5 @@
 import chess
+import pytest
 from PySide6.QtCore import QPoint, Qt
 from PySide6.QtWidgets import QDialog
 
@@ -133,8 +134,10 @@ def test_manual_annotation_arrows_are_prominent_at_supported_board_sizes():
         assert width >= 8
         assert width <= 17
         assert 0.20 * square <= width <= 0.23 * square or width == 17
-    # Premove remains visibly separate and keeps its independent rendering path.
-    assert BoardView._arrow_width(55, 0.76) < BoardView._arrow_width(55, 0.88)
+    # Premove shaft is at least 30% wider than its previously reviewed 10.5 px
+    # floor at normal board sizes; its blue tint distinguishes the cue.
+    assert BoardView._arrow_width(55, 0.82) >= 10.5 * 1.30
+    assert BoardView._arrow_width(55, 0.82) > BoardView._arrow_width(55, 0.9)
 
 
 def test_annotation_action_signal_records_add_remove_and_clear_context(qtbot) -> None:
@@ -367,6 +370,51 @@ def test_wheel_navigates_one_ply_each_direction(qtbot):
         widget.wheelEvent(wheel)
         assert wheel.isAccepted()
     assert emitted == [-1, 1]
+
+
+def test_fractional_wheel_deltas_accumulate_one_ply_without_page_scroll(qtbot):
+    from PySide6.QtCore import QPoint, QPointF
+    from PySide6.QtGui import QWheelEvent
+    widget = BoardView(chess.Board())
+    qtbot.addWidget(widget)
+    emitted = []
+    widget.wheel_navigate.connect(emitted.append)
+    for _ in range(3):
+        wheel = QWheelEvent(QPointF(20, 20), QPointF(20, 20), QPoint(0, 0),
+                            QPoint(0, 40), Qt.MouseButton.NoButton,
+                            Qt.KeyboardModifier.NoModifier, Qt.ScrollPhase.ScrollUpdate,
+                            False)
+        widget.wheelEvent(wheel)
+    assert emitted == [-1]
+
+
+@pytest.mark.parametrize("gesture", ["click", "drag"])
+def test_clicking_or_dragging_own_piece_cancels_queued_premove_before_move_intent(qtbot, gesture):
+    from PySide6.QtCore import QPoint
+
+    board = chess.Board()
+    board.push_uci("e2e4")
+    widget = BoardView(board)
+    qtbot.addWidget(widget)
+    widget.resize(600, 600)
+    widget.show()
+    widget.set_premove(chess.Move.from_uci("g1f3"), chess.WHITE)
+    canceled = []
+    moves = []
+    widget.cancel_premove_requested.connect(
+        lambda: (canceled.append(True), widget.set_premove(None, chess.WHITE)))
+    widget.move_intent.connect(moves.append)
+    start = QPoint(*center(widget, chess.G1))
+    end = QPoint(*center(widget, chess.F3))
+    if gesture == "click":
+        qtbot.mouseClick(widget, Qt.MouseButton.LeftButton, pos=start)
+    else:
+        qtbot.mousePress(widget, Qt.MouseButton.LeftButton, pos=start)
+        qtbot.mouseMove(widget, end, delay=20)
+        qtbot.mouseRelease(widget, Qt.MouseButton.LeftButton, pos=end)
+    assert canceled == [True]
+    assert widget._queued_premove is None
+    assert moves == []
 
 
 def test_graphical_promotion_picker_uses_piece_buttons(qtbot, monkeypatch):
