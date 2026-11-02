@@ -1577,6 +1577,7 @@ class LichessConnectionDialog(QDialog):
     oauth_requested = Signal()
     personal_token_requested = Signal(str)
     delete_personal_token_requested = Signal()
+    revoke_oauth_requested = Signal()
     diagnostics_requested = Signal()
 
     def __init__(self, method: str = "oauth", *, oauth_saved: bool = False,
@@ -1620,8 +1621,11 @@ class LichessConnectionDialog(QDialog):
         oauth_layout.addWidget(self.oauth_saved_badge)
         self.restore_button = QPushButton("Проверить сохранённое подключение")
         self.oauth_button = QPushButton("Подключить через браузер")
+        self.oauth_revoke_button = QPushButton("Отозвать и удалить OAuth-токен")
+        self.oauth_revoke_button.setEnabled(oauth_saved)
         oauth_layout.addWidget(self.restore_button)
         oauth_layout.addWidget(self.oauth_button)
+        oauth_layout.addWidget(self.oauth_revoke_button)
         self.pages.addWidget(oauth_page)
 
         token_page = QWidget()
@@ -1668,6 +1672,7 @@ class LichessConnectionDialog(QDialog):
         self.oauth_button.clicked.connect(self.oauth_requested.emit)
         self.personal_check_button.clicked.connect(self._submit_personal_token)
         self.personal_delete_button.clicked.connect(self.delete_personal_token_requested.emit)
+        self.oauth_revoke_button.clicked.connect(self.revoke_oauth_requested.emit)
 
     def _on_mode_toggled(self, checked: bool) -> None:
         if not checked:
@@ -1844,13 +1849,13 @@ class MainWindow(QMainWindow):
             return None
 
     def _attach_lichess_service(self, service) -> None:
-        service.status_changed.connect(self._lichess_status)
-        service.authenticated.connect(self._lichess_authenticated)
-        service.error.connect(self._lichess_error)
+        service.session_status_changed.connect(self._lichess_session_status)
+        service.session_authenticated.connect(self._lichess_session_authenticated)
+        service.session_error.connect(self._lichess_session_error)
         service.move_failed.connect(self._lichess_move_failed)
         service.takeback_action_completed.connect(self._lichess_takeback_completed)
-        service.event_received.connect(self._lichess_event)
-        service.game_event_received.connect(self._lichess_game_event)
+        service.session_event_received.connect(self._lichess_session_event)
+        service.session_game_event_received.connect(self._lichess_session_game_event)
         service.challenge_ready.connect(self._challenge_ready)
         service.challenge_status_changed.connect(self._challenge_status)
         service.invitation_cancelled.connect(self._invitation_cancelled)
@@ -1870,6 +1875,29 @@ class MainWindow(QMainWindow):
         service.puzzles_finished.connect(self._puzzles_finished)
         service.puzzle_pilot_progress.connect(self._puzzle_pilot_progress)
         service.puzzle_pilot_finished.connect(self._puzzle_pilot_finished)
+
+    def _current_lichess_generation(self, generation: int) -> bool:
+        return bool(self.lichess and self.lichess.is_auth_generation_current(generation))
+
+    def _lichess_session_status(self, generation: int, status: str) -> None:
+        if self._current_lichess_generation(generation):
+            self._lichess_status(status)
+
+    def _lichess_session_authenticated(self, generation: int, username: str) -> None:
+        if self._current_lichess_generation(generation):
+            self._lichess_authenticated(username)
+
+    def _lichess_session_error(self, generation: int, message: str) -> None:
+        if self._current_lichess_generation(generation):
+            self._lichess_error(message)
+
+    def _lichess_session_event(self, generation: int, event: dict) -> None:
+        if self._current_lichess_generation(generation):
+            self._lichess_event(event)
+
+    def _lichess_session_game_event(self, generation: int, game_id: str, event: dict) -> None:
+        if self._current_lichess_generation(generation):
+            self._lichess_game_event(game_id, event)
 
     def _disable_online_controls(self) -> None:
         self.connection.setText("●  Офлайн-режим · Lichess отключён")
@@ -1913,7 +1941,9 @@ class MainWindow(QMainWindow):
         self.connect_button = QPushButton("Подключить Lichess")
         self.connect_button.clicked.connect(self.connect_lichess)
         header.addWidget(self.connect_button)
-        self.disconnect_button = QPushButton("Отключить")
+        self.disconnect_button = QPushButton("Отключить сеанс")
+        self.disconnect_button.setToolTip(
+            "Остановить текущую Lichess-сессию, сохранив выбранные учётные данные локально.")
         self.disconnect_button.setEnabled(False)
         self.disconnect_button.clicked.connect(self.disconnect_lichess)
         header.addWidget(self.disconnect_button)
@@ -3770,8 +3800,20 @@ class MainWindow(QMainWindow):
         dialog.personal_token_requested.connect(self._save_personal_lichess_token)
         dialog.delete_personal_token_requested.connect(self._delete_personal_lichess_token)
         dialog.diagnostics_requested.connect(self._show_lichess_diagnostic_report)
-        self.lichess.status_changed.connect(dialog.set_status)
-        dialog.finished.connect(lambda _result: setattr(self, "_connection_dialog", None))
+        def update_dialog_status(generation: int, status: str) -> None:
+            if (self._current_lichess_generation(generation)
+                    and shiboken6.isValid(dialog)):
+                dialog.set_status(status)
+        self.lichess.session_status_changed.connect(update_dialog_status)
+        dialog.revoke_oauth_requested.connect(self._revoke_oauth_lichess)
+        def close_dialog(_result: int) -> None:
+            try:
+                self.lichess.session_status_changed.disconnect(update_dialog_status)
+            except (RuntimeError, TypeError):
+                pass
+            if self._connection_dialog is dialog:
+                self._connection_dialog = None
+        dialog.finished.connect(close_dialog)
         dialog.open()
 
     def _show_lichess_diagnostic_report(self) -> None:
@@ -3850,6 +3892,20 @@ class MainWindow(QMainWindow):
                 self._connection_dialog.personal_delete_button.setEnabled(False)
         except CredentialStorageError as exc:
             QMessageBox.warning(self, "Lichess", str(exc))
+
+    def _revoke_oauth_lichess(self) -> None:
+        if not self.lichess:
+            return
+        answer = QMessageBox.question(
+            self, "Отозвать OAuth-токен",
+            "Lichess отзовёт сохранённый OAuth-токен. Это действие не затрагивает PAT. Продолжить?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel,
+            QMessageBox.StandardButton.Cancel)
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+        self.lichess.revoke_oauth_credential()
+        if self._connection_dialog and shiboken6.isValid(self._connection_dialog):
+            self._connection_dialog.oauth_revoke_button.setEnabled(False)
 
     def disconnect_lichess(self) -> None:
         self._invalidate_analysis_preflight()

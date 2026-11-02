@@ -1,3 +1,9 @@
+## 02.11.2026 — M4.6 в разработке
+
+Начата отдельная ветка `codex/m46-desktop-experience` от актуального main (`3387dd38643eaa4ea2fac17fa17ba08cfc43e47f`); draft PR M4.6 будет отдельным от слитого PR #30. Обязательный первый этап — закрытие race #40 по S0–S2; далее A–H по [ТЗ M4.6 v1.1](specs/M4_6_DESKTOP_EXPERIENCE.md). Актуальный поэтапный handoff: [M4_6_EXECUTION_LOG.md](handoffs/M4_6_EXECUTION_LOG.md). Реальные секреты/Lichess, личная SQLite/архив и Stockfish не используются в тестах.
+
+Локально закрыты пункты A0/S0–S2: disconnect теперь local-only, OAuth revoke выделен отдельно и credential-safe; session signals tagged generation и фильтруются в UI. Event-based targeted suite: **32 PASS**. Интеграционный тест с реальным Windows Credential Manager/Lichess **НЕ ЗАПУСКАЛСЯ**.
+
 ## 02.11.2026 — M4.5/M4.5.1 принят пользователем и слит; следующий этап M4.6
 
 **PR #30 слит в main**: [PR #30](https://github.com/feshakomissarov-prog/chess/pull/30), merge SHA `39f4a703c50b5aed7976eb95abf28ed2ee9799cf`. На точном кодовом SHA `4e6af52d01dd637a4afee4716960a8b343524556` [Windows CI #110](https://github.com/feshakomissarov-prog/chess/actions/runs/41360769481) — **375 PASS**, compileall/offscreen. Владелец в реальном Windows-пилоте подтвердил, что Stockfish анализирует партии, график оценки построен. Он также видел отдельные ошибки jobs; причины не установлены. Обычный «Открыть сохранённую партию» показывал доску/ходы без синхронного графика (разбор был в отдельном StatisticsGameDialog). Эти ограничения/UX должны быть устранены/прозрачно отображены в M4.6, не возобновляя бесконечную M4.5 правку. Реальное повторное подключение OAuth/PAT и серверная причина прежнего HTTP 403 не подтверждены окончательно; не писать, что всё OAuth исправлено на живом сервере. Ранее раскрытый PAT следует отозвать, токены не передавать в GitHub.

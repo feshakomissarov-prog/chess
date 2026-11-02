@@ -899,6 +899,7 @@ def test_manual_connect_defers_lichess_and_credentials_until_button(qtbot, tmp_p
         selected_token_store = oauth_token_store
         auth_method = "oauth"
         status_changed = Signal()
+        session_status_changed = Signal()
         def connect_account(self): calls.append("oauth")
         def set_auth_method(self, method): self.auth_method = method
         def close(self, timeout=None): return True
@@ -933,6 +934,7 @@ def test_manual_connect_restores_saved_token_only_after_explicit_button(qtbot, t
             self.selected_token_store = self.oauth_token_store
             self.auth_method = "oauth"
             self.status_changed = Signal()
+            self.session_status_changed = Signal()
             self.client = type("Client", (), {"rate_limit_remaining": 0})()
         @property
         def token(self): return self.selected_token_store.get()
@@ -2873,3 +2875,32 @@ def test_background_refresh_requires_authenticated_connected_account(qtbot, tmp_
     assert len(calls) == 2
     window.lichess = None
     window.offline_mode = True
+
+
+def test_window_discards_queued_lichess_status_from_previous_auth_generation(qtbot, tmp_path):
+    from chess_coach.lichess.service import LichessService
+
+    class Store:
+        def get(self): return "synthetic-token"
+        def set(self, value): pass
+        def delete(self): pass
+
+    window = MainWindow(QSettings(str(tmp_path / "generation-ui.ini"),
+                                  QSettings.Format.IniFormat), offline_mode=True)
+    qtbot.addWidget(window)
+    service = LichessService(client=object(), token_store=Store(),
+                             personal_token_store=Store(), auth_method="oauth")
+    window.lichess = service
+    stale_generation = service.auth_generation
+    service.set_auth_method("personal_token")
+    current_generation = service.auth_generation
+    before = window.connection.text()
+
+    window._lichess_session_status(stale_generation, "Не подключено")
+    assert window.connection.text() == before
+    window._lichess_session_status(current_generation, "Подключено: SameName")
+    assert window.connection.text() == "●  Подключено: SameName"
+
+    window.lichess = None
+    service.close()
+    window.close()
