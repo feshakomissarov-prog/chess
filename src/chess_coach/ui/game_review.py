@@ -54,6 +54,12 @@ class ReviewGraph(QWidget):
                                int(mate) if mate is not None else None))
         return output
 
+    @staticmethod
+    def _continuous_segments(values):
+        ordered = sorted(values, key=lambda row: int(row[0]))
+        return [(first, second) for first, second in zip(ordered, ordered[1:])
+                if int(second[0]) == int(first[0]) + 1]
+
     def paintEvent(self, _event):
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
@@ -77,9 +83,10 @@ class ReviewGraph(QWidget):
                 y = rect.center().y() - round(rect.height() * score / 2000)
                 coords.append((x, y, ply, mate))
             painter.setPen(QPen(QColor(TOKENS.accent), 2))
-            for first, second in zip(coords, coords[1:]):
-                if second[2] - first[2] == 1:
-                    painter.drawLine(first[0], first[1], second[0], second[1])
+            coordinate_by_ply = {row[2]: row for row in coords}
+            for first, second in self._continuous_segments(values):
+                a, b = coordinate_by_ply[first[0]], coordinate_by_ply[second[0]]
+                painter.drawLine(a[0], a[1], b[0], b[1])
             for x, y, ply, mate in coords:
                 marker = self.markers.get(ply, {})
                 severity = marker.get("severity")

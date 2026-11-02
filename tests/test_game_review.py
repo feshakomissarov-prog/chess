@@ -167,6 +167,7 @@ def test_review_graph_uses_full_game_axis_and_never_interpolates_sparse_gaps(qtb
         {"ply": 70, "white_cp": 15},
     ], [])
     graph.full_ply_count = 80
+    assert ReviewGraph._continuous_segments(graph._values()) == []
     qtbot.addWidget(graph)
     graph.resize(700, 190)
     graph.show()
