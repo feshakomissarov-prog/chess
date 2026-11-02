@@ -32,6 +32,14 @@
 
 ## Записи по этапам
 
+### Независимое ревью PR #41 — P0: Fair Play lease и review visibility
+
+- Перепроверка safety ответов связывает их с `game_id`, текущими `line_revision`/`line_hash`, выбранным `account_id`, Lichess service, username и `auth_generation`; дополнительно сверяется current SQLite line и активный review route. Переключение партии/route и auth invalidate отбрасывают pending response без побочного изменения уже открытой другой партии.
+- Любое новое human/unknown `gameStart`, account disconnect/auth change, fail/429 или устаревшая проверка отзывает уже выданный workspace safety. Активное упражнение останавливается, кандидат и сохранённые PV очищаются из UI, действия check/hint блокируются. Offline isolated mode сохраняет прежний безопасный сценарий.
+- В отказном/ожидающем состоянии единый GameReviewWorkspace скрывает оценки графика, quality badges, CP и source/coverage; PGN и обычная навигация ходов сохраняются. Открытие другого сохранённого game сначала отзывает предыдущий lease; подключённый режим запускает preflight для нового game.
+- Регрессии fake service проверяют success→human game (до/во время упражнения), A→B→late success, auth-generation/disconnect revoke, incomplete/unknown snapshot и безопасный offline path. Целевой Qt прогон: `pytest tests/test_window.py -k 'review_training_safety or human_game_start_revokes_safety or human_game_start_stops_active_review or late_safe_reply_for_game_a or disconnect_revokes_a_previously_successful' tests/test_game_review.py` — **8 passed**. `compileall` и diff check выполняются на checkpoint.
+- Code/test commit: `22fc5e279ae2b40fca541ff5d25f127faff41fa9`. Журнал/статус фиксируются следующим docs checkpoint. Настоящие OAuth/Lichess, Stockfish и пользовательская SQLite не использовались.
+
 ### A0 — OAuth/PAT disconnect race (#40)
 
 - `disconnect_account()` теперь только отменяет локальную сессию и сохраняет выбранный credential; PAT никогда не проходит remote revoke. Для OAuth добавлено отдельное подтверждаемое действие revoke, которое захватывает OAuth store, сравнивает credential перед удалением и не может удалить замену.
