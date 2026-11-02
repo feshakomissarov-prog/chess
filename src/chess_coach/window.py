@@ -4789,16 +4789,15 @@ class MainWindow(QMainWindow):
         ))
 
     @staticmethod
-    def _lichess_status_requires_reauthentication(status: str) -> bool:
-        """Whether a status means the account session itself is no longer trusted."""
+    def _lichess_status_clears_authenticated_identity(status: str) -> bool:
+        """Whether Lichess has rejected or explicitly ended this account session."""
         return status.startswith((
-            "Не подключено", "Ошибка", "Переподключение",
+            "Не подключено", "Ошибка",
             "Проверка аккаунта отклонена", "Требуется повторное подключение",
             "Проверяем подключение", "Проверяем аккаунт",
             "Отзываем сохранённый OAuth-токен", "OAuth-токен отозван",
             "Сохранённый OAuth-токен не найден", "Не удалось отозвать OAuth-токен",
-            "Ожидание авторизации", "Финальная синхронизация партии",
-            "Потеряно соединение с партией",
+            "Ожидание авторизации",
         ))
 
     def _lichess_status(self, status: str) -> None:
@@ -4807,8 +4806,16 @@ class MainWindow(QMainWindow):
             # Revoke review leases/exercises as well as live engine and batch
             # work. A recovered transport never grants a new review lease.
             self._invalidate_analysis_preflight()
-            if self._lichess_status_requires_reauthentication(status):
+            if self._lichess_status_clears_authenticated_identity(status):
                 self._lichess_connected = False
+            elif status.startswith("Переподключение"):
+                # The account identity remains authenticated, but live actions
+                # stay gated until the current generation confirms stream recovery.
+                self._lichess_connected = False
+        elif status.startswith("Поток восстановлен: ") and not self.offline_mode:
+            # This status arrives through _lichess_session_status, which rejects
+            # stale auth generations before reaching this method.
+            self._lichess_connected = True
         connected = bool(self._lichess_connected and not self.offline_mode)
         if status == "Не подключено":
             for session in self.online_sessions.values():

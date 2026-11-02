@@ -781,6 +781,7 @@ class LichessService(QObject):
 
         def work():
             delay = 1
+            recovering_stream = False
             try:
                 while not self._stop.is_set() and not connection_stop.is_set():
                     try:
@@ -789,6 +790,12 @@ class LichessService(QObject):
                             if (self._stop.is_set() or connection_stop.is_set()
                                     or not self.is_auth_generation_current(auth_generation)):
                                 break
+                            if recovering_stream:
+                                if not self._emit_session_status(
+                                        auth_generation,
+                                        f"Поток восстановлен: {username or 'Lichess'}"):
+                                    break
+                                recovering_stream = False
                             if not self._emit_session_event(auth_generation, event):
                                 break
                             if event.get("type") == "gameStart":
@@ -799,6 +806,7 @@ class LichessService(QObject):
                         if not self._stop.is_set() and not connection_stop.is_set():
                             raise LichessError("Поток событий Lichess завершился.")
                     except RateLimitError as exc:
+                        recovering_stream = True
                         self._emit_session_status(
                             auth_generation,
                             f"Ограничение Lichess (429): переподключение через {max(60, exc.retry_after)} с"
@@ -815,6 +823,7 @@ class LichessService(QObject):
                             connection_stop.set()
                             self._emit_session_error(auth_generation, str(exc))
                             break
+                        recovering_stream = True
                         self._emit_session_status(auth_generation, "Переподключение…")
                         connection_stop.wait(delay)
                         delay = min(delay * 2, 30)

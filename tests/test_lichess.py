@@ -425,6 +425,56 @@ def test_event_stream_429_waits_before_retry_and_does_not_spin(monkeypatch):
     assert any(message.startswith("Ограничение Lichess (429)") for message in statuses)
 
 
+def test_event_stream_recovery_is_reported_only_after_same_generation_event(monkeypatch):
+    class TokenStore:
+        def get(self):
+            return "fake-token"
+
+    class StopControl:
+        def __init__(self):
+            self.stopped = False
+            self.waits = 0
+        def is_set(self):
+            return self.stopped
+        def set(self):
+            self.stopped = True
+        def wait(self, _seconds):
+            self.waits += 1
+            if self.waits == 2:
+                self.stopped = True
+                return True
+            return False
+
+    class Client:
+        def __init__(self):
+            self.calls = 0
+        def stream_events(self, _token, _stop_event):
+            self.calls += 1
+            if self.calls == 1:
+                raise LichessError("synthetic temporary disconnect")
+            yield {"type": "challenge", "challenge": {"id": "synthetic"}}
+
+    stop = StopControl()
+    client = Client()
+    service = LichessService(client=client, token_store=TokenStore())
+    service.username = "Owner"
+    service._connection_stop = stop
+    statuses, events = [], []
+    service.session_status_changed.connect(lambda generation, status:
+                                           statuses.append((generation, status)))
+    service.session_event_received.connect(lambda generation, event:
+                                           events.append((generation, event)))
+    monkeypatch.setattr(service, "_thread", lambda target, _name: target())
+
+    service._start_event_stream("fake-token", expected_generation=service.auth_generation)
+
+    assert client.calls == 2
+    assert (service.auth_generation, "Переподключение…") in statuses
+    assert (service.auth_generation, "Поток восстановлен: Owner") in statuses
+    assert events == [(service.auth_generation,
+                       {"type": "challenge", "challenge": {"id": "synthetic"}})]
+
+
 def test_finished_game_stream_interrupt_has_bounded_retry_and_keeps_sync_pending(monkeypatch):
     class TokenStore:
         def get(self):
