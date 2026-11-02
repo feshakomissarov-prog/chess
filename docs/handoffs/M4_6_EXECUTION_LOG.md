@@ -230,3 +230,10 @@
 - Added Qt/synthetic checks for 3-card layout, horizontal-scroll-free 1360×860 logical viewport, compact card sizes, no-auth controls, packaged sound preloading/reuse across three game IDs, capture deduplication, WAV format, review mate-bar handling, and phase/graph edge cases.
 - Windows Python 3.12.10, `QT_QPA_PLATFORM=offscreen`: component suite **62 passed**; targeted window/offline/premove/P0/home suite **20 passed**. `compileall -q src tests` and `git diff --check` — PASS. Full hosted Windows CI is still required on the exact final SHA.
 - A prior local one-test run of `test_visual_preferences_persist_in_qsettings` exited without a pytest traceback/native diagnostic; it was not rerun to avoid repeating a possible Qt native crash. The full Windows CI result will be reported separately. Audio output, visual quality, physical 150–200% DPI, console windows and real Stockfish/Lichess remain **НЕ ПРОВЕРЕНЫ вручную**.
+
+### 02.11.2026 — PR #41: Round 2 final exact-head Windows CI
+
+- Hosted Windows CI for code head `41509d153125a549be4e77d167b001ae8cc1b643` completed successfully: [run #41446370322](https://github.com/feshakomissarov-prog/chess/actions/runs/41446370322). The PR merge ref contained that exact head merged with base `3387dd38643eaa4ea2fac17fa17ba08cfc43e47f`.
+- Runtime: Windows Server 2025, CPython 3.12.10, PySide6/Qt/shiboken6 6.12.0. Full offscreen suite: **499 passed in 196.82 s**; compileall and isolated offline-window initialization — PASS.
+- The run used synthetic/fake tests only. No actual Lichess/OAuth/PAT, personal SQLite/PGN, or Stockfish was accessed. Physical UI, audio-device playback, DPI/monitor behavior, and manual input remain for owner verification.
+- This entry is documentation-only; a new exact-head CI is required for the resulting commit.
