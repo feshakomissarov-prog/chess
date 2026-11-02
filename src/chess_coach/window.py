@@ -38,6 +38,7 @@ from PySide6.QtWidgets import (
     QPushButton,
     QProgressDialog,
     QRadioButton,
+    QScrollArea,
     QTabWidget,
     QSpinBox,
     QSplitter,
@@ -60,6 +61,7 @@ from .lichess.session import LichessGameSession, classify_lichess_opponent
 from .lichess.statistics import StatisticsService
 from .diagnostics import anonymized_report, log_event, logs_directory
 from .ui.theme import stylesheet as desktop_stylesheet
+from .ui.dashboard import dashboard_snapshot, game_card_text
 
 
 def _puzzle_attempt_summary(attempts: list[dict]) -> str:
@@ -2217,12 +2219,57 @@ class MainWindow(QMainWindow):
     def _build_home_page(self) -> QWidget:
         page = QWidget()
         layout = QVBoxLayout(page)
-        layout.addWidget(QLabel("Создать или открыть партию"))
+        title = QLabel("Ваша шахматная практика")
+        title.setObjectName("pageTitle")
+        layout.addWidget(title)
         self.home_status = QLabel("Выберите режим игры. Анализ и тренировки появятся позже.")
         self.home_status.setWordWrap(True)
+        self.home_status.setObjectName("secondary")
         layout.addWidget(self.home_status)
+        self.dashboard_metrics = {}
+        metrics_grid = QGridLayout()
+        metrics_grid.setHorizontalSpacing(12)
+        metrics_grid.setVerticalSpacing(12)
+        self._dashboard_metric_values = {}
+        self._dashboard_metric_details = {}
+        for index, (key, label) in enumerate((
+                ("games", "Завершённые партии"), ("record", "Мои результаты"),
+                ("analysis", "Покрытие анализа"), ("puzzles", "Задачи Lichess"))):
+            card = QFrame()
+            card.setObjectName("metricCard")
+            card_layout = QVBoxLayout(card)
+            card_layout.setContentsMargins(16, 14, 16, 14)
+            caption = QLabel(label)
+            caption.setObjectName("secondary")
+            value = QLabel("—")
+            value.setStyleSheet("font-size: 25px; font-weight: 700;")
+            detail = QLabel("Локальные данные")
+            detail.setObjectName("muted")
+            detail.setWordWrap(True)
+            card_layout.addWidget(caption)
+            card_layout.addWidget(value)
+            card_layout.addWidget(detail)
+            metrics_grid.addWidget(card, index // 4, index % 4)
+            self._dashboard_metric_values[key] = value
+            self._dashboard_metric_details[key] = detail
+            self.dashboard_metrics[key] = card
+        layout.addLayout(metrics_grid)
+        recent_title = QLabel("Недавние партии")
+        recent_title.setStyleSheet("font-size: 18px; font-weight: 700;")
+        layout.addWidget(recent_title)
+        self._recent_games_layout = QVBoxLayout()
+        self._recent_games_layout.setSpacing(8)
+        layout.addLayout(self._recent_games_layout)
+        quick_actions = QHBoxLayout()
         self.home_ai_button = QPushButton("Играть против Lichess AI")
+        self.home_ai_button.setObjectName("primaryAction")
         self.home_ai_button.clicked.connect(self.play_ai)
+        self.home_local_button = QPushButton("Свободная доска")
+        self.home_local_button.clicked.connect(self.start_local_game)
+        quick_actions.addWidget(self.home_ai_button)
+        quick_actions.addWidget(self.home_local_button)
+        layout.addLayout(quick_actions)
+        layout.addWidget(QLabel("Ещё"))
         self.home_friend_button = QPushButton("Играть с другом по ссылке")
         self.home_friend_button.clicked.connect(self.open_friend_game)
         self.home_username_button = QPushButton("Вызвать игрока Lichess")
@@ -2230,8 +2277,6 @@ class MainWindow(QMainWindow):
         self.active_games_button = QPushButton("Активные партии Lichess")
         self.active_games_button.clicked.connect(self.show_active_games)
         self.active_games_button.setEnabled(False)
-        self.home_local_button = QPushButton("Локальная доска")
-        self.home_local_button.clicked.connect(self.start_local_game)
         self.home_games_button = QPushButton("Завершённые партии")
         self.home_games_button.clicked.connect(self.show_saved_games)
         self.home_archive_status_button = QPushButton("Хранилище и статус архива")
@@ -2257,9 +2302,8 @@ class MainWindow(QMainWindow):
         self.home_settings_button.clicked.connect(self.open_settings)
         self.resume_game_button = QPushButton("Вернуться в текущую партию")
         self.resume_game_button.clicked.connect(self.resume_current_game)
-        for button in (self.home_ai_button, self.home_friend_button,
+        for button in (self.home_friend_button,
                        self.home_username_button, self.active_games_button,
-                       self.home_local_button,
                        self.home_games_button, self.home_archive_status_button,
                        self.home_stats_button,
                        self.home_batch_analysis_button,
@@ -2268,7 +2312,48 @@ class MainWindow(QMainWindow):
                        self.resume_game_button):
             layout.addWidget(button)
         layout.addStretch(1)
-        return page
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+        scroll.setWidget(page)
+        self._refresh_home_dashboard()
+        return scroll
+
+    def _refresh_home_dashboard(self) -> None:
+        if not hasattr(self, "_dashboard_metric_values"):
+            return
+        try:
+            snapshot = dashboard_snapshot(self.game_repository)
+        except Exception as exc:
+            for value in self._dashboard_metric_values.values():
+                value.setText("н/д")
+            for detail in self._dashboard_metric_details.values():
+                detail.setText(f"Не удалось прочитать локальную статистику: {exc}")
+            return
+        for metric in snapshot["metrics"]:
+            self._dashboard_metric_values[metric["key"]].setText(metric["value"])
+            self._dashboard_metric_details[metric["key"]].setText(
+                f"{metric['detail']}\nИсточник: {metric['source']}")
+        while self._recent_games_layout.count():
+            item = self._recent_games_layout.takeAt(0)
+            widget = item.widget()
+            if widget is not None:
+                widget.deleteLater()
+        games = snapshot["recent_games"]
+        if not games:
+            empty = QLabel("Пока нет сохранённых завершённых партий. Импортируйте партии или сыграйте локально.")
+            empty.setWordWrap(True)
+            empty.setObjectName("secondary")
+            self._recent_games_layout.addWidget(empty)
+            return
+        for game in games:
+            heading, details = game_card_text(game)
+            card = QPushButton(f"♟  {heading}\n{details}")
+            card.setObjectName("navItem")
+            card.setMinimumHeight(68)
+            card.setToolTip("Открыть партию в библиотеке Chess Coach")
+            card.clicked.connect(lambda _checked=False, item=dict(game): self._open_saved_game(item))
+            self._recent_games_layout.addWidget(card)
 
     def _build_result_page(self) -> QWidget:
         page = QWidget()
@@ -2429,6 +2514,7 @@ class MainWindow(QMainWindow):
         self._screen_mode = "home"
         self.screen_title.setText("Главная")
         self.screen_stack.setCurrentWidget(self.home_page)
+        self._refresh_home_dashboard()
         active_id = self._selected_live_game_id
         active = self.online_sessions.get(active_id) if active_id else None
         if active and active.status in {"started", "playing"}:

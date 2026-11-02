@@ -16,7 +16,7 @@
 | A0 | Issue #40: generation-safe disconnect/revoke, stale stream suppression, Event/Barrier tests | Выполнен, commit `e0a397d` |
 | A | Аудит маршрутов/read-model, дизайн-токены, baseline | Выполнен; tokens вынесены в `ui/theme.py` |
 | B | AppShell, header/sidebar, responsive route navigation | Выполнен локально; commit checkpoint ниже |
-| C | Главная, честные KPI, последние три реальные партии/empty states | Ожидает B |
+| C | Главная, честные KPI, последние три реальные партии/empty states | Выполнен, checkpoint ниже |
 | D | Board workspace sizes/inspector; единый GameReviewWorkspace; интерактивный graph и per-side summary; улучшение ошибки | Ожидает C |
 | E | Оригинальные звуки, mute/volume и dedup событий | Ожидает D |
 | F | CMD/debug launcher, optional shortcut action, single instance, startup diagnostics | Ожидает E |
@@ -54,4 +54,12 @@
 - Проверки Windows CPython 3.12.10, Qt offscreen: `compileall src tests` PASS; `pytest tests/test_theme.py tests/test_window.py` — **100 passed**; `git diff --check` PASS.
 - При первом полном прогоне выявлены две тестовые fake-service заглушки без generation-tagged signal из A0; заглушки приведены к актуальному контракту, повторный прогон прошёл.
 - Ручная визуальная проверка, 150–200% DPI, ширина 1024dp и живой Lichess — **НЕ ПРОВЕРЯЛИСЬ**.
-- Следующий этап: C — dashboard с ограниченным read-model, реальными источниками KPI и тремя последними карточками.
+- Следующий этап после A/B: C — dashboard с ограниченным read-model, реальными источниками KPI и тремя последними карточками.
+
+### C — Dashboard и последние партии
+
+- Добавлен `ui/dashboard.py`: четыре KPI считаются агрегатами из текущей SQLite (`games`, завершённые результаты с известным цветом, current `analysis_runs`, `puzzle_attempts`); последний список запрашивается через существующий paginated `search_games(page_size=3)`. Нет полной загрузки PGN/ходов и нет фиктивных чисел; для неизвестного цвета/нулевой выборки отображается «н/д».
+- Главная показывает быстрые действия (AI и свободная доска), 3 последних карточки и сохраняет остальные архивные действия под «Ещё». Нажатие карточки открывает существующий просмотр сохранённой партии.
+- Регрессии на временной реальной SQLite проверяют пустую базу, результаты/ограничение до 3 карточек и неизвестный цвет. Совместный Qt-прогон `tests/test_theme.py tests/test_dashboard.py tests/test_window.py`: **103 passed** (Python 3.12.10, Qt offscreen). `compileall`/`git diff --check` повторно проверены при checkpoint.
+- Результаты корректны относительно `games.color`; для одной игры, связанной с несколькими аккаунтами, домашний свод использует owner color поля games и не умножает строки join-ом. Экран статистики остаётся отдельным фильтруемым источником.
+- Следующий этап: D — size presets и единое рабочее пространство разбора; миграция схемы пока не нужна.
