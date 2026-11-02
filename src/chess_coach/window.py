@@ -4656,6 +4656,9 @@ class MainWindow(QMainWindow):
             QMessageBox.StandardButton.Cancel)
         if answer != QMessageBox.StandardButton.Yes:
             return
+        # Drop the review safety lease before starting asynchronous revocation.
+        # Neither a successful nor failed revoke can restore this authorization.
+        self._lichess_status("Отзываем сохранённый OAuth-токен…")
         self.lichess.revoke_oauth_credential()
         if self._connection_dialog and shiboken6.isValid(self._connection_dialog):
             self._connection_dialog.oauth_revoke_button.setEnabled(False)
@@ -4772,18 +4775,42 @@ class MainWindow(QMainWindow):
         self.refresh("Открываем выбранную активную партию; позицию подтвердит поток Lichess.")
         self.lichess.start_game(session.game_id)
 
+    @staticmethod
+    def _lichess_status_invalidates_safety(status: str) -> bool:
+        """Return whether a service status makes Lichess safety unknown."""
+        return status.startswith((
+            "Не подключено", "Ошибка", "Ограничение Lichess (429)",
+            "Переподключение", "Проверка аккаунта отклонена",
+            "Требуется повторное подключение", "Проверяем подключение",
+            "Проверяем аккаунт", "Отзываем сохранённый OAuth-токен",
+            "OAuth-токен отозван", "Сохранённый OAuth-токен не найден",
+            "Не удалось отозвать OAuth-токен", "Ожидание авторизации",
+            "Финальная синхронизация партии", "Потеряно соединение с партией",
+        ))
+
+    @staticmethod
+    def _lichess_status_requires_reauthentication(status: str) -> bool:
+        """Whether a status means the account session itself is no longer trusted."""
+        return status.startswith((
+            "Не подключено", "Ошибка", "Переподключение",
+            "Проверка аккаунта отклонена", "Требуется повторное подключение",
+            "Проверяем подключение", "Проверяем аккаунт",
+            "Отзываем сохранённый OAuth-токен", "OAuth-токен отозван",
+            "Сохранённый OAuth-токен не найден", "Не удалось отозвать OAuth-токен",
+            "Ожидание авторизации", "Финальная синхронизация партии",
+            "Потеряно соединение с партией",
+        ))
+
     def _lichess_status(self, status: str) -> None:
         self.connection.setText("●  " + status)
-        connected = bool(self._lichess_connected and not self.offline_mode)
-        if (status == "Не подключено" or status == "Ошибка подключения"
-                or status.startswith("Ограничение Lichess (429)")
-                or status.startswith("Переподключение")):
-            self._disable_position_evaluation(
-                "Оценка Stockfish остановлена: подключение или безопасность неизвестны.")
-            self._pause_batch_analysis()
-        if status == "Не подключено":
+        if not self.offline_mode and self._lichess_status_invalidates_safety(status):
+            # Revoke review leases/exercises as well as live engine and batch
+            # work. A recovered transport never grants a new review lease.
             self._invalidate_analysis_preflight()
-            self._lichess_connected = False
+            if self._lichess_status_requires_reauthentication(status):
+                self._lichess_connected = False
+        connected = bool(self._lichess_connected and not self.offline_mode)
+        if status == "Не подключено":
             for session in self.online_sessions.values():
                 session.clear_unconfirmed_move_intent()
             if self.online_session is not None:

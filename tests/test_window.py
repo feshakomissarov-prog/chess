@@ -513,6 +513,142 @@ def test_disconnect_revokes_a_previously_successful_review_safety_lease(
     assert window.review_workspace.graph._values() == []
 
 
+@pytest.mark.parametrize("status", [
+    "Не подключено",
+    "Ограничение Lichess (429): повторите через 60 с",
+    "Переподключение…", "Ошибка подключения", "Ошибка проверки аккаунта",
+    "Проверка аккаунта отклонена Lichess (HTTP 403)",
+    "Требуется повторное подключение Lichess (HTTP 401)",
+])
+def test_unsafe_lichess_status_revokes_review_lease_and_recovery_requires_new_preflight(
+        qtbot, tmp_path, monkeypatch, status):
+    window = MainWindow(QSettings(str(tmp_path / f"review-status-{status[:8]}.ini"),
+                                  QSettings.Format.IniFormat), offline_mode=True)
+    qtbot.addWidget(window)
+    game = _saved_review_with_engine_facts(window, "status-revoke")
+    assert window._open_saved_game(game)
+    window.offline_mode = False
+    window._lichess_connected = True
+    monkeypatch.setattr(window, "_online_actions_allowed", lambda: True)
+
+    class FakeClient:
+        rate_limit_remaining = 0
+    class FakeService:
+        username = "Owner"
+        client = FakeClient()
+        def check_active_games_for_analysis(self, request_id): self.request_id = request_id
+        def close(self, timeout=1.0): return True
+    window.lichess = FakeService()
+    window._request_review_training_safety("status-revoke")
+    window._review_safety_games_received(window.lichess.request_id, [])
+    assert window.review_workspace.evaluation_allowed
+    assert "Сохранённый PV:" in window.review_workspace.event_detail.text()
+    window.review_workspace.start_training()
+    assert window.review_workspace.training_mode
+
+    window._lichess_status(status)
+
+    review = window.review_workspace
+    assert not review.training_allowed
+    assert not review.evaluation_allowed
+    assert not review.training_mode
+    assert review.graph._values() == []
+    assert "Сохранённый PV:" not in review.event_detail.text()
+    previous = review.training_status.text()
+    review.show_hint()
+    assert review.training_status.text() == previous
+
+    # Transport/auth recovery alone must not restore the old lease.
+    window._lichess_connected = True
+    window._lichess_status("Подключено: Owner")
+    assert not review.training_allowed
+    assert not review.evaluation_allowed
+    assert review.graph._values() == []
+
+    # A fresh, explicit complete safety check can grant a new lease.
+    window._request_review_training_safety("status-revoke")
+    window._review_safety_games_received(window.lichess.request_id, [])
+    assert review.training_allowed
+    assert review.evaluation_allowed
+
+
+def test_oauth_revoke_revokes_review_safety_before_service_request_and_never_revokes_pat(
+        qtbot, tmp_path, monkeypatch):
+    window = MainWindow(QSettings(str(tmp_path / "oauth-revoke-safety.ini"),
+                                  QSettings.Format.IniFormat), offline_mode=True)
+    qtbot.addWidget(window)
+    game = _saved_review_with_engine_facts(window, "oauth-revoke-safety")
+    assert window._open_saved_game(game)
+    window.offline_mode = False
+    window._lichess_connected = True
+    monkeypatch.setattr(window, "_online_actions_allowed", lambda: True)
+
+    class FakeClient:
+        rate_limit_remaining = 0
+    class FakeService:
+        username = "Owner"
+        client = FakeClient()
+        pat_revoke_calls = 0
+        def check_active_games_for_analysis(self, request_id): self.request_id = request_id
+        def revoke_oauth_credential(self):
+            self.state_when_started = (
+                window.review_workspace.training_allowed,
+                window.review_workspace.evaluation_allowed,
+                window.review_workspace.graph._values(),
+                window._lichess_connected,
+            )
+        def close(self, timeout=1.0): return True
+    window.lichess = FakeService()
+    window._request_review_training_safety("oauth-revoke-safety")
+    window._review_safety_games_received(window.lichess.request_id, [])
+    assert window.review_workspace.evaluation_allowed
+    monkeypatch.setattr(QMessageBox, "question",
+                        lambda *args, **kwargs: QMessageBox.StandardButton.Yes)
+
+    window._revoke_oauth_lichess()
+
+    assert window.lichess.state_when_started == (False, False, [], False)
+    assert window.lichess.pat_revoke_calls == 0
+    # Neither success nor failure from the async revoke grants safety back.
+    window._lichess_status("Не удалось отозвать OAuth-токен: fake failure")
+    window._lichess_status("OAuth-токен отозван и удалён локально.")
+    assert not window.review_workspace.training_allowed
+    assert not window.review_workspace.evaluation_allowed
+    assert window.review_workspace.graph._values() == []
+
+
+def test_late_review_safety_reply_after_line_revision_change_is_rejected(
+        qtbot, tmp_path, monkeypatch):
+    window = MainWindow(QSettings(str(tmp_path / "review-line-stale.ini"),
+                                  QSettings.Format.IniFormat), offline_mode=True)
+    qtbot.addWidget(window)
+    game = _saved_review_with_engine_facts(window, "review-line-stale")
+    assert window._open_saved_game(game)
+    window.offline_mode = False
+    window._lichess_connected = True
+    monkeypatch.setattr(window, "_online_actions_allowed", lambda: True)
+
+    class FakeClient:
+        rate_limit_remaining = 0
+    class FakeService:
+        username = "Owner"
+        client = FakeClient()
+        def check_active_games_for_analysis(self, request_id): self.request_id = request_id
+        def close(self, timeout=1.0): return True
+    window.lichess = FakeService()
+    window._request_review_training_safety("review-line-stale")
+    request_id = window.lichess.request_id
+    window.game_repository.save_snapshot("review-line-stale", "startpos", "e2e4 e7e5",
+        "white", "Opponent", False, "5+0", "mate", "white")
+
+    window._review_safety_games_received(
+        request_id, [{"source": "ai", "opponent": {"ai": 3, "id": None}}])
+
+    assert not window.review_workspace.training_allowed
+    assert not window.review_workspace.evaluation_allowed
+    assert window.review_workspace.graph._values() == []
+
+
 def test_online_move_sound_waits_for_authoritative_ack_and_deduplicates_replays(qtbot, tmp_path):
     window = MainWindow(QSettings(str(tmp_path / "sound-ack.ini"),
                                   QSettings.Format.IniFormat), offline_mode=True)
