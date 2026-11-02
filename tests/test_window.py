@@ -14,6 +14,7 @@ from chess_coach.window import (ActiveGamesDialog, BatchAnalysisDialog, Evaluati
                                 _batch_safety_from_games, _puzzle_attempt_summary)
 from chess_coach.lichess.session import LichessGameSession
 from chess_coach.lichess.repository import GameRepository
+from chess_coach.ui.workspace_state import geometry_intersects_available, reposition_visible_frame
 
 
 @pytest.fixture(autouse=True)
@@ -73,6 +74,131 @@ def test_saved_game_orientation_uses_selected_account_color(qtbot, tmp_path):
     assert window._open_saved_game(game)
     assert window.online_session.color == chess.BLACK
     assert window.board._flipped
+
+
+def test_workspace_review_resumes_same_revision_ply_and_inspector_tab(qtbot, tmp_path):
+    settings = QSettings(str(tmp_path / "workspace.ini"), QSettings.Format.IniFormat)
+    window = MainWindow(settings, manual_connect_mode=True)
+    qtbot.addWidget(window)
+    window.game_repository.save_snapshot(
+        "resume-review", "startpos", "e2e4 e7e5 g1f3", "white", "Friend", False,
+        "5+3", "mate", "white", white_player="Owner", black_player="Friend")
+    game = window.game_repository.get_game("resume-review")
+    assert window._open_saved_game(game)
+    window.review_workspace.select_ply(2)
+    window.review_workspace.tabs.setCurrentIndex(1)
+    window._active_route = "games"
+    window._persist_workspace_state()
+    assert settings.value("workspace/review_viewed_ply", type=int) == 2
+    assert settings.value("workspace/review_inspector_tab", type=int) == 1
+    revision = settings.value("workspace/review_line_revision", type=int)
+    line_hash = settings.value("workspace/review_line_hash", type=str)
+    assert revision == window.game_repository.current_line("resume-review")["line_revision"]
+    assert line_hash == window.game_repository.current_line("resume-review")["line_hash"]
+
+    window.close()
+    resumed = MainWindow(QSettings(str(tmp_path / "workspace.ini"), QSettings.Format.IniFormat),
+                         manual_connect_mode=True)
+    qtbot.addWidget(resumed)
+    assert resumed.resume_saved_review(show_message=False)
+    assert resumed.review_workspace.selected_ply == 2
+    assert resumed.review_workspace.tabs.currentIndex() == 1
+    assert resumed.screen_stack.currentWidget() is resumed.review_workspace
+
+
+def test_workspace_changed_line_falls_back_to_start_and_restores_visible_geometry(qtbot, tmp_path):
+    settings = QSettings(str(tmp_path / "workspace-changed.ini"), QSettings.Format.IniFormat)
+    window = MainWindow(settings, manual_connect_mode=True)
+    qtbot.addWidget(window)
+    window.game_repository.save_snapshot(
+        "changed-review", "startpos", "e2e4 e7e5", "white", "Friend", False,
+        "5+3", "mate", "white", white_player="Owner", black_player="Friend")
+    game = window.game_repository.get_game("changed-review")
+    assert window._open_saved_game(game)
+    window.review_workspace.select_ply(2)
+    window._active_route = "games"
+    window._persist_workspace_state()
+    window.close()
+
+    repository = GameRepository(Path(QStandardPaths.writableLocation(
+        QStandardPaths.StandardLocation.AppDataLocation)) / "games.sqlite3")
+    repository.save_snapshot(
+        "changed-review", "startpos", "d2d4 d7d5", "white", "Friend", False,
+        "5+3", "mate", "white", white_player="Owner", black_player="Friend")
+    repository.shutdown()
+    resumed = MainWindow(QSettings(str(tmp_path / "workspace-changed.ini"),
+                                   QSettings.Format.IniFormat), manual_connect_mode=True)
+    qtbot.addWidget(resumed)
+    assert resumed.resume_saved_review(show_message=False)
+    assert resumed.review_workspace.selected_ply == 0
+    assert "изменилась" in resumed.statusBar().currentMessage()
+
+
+def test_delayed_workspace_restore_never_steals_a_page_already_opened_by_user(qtbot, tmp_path):
+    settings = QSettings(str(tmp_path / "workspace-no-steal.ini"), QSettings.Format.IniFormat)
+    settings.setValue("workspace/last_route", "games")
+    window = MainWindow(settings, manual_connect_mode=True)
+    qtbot.addWidget(window)
+    window.start_local_game()
+    qtbot.wait(120)
+    assert window.screen_stack.currentWidget() is window.game_page
+    assert window._screen_mode == "local"
+
+
+def test_offscreen_saved_window_geometry_is_repositioned(qtbot):
+    from PySide6.QtCore import QRect
+    visible = QRect(0, 0, 1280, 720)
+    offscreen = QRect(-2200, 150, 900, 700)
+    assert not geometry_intersects_available(offscreen, [visible])
+    corrected = reposition_visible_frame(offscreen, [visible])
+    assert geometry_intersects_available(corrected, [visible])
+    assert corrected.x() >= visible.x() and corrected.y() >= visible.y()
+    oversized = reposition_visible_frame(QRect(0, 0, 1360, 860), [visible])
+    assert oversized == visible
+
+
+def test_statistics_dialog_restores_and_exports_small_filter_state(qtbot, tmp_path):
+    repository = GameRepository(tmp_path / "filters.sqlite3")
+    saved = {"period_days": 30, "side": "black", "result": "draw",
+             "game_source": "local", "analysis_source": "stockfish",
+             "opponent": "Rival", "opening": "C20", "advanced": True, "tab": 1}
+    dialog = StatisticsDialog(repository, saved_filters=saved)
+    qtbot.addWidget(dialog)
+    dialog._refresh_timer.stop()
+    assert dialog.period.currentData() == 30
+    assert dialog.side.currentData() == "black"
+    assert dialog.result_filter.currentData() == "draw"
+    assert dialog.game_source.currentData() == "local"
+    assert dialog.analysis_source.currentData() == "stockfish"
+    assert dialog.opponent.text() == "Rival"
+    assert dialog.opening.text() == "C20"
+    assert dialog.advanced_filters_group.isChecked()
+    state = dialog.persisted_filter_state()
+    assert state["period_days"] == 30 and state["tab"] == 1
+    assert state["opponent"] == "Rival" and state["opening"] == "C20"
+    repository.shutdown()
+
+
+def test_completed_analysis_uses_unified_review_route_and_inline_notice(qtbot, tmp_path):
+    window = MainWindow(QSettings(str(tmp_path / "analysis-notice.ini"),
+                                  QSettings.Format.IniFormat), offline_mode=True)
+    qtbot.addWidget(window)
+    window.game_repository.save_snapshot(
+        "analysis-complete", "startpos", "e2e4 e7e5", "white", "Friend", False,
+        "5+3", "mate", "white", white_player="Owner", black_player="Friend")
+    window._analysis_finished("analysis-complete", {
+        "assessments": [{"ply": 0, "white_cp": 0}], "source": "stockfish"})
+    assert window.screen_stack.currentWidget() is window.review_workspace
+    assert "общий разбор" in window.statusBar().currentMessage()
+
+
+def test_lichess_failure_is_inline_and_does_not_open_modal_warning(qtbot, tmp_path, monkeypatch):
+    window = MainWindow(QSettings(str(tmp_path / "inline-error.ini"),
+                                  QSettings.Format.IniFormat), offline_mode=True)
+    qtbot.addWidget(window)
+    monkeypatch.setattr(QMessageBox, "warning", lambda *_args: pytest.fail("modal warning opened"))
+    window._lichess_error("Ошибка HTTP 429")
+    assert window.statusBar().currentMessage() == "Ошибка HTTP 429"
 
 
 def test_free_board_orientation_is_separate_from_online_auto_orientation(qtbot, tmp_path):
@@ -141,7 +267,7 @@ def test_m46_shell_has_stable_routes_and_collapses_for_board_screens(qtbot, tmp_
     window = MainWindow(QSettings(str(tmp_path / "m46-shell.ini"),
                                   QSettings.Format.IniFormat), offline_mode=True)
     qtbot.addWidget(window)
-    assert window.sidebar.width() == 212
+    assert window.sidebar.width() == (60 if window.width() < 1160 else 212)
     assert set(window._nav_buttons) == {"home", "play", "games", "analytics", "puzzles"}
     assert window._nav_buttons["home"].property("active") is True
     window.start_local_game()

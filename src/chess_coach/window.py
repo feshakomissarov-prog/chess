@@ -16,7 +16,7 @@ import weakref
 import PySide6
 import shiboken6
 from PySide6.QtCore import QProcess, QSettings, Qt, QStandardPaths, QTimer, Signal, qVersion, QUrl
-from PySide6.QtGui import QKeySequence, QShortcut, QColor, QPainter, QPen, QDesktopServices
+from PySide6.QtGui import QKeySequence, QShortcut, QColor, QPainter, QPen, QDesktopServices, QGuiApplication
 from PySide6.QtWidgets import (
     QCheckBox,
     QApplication,
@@ -65,6 +65,7 @@ from .ui.theme import stylesheet as desktop_stylesheet
 from .ui.dashboard import dashboard_snapshot, game_card_text
 from .ui.game_review import GameReviewWorkspace
 from .ui.sounds import ChessSoundPlayer
+from .ui.workspace_state import reposition_visible_frame
 
 
 def _puzzle_attempt_summary(attempts: list[dict]) -> str:
@@ -477,12 +478,13 @@ class StatisticsDialog(QDialog):
     position_requested = Signal(str, int)
     game_requested = Signal(str)
 
-    def __init__(self, repository: GameRepository, parent=None) -> None:
+    def __init__(self, repository: GameRepository, parent=None,
+                 saved_filters: dict | None = None) -> None:
         super().__init__(parent)
         self.repository = repository
         self.service = StatisticsService(repository)
         self.setWindowTitle("Статистика и анализ")
-        self.setMinimumSize(760, 560)
+        self.setMinimumSize(480, 360)
         self.resize(1040, 820)
         self._generation = 0
         self._query_thread: threading.Thread | None = None
@@ -501,10 +503,10 @@ class StatisticsDialog(QDialog):
         openings_layout = QVBoxLayout(openings_page)
         critical_page = QWidget(self)
         critical_layout = QVBoxLayout(critical_page)
-        self.tabs.addTab(overview_page, "Обзор")
-        self.tabs.addTab(games_page, "Партии")
-        self.tabs.addTab(openings_page, "Дебюты/фазы")
-        self.tabs.addTab(critical_page, "Критические моменты")
+        self.tabs.addTab(self._scroll_tab(overview_page), "Обзор")
+        self.tabs.addTab(self._scroll_tab(games_page), "Партии")
+        self.tabs.addTab(self._scroll_tab(openings_page), "Дебюты/фазы")
+        self.tabs.addTab(self._scroll_tab(critical_page), "Критические моменты")
         close_button = QPushButton("Закрыть")
         close_button.clicked.connect(self.accept)
         root.addWidget(close_button, 0, Qt.AlignmentFlag.AlignRight)
@@ -577,6 +579,7 @@ class StatisticsDialog(QDialog):
         advanced.toggled.connect(advanced_content.setVisible)
         self.advanced_filters_group = advanced
         self.advanced_filters_content = advanced_content
+        self.restore_filter_state(saved_filters or {})
         overview_layout.addLayout(basic_filters)
         overview_layout.addWidget(advanced)
         all_time = QPushButton("Всё время")
@@ -646,6 +649,45 @@ class StatisticsDialog(QDialog):
         self.previous_page.clicked.connect(lambda: self._set_page(max(0, self._page - 1)))
         self.next_page.clicked.connect(lambda: self._set_page(self._page + 1))
         self._schedule_refresh()
+
+    @staticmethod
+    def _scroll_tab(page: QWidget) -> QScrollArea:
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+        scroll.setWidget(page)
+        return scroll
+
+    def restore_filter_state(self, state: dict) -> None:
+        """Restore only small filter values; never restore query/result payloads."""
+        combos = {
+            "account_id": self.account, "period_days": self.period, "side": self.side,
+            "result": self.result_filter, "game_source": self.game_source,
+            "analyzed": self.analyzed, "analysis_source": self.analysis_source,
+        }
+        for key, combo in combos.items():
+            if key not in state:
+                continue
+            index = combo.findData(state[key])
+            if index >= 0:
+                combo.setCurrentIndex(index)
+        if state.get("clock"):
+            self.clock.setCurrentText(str(state["clock"]))
+        self.opponent.setText(str(state.get("opponent") or ""))
+        self.opening.setText(str(state.get("opening") or ""))
+        self.advanced_filters_group.setChecked(bool(state.get("advanced", False)))
+        self.tabs.setCurrentIndex(max(0, min(self.tabs.count() - 1,
+                                            int(state.get("tab", 0) or 0))))
+
+    def persisted_filter_state(self) -> dict:
+        return {
+            "account_id": self.account.currentData(), "period_days": self.period.currentData(),
+            "clock": self.clock.currentText().strip(), "side": self.side.currentData(),
+            "result": self.result_filter.currentData(), "game_source": self.game_source.currentData(),
+            "opponent": self.opponent.text().strip(), "opening": self.opening.text().strip(),
+            "analyzed": self.analyzed.currentData(), "analysis_source": self.analysis_source.currentData(),
+            "advanced": self.advanced_filters_group.isChecked(), "tab": self.tabs.currentIndex(),
+        }
 
     @staticmethod
     def _fill_combo(combo: QComboBox, items: tuple[tuple[str, str], ...]) -> None:
@@ -1827,14 +1869,21 @@ class MainWindow(QMainWindow):
         self._shutdown_requested = False
         self._shutdown_read_only = False
         self._analysis_shutdown_deadline: float | None = None
+        self._workspace_state_restoring = True
+        self._active_route = str(self.settings.value("workspace/last_route", "home", type=str))
+        self._workspace_save_timer = QTimer(self)
+        self._workspace_save_timer.setSingleShot(True)
+        self._workspace_save_timer.setInterval(500)
+        self._workspace_save_timer.timeout.connect(self._persist_workspace_state)
         self.analysis_progress.connect(self._analysis_progress)
         self.analysis_finished.connect(self._analysis_finished)
         self.engine_install_progress.connect(self._engine_install_progress_changed)
         self.engine_install_finished.connect(self._engine_install_finished)
         self.position_eval_finished.connect(self._position_eval_finished)
         self.setWindowTitle("Chess Coach")
-        self.setMinimumSize(1040, 680)
+        self.setMinimumSize(500, 360)
         self.resize(1360, 860)
+        self._restore_window_frame()
         self.setStyleSheet(
             "QMainWindow, QWidget { background: #f4f1ea; color: #292a2b; }"
             "QPushButton { background: #ffffff; border: 1px solid #d9d5cb;"
@@ -1847,6 +1896,10 @@ class MainWindow(QMainWindow):
             " border-radius: 6px; padding: 5px; }"
         )
         self._build_ui()
+        self._set_sidebar_collapsed(
+            self.settings.value("workspace/sidebar_collapsed", self.width() < 1160, type=bool),
+            explicit=self.settings.value("workspace/sidebar_explicit", False, type=bool))
+        self._workspace_state_restoring = False
         self.show_home()
         self.clock_timer = QTimer(self)
         self.clock_timer.timeout.connect(self._update_clock)
@@ -1874,6 +1927,8 @@ class MainWindow(QMainWindow):
         elif offline_mode:
             self._disable_online_controls()
         self.refresh()
+        if not self.offline_mode:
+            QTimer.singleShot(75, self._restore_workspace_after_startup)
 
     def _create_lichess_service(self):
         try:
@@ -1986,6 +2041,7 @@ class MainWindow(QMainWindow):
         self.disconnect_button.clicked.connect(self.disconnect_lichess)
         header.addWidget(self.disconnect_button)
         self.settings_button = QPushButton("Настройки")
+        self.settings_button.setAccessibleName("Настройки")
         self.settings_button.clicked.connect(self.open_settings)
         header.addWidget(self.settings_button)
         outer.addWidget(header_widget)
@@ -2174,7 +2230,14 @@ class MainWindow(QMainWindow):
         splitter.setStretchFactor(0, 13)
         splitter.setStretchFactor(1, 7)
         splitter.setSizes([850, 450])
-        self.game_page = splitter
+        self.game_splitter = splitter
+        splitter.setOrientation(
+            Qt.Orientation.Vertical if self.width() < 1120 else Qt.Orientation.Horizontal)
+        game_scroll = QScrollArea()
+        game_scroll.setWidgetResizable(True)
+        game_scroll.setFrameShape(QFrame.Shape.NoFrame)
+        game_scroll.setWidget(splitter)
+        self.game_page = game_scroll
         self.screen_stack.addWidget(self.game_page)
         self.result_page = self._build_result_page()
         self.screen_stack.addWidget(self.result_page)
@@ -2182,14 +2245,20 @@ class MainWindow(QMainWindow):
         self.review_workspace.return_requested.connect(self.show_home)
         self.review_workspace.export_requested.connect(self._export_review_pgn)
         self.review_workspace.safety_requested.connect(self._request_review_training_safety)
+        self.review_workspace.position_selected.connect(self._review_position_selected)
+        self.review_workspace.tabs.currentChanged.connect(self._schedule_workspace_save)
         self.screen_stack.addWidget(self.review_workspace)
         self.screen_stack.setCurrentWidget(self.home_page)
         self.screen_stack.currentChanged.connect(self._shell_screen_changed)
         outer.addWidget(self.screen_stack, 1)
         self.setCentralWidget(root)
+        status_bar = self.statusBar()
+        status_bar.setObjectName("inlineNoticeBar")
+        status_bar.setAccessibleName("Уведомления Chess Coach")
         self.setStyleSheet(desktop_stylesheet())
         self._apply_board_size()
         self._set_sidebar_collapsed(self.width() < 1160)
+        self._apply_header_responsive()
         self._set_active_route("home")
 
     def _board_size_changed(self, _index: int) -> None:
@@ -2221,6 +2290,26 @@ class MainWindow(QMainWindow):
                 and self.width() < 1160):
             self._set_sidebar_collapsed(True)
         self._apply_board_size()
+        if hasattr(self, "game_splitter"):
+            self.game_splitter.setOrientation(
+                Qt.Orientation.Vertical if self.width() < 1120 else Qt.Orientation.Horizontal)
+        self._apply_header_responsive()
+        self._layout_dashboard_metrics()
+        self._schedule_workspace_save()
+
+    def _apply_header_responsive(self) -> None:
+        if not hasattr(self, "settings_button"):
+            return
+        compact = self.width() < 820
+        self.connect_button.setText("Подключить" if compact else "Подключить Lichess")
+        self.disconnect_button.setText("Отключить" if compact else "Отключить сеанс")
+        self.settings_button.setText("⚙" if compact else "Настройки")
+        self.settings_button.setToolTip("Настройки")
+        self.header_brand.setVisible(self.sidebar.width() <= 60 and self.width() >= 800)
+
+    def moveEvent(self, event) -> None:
+        super().moveEvent(event)
+        self._schedule_workspace_save()
 
     def _build_sidebar(self) -> QWidget:
         sidebar = QFrame()
@@ -2232,6 +2321,7 @@ class MainWindow(QMainWindow):
         self.sidebar_toggle = QPushButton("☰")
         self.sidebar_toggle.setObjectName("navItem")
         self.sidebar_toggle.setToolTip("Свернуть или развернуть меню")
+        self.sidebar_toggle.setAccessibleName("Свернуть или развернуть боковое меню")
         self.sidebar_toggle.clicked.connect(lambda: self._set_sidebar_collapsed(
             self.sidebar.width() > 60, explicit=True))
         layout.addWidget(self.sidebar_toggle)
@@ -2250,6 +2340,7 @@ class MainWindow(QMainWindow):
             button.setProperty("route", key)
             button.setProperty("route_label", label)
             button.setMinimumHeight(44)
+            button.setAccessibleName(label)
             button.clicked.connect(callback)
             self._nav_buttons[key] = button
             layout.addWidget(button)
@@ -2259,6 +2350,7 @@ class MainWindow(QMainWindow):
         layout.addWidget(divider)
         self.sidebar_settings = QPushButton("⚙   Настройки")
         self.sidebar_settings.setObjectName("navItem")
+        self.sidebar_settings.setAccessibleName("Настройки")
         self.sidebar_settings.clicked.connect(self.open_settings)
         layout.addWidget(self.sidebar_settings)
         self._sidebar_explicit_override = False
@@ -2278,6 +2370,8 @@ class MainWindow(QMainWindow):
             button.setToolTip(label if collapsed else "")
         self.header_brand.setVisible(collapsed)
         self._apply_board_size()
+        self._apply_header_responsive()
+        self._schedule_workspace_save()
 
     def _shell_screen_changed(self, _index: int) -> None:
         if not hasattr(self, "sidebar"):
@@ -2287,9 +2381,113 @@ class MainWindow(QMainWindow):
         current = self.screen_stack.currentWidget()
         route = ("games" if current is getattr(self, "review_workspace", None) else
                  "play" if is_board else "home")
+        self._active_route = route
         self._set_active_route(route)
         if not self._sidebar_explicit_override:
             self._set_sidebar_collapsed(is_board or self.width() < 1160)
+        self._schedule_workspace_save()
+
+    def _restore_window_frame(self) -> None:
+        saved = self.settings.value("workspace/window_geometry")
+        if saved:
+            try:
+                self.restoreGeometry(saved)
+            except (TypeError, ValueError):
+                pass
+        screens = [screen.availableGeometry() for screen in QGuiApplication.screens()]
+        frame = self.frameGeometry()
+        if screens:
+            corrected = reposition_visible_frame(frame, screens)
+            if corrected.size() != frame.size():
+                self.resize(corrected.size())
+            if corrected.topLeft() != frame.topLeft():
+                self.move(corrected.topLeft())
+
+    def _schedule_workspace_save(self, *_args) -> None:
+        timer = getattr(self, "_workspace_save_timer", None)
+        if timer is not None and not self._workspace_state_restoring:
+            timer.start()
+
+    def _persist_workspace_state(self) -> None:
+        if self._workspace_state_restoring:
+            return
+        self.settings.setValue("workspace/window_geometry", self.saveGeometry())
+        self.settings.setValue("workspace/theme", "dark-v1")
+        self.settings.setValue("workspace/last_route", self._active_route)
+        self.settings.setValue("workspace/sidebar_collapsed", self.sidebar.width() <= 60)
+        self.settings.setValue("workspace/sidebar_explicit", self._sidebar_explicit_override)
+        self.settings.setValue("workspace/board_target_size",
+                               int(self.settings.value("board_target_size", 480, type=int)))
+        review = getattr(self, "review_workspace", None)
+        if review is not None and review.review:
+            line = review.review["line"]
+            self.settings.setValue("workspace/review_game_id", str(review.review["game"]["game_id"]))
+            self.settings.setValue("workspace/review_line_revision", int(line["line_revision"]))
+            self.settings.setValue("workspace/review_line_hash", str(line["line_hash"]))
+            self.settings.setValue("workspace/review_viewed_ply", int(review.selected_ply))
+            self.settings.setValue("workspace/review_inspector_tab", int(review.tabs.currentIndex()))
+        self.settings.sync()
+
+    def _review_position_selected(self, _game_id: str, _ply: int) -> None:
+        self._schedule_workspace_save()
+
+    def _restore_workspace_after_startup(self) -> None:
+        if self.offline_mode or self._shutdown_requested:
+            return
+        route = str(self.settings.value("workspace/last_route", "home", type=str))
+        if route != "games":
+            return
+        if self.screen_stack.currentWidget() is not self.home_page:
+            return
+        if self.resume_saved_review(show_message=False):
+            return
+        self._active_route = "home"
+        self._set_active_route("home")
+        self.show_home()
+
+    def resume_saved_review(self, *, show_message: bool = True) -> bool:
+        game_id = str(self.settings.value("workspace/review_game_id", "", type=str)).strip()
+        if not game_id:
+            if show_message:
+                self._notify_inline("Нет сохранённого разбора для продолжения.")
+            return False
+        game = self.game_repository.get_game(game_id)
+        line = self.game_repository.current_line(game_id) if game else None
+        if (not game or not line or not self._is_standard_board_game(game)
+                or game.get("status") in {"created", "started", "started_soon", "playing"}):
+            self._active_route = "home"
+            self.settings.remove("workspace/review_game_id")
+            self._schedule_workspace_save()
+            if show_message:
+                self._notify_inline("Сохранённый разбор недоступен; проверьте библиотеку партий.")
+            return False
+        saved_revision = self.settings.value("workspace/review_line_revision", -1, type=int)
+        saved_hash = str(self.settings.value("workspace/review_line_hash", "", type=str))
+        same_line = (int(line["line_revision"]) == saved_revision
+                     and str(line["line_hash"]) == saved_hash)
+        self._workspace_state_restoring = True
+        try:
+            if not self._open_saved_game(game):
+                return False
+            ply = int(self.settings.value("workspace/review_viewed_ply", 0, type=int)) if same_line else 0
+            self.review_workspace.select_ply(max(0, min(len(self.review_workspace.review["moves"]), ply)))
+            tab = self.settings.value("workspace/review_inspector_tab", 0, type=int)
+            self.review_workspace.tabs.setCurrentIndex(
+                max(0, min(self.review_workspace.tabs.count() - 1, tab)))
+            if not same_line:
+                self.screen_title.setText("Разбор продолжен с начала · сохранённая линия изменилась")
+                self._notify_inline("Линия партии изменилась; разбор открыт с начальной позиции.")
+            else:
+                self.screen_title.setText("Продолжение разбора")
+            return True
+        finally:
+            self._workspace_state_restoring = False
+            self._schedule_workspace_save()
+
+    def _notify_inline(self, message: str, timeout_ms: int = 9000) -> None:
+        status = self.statusBar()
+        status.setAccessibleName("Уведомление: " + str(message)[:120])
+        status.showMessage(str(message), max(1000, int(timeout_ms)))
 
     def _set_active_route(self, route: str) -> None:
         for key, button in self._nav_buttons.items():
@@ -2309,6 +2507,7 @@ class MainWindow(QMainWindow):
         layout.addWidget(self.home_status)
         self.dashboard_metrics = {}
         metrics_grid = QGridLayout()
+        self.dashboard_metrics_grid = metrics_grid
         metrics_grid.setHorizontalSpacing(12)
         metrics_grid.setVerticalSpacing(12)
         self._dashboard_metric_values = {}
@@ -2330,10 +2529,10 @@ class MainWindow(QMainWindow):
             card_layout.addWidget(caption)
             card_layout.addWidget(value)
             card_layout.addWidget(detail)
-            metrics_grid.addWidget(card, index // 4, index % 4)
             self._dashboard_metric_values[key] = value
             self._dashboard_metric_details[key] = detail
             self.dashboard_metrics[key] = card
+        self._layout_dashboard_metrics()
         layout.addLayout(metrics_grid)
         recent_title = QLabel("Недавние партии")
         recent_title.setStyleSheet("font-size: 18px; font-weight: 700;")
@@ -2383,6 +2582,11 @@ class MainWindow(QMainWindow):
         self.home_settings_button.clicked.connect(self.open_settings)
         self.resume_game_button = QPushButton("Вернуться в текущую партию")
         self.resume_game_button.clicked.connect(self.resume_current_game)
+        self.resume_review_button = QPushButton("Продолжить разбор последней партии")
+        self.resume_review_button.setObjectName("primaryAction")
+        self.resume_review_button.setAccessibleName("Продолжить разбор последней партии")
+        self.resume_review_button.clicked.connect(self.resume_saved_review)
+        self.resume_review_button.setVisible(False)
         for button in (self.home_friend_button,
                        self.home_username_button, self.active_games_button,
                        self.home_games_button, self.home_archive_status_button,
@@ -2390,7 +2594,8 @@ class MainWindow(QMainWindow):
                        self.home_batch_analysis_button,
                        self.home_puzzles_button,
                        self.home_settings_button,
-                       self.resume_game_button):
+                       self.resume_game_button,
+                       self.resume_review_button):
             layout.addWidget(button)
         layout.addStretch(1)
         scroll = QScrollArea()
@@ -2435,6 +2640,20 @@ class MainWindow(QMainWindow):
             card.setToolTip("Открыть партию в библиотеке Chess Coach")
             card.clicked.connect(lambda _checked=False, item=dict(game): self._open_saved_game(item))
             self._recent_games_layout.addWidget(card)
+
+    def _layout_dashboard_metrics(self) -> None:
+        grid = getattr(self, "dashboard_metrics_grid", None)
+        cards = list(getattr(self, "dashboard_metrics", {}).values())
+        if grid is None or not cards:
+            return
+        columns = 2 if self.width() < 900 else 4
+        if getattr(self, "_dashboard_metric_columns", None) == columns:
+            return
+        self._dashboard_metric_columns = columns
+        while grid.count():
+            grid.takeAt(0)
+        for index, card in enumerate(cards):
+            grid.addWidget(card, index // columns, index % columns)
 
     def _build_result_page(self) -> QWidget:
         page = QWidget()
@@ -2596,6 +2815,8 @@ class MainWindow(QMainWindow):
         self.screen_title.setText("Главная")
         self.screen_stack.setCurrentWidget(self.home_page)
         self._refresh_home_dashboard()
+        self.resume_review_button.setVisible(bool(
+            self.settings.value("workspace/review_game_id", "", type=str)))
         active_id = self._selected_live_game_id
         active = self.online_sessions.get(active_id) if active_id else None
         if active and active.status in {"started", "playing"}:
@@ -2772,13 +2993,22 @@ class MainWindow(QMainWindow):
             self.home_status.setText(f"Не удалось обновить партию {game_id}: {message}")
 
     def show_statistics(self) -> None:
-        dialog = StatisticsDialog(self.game_repository, self)
+        raw_filters = str(self.settings.value("workspace/statistics_filters", "", type=str))
+        try:
+            saved_filters = json.loads(raw_filters) if raw_filters else {}
+        except (TypeError, json.JSONDecodeError):
+            saved_filters = {}
+        dialog = StatisticsDialog(self.game_repository, self,
+                                  saved_filters=saved_filters if isinstance(saved_filters, dict) else {})
         self._statistics_dialog = dialog
         dialog.worker_started.connect(self._statistics_worker_started)
         dialog.worker_finished.connect(self._statistics_worker_finished)
         dialog.position_requested.connect(self._open_statistics_position)
         dialog.game_requested.connect(lambda game_id: self._open_statistics_game(dialog, game_id))
         dialog.exec()
+        self.settings.setValue("workspace/statistics_filters",
+                               json.dumps(dialog.persisted_filter_state(), ensure_ascii=False))
+        self._schedule_workspace_save()
         self._statistics_dialog = None
 
     def _open_statistics_game(self, dialog: StatisticsDialog, game_id: str) -> None:
@@ -4485,6 +4715,7 @@ class MainWindow(QMainWindow):
             return
         self._invalidate_analysis_preflight()
         self._lichess_connected = True
+        self.settings.setValue("workspace/selected_account", f"lichess:{username.strip().lower()}")
         self.connection.setText(f"●  Подключено: {username}")
         if self._connection_dialog is not None:
             self._connection_dialog.accept()
@@ -4512,6 +4743,11 @@ class MainWindow(QMainWindow):
     def _background_sync_finished(self, kind: str, message: str) -> None:
         if not self._shutdown_requested:
             self.connection.setToolTip(f"Последнее фоновое обновление {kind}: {message}")
+            if "Ошибка" in message or "не совпадают" in message:
+                self._notify_inline(f"Синхронизация {kind}: {message}")
+            elif "новых партий: 0" not in message and "новых попыток: 0" not in message:
+                if "новых партий:" in message or "новых попыток:" in message:
+                    self._notify_inline(f"Синхронизация {kind}: {message}", timeout_ms=6000)
 
     def _resume_pending_final_syncs(self) -> None:
         """Resume persisted terminal games without taking over the visible screen."""
@@ -4547,9 +4783,9 @@ class MainWindow(QMainWindow):
         if self._connection_dialog is not None and shiboken6.isValid(self._connection_dialog):
             self._connection_dialog.set_status(message)
         elif "HTTP 403" in message or "HTTP 401" in message:
-            self.home_status.setText(message + " Локальная библиотека и история остаются доступны.")
+            self._notify_inline(message + " Локальная библиотека и история остаются доступны.")
         else:
-            QMessageBox.warning(self, "Lichess", message)
+            self._notify_inline(message)
         self.refresh(message)
 
     def _lichess_move_failed(self, game_id: str, uci: str, request_id: str, status: int) -> None:
@@ -5451,34 +5687,30 @@ class MainWindow(QMainWindow):
         if self._shutdown_requested:
             return
         if isinstance(result, dict) and result.get("error"):
-            QMessageBox.warning(self, "Stockfish", result["error"])
+            self._notify_inline(f"Stockfish: {result['error']}")
         else:
             count = len(result.get("assessments", [])) if isinstance(result, dict) else 0
             if count:
-                dialog = QDialog(self)
-                dialog.setWindowTitle("Оценка партии · белые сверху положительны")
-                layout = QVBoxLayout(dialog)
-                layout.addWidget(QLabel(f"Оценено позиций: {count}. Источник: "
-                                        f"{result.get('source', 'Stockfish')}. Клик по графику открывает позицию."))
-                graph = EvaluationGraph(result["assessments"], dialog)
-                graph.selected_ply.connect(lambda ply: self._open_analysis_position(game_id, ply))
-                layout.addWidget(graph)
-                close = QPushButton("Закрыть")
-                close.clicked.connect(dialog.accept)
-                layout.addWidget(close)
-                dialog.resize(720, 320)
-                dialog.exec()
+                selected_ply = (self.review_workspace.selected_ply
+                                if self.review_workspace.review
+                                and self.review_workspace.review["game"]["game_id"] == game_id else 0)
+                if self._open_analysis_position(game_id, selected_ply):
+                    self._notify_inline(
+                        f"Анализ сохранён: оценено {count} позиций; открыт общий разбор партии.")
+                else:
+                    self._notify_inline(f"Анализ сохранён: оценено {count} позиций.")
             else:
-                QMessageBox.information(self, "Stockfish", "Оценок для этой партии нет.")
+                self._notify_inline("Stockfish не сохранил оценки для этой партии.")
 
-    def _open_analysis_position(self, game_id: str, ply: int) -> None:
+    def _open_analysis_position(self, game_id: str, ply: int) -> bool:
         game = self.game_repository.get_game(game_id)
         if not game:
-            return
+            return False
         if not self._open_saved_game(game):
             self.home_status.setText(self._raw_only_game_message(game))
-            return
+            return False
         self.review_workspace.select_ply(ply)
+        return True
 
     @staticmethod
     def _is_standard_board_game(game: dict) -> bool:
@@ -5525,6 +5757,8 @@ class MainWindow(QMainWindow):
             return False
         self.screen_stack.setCurrentWidget(self.review_workspace)
         self.game_status.setText("Сохранённая завершённая партия · только чтение")
+        self._active_route = "games"
+        self._schedule_workspace_save()
         return True
 
     def leave_online_game(self) -> None:
@@ -5543,6 +5777,8 @@ class MainWindow(QMainWindow):
         self.show_home()
 
     def closeEvent(self, event) -> None:
+        self._workspace_save_timer.stop()
+        self._persist_workspace_state()
         self._shutdown_requested = True
         self._position_eval_timer.stop()
         if self._position_eval_thread is not None:

@@ -1,6 +1,6 @@
 import chess
 
-from chess_coach.ui.game_review import GameReviewWorkspace
+from chess_coach.ui.game_review import GameReviewWorkspace, ReviewGraph
 from chess_coach.lichess.game_review import (
     ACCEPTANCE_POLICY_VERSION, eligible_error_moves, load_game_review,
     verified_improved_moves,
@@ -139,3 +139,18 @@ def test_review_safety_button_does_not_reveal_solution_before_preflight(qtbot, t
         assert not workspace.graph.isHidden()  # graph stays visible; no solution/PV is exposed
     finally:
         repo.shutdown()
+
+
+def test_review_graph_supports_keyboard_position_navigation(qtbot):
+    from PySide6.QtCore import Qt
+
+    graph = ReviewGraph([{"ply": 0, "white_cp": 0}, {"ply": 3, "white_cp": 40}], [])
+    qtbot.addWidget(graph)
+    graph.show()
+    graph.setFocus()
+    selected = []
+    graph.selected_ply.connect(selected.append)
+    graph.selected_ply.connect(graph.select_ply)
+    qtbot.keyClick(graph, Qt.Key.Key_End)
+    qtbot.keyClick(graph, Qt.Key.Key_Left)
+    assert selected == [3, 2]

@@ -7,7 +7,7 @@ from PySide6.QtCore import QPointF, Qt, Signal
 from PySide6.QtGui import QColor, QPainter, QPen, QPolygonF
 from PySide6.QtWidgets import (
     QFrame, QGridLayout, QHBoxLayout, QLabel, QListWidget, QListWidgetItem,
-    QPushButton, QSplitter, QTabWidget, QVBoxLayout, QWidget,
+    QPushButton, QScrollArea, QSplitter, QTabWidget, QVBoxLayout, QWidget,
 )
 
 from ..board_view import BoardView
@@ -27,7 +27,9 @@ class ReviewGraph(QWidget):
         self.current_ply = 0
         self.setMinimumHeight(170)
         self.setMaximumHeight(220)
-        self.setMinimumWidth(400)
+        self.setMinimumWidth(320)
+        self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+        self.setAccessibleName("Интерактивный график оценки по ходам")
 
     def _values(self):
         output = []
@@ -110,6 +112,23 @@ class ReviewGraph(QWidget):
         ply = round((event.position().x() - rect.left()) * max_ply / max(1, rect.width()))
         self.selected_ply.emit(max(0, min(max_ply, ply)))
 
+    def keyPressEvent(self, event):
+        values = self._values()
+        if not values:
+            super().keyPressEvent(event)
+            return
+        max_ply = max(ply for ply, _score, _mate in values)
+        if event.key() == Qt.Key.Key_Left:
+            self.selected_ply.emit(max(0, self.current_ply - 1))
+        elif event.key() == Qt.Key.Key_Right:
+            self.selected_ply.emit(min(max_ply, self.current_ply + 1))
+        elif event.key() == Qt.Key.Key_Home:
+            self.selected_ply.emit(0)
+        elif event.key() == Qt.Key.Key_End:
+            self.selected_ply.emit(max_ply)
+        else:
+            super().keyPressEvent(event)
+
 
 class GameReviewWorkspace(QWidget):
     position_selected = Signal(str, int)
@@ -139,7 +158,13 @@ class GameReviewWorkspace(QWidget):
         self._build_ui()
 
     def _build_ui(self):
-        root = QVBoxLayout(self)
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+        scroll = QScrollArea(self)
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+        content = QWidget(scroll)
+        root = QVBoxLayout(content)
         root.setContentsMargins(16, 12, 16, 12)
         header = QHBoxLayout()
         self.title = QLabel("Разбор партии")
@@ -162,6 +187,7 @@ class GameReviewWorkspace(QWidget):
         self.white_name = QLabel("Белые")
         self.white_name.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.review_board = BoardView(chess.Board())
+        self.review_board.setAccessibleName("Доска просмотренной партии")
         self.review_board.setFixedSize(480, 480)
         self.review_board.set_interaction_enabled(False)
         self.review_board.set_premove_allowed(False)
@@ -175,10 +201,12 @@ class GameReviewWorkspace(QWidget):
         split.addWidget(board_column)
 
         inspector = QWidget()
-        inspector.setMinimumWidth(300)
+        inspector.setMinimumWidth(240)
         inspector_layout = QVBoxLayout(inspector)
         self.tabs = QTabWidget()
+        self.tabs.setAccessibleName("Панель сведений о партии")
         self.moves_list = QListWidget()
+        self.moves_list.setAccessibleName("Список ходов партии")
         self.moves_list.currentItemChanged.connect(self._move_selected)
         self.tabs.addTab(self.moves_list, "Ходы")
         facts = QWidget()
@@ -196,6 +224,7 @@ class GameReviewWorkspace(QWidget):
         split.addWidget(inspector)
         split.setStretchFactor(0, 6)
         split.setStretchFactor(1, 4)
+        self.workspace_splitter = split
         root.addWidget(split, 1)
 
         self.graph_title = QLabel("Оценка по ходу партии")
@@ -238,8 +267,17 @@ class GameReviewWorkspace(QWidget):
         self.training_status.setObjectName("secondary")
         actions.addWidget(self.training_status, 1)
         root.addLayout(actions)
+        scroll.setWidget(content)
+        outer.addWidget(scroll, 1)
         self.check_button.setEnabled(False)
         self.continue_button.setVisible(False)
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        splitter = getattr(self, "workspace_splitter", None)
+        if splitter is not None:
+            splitter.setOrientation(
+                Qt.Orientation.Vertical if self.width() < 1120 else Qt.Orientation.Horizontal)
 
     def load_game(self, game: dict, *, training_allowed: bool | None = None,
                   training_block_reason: str | None = None) -> None:

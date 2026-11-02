@@ -20,7 +20,7 @@
 | D | Board workspace sizes/inspector; единый GameReviewWorkspace; интерактивный graph и per-side summary; улучшение ошибки | Выполнен локально, checkpoint ниже |
 | E | Оригинальные звуки, mute/volume и dedup событий | Выполнен, commit `61212bd` |
 | F | CMD/debug launcher, optional shortcut action, single instance, startup diagnostics | Реализован локально, ожидает checkpoint |
-| G | Workspace restore, loading/notifications/accessibility/responsive behavior | Ожидает F |
+| G | Workspace restore, loading/notifications/accessibility/responsive behavior | Реализован локально, ожидает checkpoint |
 | H | Регрессии, display/DPI acceptance, полный Windows CI на точном SHA, handoff | Ожидает A0–G |
 
 ## Решения
@@ -85,6 +85,16 @@
 - Windows CPython 3.12.10 / Qt offscreen: `pytest tests/test_sounds.py tests/test_theme.py tests/test_dashboard.py tests/test_game_review.py tests/test_board_view.py tests/test_window.py`: **148 passed**; `compileall src/chess_coach tests` PASS; `git diff --check` PASS. Stage commit: `61212bd Add original configurable chess sounds`.
 - Реальное аудиоустройство/задержка <100ms и ручная проверка динамиков на Windows — **НЕ ПРОВЕРЯЛИСЬ**.
 - Следующий этап: F — прозрачные CMD/debug launchers, явное создание Desktop shortcut по действию владельца, single-instance и ограниченные startup logs.
+
+### G — сохранение рабочего места, тихие уведомления и адаптивность
+
+- Состояние окна сохраняется debounced в QSettings: geometry/maximized через `saveGeometry`, dark-v1, стабильный последний route, sidebar mode, размер доски, account id без токена; для последнего завершённого review — только `game_id`, `line_revision`, `line_hash`, просмотренный ply и вкладка inspector. PGN/FEN не копируются в settings, SQLite не меняется. Фильтры StatisticsDialog хранятся как небольшой JSON state, выбор восстанавливается только если account/filter option всё ещё доступен.
+- При старте автоматическое продолжение выполняется только если последним экраном был review, game всё ещё завершён и стандартный, а revision+hash совпадают. Ply/tab восстанавливаются по совпавшей линии. При изменении линии открывается текущая партия с ply 0 и коротким уведомлением; при недоступной партии остаётся Главная. Startup restore отменяется, если пользователь уже открыл другой экран. На Главной добавлена отдельная кнопка «Продолжить разбор последней партии».
+- Геометрия окна восстанавливается в Qt logical px и полностью помещается в `availableGeometry` текущих экранов; недоступная сохранённая геометрия помещается на первый экран. Минимальный размер приложения снижен до 500×360 logical px. На узком окне обзорные KPI перестраиваются в две колонки, игровая доска/панель и GameReview инспектор переходят в вертикальный splitter, основные страницы прокручиваются; статистические вкладки тоже имеют scroll wrapper.
+- В MainWindow добавлен accessible status bar для кратких событий sync/error/анализа; Lichess/API/Stockfish ошибки больше не создают неожиданный блокирующий warning modal. Успешный завершённый анализ направляет в тот же GameReviewWorkspace вместо отдельного графического диалога. Навигация, настройки, board и review graph получили доступные имена; график поддерживает Home/End/Left/Right с keyboard focus.
+- Добавлены regressions на совпадающий resume, stale revision/hash fallback, окно вне/частично вне экрана, отсутствие захвата экрана отложенным restore, persistence statistics filters, unified analysis completion, inline error notice и keyboard graph navigation.
+- Windows CPython 3.12.10 / Qt offscreen: `pytest tests/test_window.py tests/test_game_review.py tests/test_theme.py tests/test_dashboard.py tests/test_launcher.py tests/test_single_instance.py`: **135 passed**; `compileall src/chess_coach tests` PASS; `git diff --check` PASS.
+- Проверка на физических DPI/мониторах, изменение разрешения в ходе работы, клавиатурный/скринридер smoke и ручная проверка сохранённого окна — **НЕ ПРОВЕРЯЛИСЬ**; для этого нужен владелец на Windows GUI. Следующий этап: H — полный regression matrix, compile/diff, точный Windows CI и финальный handoff.
 
 ### F — пользовательский запуск, single-instance и иконка
 
