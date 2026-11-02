@@ -18,8 +18,8 @@
 | B | AppShell, header/sidebar, responsive route navigation | Выполнен локально; commit checkpoint ниже |
 | C | Главная, честные KPI, последние три реальные партии/empty states | Выполнен, checkpoint ниже |
 | D | Board workspace sizes/inspector; единый GameReviewWorkspace; интерактивный graph и per-side summary; улучшение ошибки | Выполнен локально, checkpoint ниже |
-| E | Оригинальные звуки, mute/volume и dedup событий | Реализован локально, ожидает checkpoint |
-| F | CMD/debug launcher, optional shortcut action, single instance, startup diagnostics | Ожидает E |
+| E | Оригинальные звуки, mute/volume и dedup событий | Выполнен, commit `61212bd` |
+| F | CMD/debug launcher, optional shortcut action, single instance, startup diagnostics | Реализован локально, ожидает checkpoint |
 | G | Workspace restore, loading/notifications/accessibility/responsive behavior | Ожидает F |
 | H | Регрессии, display/DPI acceptance, полный Windows CI на точном SHA, handoff | Ожидает A0–G |
 
@@ -82,6 +82,16 @@
 - Сигналы разделены на обычный ход, взятие, шах, рокировку, превращение, предход, окончание партии и уведомление. Приоритет завершения результата выше классификации хода. Настройки ходов/уведомлений/явного выбора исторического хода и громкость 0–100 сохраняются в QSettings; defaults: moves ON, notifications ON, history OFF, volume 45.
 - Live own move ждёт authoritative Lichess event, локальный ход подаёт сигнал после принятия контроллером; повторный ACK/stream ply и повторное gameFinish подавляются event deduplicator. Reject и фоновые события не озвучиваются. Premove placement имеет отдельный тихий click; исполнение звучит только после подтверждения. История звучит только при явном клике по записи и включённой настройке; навигация, колесо, refresh и rebuild остаются тихими.
 - Добавлены unit и Qt regressions на WAV формат, классификацию check/capture/castle/promotion/mate, move ACK/dedup, pending rejection, отдельный notification cue, mute/volume, premove, повторное завершение, explicit history и отсутствие звука при навигации.
-- Windows CPython 3.12.10 / Qt offscreen: `pytest tests/test_sounds.py tests/test_theme.py tests/test_dashboard.py tests/test_game_review.py tests/test_board_view.py tests/test_window.py`: **148 passed**; `compileall src/chess_coach tests` PASS; `git diff --check` PASS.
+- Windows CPython 3.12.10 / Qt offscreen: `pytest tests/test_sounds.py tests/test_theme.py tests/test_dashboard.py tests/test_game_review.py tests/test_board_view.py tests/test_window.py`: **148 passed**; `compileall src/chess_coach tests` PASS; `git diff --check` PASS. Stage commit: `61212bd Add original configurable chess sounds`.
 - Реальное аудиоустройство/задержка <100ms и ручная проверка динамиков на Windows — **НЕ ПРОВЕРЯЛИСЬ**.
 - Следующий этап: F — прозрачные CMD/debug launchers, явное создание Desktop shortcut по действию владельца, single-instance и ограниченные startup logs.
+
+### F — пользовательский запуск, single-instance и иконка
+
+- Добавлен `launch_chess_coach.cmd` (путь относительно `%~dp0`, ищет `.venv312` затем `.venv`, запускает `pythonw.exe -m chess_coach --manual-connect`, ничего не устанавливает и не использует временный `--offline` профиль); `debug_chess_coach.cmd` запускает обычный `python.exe`, оставляя терминал для диагностики. Отсутствующий/неподдерживаемый runtime даёт инструкцию и пишет только статический код ошибки в `%LOCALAPPDATA%\ChessCoach\logs\chess-coach-launcher.log`.
+- Обновлён opt-in `scripts/create_desktop_shortcut.ps1`: создаёт ярлык лишь при явном запуске пользователем, предпочитает `.venv312`, запускает `--manual-connect`, использует собственную ICO, не создаёт автозапуск. `scripts/create_app_icon.py` генерирует собственный 64px ICO из примитивов stdlib, включён в wheel package data и используется как Qt app icon.
+- Добавлен profile-scoped `QLocalServer` guard. Идентификатор — SHA-256 нормализованного каталога существующего `QStandardPaths.AppDataLocation`, без записи токенов или иных данных. Повторный запуск отправляет activate-команду и завершается до создания MainWindow/SQLite writer. Сомнительный socket timeout блокирует новый writer вместо попытки удалить возможный живой lock; только явные missing/refused endpoints проходят stale cleanup.
+- Добавлены тесты повторного запуска/активации и независимых временных профилей, CLI второй процесс, относительность launch script, offline isolation, args shortcut, оригинальная ICO signature, существующие privacy diagnostics.
+- Windows CPython 3.12.10 / Qt offscreen: `pytest tests/test_launcher.py tests/test_single_instance.py tests/test_diagnostics.py tests/test_window.py`: **121 passed**; `compileall src/chess_coach scripts/create_app_icon.py tests/test_launcher.py tests/test_single_instance.py` PASS; `git diff --check` PASS.
+- `.cmd`, COM shortcut creation and interactive activation of a second Windows process on the owner's profile were not executed: no user DB/profile changes are allowed during this task. Tests use separate temp profiles; visible GUI remains for owner's manual check.
+- Следующий этап: G — save/restore route + review identity, non-blocking loading/notifications, responsive/accessibility regression pass.
