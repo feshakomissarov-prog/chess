@@ -115,3 +115,12 @@ def test_missing_audio_device_fails_gracefully(tmp_path):
     assert not player.available
     assert player.effects == {}
     assert not player.play_premove("premove")
+
+
+def test_preview_is_explicit_and_does_not_consume_live_game_dedupe(tmp_path):
+    player = _player(tmp_path)
+    assert player.preview()
+    assert player.effects["move"].play_count == 1
+    board = chess.Board()
+    assert player.play_move("next-game", 1, board, chess.Move.from_uci("e2e4"))
+    assert player.effects["move"].play_count == 2

@@ -41,9 +41,10 @@ atexit.register(close_position_engines)
 
 
 def evaluate_position(engine_path: str, board: chess.Board, stop_event: threading.Event,
-                      active_result: dict) -> dict:
+                      active_result: dict, on_update=None) -> dict:
     """Evaluate one copied position; ``active_result`` lets the UI stop stale UCI work."""
     engine = _engine_for_path(engine_path)
+    on_update = on_update or active_result.get("on_update")
     try:
         if stop_event.is_set():
             return {"cancelled": True}
@@ -56,6 +57,8 @@ def evaluate_position(engine_path: str, board: chess.Board, stop_event: threadin
         for update in analysis:
             info = update
             active_result["latest_info"] = update
+            if on_update is not None and not stop_event.is_set():
+                on_update(update)
             if stop_event.is_set():
                 analysis.stop()
                 break

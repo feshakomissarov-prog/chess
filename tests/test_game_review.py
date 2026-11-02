@@ -141,8 +141,8 @@ def test_move_table_groups_white_and_black_in_fullmove_rows_and_keeps_ply(qtbot)
     ]
     table.set_rows(moves, scores={1: {"white_cp": 25}, 2: {"white_cp": 10}})
     assert table.table.rowCount() == 2
-    assert table.table.item(0, 1).text().endswith("+0.2 ♔")
-    assert table.table.item(0, 2).text().startswith("e5   +0.1")
+    assert table.table.item(0, 1).text().endswith("+0.2 · белые")
+    assert table.table.item(0, 2).text().startswith("? e5   +0.1")
     assert table.table.item(1, 1).text().startswith("?? ")
     selected = []
     table.ply_selected.connect(selected.append)
@@ -164,7 +164,7 @@ def test_move_table_black_to_move_fen_uses_fullmove_number_and_handles_empty_sid
     assert table.table.rowCount() == 1
     assert table.table.item(0, 0).text() == "25"
     assert table.table.item(0, 1).text() == ""
-    assert table.table.item(0, 2).text() == "Kd7"
+    assert table.table.item(0, 2).text() == "? Kd7"
 
 
 def test_review_safety_button_does_not_reveal_solution_before_preflight(qtbot, tmp_path):
@@ -246,7 +246,7 @@ def test_review_events_and_saved_pv_follow_selection_and_fair_play_gate(qtbot, t
         assert [workspace.tabs.tabText(i) for i in range(workspace.tabs.count())] == [
             "Ходы", "Разбор", "События", "Заметки"]
         workspace.select_ply(1)
-        assert "Сохранённый PV: c7c5 g1f3" in workspace.event_detail.text()
+        assert "Сохранённое продолжение: c5 Nf3" in workspace.event_detail.text()
         workspace.set_safety_pending("Активная человеческая партия")
         assert workspace.event_list.count() == 0
         assert "Активная человеческая партия" in workspace.event_detail.text()

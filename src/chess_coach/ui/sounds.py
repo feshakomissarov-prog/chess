@@ -173,6 +173,10 @@ class ChessSoundPlayer(QObject):
             return False
         return self._play("notification")
 
+    def preview(self) -> bool:
+        """Play one short local move click without touching live event dedupe."""
+        return bool(self.moves_enabled and self._play("move"))
+
     def _play(self, cue: str) -> bool:
         effect = self.effects.get(cue)
         if effect is None:

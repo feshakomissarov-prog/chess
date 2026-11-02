@@ -126,6 +126,29 @@ def source_short(source: Any) -> tuple[str, str]:
     raw = str(source or "").strip().casefold()
     if raw in {"stockfish", "local", "chess_coach"} or "stockfish" in raw:
         return "S", "Stockfish · локальная оценка"
-    if raw in {"lichess", "lichess_analysis", "official_lichess"}:
+    if raw in {"lichess", "lichess_analysis", "official_lichess", "lichess-pgn",
+               "lichess pgn"}:
         return "L", "Lichess · официальный импортированный анализ"
     return "—", "Оценка отсутствует"
+
+
+def severity_label(value: Any) -> str:
+    return {
+        "good": "хороший ход", "inaccuracy": "неточность", "mistake": "ошибка",
+        "blunder": "зевок", "unknown": "не оценён", "strong": "подтверждённый сильный ход",
+    }.get(str(value or "").casefold(), "класс не определён")
+
+
+def phase_label(value: Any) -> str:
+    return {"opening": "дебют", "middlegame": "миттельшпиль",
+            "endgame": "эндшпиль", "unknown": "этап не определён"}.get(
+                str(value or "").casefold(), "этап не определён")
+
+
+def evaluation_label(white_cp: int | None, mate_white: int | None = None) -> str:
+    if mate_white is not None:
+        side = "белые ставят мат" if mate_white > 0 else "чёрные ставят мат"
+        return f"{side} через {abs(int(mate_white))} · перспектива белых"
+    if white_cp is None:
+        return "оценка отсутствует"
+    return f"{int(white_cp) / 100:+.2f} за белых"

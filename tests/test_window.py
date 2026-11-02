@@ -294,17 +294,20 @@ def test_m46_shell_uses_expanded_sidebar_at_wide_home_and_compact_board(qtbot, t
     assert window.sidebar.width() == 60
 
 
-@pytest.mark.parametrize("size", [400, 480, 560, 640])
+@pytest.mark.parametrize("size", [400, 480, 560, 720, -1])
 def test_m46_board_size_presets_are_available_and_persisted(qtbot, tmp_path, size):
     settings = QSettings(str(tmp_path / f"board-size-{size}.ini"), QSettings.Format.IniFormat)
     window = MainWindow(settings, offline_mode=True)
     qtbot.addWidget(window)
     assert [window.board_size_combo.itemData(i) for i in range(window.board_size_combo.count())] == [
-        400, 480, 560, 640]
+        400, 480, 560, 720, -1]
     window.board_size_combo.setCurrentIndex(window.board_size_combo.findData(size))
     assert window.settings.value("board_target_size", type=int) == size
-    assert window.board.width() <= size
-    assert window.board.height() <= size
+    if size > 0:
+        assert window.board.width() <= size
+        assert window.board.height() <= size
+    else:
+        assert window.settings.value("board_target_size", type=int) == -1
     assert window.board.width() >= 320
 
 
@@ -542,7 +545,7 @@ def test_unsafe_lichess_status_revokes_review_lease_and_recovery_requires_new_pr
     window._request_review_training_safety("status-revoke")
     window._review_safety_games_received(window.lichess.request_id, [])
     assert window.review_workspace.evaluation_allowed
-    assert "Сохранённый PV:" in window.review_workspace.event_detail.text()
+    assert "Сохранённое продолжение:" in window.review_workspace.event_detail.text()
     window.review_workspace.start_training()
     assert window.review_workspace.training_mode
 
@@ -553,7 +556,7 @@ def test_unsafe_lichess_status_revokes_review_lease_and_recovery_requires_new_pr
     assert not review.evaluation_allowed
     assert not review.training_mode
     assert review.graph._values() == []
-    assert "Сохранённый PV:" not in review.event_detail.text()
+    assert "Сохранённое продолжение:" not in review.event_detail.text()
     previous = review.training_status.text()
     review.show_hint()
     assert review.training_status.text() == previous
@@ -975,9 +978,9 @@ def test_statistics_unknown_own_coverage_and_real_collapsed_advanced_filters(qtb
 
     text = dialog.summary_label.text()
     row_text = dialog.games.item(0).text()
-    assert "0/465" in text and "личные ошибки на 100 сравнимых своих ходов: нет данных" in text
-    assert "Классификации обоих цветов" in text and "не персональный диагноз" in text
-    assert "н/д (0/465 сравнимых ходов)" in row_text
+    assert "ошибки на 100 оценённых моих ходов: нет данных" in text
+    assert "Официальная точность Lichess" in text and "нет данных" in text
+    assert "Нет оценённых моих ходов (0/465)" in row_text
     assert "свои н/о/з 0/0/0" not in row_text
 
 
@@ -1104,9 +1107,12 @@ def test_statistics_screen_filters_asynchronously_and_resets(qtbot, tmp_path):
     assert dialog.games.count() == 2
     win_item = next(dialog.games.item(index) for index in range(dialog.games.count())
                     if dialog.games.item(index).data(Qt.ItemDataRole.UserRole) == "screen-win")
-    assert "н/о/з 0/1/0" in win_item.text()
-    assert "2/2 поз." in win_item.text()
-    assert "stockfish" in win_item.text()
+    assert "Неточности 0" in win_item.text()
+    assert "ошибки 1" in win_item.text()
+    assert "зевки 0" in win_item.text()
+    assert "Оценено позиций: 2/2" in win_item.text()
+    assert "источник S" in win_item.text()
+    assert "Stockfish" in win_item.toolTip()
     assert dialog.period.currentData() == 90
     assert [dialog.tabs.tabText(index) for index in range(dialog.tabs.count())] == [
         "Обзор", "Партии", "Дебюты/фазы", "Критические моменты"]
@@ -1362,6 +1368,8 @@ def test_position_evaluation_is_explicit_offline_only_and_stale_result_is_hidden
     qtbot.waitUntil(lambda: len(calls) == 1 and window._position_eval_thread is None,
                     timeout=3000)
     assert "+0.35" in window.position_eval_label.text()
+    assert "лучший ход e4" in window.position_eval_label.text()
+    assert "e2e4" not in window.position_eval_label.text()
 
     for uci in ("e2e4", "e7e5", "g1f3", "b8c6"):
         window.on_move_intent(chess.Move.from_uci(uci))
@@ -1434,7 +1442,7 @@ def test_position_evaluation_normal_mode_requires_safe_preflight_and_rejects_sta
     qtbot.waitUntil(lambda: len(calls) == 1 and window._position_eval_thread is None,
                     timeout=3000)
     assert "-0.25" in window.position_eval_label.text()
-    assert "PV e2e4" in window.position_eval_label.text()
+    assert "вариант e4" in window.position_eval_label.text()
     assert window.game_repository.search_games(completed_only=False)["total"] == games_before
 
     # HTTP 429/error while asking for a new safety snapshot fails closed.
@@ -1857,7 +1865,7 @@ def test_puzzle_replay_is_local_legal_and_does_not_change_history_or_send_reques
 
     def exercise(dialog):
         replay = next(button for button in dialog.findChildren(QPushButton)
-                      if button.text() == "Решить снова офлайн")
+                      if button.text() == "Решить повторно")
         reveal = next(button for button in dialog.findChildren(QPushButton)
                       if button.text() == "Показать решение…")
         reset = next(button for button in dialog.findChildren(QPushButton)
@@ -2096,12 +2104,16 @@ def test_completed_pair_allows_selecting_white_halfmove(qtbot, tmp_path) -> None
     live_fen = window.controller.board.fen()
     window.refresh()
     assert window.moves.count() == 2
+    assert window.moves.table.rowCount() == 1
+    assert window.moves.table.item(0, 1).text() == "e4"
+    assert window.moves.table.item(0, 2).text() == "e5"
     white_item = next(
         window.moves.item(index)
         for index in range(window.moves.count())
         if window.moves.item(index).data(Qt.ItemDataRole.UserRole) == 1
     )
-    assert white_item.text() == "1. e4"
+    assert white_item.text() == "e4"
+    assert window.moves.table.item(0, 0).text() == "1"
     qtbot.mouseClick(
         window.moves.viewport(),
         Qt.MouseButton.LeftButton,
@@ -2126,6 +2138,10 @@ def test_visual_preferences_persist_in_qsettings(tmp_path) -> None:
     dialog.sound_notifications.setChecked(False)
     dialog.sound_history.setChecked(True)
     dialog.sound_volume.setValue(73)
+    preview = []
+    dialog.sound_preview_requested.connect(lambda: preview.append(True))
+    dialog.sound_preview.click()
+    assert preview == [True]
     dialog.save(settings)
 
     loaded = QSettings(path, QSettings.Format.IniFormat)
@@ -2180,138 +2196,76 @@ def test_saved_custom_node_limit_survives_settings_reopen_and_preset_changes_are
     assert reopened.analysis_limit_value.value() == 25_000
 
 
-def test_stockfish_uci_probe_timeout_waits_for_process_finished(qtbot, tmp_path, monkeypatch):
+def test_stockfish_uci_probe_uses_hidden_worker_and_reports_timeout(qtbot, tmp_path, monkeypatch):
     import chess_coach.window as window_module
 
-    class FakeSignal:
-        def __init__(self): self.callbacks = []
-        def connect(self, callback): self.callbacks.append(callback)
-        def emit(self, *args):
-            for callback in list(self.callbacks): callback(*args)
-
-    class FakeProcess:
-        class ProcessState:
-            NotRunning = 0
-            Running = 1
-        ProcessState = ProcessState
-        def __init__(self, _parent):
-            created.append(self)
-            self.started = FakeSignal()
-            self.readyReadStandardOutput = FakeSignal()
-            self.errorOccurred = FakeSignal()
-            self.finished = FakeSignal()
-            self.current_state = self.ProcessState.NotRunning
-            self.program = None
-            self.killed = False
-            self.deleted = False
-            self.output = b""
-            self.writes = []
-        def start(self, program, _args):
-            self.program = program
-            self.current_state = self.ProcessState.Running
-        def state(self): return self.current_state
-        def write(self, payload): self.writes.append(payload); return len(payload)
-        def readAllStandardOutput(self):
-            payload, self.output = self.output, b""
-            return payload
-        def kill(self): self.killed = True  # completion is intentionally delayed
-        def deleteLater(self): self.deleted = True
-        def errorString(self): return "test error"
-        def complete(self):
-            self.current_state = self.ProcessState.NotRunning
-            self.finished.emit(1, 0)
-
-    created = []
-    monkeypatch.setattr(window_module, "QProcess", FakeProcess)
+    engine_path = tmp_path / "fake-stockfish.exe"
+    engine_path.write_bytes(b"fake")
+    calls = []
+    class FakeEngine:
+        id = {"name": "FakeFish"}
+        def ping(self): raise TimeoutError("UCI не ответил за 3 секунды")
+        def quit(self): calls.append("quit")
+    monkeypatch.setattr(window_module, "popen_uci_hidden",
+                        lambda *args, **kwargs: (calls.append((args, kwargs)) or FakeEngine()))
     dialog = SettingsDialog(QSettings(str(tmp_path / "probe-timeout.ini"), QSettings.Format.IniFormat))
     qtbot.addWidget(dialog)
-    dialog.engine_path.setText("C:/user-selected/stockfish.exe")
-    assert created == []
+    dialog.engine_path.setText(str(engine_path))
     dialog.engine_test.click()
-    process = created[0]
-    process.started.emit()
-    assert process.program == "C:/user-selected/stockfish.exe"
-    assert process.writes == [b"uci\n"]
-    dialog._engine_probe_timeout(process)
-    assert process.killed and not process.deleted
-    assert dialog._engine_process is process
-    assert not dialog.engine_test.isEnabled()
-    process.complete()
-    assert process.deleted
-    assert dialog._engine_process is None
-    assert dialog.engine_test.isEnabled()
-    assert "5 секунд" in dialog.engine_test_status.text()
+    qtbot.waitUntil(lambda: dialog.engine_test.isEnabled(), timeout=3000)
+    assert calls[0][0][0] == str(engine_path.resolve())
+    assert calls[0][1]["timeout"] == 3.0
+    assert calls[-1] == "quit"
+    assert "не пройдена" in dialog.engine_test_status.text()
+    assert not dialog._engine_verified_path
 
 
-def test_stockfish_uci_probe_quits_gracefully_and_close_waits_for_delayed_finished(
-        qtbot, tmp_path, monkeypatch):
+def test_stockfish_uci_probe_cancel_closes_hidden_engine_worker(qtbot, tmp_path, monkeypatch):
+    import threading
     import chess_coach.window as window_module
 
-    class FakeSignal:
-        def __init__(self): self.callbacks = []
-        def connect(self, callback): self.callbacks.append(callback)
-        def emit(self, *args):
-            for callback in list(self.callbacks): callback(*args)
-
-    class FakeProcess:
-        class ProcessState:
-            NotRunning = 0
-            Running = 1
-        ProcessState = ProcessState
-        def __init__(self, _parent):
-            created.append(self)
-            self.started = FakeSignal()
-            self.readyReadStandardOutput = FakeSignal()
-            self.errorOccurred = FakeSignal()
-            self.finished = FakeSignal()
-            self.current_state = self.ProcessState.NotRunning
-            self.output = b""
-            self.writes = []
-            self.deleted = False
-            self.killed = False
-        def start(self, _program, _args): self.current_state = self.ProcessState.Running
-        def state(self): return self.current_state
-        def write(self, payload): self.writes.append(payload); return len(payload)
-        def readAllStandardOutput(self):
-            payload, self.output = self.output, b""
-            return payload
-        def kill(self): self.killed = True
-        def deleteLater(self): self.deleted = True
-        def errorString(self): return "test error"
-        def complete(self):
-            self.current_state = self.ProcessState.NotRunning
-            self.finished.emit(0, 0)
-
-    created = []
-    monkeypatch.setattr(window_module, "QProcess", FakeProcess)
+    engine_path = tmp_path / "fake-stockfish.exe"
+    engine_path.write_bytes(b"fake")
+    started, stopped = threading.Event(), threading.Event()
+    class FakeEngine:
+        id = {"name": "FakeFish"}
+        def ping(self):
+            started.set()
+            stopped.wait(2)
+            raise RuntimeError("cancelled")
+        def quit(self): stopped.set()
+    monkeypatch.setattr(window_module, "popen_uci_hidden", lambda *args, **kwargs: FakeEngine())
     dialog = SettingsDialog(QSettings(str(tmp_path / "probe-close.ini"), QSettings.Format.IniFormat))
     qtbot.addWidget(dialog)
-    dialog.engine_path.setText("fake-stockfish.exe")
+    dialog.engine_path.setText(str(engine_path))
     dialog.engine_test.click()
-    process = created[0]
-    process.output = b"id name FakeFish\nuciok\n"
-    process.readyReadStandardOutput.emit()
-    assert process.writes[-1] == b"isready\n"
-    process.output = b"readyok\n"
-    process.readyReadStandardOutput.emit()
-    assert process.writes[-1] == b"quit\n"
-    assert dialog._engine_process is process and not process.deleted
-    assert not dialog.engine_test.isEnabled()
+    qtbot.waitUntil(started.is_set, timeout=1000)
+    worker = dialog._engine_probe_thread
+    dialog.reject()
+    assert stopped.is_set()
+    qtbot.waitUntil(lambda: not worker.is_alive(), timeout=1000)
+    assert not dialog._engine_verified_path
 
-    dialog.reject()  # repeated close/cancel while graceful shutdown is pending is idempotent
-    assert dialog._engine_process is process and not process.deleted
-    process.complete()
-    assert dialog._engine_process is None and process.deleted
-    assert dialog.engine_test.isEnabled()
+
+def test_stockfish_uci_probe_marks_only_tested_path_verified(qtbot, tmp_path, monkeypatch):
+    import chess_coach.window as window_module
+
+    engine_path = tmp_path / "fake-stockfish.exe"
+    engine_path.write_bytes(b"fake")
+    class FakeEngine:
+        id = {"name": "FakeFish"}
+        def ping(self): return None
+        def quit(self): return None
+    monkeypatch.setattr(window_module, "popen_uci_hidden", lambda *args, **kwargs: FakeEngine())
+    dialog = SettingsDialog(QSettings(str(tmp_path / "probe-success.ini"), QSettings.Format.IniFormat))
+    qtbot.addWidget(dialog)
+    dialog.engine_path.setText(str(engine_path))
+    dialog.engine_test.click()
+    qtbot.waitUntil(lambda: dialog.engine_test.isEnabled(), timeout=2000)
     assert dialog.engine_test_status.text() == "UCI готов: FakeFish"
-
-    dialog.engine_test.click()
-    second = created[1]
-    dialog.reject()  # cancellation kills the child but does not destroy its live wrapper
-    assert second.killed and not second.deleted
-    assert dialog._engine_process is second
-    second.complete()
-    assert dialog._engine_process is None and second.deleted
+    assert dialog._engine_verified_path == str(engine_path.resolve())
+    dialog.engine_path.setText(str(tmp_path / "different.exe"))
+    assert not dialog._engine_verified_path
 
 
 def test_cancel_premove_button_clears_queued_intent(qtbot, tmp_path) -> None:
@@ -2742,6 +2696,22 @@ def test_m46_home_has_play_review_context_and_collapsed_secondary_actions(qtbot,
     assert not window.home_more_content.isHidden()
     assert window.home_batch_analysis_button.isEnabled()
     window.game_repository.shutdown()
+
+
+def test_sidebar_play_opens_mode_picker_without_resetting_local_game(qtbot, tmp_path):
+    window = MainWindow(QSettings(str(tmp_path / "play-picker.ini"),
+                                  QSettings.Format.IniFormat), offline_mode=True)
+    qtbot.addWidget(window)
+    window.start_local_game()
+    for uci in ("e2e4", "e7e5"):
+        window.on_move_intent(chess.Move.from_uci(uci))
+    before = tuple(window.controller.board.move_stack)
+    window._nav_buttons["play"].click()
+    assert window.screen_stack.currentWidget() is window.play_page
+    assert tuple(window.controller.board.move_stack) == before
+    assert not window.play_ai_button.isEnabled()
+    assert window.play_active_button.toolTip()
+    window.close()
 
 
 def test_local_move_sound_deduplication_uses_a_new_identity_for_each_game(qtbot, tmp_path):

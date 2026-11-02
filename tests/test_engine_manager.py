@@ -267,9 +267,12 @@ def test_position_evaluator_reuses_one_engine_for_a_local_session(monkeypatch, t
     monkeypatch.setattr(position_module, "popen_uci_hidden",
                         lambda *args, **kwargs: (starts.append(args[0]) or engine))
     path = str(tmp_path / "stockfish.exe")
-    first = position_module.evaluate_position(path, chess.Board(), threading.Event(), {})
+    updates = []
+    first = position_module.evaluate_position(
+        path, chess.Board(), threading.Event(), {}, on_update=updates.append)
     second = position_module.evaluate_position(path, chess.Board(), threading.Event(), {})
     assert first["depth"] == second["depth"] == 1
+    assert len(updates) == 1 and updates[0]["depth"] == 1
     assert len(starts) == 1
     position_module.close_position_engines()
     assert quits == ["quit"]

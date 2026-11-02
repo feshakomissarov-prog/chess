@@ -52,6 +52,7 @@ from PySide6.QtWidgets import (
 from .board_view import BoardView
 from .controller import GameController
 from .engine_manager import discover_stockfish, install_official_stockfish
+from .uci import popen_uci_hidden
 from .position_analysis import evaluate_position
 from .lichess.auth import CredentialStorageError, WindowsCredentialStore
 from .lichess.analysis import AnalysisOptions, CLASSIFIER_VERSION, CompletedGameAnalyzer
@@ -64,9 +65,11 @@ from .diagnostics import anonymized_report, log_event, logs_directory
 from .ui.theme import stylesheet as desktop_stylesheet
 from .ui.dashboard import dashboard_options, dashboard_snapshot, game_card_text
 from .ui.game_review import GameReviewWorkspace
+from .ui.move_table import MoveTable
 from .ui.sounds import ChessSoundPlayer
 from .ui.workspace_state import reposition_visible_frame
-from .ui.display import format_clock_control, format_game_date, source_short
+from .ui.display import (format_clock_control, format_game_date,
+                         russian_opening_name, source_short)
 
 
 def _puzzle_attempt_summary(attempts: list[dict]) -> str:
@@ -94,6 +97,25 @@ def _puzzle_attempt_summary(attempts: list[dict]) -> str:
     return (f"В показанной выборке: {len(attempts)} попыток · решено {wins} ({rate}%) · "
             f"средний рейтинг задачи {average}. Темы (успешно/попытки): {theme_text}. "
             "Повторные попытки одной задачи учитываются отдельно.")
+
+
+_PUZZLE_THEME_LABELS = {
+    "mateIn1": "мат в 1", "mateIn2": "мат в 2", "mateIn3": "мат в 3",
+    "fork": "вилка", "pin": "связка", "skewer": "рентген", "hangingPiece": "незащищённая фигура",
+    "discoveredAttack": "вскрытое нападение", "defensiveMove": "защитный ход",
+    "sacrifice": "жертва", "endgame": "эндшпиль", "opening": "дебют",
+    "middlegame": "миттельшпиль", "promotion": "превращение пешки",
+}
+
+
+def _puzzle_themes_label(value: object) -> str:
+    try:
+        themes = json.loads(value or "[]") if isinstance(value, str) else value
+    except (TypeError, json.JSONDecodeError):
+        themes = []
+    if not isinstance(themes, list):
+        return "нет данных"
+    return ", ".join(_PUZZLE_THEME_LABELS.get(str(theme), str(theme)) for theme in themes) or "нет данных"
 
 
 def _game_date_label(game: dict) -> str:
@@ -474,6 +496,7 @@ class StatisticsDialog(QDialog):
     opening_finished = Signal(object)
     position_requested = Signal(str, int)
     game_requested = Signal(str)
+    batch_requested = Signal()
 
     def __init__(self, repository: GameRepository, parent=None,
                  saved_filters: dict | None = None) -> None:
@@ -506,7 +529,15 @@ class StatisticsDialog(QDialog):
         self.tabs.addTab(self._scroll_tab(critical_page), "Критические моменты")
         close_button = QPushButton("Закрыть")
         close_button.clicked.connect(self.accept)
-        root.addWidget(close_button, 0, Qt.AlignmentFlag.AlignRight)
+        footer = QHBoxLayout()
+        self.batch_button = QPushButton("Массовый анализ Stockfish…")
+        self.batch_button.setToolTip(
+            "Явно запускает анализ выбранных завершённых партий после проверки безопасности.")
+        self.batch_button.clicked.connect(self.batch_requested.emit)
+        footer.addWidget(self.batch_button)
+        footer.addStretch(1)
+        footer.addWidget(close_button)
+        root.addLayout(footer)
         filters = QGridLayout()
         self.account = QComboBox()
         self.account.addItem("Все локальные партии (смешанный срез)", None)
@@ -522,7 +553,7 @@ class StatisticsDialog(QDialog):
         self.clock = QComboBox()
         self.clock.addItem("Любой контроль", "")
         for value in options["clocks"]:
-            self.clock.addItem(value, value)
+            self.clock.addItem(format_clock_control(value), value)
         self.clock.setEditable(True)
         self.clock.lineEdit().setPlaceholderText("Любой контроль")
         self.side = QComboBox()
@@ -577,8 +608,8 @@ class StatisticsDialog(QDialog):
         self.advanced_filters_group = advanced
         self.advanced_filters_content = advanced_content
         self.restore_filter_state(saved_filters or {})
-        overview_layout.addLayout(basic_filters)
-        overview_layout.addWidget(advanced)
+        root.insertLayout(0, basic_filters)
+        root.insertWidget(1, advanced)
         all_time = QPushButton("Всё время")
         all_time.clicked.connect(lambda: self.period.setCurrentIndex(self.period.findData(0)))
         overview_layout.addWidget(all_time)
@@ -590,7 +621,7 @@ class StatisticsDialog(QDialog):
         self.summary_label.setWordWrap(True)
         overview_layout.addWidget(self.summary_label)
         opening_actions = QHBoxLayout()
-        self.opening_refresh_button = QPushButton("Сопоставить дебюты и фазы для 25 партий")
+        self.opening_refresh_button = QPushButton("Обновить локальную классификацию 25 партий")
         self.opening_refresh_button.setToolTip(
             "Явный локальный пакет: только 25 новых партий, без сети и движка.")
         self.opening_refresh_button.clicked.connect(self._start_opening_refresh)
@@ -669,7 +700,11 @@ class StatisticsDialog(QDialog):
             if index >= 0:
                 combo.setCurrentIndex(index)
         if state.get("clock"):
-            self.clock.setCurrentText(str(state["clock"]))
+            index = self.clock.findData(str(state["clock"]))
+            if index >= 0:
+                self.clock.setCurrentIndex(index)
+            else:
+                self.clock.setCurrentText(format_clock_control(state["clock"]))
         self.opponent.setText(str(state.get("opponent") or ""))
         self.opening.setText(str(state.get("opening") or ""))
         self.advanced_filters_group.setChecked(bool(state.get("advanced", False)))
@@ -679,7 +714,7 @@ class StatisticsDialog(QDialog):
     def persisted_filter_state(self) -> dict:
         return {
             "account_id": self.account.currentData(), "period_days": self.period.currentData(),
-            "clock": self.clock.currentText().strip(), "side": self.side.currentData(),
+            "clock": self._clock_filter_value() or "", "side": self.side.currentData(),
             "result": self.result_filter.currentData(), "game_source": self.game_source.currentData(),
             "opponent": self.opponent.text().strip(), "opening": self.opening.text().strip(),
             "analyzed": self.analyzed.currentData(), "analysis_source": self.analysis_source.currentData(),
@@ -699,8 +734,7 @@ class StatisticsDialog(QDialog):
             "since": (now - timedelta(days=days)).isoformat() if days else None,
             "until": (now + timedelta(milliseconds=1)).isoformat() if days else None,
             "opponent": self.opponent.text().strip() or None,
-            "clock": (None if self.clock.currentData() == "" else
-                      self.clock.currentText().strip() or None),
+            "clock": self._clock_filter_value(),
             "game_source": self.game_source.currentData() or None,
             "analysis_source": self.analysis_source.currentData() or None,
             "side": self.side.currentData() or None,
@@ -708,6 +742,15 @@ class StatisticsDialog(QDialog):
             "result": self.result_filter.currentData() or None,
             "analyzed": self.analyzed.currentData() or None,
         }
+
+    def _clock_filter_value(self) -> str | None:
+        if self.clock.currentIndex() >= 0:
+            current = self.clock.currentText().strip()
+            item_text = self.clock.itemText(self.clock.currentIndex())
+            if current == item_text:
+                return self.clock.currentData() or None
+        raw = self.clock.currentText().strip()
+        return raw or None
 
     def _schedule_refresh(self, *_args) -> None:
         if self._close_when_idle:
@@ -827,37 +870,42 @@ class StatisticsDialog(QDialog):
                 player = game.get("account_player_name") or "Вы"
                 opponent = game.get("account_opponent") or game.get("opponent") or "соперник"
                 eco = game.get("matched_opening_eco") or game.get("opening_eco") or "ECO —"
-                opening_name = game.get("matched_opening_name") or game.get("opening_name") or "дебют неизвестен"
+                opening_original = game.get("matched_opening_name") or game.get("opening_name")
+                opening_name = russian_opening_name(eco, opening_original)
                 assessed = game.get("own_assessed_moves")
                 total_own = game.get("total_own_moves")
                 scored = game.get("scored_positions")
                 total_positions = game.get("total_positions")
-                coverage = (f"{scored if scored is not None else '—'}/"
-                            f"{total_positions if total_positions is not None else '—'} поз. "
-                            f"· сравнимые свои ходы {assessed if assessed is not None else '—'}/"
-                            f"{total_own if total_own is not None else '—'} "
-                            f"({game.get('analysis_status')})"
-                            if game.get("analysis_status") else "анализ не запускался")
+                coverage = (f"Оценено позиций: {scored if scored is not None else '—'}/"
+                            f"{total_positions if total_positions is not None else '—'} · "
+                            f"моих ходов: {assessed if assessed is not None else '—'}/"
+                            f"{total_own if total_own is not None else '—'}"
+                            if game.get("analysis_status") else "Оценки пока нет")
                 if assessed is None:
-                    error_counts = "свои н/о/з — (охват неизвестен)"
+                    error_counts = "Ошибки по моим ходам: нет данных"
                 elif assessed == 0:
-                    error_counts = (f"свои н/о/з н/д (0/{total_own if total_own is not None else '—'} "
-                                    "сравнимых ходов)")
+                    error_counts = (f"Нет оценённых моих ходов (0/{total_own if total_own is not None else '—'}).")
                 else:
                     counts = (game.get("own_inaccuracies"), game.get("own_mistakes"),
                               game.get("own_blunders"))
-                    error_counts = ("свои н/о/з " + "/".join(
-                        str(value) if value is not None else "—" for value in counts)
-                        + f" (N={assessed})")
+                    error_counts = (f"Неточности {counts[0] if counts[0] is not None else '—'} · "
+                                    f"ошибки {counts[1] if counts[1] is not None else '—'} · "
+                                    f"зевки {counts[2] if counts[2] is not None else '—'} · "
+                                    f"оценено ходов {assessed}")
                 accuracy = game.get("owner_lichess_accuracy")
-                accuracy_label = (f"Lichess accuracy {accuracy:.1f}%" if accuracy is not None else
-                                  "Lichess accuracy: данных нет")
+                accuracy_label = (f"Точность Lichess {accuracy:.1f}%" if accuracy is not None else
+                                  "Точность Lichess —")
                 conflict = " · конфликт названия" if game.get("opening_conflict") else ""
+                short_source, source_detail = source_short(game.get("selected_analysis_source"))
                 item = QListWidgetItem(
                     f"{_game_date_label(game)} · {outcome} · "
-                    f"{player} vs {opponent} · {eco} {opening_name}{conflict}\n"
-                    f"{accuracy_label} · {error_counts} · {coverage} · "
-                    f"{game.get('selected_analysis_source') or 'источник оценки отсутствует'}")
+                    f"{player} — {opponent} · {opening_name}{conflict}\n"
+                    f"{format_clock_control(game.get('clock'))} · {accuracy_label} · "
+                    f"{error_counts} · {coverage} · источник {short_source}")
+                item.setToolTip(f"Дебют в источнике: {opening_original or 'не указан'}\n{source_detail}")
+                item.setData(Qt.ItemDataRole.AccessibleDescriptionRole,
+                             f"Партия. {outcome}. {player} против {opponent}. {opening_name}. "
+                             f"Источник оценки: {source_detail}.")
                 item.setData(Qt.ItemDataRole.UserRole, game["game_id"])
                 self.games.addItem(item)
             total = summary["games"]
@@ -877,18 +925,15 @@ class StatisticsDialog(QDialog):
                      f"Аккаунт: {self.account.currentText()}")
             self.mixed_warning.setText(scope)
             self.summary_label.setText(
-                f"Партии: {total} · победы/ничьи/поражения: {summary['wins']}/"
-                f"{summary['draws']}/{summary['losses']} · неизвестно/прерваны: {summary['unknown_or_aborted']}\n"
-                f"С локальной оценкой: {summary['analysis_games']}/{total} · покрытие ходов: {coverage_text}\n"
-                f"Классификации обоих цветов по версии {CLASSIFIER_VERSION} "
-                f"(локальные оценённые ходы; не персональный диагноз): "
-                f"{classified['mistake']} / {classified['inaccuracy']} / {classified['blunder']} · "
-                f"личные ошибки на 100 сравнимых своих ходов: "
+                f"Партии: {total} · победы {summary['wins']} · ничьи {summary['draws']} · "
+                f"поражения {summary['losses']}\n"
+                f"Анализ есть у {summary['analysis_games']}/{total} партий · {coverage_text}\n"
+                f"Мои неточности / ошибки / зевки: {classified['inaccuracy']} / "
+                f"{classified['mistake']} / {classified['blunder']} · ошибки на 100 оценённых моих ходов: "
                 f"{summary['own_error_rate_per_100'] if summary['own_error_rate_per_100'] is not None else 'нет данных'}\n"
-                f"Средняя потеря CP: {summary['avg_cpl_cp'] if summary['avg_cpl_cp'] is not None else 'нет данных'} · "
-                f"колебания ≥200 CP: {summary['swings_200cp']} · "
-                f"Lichess accuracy (официально): белые {accuracy['white'] if accuracy['white'] is not None else 'нет данных'}, "
-                f"чёрные {accuracy['black'] if accuracy['black'] is not None else 'нет данных'}")
+                f"Официальная точность Lichess: белые {accuracy['white'] if accuracy['white'] is not None else 'нет данных'}, "
+                f"чёрные {accuracy['black'] if accuracy['black'] is not None else 'нет данных'}. "
+                "Н/д означает отсутствие подходящего источника или знаменателя, а не нулевой результат.")
             profile = summary.get("personal_profile")
             if isinstance(profile, dict):
                 sections = []
@@ -1033,6 +1078,8 @@ class StatisticsDialog(QDialog):
 
 class SettingsDialog(QDialog):
     install_requested = Signal()
+    sound_preview_requested = Signal()
+    engine_probe_result = Signal(int, bool, str)
 
     def __init__(self, settings: QSettings, parent=None, repository: GameRepository | None = None) -> None:
         super().__init__(parent)
@@ -1082,6 +1129,10 @@ class SettingsDialog(QDialog):
             lambda value: self.sound_volume_label.setText(f"Громкость · {value}%"))
         layout.addWidget(self.sound_volume_label)
         layout.addWidget(self.sound_volume)
+        self.sound_preview = QPushButton("Прослушать звук хода")
+        self.sound_preview.setToolTip("Воспроизводит короткий локальный звук без обращения к сети.")
+        self.sound_preview.clicked.connect(self.sound_preview_requested.emit)
+        layout.addWidget(self.sound_preview)
         layout.addWidget(QLabel("Stockfish для завершённых партий и свободной доски"))
         engine_row = QHBoxLayout()
         configured_path = settings.value("stockfish_path", "", type=str)
@@ -1161,15 +1212,15 @@ class SettingsDialog(QDialog):
         diagnostics_layout.addWidget(self.share_report)
         layout.addWidget(diagnostics_box)
         self._diagnostics_repository = repository
+        # Kept as a compatibility/status field; engine probing now uses the
+        # shared hidden UCI launcher rather than QProcess.
         self._engine_process: QProcess | None = None
-        self._engine_probe_timer: QTimer | None = None
-        self._engine_probe_shutdown_timer: QTimer | None = None
-        self._engine_probe_buffer = bytearray()
-        self._engine_probe_stage = "uci"
-        self._engine_probe_name = "UCI engine"
-        self._engine_probe_finishing = False
-        self._engine_probe_finish_message: str | None = None
-        self._engine_probe_owner = None
+        self._engine_probe_thread: threading.Thread | None = None
+        self._engine_probe_generation = 0
+        self._engine_probe_cancel = threading.Event()
+        self._engine_probe_lock = threading.Lock()
+        self._engine_probe_engine = None
+        self.engine_probe_result.connect(self._engine_probe_finished)
         self.finished.connect(lambda _result: self._stop_engine_probe())
         buttons = QDialogButtonBox(
             QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
@@ -1230,6 +1281,7 @@ class SettingsDialog(QDialog):
                 "В известных пользовательских путях и PATH Stockfish не найден.")
 
     def _engine_path_changed(self, value: str) -> None:
+        self._engine_probe_generation += 1
         if value.strip() != self._engine_verified_path:
             self._engine_verified_path = ""
 
@@ -1263,166 +1315,70 @@ class SettingsDialog(QDialog):
         if not path:
             self.engine_test_status.setText("Сначала выберите локальный executable.")
             return
-        if self._engine_process is not None:
+        if self._engine_probe_thread is not None and self._engine_probe_thread.is_alive():
             return
-        process_parent = self.parent() or QApplication.instance()
-        self._engine_probe_owner = process_parent
-        process = QProcess(process_parent)
-        if hasattr(process, "setCreateProcessArgumentsModifier"):
-            def hide_console(arguments):
-                if hasattr(QProcess, "CreateProcessArgument"):
-                    arguments.flags |= QProcess.CreateProcessArgument.CreateNoWindow
-            process.setCreateProcessArgumentsModifier(hide_console)
-        self._engine_process = process
-        self._engine_probe_finishing = False
-        self._engine_probe_finish_message = None
-        self._engine_probe_buffer.clear()
-        self._engine_probe_stage = "uci"
-        self._engine_probe_name = "UCI engine"
+        self._engine_probe_cancel = threading.Event()
+        self._engine_probe_generation += 1
+        generation = self._engine_probe_generation
         self.engine_test.setEnabled(False)
-        self.engine_test_status.setText("Запущена ограниченная UCI-проверка…")
-        if hasattr(process_parent, "_track_engine_probe"):
-            process_parent._track_engine_probe(process)
-        dialog_ref = weakref.ref(self)
-        owner_ref = weakref.ref(process_parent)
-        def dispatch(method: str, *args) -> None:
-            dialog = dialog_ref()
-            if dialog is not None and shiboken6.isValid(dialog):
-                getattr(dialog, method)(*args)
-            elif method == "_engine_probe_finished":
-                current = args[0]
-                if current.state() == QProcess.ProcessState.NotRunning:
-                    owner = owner_ref()
-                    if (owner is not None and shiboken6.isValid(owner)
-                            and hasattr(owner, "_untrack_engine_probe")):
-                        owner._untrack_engine_probe(current)
-                    current.deleteLater()
-        process.started.connect(lambda current=process: dispatch("_engine_probe_started", current))
-        process.readyReadStandardOutput.connect(lambda current=process: dispatch("_read_engine_probe", current))
-        process.errorOccurred.connect(lambda error, current=process:
-                                      dispatch("_engine_probe_error", current, error))
-        process.finished.connect(lambda code, status, current=process:
-                                  dispatch("_engine_probe_finished", current, code, status))
-        timer = QTimer(self)
-        timer.setSingleShot(True)
-        timer.timeout.connect(lambda current=process: dispatch("_engine_probe_timeout", current))
-        self._engine_probe_timer = timer
-        timer.start(5_000)
-        process.start(path, [])
+        self.engine_test_status.setText("UCI-проверка идёт в фоне; консольное окно не создаётся…")
+        self._engine_verified_path = ""
 
-    def _engine_probe_started(self, process: QProcess) -> None:
-        if process is self._engine_process and not self._engine_probe_finishing:
-            process.write(b"uci\n")
+        def work() -> None:
+            engine = None
+            try:
+                resolved = str(Path(path).expanduser().resolve(strict=True))
+                engine = popen_uci_hidden(
+                    resolved, timeout=3.0, cwd=str(Path(resolved).parent))
+                with self._engine_probe_lock:
+                    self._engine_probe_engine = engine
+                if self._engine_probe_cancel.is_set():
+                    raise RuntimeError("Проверка остановлена.")
+                engine.ping()
+                if self._engine_probe_cancel.is_set():
+                    raise RuntimeError("Проверка остановлена.")
+                self.engine_probe_result.emit(
+                    generation, True, str(engine.id.get("name") or "UCI engine"))
+            except Exception as exc:
+                self.engine_probe_result.emit(generation, False, str(exc))
+            finally:
+                if engine is not None:
+                    try:
+                        engine.quit()
+                    except Exception:
+                        pass
+                with self._engine_probe_lock:
+                    if self._engine_probe_engine is engine:
+                        self._engine_probe_engine = None
 
-    def _read_engine_probe(self, process: QProcess) -> None:
-        if process is not self._engine_process or self._engine_probe_finishing:
-            return
-        self._engine_probe_buffer.extend(bytes(process.readAllStandardOutput()))
-        output = self._engine_probe_buffer.decode("utf-8", errors="replace")
-        if self._engine_probe_stage == "uci" and "uciok" in output:
-            self._engine_probe_name = next((line.removeprefix("id name ")
-                                            for line in output.splitlines()
-                                            if line.startswith("id name ")), "UCI engine")
-            self._engine_probe_stage = "ready"
-            process.write(b"isready\n")
-        if self._engine_probe_stage == "ready" and "readyok" in output:
-            self._finish_engine_probe(f"UCI готов: {self._engine_probe_name}", graceful=True)
+        self._engine_probe_thread = threading.Thread(
+            target=work, name="chess-coach-engine-probe", daemon=True)
+        self._engine_probe_thread.start()
 
-    def _engine_probe_error(self, process: QProcess, _error) -> None:
-        if (process is self._engine_process and not self._engine_probe_finishing
-                and process.state() == QProcess.ProcessState.NotRunning):
-            self._finish_engine_probe(f"Не удалось запустить движок: {process.errorString()}")
-
-    def _engine_probe_finished(self, process: QProcess, _code, _status) -> None:
-        if process is not self._engine_process:
-            process.deleteLater()
-            return
-        if not self._engine_probe_finishing and "readyok" not in self._engine_probe_buffer.decode(
-                "utf-8", errors="replace"):
-            self._engine_probe_finish_message = "Процесс завершился до ответа readyok."
-        self._finalize_engine_probe(process)
-
-    def _engine_probe_timeout(self, process: QProcess | None = None) -> None:
-        process = process or self._engine_process
-        if process is None:
-            return
-        if process is self._engine_process and not self._engine_probe_finishing:
-            self._finish_engine_probe("UCI не ответил за 5 секунд; останавливаем процесс.")
-
-    def _finish_engine_probe(self, message: str | None = None, *, graceful: bool = False) -> None:
-        process = self._engine_process
-        if process is None or self._engine_probe_finishing:
-            return
-        self._engine_probe_finishing = True
-        if message is not None:
-            self._engine_probe_finish_message = message
-        if self._engine_probe_timer is not None:
-            self._engine_probe_timer.stop()
-            self._engine_probe_timer.deleteLater()
-            self._engine_probe_timer = None
-        if process.state() == QProcess.ProcessState.NotRunning:
-            self._finalize_engine_probe(process)
-            return
-        if graceful:
-            process.write(b"quit\n")
-        else:
-            process.kill()
-        # The bounded kill timer must outlive SettingsDialog if it is closed while
-        # the child is still shutting down.
-        owner = self._engine_probe_owner or QApplication.instance()
-        timer = QTimer(owner)
-        timer.setSingleShot(True)
-        dialog_ref = weakref.ref(self)
-        def kill_or_delegate(current=process) -> None:
-            dialog = dialog_ref()
-            if dialog is not None and shiboken6.isValid(dialog):
-                dialog._kill_engine_probe(current)
-            elif current.state() != QProcess.ProcessState.NotRunning:
-                current.kill()
-        timer.timeout.connect(kill_or_delegate)
-        self._engine_probe_shutdown_timer = timer
-        timer.start(1_000 if graceful else 2_000)
-
-    def _kill_engine_probe(self, process: QProcess) -> None:
-        if process is not self._engine_process:
-            return
-        if process.state() == QProcess.ProcessState.NotRunning:
-            self._finalize_engine_probe(process)
-            return
-        process.kill()
-        # Keep the QProcess alive until its finished signal confirms OS exit.
-        if self._engine_probe_shutdown_timer is not None:
-            self._engine_probe_shutdown_timer.start(2_000)
-
-    def _finalize_engine_probe(self, process: QProcess) -> None:
-        if process is not self._engine_process:
-            return
-        if process.state() != QProcess.ProcessState.NotRunning:
-            return
-        for timer_name in ("_engine_probe_timer", "_engine_probe_shutdown_timer"):
-            timer = getattr(self, timer_name)
-            if timer is not None:
-                timer.stop()
-                timer.deleteLater()
-                setattr(self, timer_name, None)
-        self._engine_process = None
-        owner = self._engine_probe_owner
-        if owner is not None and hasattr(owner, "_untrack_engine_probe"):
-            owner._untrack_engine_probe(process)
-        self._engine_probe_owner = None
-        self._engine_probe_finishing = False
-        if self._engine_probe_finish_message:
-            self.engine_test_status.setText(self._engine_probe_finish_message)
-            if self._engine_probe_finish_message.startswith("UCI готов:"):
-                self._engine_verified_path = str(Path(self.engine_path.text().strip()).resolve())
-            else:
-                self._engine_verified_path = ""
-        self._engine_probe_finish_message = None
-        process.deleteLater()
+    def _engine_probe_finished(self, generation: int, success: bool, detail: str) -> None:
+        current = generation == self._engine_probe_generation
+        if current and success:
+            self._engine_verified_path = str(Path(self.engine_path.text().strip()).resolve())
+            self.engine_test_status.setText(f"UCI готов: {detail}")
+        elif current:
+            self._engine_verified_path = ""
+            self.engine_test_status.setText(f"UCI-проверка не пройдена: {detail}")
         self.engine_test.setEnabled(True)
 
     def _stop_engine_probe(self) -> None:
-        self._finish_engine_probe("Проверка движка остановлена.")
+        thread = self._engine_probe_thread
+        if thread is None or not thread.is_alive():
+            return
+        self._engine_probe_generation += 1
+        self._engine_probe_cancel.set()
+        with self._engine_probe_lock:
+            engine = self._engine_probe_engine
+        if engine is not None:
+            try:
+                engine.quit()
+            except Exception:
+                pass
+        thread.join(timeout=0.25)
 
 
 class BatchAnalysisDialog(QDialog):
@@ -1771,6 +1727,7 @@ class MainWindow(QMainWindow):
     engine_install_progress = Signal(str)
     engine_install_finished = Signal(object)
     position_eval_finished = Signal(int, object, object)
+    position_eval_update = Signal(int, object)
     dashboard_finished = Signal(int, object, object, object)
 
     def __init__(
@@ -1879,6 +1836,7 @@ class MainWindow(QMainWindow):
         self._analysis_shutdown_deadline: float | None = None
         self._workspace_state_restoring = True
         self._active_route = str(self.settings.value("workspace/last_route", "home", type=str))
+        self._board_focus_mode = self.settings.value("workspace/board_focus_mode", False, type=bool)
         self._workspace_save_timer = QTimer(self)
         self._workspace_save_timer.setSingleShot(True)
         self._workspace_save_timer.setInterval(500)
@@ -1888,6 +1846,7 @@ class MainWindow(QMainWindow):
         self.engine_install_progress.connect(self._engine_install_progress_changed)
         self.engine_install_finished.connect(self._engine_install_finished)
         self.position_eval_finished.connect(self._position_eval_finished)
+        self.position_eval_update.connect(self._position_eval_update)
         self.dashboard_finished.connect(self._dashboard_result_ready)
         self.setWindowTitle("Chess Coach")
         self.setMinimumSize(500, 360)
@@ -1905,6 +1864,7 @@ class MainWindow(QMainWindow):
             " border-radius: 6px; padding: 5px; }"
         )
         self._build_ui()
+        self.focus_mode_button.setChecked(self._board_focus_mode)
         self._set_sidebar_collapsed(
             self.settings.value("workspace/sidebar_collapsed", self.width() < 1160, type=bool),
             explicit=self.settings.value("workspace/sidebar_explicit", False, type=bool))
@@ -2061,6 +2021,8 @@ class MainWindow(QMainWindow):
         self.screen_stack = QStackedWidget()
         self.home_page = self._build_home_page()
         self.screen_stack.addWidget(self.home_page)
+        self.play_page = self._build_play_page()
+        self.screen_stack.addWidget(self.play_page)
 
         splitter = QSplitter(Qt.Orientation.Horizontal)
         splitter.setChildrenCollapsible(False)
@@ -2071,6 +2033,11 @@ class MainWindow(QMainWindow):
         self.opponent_label = QLabel("Соперник  ·  локальная партия")
         self.opponent_label.setStyleSheet("font-size: 15px; font-weight: 600; padding: 2px 4px;")
         board_layout.addWidget(self.opponent_label)
+        self.focus_mode_button = QPushButton("Режим фокуса")
+        self.focus_mode_button.setCheckable(True)
+        self.focus_mode_button.setAccessibleName("Переключить режим фокуса доски")
+        self.focus_mode_button.toggled.connect(self._set_focus_mode)
+        board_layout.addWidget(self.focus_mode_button)
         self.board = BoardView(self.controller.board)
         self.board.setMinimumSize(320, 320)
         self.board.set_premove(self.controller.premove, self.controller.player_color)
@@ -2111,8 +2078,9 @@ class MainWindow(QMainWindow):
         self.board_size_label = QLabel("Размер доски")
         side_layout.addWidget(self.board_size_label)
         self.board_size_combo = QComboBox()
-        for label, size in (("Компактная · 400", 400), ("Средняя · 480", 480),
-                            ("Большая · 560", 560), ("Максимальная · 640", 640)):
+        for label, size in (("Компактная · 400", 400), ("Стандартная · 480", 480),
+                            ("Большая · 560", 560), ("Очень большая · 720", 720),
+                            ("На всю доступную область", -1)):
             self.board_size_combo.addItem(label, size)
         stored_size = self.settings.value("board_target_size", 480, type=int)
         index = self.board_size_combo.findData(stored_size)
@@ -2188,8 +2156,8 @@ class MainWindow(QMainWindow):
         moves_title = QLabel("ХОДЫ")
         moves_title.setStyleSheet("font-size: 11px; font-weight: 700; color: #77766f;")
         side_layout.addWidget(moves_title)
-        self.moves = QListWidget()
-        self.moves.itemClicked.connect(self.on_move_selected)
+        self.moves = MoveTable()
+        self.moves.ply_selected.connect(self.on_move_selected_ply)
         side_layout.addWidget(self.moves, 1)
         history_controls = QHBoxLayout()
         for label, action in (
@@ -2282,16 +2250,26 @@ class MainWindow(QMainWindow):
             return
         target = int(self.settings.value("board_target_size", 480, type=int))
         sidebar_width = self.sidebar.width() if hasattr(self, "sidebar") else 212
-        inspector_min = 320
-        available_width = max(320, self.width() - sidebar_width - inspector_min - 96)
+        focus = bool(getattr(self, "_board_focus_mode", False))
+        inspector_width = 0 if focus else 340
+        available_width = max(320, self.width() - sidebar_width - inspector_width - 96)
         available_height = max(320, self.height() - 64 - 210)
-        actual = max(320, min(target, available_width, available_height))
+        requested = min(available_width, available_height) if target <= 0 else target
+        actual = max(320, min(requested, available_width, available_height))
         self.board.setFixedSize(actual, actual)
         if hasattr(self, "review_workspace"):
-            review_width = max(320, self.width() - sidebar_width - 320 - 96)
+            review_width = max(320, self.width() - sidebar_width - inspector_width - 96)
             review_height = max(320, self.height() - 64 - 210)
-            review_size = max(320, min(target, review_width, review_height))
+            review_size = max(320, min(requested, review_width, review_height))
             self.review_workspace.review_board.setFixedSize(review_size, review_size)
+
+    def _set_focus_mode(self, enabled: bool) -> None:
+        self._board_focus_mode = bool(enabled)
+        if hasattr(self, "game_splitter"):
+            self.game_splitter.widget(1).setVisible(not enabled)
+        self.focus_mode_button.setText("Вернуть панель" if enabled else "Режим фокуса")
+        self.settings.setValue("workspace/board_focus_mode", bool(enabled))
+        self._apply_board_size()
 
     def resizeEvent(self, event) -> None:
         super().resizeEvent(event)
@@ -2339,7 +2317,7 @@ class MainWindow(QMainWindow):
         layout.addWidget(self.sidebar_brand)
         self._nav_buttons: dict[str, QPushButton] = {}
         items = (("home", "⌂", "Главная", self.show_home),
-                 ("play", "♟", "Играть", self.start_local_game),
+                 ("play", "♟", "Играть", self.show_play),
                  ("games", "▤", "Мои партии", self.show_saved_games),
                  ("analytics", "⌁", "Аналитика", self.show_statistics),
                  ("puzzles", "♞", "Задачи", self.open_puzzle_history_local))
@@ -2395,7 +2373,7 @@ class MainWindow(QMainWindow):
             self.game_page, self.result_page, getattr(self, "review_workspace", None))
         current = self.screen_stack.currentWidget()
         route = ("games" if current is getattr(self, "review_workspace", None) else
-                 "play" if is_board else "home")
+                 "play" if is_board or current is getattr(self, "play_page", None) else "home")
         self._active_route = route
         self._set_active_route(route)
         if not self._sidebar_explicit_override:
@@ -2662,18 +2640,14 @@ class MainWindow(QMainWindow):
         self.home_puzzles_pilot_button.setEnabled(False)
         self.home_settings_button = QPushButton("Настройки")
         self.home_settings_button.clicked.connect(self.open_settings)
-        self.home_more_toggle = QPushButton("Ещё  ▸")
+        self.home_more_toggle = QPushButton("Хранилище и обслуживание  ▸")
         self.home_more_toggle.setCheckable(True)
-        self.home_more_toggle.setAccessibleName("Показать дополнительные действия")
+        self.home_more_toggle.setAccessibleName("Показать обслуживание и синхронизацию архива")
         layout.addWidget(self.home_more_toggle)
-        self.home_more = QGroupBox("Дополнительные действия")
+        self.home_more = QGroupBox("Обслуживание архива")
         more_layout = QVBoxLayout(self.home_more)
-        for button in (self.home_friend_button, self.home_username_button,
-                       self.active_games_button, self.home_games_button,
-                       self.home_archive_status_button, self.home_pilot_import_button,
-                       self.home_archive_button, self.home_stats_button,
-                       self.home_batch_analysis_button, self.home_puzzles_button,
-                       self.home_puzzles_pilot_button, self.home_settings_button):
+        for button in (self.home_archive_status_button, self.home_pilot_import_button,
+                       self.home_archive_button):
             more_layout.addWidget(button)
         more_layout_widget = QWidget()
         more_content = QVBoxLayout(more_layout_widget)
@@ -2688,8 +2662,8 @@ class MainWindow(QMainWindow):
         self.home_more.setVisible(False)
         self.home_more_toggle.toggled.connect(self.home_more.setVisible)
         self.home_more_toggle.toggled.connect(more_layout_widget.setVisible)
-        self.home_more_toggle.toggled.connect(
-            lambda checked: self.home_more_toggle.setText("Ещё  ▾" if checked else "Ещё  ▸"))
+        self.home_more_toggle.toggled.connect(lambda checked: self.home_more_toggle.setText(
+            "Хранилище и обслуживание  ▾" if checked else "Хранилище и обслуживание  ▸"))
         layout.addWidget(self.home_more)
         layout.addStretch(1)
         scroll = QScrollArea()
@@ -2697,6 +2671,50 @@ class MainWindow(QMainWindow):
         scroll.setFrameShape(QFrame.Shape.NoFrame)
         scroll.setWidget(page)
         return scroll
+
+    def _build_play_page(self) -> QWidget:
+        page = QWidget()
+        layout = QVBoxLayout(page)
+        title = QLabel("Выберите режим игры")
+        title.setObjectName("pageTitle")
+        layout.addWidget(title)
+        note = QLabel("Открытие этого раздела не сбрасывает текущую доску или партию.")
+        note.setObjectName("secondary")
+        layout.addWidget(note)
+        self.play_local_button = QPushButton("Свободная локальная доска")
+        self.play_local_button.setObjectName("primaryAction")
+        self.play_local_button.clicked.connect(self.start_local_game)
+        layout.addWidget(self.play_local_button)
+        self.play_ai_button = QPushButton("Играть против Lichess AI")
+        self.play_ai_button.clicked.connect(self.play_ai)
+        layout.addWidget(self.play_ai_button)
+        self.play_friend_button = QPushButton("Играть с другом по ссылке")
+        self.play_friend_button.clicked.connect(self.open_friend_game)
+        layout.addWidget(self.play_friend_button)
+        self.play_challenge_button = QPushButton("Вызвать игрока Lichess")
+        self.play_challenge_button.clicked.connect(self.challenge_username)
+        layout.addWidget(self.play_challenge_button)
+        self.play_active_button = QPushButton("Активные партии / продолжить")
+        self.play_active_button.clicked.connect(self.show_active_games)
+        layout.addWidget(self.play_active_button)
+        layout.addStretch(1)
+        return page
+
+    def show_play(self) -> None:
+        """Show mode selection without resetting the controller or online game."""
+        self.screen_title.setText("Играть")
+        self.screen_stack.setCurrentWidget(self.play_page)
+        self._update_play_mode_availability()
+
+    def _update_play_mode_availability(self) -> None:
+        if not hasattr(self, "play_ai_button"):
+            return
+        online = self._online_actions_allowed()
+        for button in (self.play_ai_button, self.play_friend_button,
+                       self.play_challenge_button, self.play_active_button):
+            button.setEnabled(online)
+            button.setToolTip("Подключите Lichess; запросы остаются отключены до готовности соединения."
+                              if not online else "Доступно при активном соединении Lichess.")
 
     def _refresh_home_dashboard(self) -> None:
         if not hasattr(self, "_dashboard_metric_values"):
@@ -3180,6 +3198,8 @@ class MainWindow(QMainWindow):
         dialog.worker_finished.connect(self._statistics_worker_finished)
         dialog.position_requested.connect(self._open_statistics_position)
         dialog.game_requested.connect(lambda game_id: self._open_statistics_game(dialog, game_id))
+        dialog.batch_requested.connect(lambda: (
+            dialog.accept(), QTimer.singleShot(0, self.show_batch_analysis)))
         dialog.exec()
         self.settings.setValue("workspace/statistics_filters",
                                json.dumps(dialog.persisted_filter_state(), ensure_ascii=False))
@@ -3594,13 +3614,14 @@ class MainWindow(QMainWindow):
         board.set_interaction_enabled(False)
         solution = QLabel("Выберите попытку для локального просмотра.")
         solution.setWordWrap(True)
-        replay = QPushButton("Решить снова офлайн")
+        replay = QPushButton("Решить повторно")
         replay.setEnabled(False)
         reveal = QPushButton("Показать решение…")
         reveal.setEnabled(False)
         reset_replay = QPushButton("Сбросить упражнение")
         reset_replay.setEnabled(False)
         right.addWidget(board, 1)
+        right.addWidget(QLabel("Практика по сохранённой попытке · ответ не отправляется на Lichess"))
         right.addWidget(solution)
         replay_row = QHBoxLayout()
         replay_row.addWidget(replay)
@@ -3627,20 +3648,19 @@ class MainWindow(QMainWindow):
             sync_state = self.game_repository.puzzle_sync_state(selected_account)
             top_themes = sorted(overall["themes"].items(),
                                 key=lambda item: (item[1]["attempts"], item[0]), reverse=True)[:8]
-            theme_summary = ", ".join(
-                f"{theme}: {stats['wins']}/{stats['attempts']} ({stats['success_percent']}%)"
-                for theme, stats in top_themes) or "нет данных"
-            trend_summary = ", ".join(
-                f"{row['month']}: {row['average_rating'] if row['average_rating'] is not None else 'н/д'} "
-                f"(N={row['attempts']})" for row in rating_trend) or "нет данных"
+            theme_summary = ", ".join(_PUZZLE_THEME_LABELS.get(theme, theme)
+                                        for theme, _stats in top_themes[:4]) or "нет данных"
+            trend_summary = (f"· средний рейтинг {rating_trend[-1]['average_rating']}"
+                             if rating_trend and rating_trend[-1].get("average_rating") is not None
+                             else "")
             summary.setText(
-                f"Аккаунт: {account_rows[selected_account]['username']}\n"
-                f"Локально сохранено: {overall['attempts']} попыток · решено {overall['wins']} · "
-                f"ошибок {overall['failures']} · успех {overall['success_percent'] if overall['success_percent'] is not None else 'н/д'}%\n"
-                f"Средний рейтинг задач: {overall['average_puzzle_rating'] if overall['average_puzzle_rating'] is not None else 'н/д'} · "
-                f"динамика по месяцам: {trend_summary}\nТемы (решено/попыток): {theme_summary}\n"
-                f"Последнее обновление: {self._format_sync_time(sync_state.get('last_success_at')) if sync_state.get('last_success_at') else 'неизвестно'}"
-                +(f" · ошибка синхронизации: {sync_state['last_error']}" if sync_state.get("last_error") else ""))
+                f"{account_rows[selected_account]['username']} · {overall['attempts']} попыток · "
+                f"решено {overall['wins']} ({overall['success_percent'] if overall['success_percent'] is not None else 'н/д'}%)"
+                f"{trend_summary}\nЧастые темы: {theme_summary} · история и даты сохранены локально.")
+            summary.setToolTip(
+                f"Последняя успешная синхронизация: "
+                f"{self._format_sync_time(sync_state.get('last_success_at')) if sync_state.get('last_success_at') else 'неизвестно'}"
+                +(f"\nОшибка синхронизации: {sync_state['last_error']}" if sync_state.get("last_error") else ""))
 
         def render_page() -> None:
             result = self.game_repository.puzzle_history_page(
@@ -3649,11 +3669,12 @@ class MainWindow(QMainWindow):
             state["items"] = result["items"]
             history.clear()
             for attempt in state["items"]:
-                date = datetime.fromtimestamp(attempt["attempt_date_ms"] / 1000).strftime("%Y-%m-%d %H:%M")
                 try:
-                    themes = ", ".join(json.loads(attempt.get("themes_json") or "[]"))
-                except (TypeError, json.JSONDecodeError):
-                    themes = ""
+                    date = datetime.fromtimestamp(
+                        attempt["attempt_date_ms"] / 1000).astimezone().strftime("%d.%m.%Y · %H:%M")
+                except (TypeError, ValueError, OverflowError, OSError):
+                    date = "Дата неизвестна"
+                themes = _puzzle_themes_label(attempt.get("themes_json"))
                 outcome = "Решено" if attempt["win"] else "Ошибка"
                 item = QListWidgetItem(
                     f"{date} · {outcome} · {attempt['puzzle_rating'] or 'без рейтинга'} · {themes}")
@@ -4285,6 +4306,7 @@ class MainWindow(QMainWindow):
                  else self.controller.snapshot().board).copy(stack=False)
         stop_event = threading.Event()
         active: dict = {}
+        active["on_update"] = lambda info: self.position_eval_update.emit(generation, info)
         self._position_eval_stop = stop_event
         self._position_eval_handle = active
         self.position_eval_button.setEnabled(False)
@@ -4333,14 +4355,47 @@ class MainWindow(QMainWindow):
                 score = (f"мат {'белым' if payload['mate_white'] > 0 else 'чёрным'} через "
                          f"{abs(payload['mate_white'])}" if payload.get("mate_white") is not None
                          else (f"{cp / 100:+.2f} пешки за белых" if cp is not None else "оценка недоступна"))
+                shown_board = (self.online_session.render_board if self.online_session is not None
+                               else self.controller.snapshot().board).copy(stack=False)
+                pv_san = []
+                best = "не сохранён"
+                try:
+                    pv = payload.get("pv") or ([payload["best_move"]]
+                                                  if payload.get("best_move") else [])
+                    for raw in pv:
+                        candidate = chess.Move.from_uci(str(raw))
+                        if candidate not in shown_board.legal_moves:
+                            break
+                        if not pv_san:
+                            best = shown_board.san(candidate)
+                        pv_san.append(shown_board.san(candidate))
+                        shown_board.push(candidate)
+                except (ValueError, chess.InvalidMoveError):
+                    best, pv_san = "не удалось отобразить", []
                 self.position_eval_label.setText(
-                    f"Stockfish · {score} · лучший ход {payload.get('best_move') or 'н/д'} · "
-                    f"глубина {payload.get('depth') or 'н/д'} · PV "
-                    f"{' '.join(payload.get('pv') or [])[:80]}; оценка не является точностью Lichess.")
+                    f"Stockfish · {score} · лучший ход {best} · "
+                    f"глубина {payload.get('depth') or 'н/д'} · вариант "
+                    f"{' '.join(pv_san) or 'н/д'}; это оценка движка, не точность Lichess.")
         if self._position_eval_queued and self._position_eval_mode:
             self._position_eval_queued = False
             self._position_eval_timer.start(0)
         self.refresh()
+
+    def _position_eval_update(self, generation: int, info: object) -> None:
+        if (generation != self._position_eval_generation or not isinstance(info, dict)
+                or self._position_eval_stop is None or self._position_eval_stop.is_set()):
+            return
+        score = info.get("score")
+        if score is None:
+            label = "оценка пока недоступна"
+        else:
+            cp = score.pov(chess.WHITE).score(mate_score=100000)
+            mate = score.pov(chess.WHITE).mate()
+            label = (f"мат за белых через {mate}" if mate is not None and mate > 0 else
+                     f"мат за чёрных через {abs(mate)}" if mate is not None else
+                     f"{cp / 100:+.2f} за белых" if cp is not None else "оценка недоступна")
+        self.position_eval_label.setText(
+            f"Stockfish · текущая позиция · {label} · глубина {info.get('depth') or '…'}")
 
     def on_premove_intent(self, move: chess.Move) -> None:
         if self.online_session is not None:
@@ -4398,6 +4453,10 @@ class MainWindow(QMainWindow):
 
     def on_move_selected(self, item: QListWidgetItem) -> None:
         ply = int(item.data(Qt.ItemDataRole.UserRole))
+        self.on_move_selected_ply(ply)
+
+    def on_move_selected_ply(self, ply: int) -> None:
+        ply = int(ply)
         if self.online_session is not None:
             self._play_history_sound(self.online_session.game_id, self.online_session.board, ply)
             self.online_view_ply = None if ply >= len(self.online_session.board.move_stack) else ply
@@ -4494,6 +4553,7 @@ class MainWindow(QMainWindow):
 
     def open_settings(self) -> None:
         dialog = SettingsDialog(self.settings, self, repository=self.game_repository)
+        dialog.sound_preview_requested.connect(self.sound_player.preview)
         dialog.install_requested.connect(
             lambda current=dialog: self._install_official_stockfish(current))
         dialog.finished.connect(lambda _result: self._cancel_stockfish_install())
@@ -4953,6 +5013,7 @@ class MainWindow(QMainWindow):
                     and self._lichess_rate_limit_remaining() == 0)
 
     def _refresh_online_controls(self) -> None:
+        self._update_play_mode_availability()
         if (not self.lichess or self.offline_mode or not self._lichess_connected):
             return
         remaining = self._lichess_rate_limit_remaining()
@@ -5499,7 +5560,7 @@ class MainWindow(QMainWindow):
             widget.setVisible(False)
 
     def _sync_online_history(self, board: chess.Board, game_id: str, selected_ply: int) -> None:
-        """Append SAN rows for new plies; rebuild only on a new/divergent line."""
+        """Append SAN cells for confirmed plies; show white/black in one fullmove row."""
         moves = tuple(board.move_stack)
         previous = self._online_history_moves
         incremental = (
@@ -5523,23 +5584,19 @@ class MainWindow(QMainWindow):
                 position = None
                 start_ply = len(moves)
             if position is not None:
+                rows = []
                 for index in range(start_ply, len(moves)):
                     move = moves[index]
                     ply = index + 1
-                    prefix = f"{(ply + 1) // 2}. " if ply % 2 else f"{(ply + 1) // 2}... "
-                    item = QListWidgetItem(prefix + position.san(move))
-                    item.setData(Qt.ItemDataRole.UserRole, ply)
-                    self.moves.addItem(item)
+                    rows.append({"ply": ply, "san": position.san(move),
+                                 "mover": "white" if position.turn == chess.WHITE else "black",
+                                 "before_fen": position.fen()})
                     position.push(move)
+                for row in rows:
+                    self.moves.append_move(row, enabled=self.online_session is None or
+                                           not self._is_live_online_session())
             desired_ply = min(selected_ply, len(moves))
-            current = self.moves.currentItem()
-            if current is None or current.data(Qt.ItemDataRole.UserRole) != desired_ply:
-                selected = next((self.moves.item(i) for i in range(self.moves.count())
-                                 if self.moves.item(i).data(Qt.ItemDataRole.UserRole) == desired_ply), None)
-                if selected:
-                    self.moves.setCurrentItem(selected)
-                elif desired_ply == 0:
-                    self.moves.setCurrentRow(-1)
+            self.moves.select_ply(desired_ply)
             self._online_history_game_id = game_id
             self._online_history_moves = moves
             if not unchanged:
