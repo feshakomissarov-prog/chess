@@ -13,8 +13,9 @@ def center(board_widget: BoardView, square: int) -> tuple[int, int]:
     return int(rect.x() + (col + 0.5) * side), int(rect.y() + (row + 0.5) * side)
 
 
-def test_m46_board_uses_approved_wood_palette_without_changing_widget_base():
+def test_m46_board_uses_approved_wood_palette_without_changing_widget_base(qtbot):
     widget = BoardView(chess.Board())
+    qtbot.addWidget(widget)
     assert widget._renderer.light_color.name().upper() == TOKENS.board_light
     assert widget._renderer.dark_color.name().upper() == TOKENS.board_dark
     assert widget._renderer.selected_color.name().upper() == TOKENS.board_selection

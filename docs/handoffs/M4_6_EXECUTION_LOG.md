@@ -98,12 +98,12 @@
 
 ### H — полная регрессионная проверка и handoff
 
-- Локальный CPython 3.12.10 / PySide6 6.12.0. Один полный offscreen pytest запуск и отдельный запуск `tests/test_board_view.py` завершились native exit code 1 без pytest summary. Event Viewer содержит Application Error 1000 / WER 1001: `python.exe` из `.venv312`, модуль `G:\project\chess\.venv312\Lib\site-packages\PySide6\Qt6Core.dll`, exception `0xc0000409` (BEX64). Причина внутри native Qt не установлена; связь с Dr.Web не подтверждена. Полные/падающие Qt-наборы повторно не гонялись.
-- Диагностическое разделение: все тесты, кроме `tests/test_board_view.py`, — **407 passed за 122.12 с**. Изолированный smoke `tests/test_theme.py` — **2 passed**; Python / pytest / PySide6 import проходит. `compileall` и `pip check` — PASS. На GitHub hosted runner полный набор остаётся обязательной проверкой перед завершением.
+- Локальный CPython 3.12.10 / PySide6 6.12.0: начальный полный offscreen pytest запуск и `tests/test_board_view.py` завершались native exit без pytest summary. Event Viewer зафиксировал Application Error 1000 / WER 1001: `python.exe` из `.venv312`, модуль `G:\project\chess\.venv312\Lib\site-packages\PySide6\Qt6Core.dll`, exception `0xc0000409` (BEX64). Причина — созданный в новом palette-тесте `BoardView` не был зарегистрирован в `qtbot`; тест завершался с уничтожением unmanaged Qt widget. После фикса `qtbot.addWidget(widget)` palette regression проходит.
+- Проверка исправления: `pytest tests/test_board_view.py` — **21 passed**; затем полный offscreen набор — **428 passed за 118.77 с**. `compileall` и `pip check` — PASS. Запусков реального приложения или пользовательского GUI не было.
 - Текущая проверка `git diff --check origin/main` — PASS. Удалены только лишние пустые строки EOF в двух тестах, чтобы у PR diff был чистый whitespace check.
 - Полная проверка на физических DPI/нескольких мониторах, клавиатура/скринридер с пользователем, звук через реальное устройство, ручной запуск `.cmd` и создание ярлыка с пользовательским профилем — **НЕ ПРОВЕРЯЛИСЬ**.
 - Реальные OAuth/Lichess, PAT, архив, пользовательская SQLite и Stockfish не запускались/не открывались. Их проверка не является частью M4.6 CI.
-- Финальный hosted Windows CI на точном итоговом SHA и его ссылка будут добавлены после последнего push; PR #41 остаётся draft.
+- Предыдущий hosted Windows CI на SHA `c8d3e81e907dc324928afc6c2675039204d6e0fd` остановился при offscreen pytest; после исправления времени жизни виджета запускается повторный CI. Его точный head SHA и результат указать в финальном handoff; PR #41 остаётся draft.
 
 ### F — пользовательский запуск, single-instance и иконка
 
