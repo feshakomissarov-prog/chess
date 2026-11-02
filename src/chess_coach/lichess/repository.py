@@ -1110,7 +1110,7 @@ class GameRepository:
     def search_games(self, query: str = "", *, page: int = 0,
                      page_size: int = DEFAULT_PAGE_SIZE, completed_only: bool = False,
                      source: str | None = None, opponent: str | None = None,
-                     account_id: str | None = None) -> dict:
+                     account_id: str | None = None, clock: str | None = None) -> dict:
         """Search the local library without loading every PGN into a widget."""
         self._wait_before_read()
         page = max(0, int(page))
@@ -1129,6 +1129,9 @@ class GameRepository:
             params.extend([f"%{term}%"] * 5)
         if completed_only:
             clauses.append("status NOT IN ('created','started','started_soon','playing')")
+        if clock:
+            clauses.append("g.clock=?")
+            params.append(clock)
         if source:
             clauses.append("source=?")
             params.append(source)

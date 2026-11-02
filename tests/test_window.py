@@ -2455,6 +2455,24 @@ def test_game_finished_while_home_updates_resume_action_without_switching_screen
     assert not window.resume_game_button.isVisible()
 
 
+def test_m46_home_has_play_review_context_and_collapsed_secondary_actions(qtbot, tmp_path):
+    window = MainWindow(QSettings(str(tmp_path / "home-primary.ini"), QSettings.Format.IniFormat))
+    qtbot.addWidget(window)
+    assert window.home_ai_button.text() == "Играть против Lichess AI"
+    assert window.home_local_button.text() == "Свободная доска"
+    assert window.home_review_button.text() == "Выбрать партию"
+    assert window.resume_review_button.text() == "Продолжить последний разбор"
+    assert window.home_more.isCheckable()
+    assert not window.home_more.isChecked()
+    assert window.home_more_content.isHidden()
+    assert {"games", "accuracy", "analysis", "errors"} == set(window.dashboard_metrics)
+    assert window.dashboard_account.count() >= 1
+    assert window.dashboard_clock.count() >= 1
+    window.home_more.setChecked(True)
+    assert not window.home_more_content.isHidden()
+    window.game_repository.shutdown()
+
+
 def test_game_finish_for_selected_review_does_not_replace_review(qtbot, tmp_path):
     window = MainWindow(QSettings(str(tmp_path / "review-not-stolen.ini"), QSettings.Format.IniFormat))
     qtbot.addWidget(window)

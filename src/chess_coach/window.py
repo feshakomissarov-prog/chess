@@ -62,7 +62,7 @@ from .lichess.session import LichessGameSession, classify_lichess_opponent
 from .lichess.statistics import StatisticsService
 from .diagnostics import anonymized_report, log_event, logs_directory
 from .ui.theme import stylesheet as desktop_stylesheet
-from .ui.dashboard import dashboard_snapshot, game_card_text
+from .ui.dashboard import dashboard_options, dashboard_snapshot, game_card_text
 from .ui.game_review import GameReviewWorkspace
 from .ui.sounds import ChessSoundPlayer
 from .ui.workspace_state import reposition_visible_frame
@@ -2511,6 +2511,35 @@ class MainWindow(QMainWindow):
         self.home_status.setWordWrap(True)
         self.home_status.setObjectName("secondary")
         layout.addWidget(self.home_status)
+        scope_row = QHBoxLayout()
+        self.dashboard_account = QComboBox()
+        self.dashboard_account.setAccessibleName("Аккаунт сводки")
+        self.dashboard_account.addItem("Все локальные партии", None)
+        self.dashboard_clock = QComboBox()
+        self.dashboard_clock.setAccessibleName("Контроль времени сводки")
+        self.dashboard_clock.addItem("Любой контроль", "")
+        options = dashboard_options(self.game_repository)
+        for account in options["accounts"]:
+            self.dashboard_account.addItem(account["username"], account["account_id"])
+        for clock in options["clocks"]:
+            self.dashboard_clock.addItem(clock, clock)
+        preferred_account = str(self.settings.value("workspace/selected_account", "", type=str))
+        if self.lichess and self.lichess.username:
+            preferred_account = f"lichess:{self.lichess.username.strip().lower()}"
+        preferred_index = self.dashboard_account.findData(preferred_account)
+        if preferred_index >= 0:
+            self.dashboard_account.setCurrentIndex(preferred_index)
+        preferred_clock = str(self.settings.value("workspace/dashboard_clock", "", type=str))
+        clock_index = self.dashboard_clock.findData(preferred_clock)
+        if clock_index >= 0:
+            self.dashboard_clock.setCurrentIndex(clock_index)
+        scope_row.addWidget(QLabel("Аккаунт"))
+        scope_row.addWidget(self.dashboard_account, 1)
+        scope_row.addWidget(QLabel("Контроль"))
+        scope_row.addWidget(self.dashboard_clock, 1)
+        layout.addLayout(scope_row)
+        self.dashboard_account.currentIndexChanged.connect(self._dashboard_filter_changed)
+        self.dashboard_clock.currentIndexChanged.connect(self._dashboard_filter_changed)
         self.dashboard_metrics = {}
         metrics_grid = QGridLayout()
         self.dashboard_metrics_grid = metrics_grid
@@ -2519,8 +2548,9 @@ class MainWindow(QMainWindow):
         self._dashboard_metric_values = {}
         self._dashboard_metric_details = {}
         for index, (key, label) in enumerate((
-                ("games", "Завершённые партии"), ("record", "Мои результаты"),
-                ("analysis", "Покрытие анализа"), ("puzzles", "Задачи Lichess"))):
+                ("games", "Завершённые партии"), ("accuracy", "Точность Lichess"),
+                ("analysis", "Анализ моих ходов"),
+                ("errors", "Ошибки на 100 оценённых ходов"))):
             card = QFrame()
             card.setObjectName("metricCard")
             card_layout = QVBoxLayout(card)
@@ -2546,16 +2576,53 @@ class MainWindow(QMainWindow):
         self._recent_games_layout = QVBoxLayout()
         self._recent_games_layout.setSpacing(8)
         layout.addLayout(self._recent_games_layout)
-        quick_actions = QHBoxLayout()
+        primary_actions = QHBoxLayout()
+        play_card = QFrame()
+        play_card.setObjectName("metricCard")
+        play_layout = QVBoxLayout(play_card)
+        play_title = QLabel("Играть")
+        play_title.setStyleSheet("font-size: 20px; font-weight: 700;")
+        play_layout.addWidget(play_title)
+        play_hint = QLabel("Локальная доска или нерейтинговая партия Lichess AI")
+        play_hint.setObjectName("secondary")
+        play_layout.addWidget(play_hint)
+        play_buttons = QHBoxLayout()
         self.home_ai_button = QPushButton("Играть против Lichess AI")
         self.home_ai_button.setObjectName("primaryAction")
         self.home_ai_button.clicked.connect(self.play_ai)
         self.home_local_button = QPushButton("Свободная доска")
         self.home_local_button.clicked.connect(self.start_local_game)
-        quick_actions.addWidget(self.home_ai_button)
-        quick_actions.addWidget(self.home_local_button)
-        layout.addLayout(quick_actions)
-        layout.addWidget(QLabel("Ещё"))
+        self.resume_game_button = QPushButton("Вернуться в текущую партию")
+        self.resume_game_button.clicked.connect(self.resume_current_game)
+        self.resume_game_button.setVisible(False)
+        play_buttons.addWidget(self.home_ai_button)
+        play_buttons.addWidget(self.home_local_button)
+        play_buttons.addWidget(self.resume_game_button)
+        play_layout.addLayout(play_buttons)
+        primary_actions.addWidget(play_card, 1)
+        review_card = QFrame()
+        review_card.setObjectName("metricCard")
+        review_layout = QVBoxLayout(review_card)
+        review_title = QLabel("Разобрать")
+        review_title.setStyleSheet("font-size: 20px; font-weight: 700;")
+        review_layout.addWidget(review_title)
+        review_hint = QLabel("Открой завершённую партию или продолжи просмотр")
+        review_hint.setObjectName("secondary")
+        review_layout.addWidget(review_hint)
+        review_buttons = QHBoxLayout()
+        self.home_review_button = QPushButton("Выбрать партию")
+        self.home_review_button.clicked.connect(self.show_saved_games)
+        review_buttons.addWidget(self.home_review_button)
+        self.resume_review_button = QPushButton("Продолжить последний разбор")
+        self.resume_review_button.setObjectName("primaryAction")
+        self.resume_review_button.setAccessibleName("Продолжить разбор последней партии")
+        self.resume_review_button.clicked.connect(self.resume_saved_review)
+        self.resume_review_button.setVisible(False)
+        review_buttons.addWidget(self.resume_review_button)
+        review_layout.addLayout(review_buttons)
+        primary_actions.addWidget(review_card, 1)
+        layout.addLayout(primary_actions)
+
         self.home_friend_button = QPushButton("Играть с другом по ссылке")
         self.home_friend_button.clicked.connect(self.open_friend_game)
         self.home_username_button = QPushButton("Вызвать игрока Lichess")
@@ -2586,23 +2653,29 @@ class MainWindow(QMainWindow):
         self.home_puzzles_pilot_button.setEnabled(False)
         self.home_settings_button = QPushButton("Настройки")
         self.home_settings_button.clicked.connect(self.open_settings)
-        self.resume_game_button = QPushButton("Вернуться в текущую партию")
-        self.resume_game_button.clicked.connect(self.resume_current_game)
-        self.resume_review_button = QPushButton("Продолжить разбор последней партии")
-        self.resume_review_button.setObjectName("primaryAction")
-        self.resume_review_button.setAccessibleName("Продолжить разбор последней партии")
-        self.resume_review_button.clicked.connect(self.resume_saved_review)
-        self.resume_review_button.setVisible(False)
-        for button in (self.home_friend_button,
-                       self.home_username_button, self.active_games_button,
-                       self.home_games_button, self.home_archive_status_button,
-                       self.home_stats_button,
-                       self.home_batch_analysis_button,
-                       self.home_puzzles_button,
-                       self.home_settings_button,
-                       self.resume_game_button,
-                       self.resume_review_button):
-            layout.addWidget(button)
+        self.home_more = QGroupBox("Ещё")
+        self.home_more.setCheckable(True)
+        self.home_more.setChecked(False)
+        more_layout = QVBoxLayout(self.home_more)
+        for button in (self.home_friend_button, self.home_username_button,
+                       self.active_games_button, self.home_games_button,
+                       self.home_archive_status_button, self.home_pilot_import_button,
+                       self.home_archive_button, self.home_stats_button,
+                       self.home_batch_analysis_button, self.home_puzzles_button,
+                       self.home_puzzles_pilot_button, self.home_settings_button):
+            more_layout.addWidget(button)
+        more_layout_widget = QWidget()
+        more_content = QVBoxLayout(more_layout_widget)
+        more_content.setContentsMargins(0, 0, 0, 0)
+        for index in range(more_layout.count()):
+            item = more_layout.takeAt(0)
+            if item.widget():
+                more_content.addWidget(item.widget())
+        self.home_more_content = more_layout_widget
+        more_layout_widget.setVisible(False)
+        more_layout.addWidget(more_layout_widget)
+        self.home_more.toggled.connect(more_layout_widget.setVisible)
+        layout.addWidget(self.home_more)
         layout.addStretch(1)
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
@@ -2615,7 +2688,12 @@ class MainWindow(QMainWindow):
         if not hasattr(self, "_dashboard_metric_values"):
             return
         try:
-            snapshot = dashboard_snapshot(self.game_repository)
+            account_id = (self.dashboard_account.currentData()
+                          if hasattr(self, "dashboard_account") else None)
+            clock = (self.dashboard_clock.currentData()
+                     if hasattr(self, "dashboard_clock") else "")
+            snapshot = dashboard_snapshot(self.game_repository, account_id=account_id,
+                                          clock=clock or None)
         except Exception as exc:
             for value in self._dashboard_metric_values.values():
                 value.setText("н/д")
@@ -2640,12 +2718,31 @@ class MainWindow(QMainWindow):
             return
         for game in games:
             heading, details = game_card_text(game)
-            card = QPushButton(f"♟  {heading}\n{details}")
+            metrics = game.get("review_metrics") or {}
+            card_text = (
+                f"♟  {heading}\n{details}\n"
+                f"Точность Lichess {metrics.get('accuracy', 'н/д')} · "
+                f"неточности {metrics.get('inaccuracies', 'н/д')} · "
+                f"ошибки {metrics.get('mistakes', 'н/д')} · зевки {metrics.get('blunders', 'н/д')} · "
+                f"сильные подтверждённые {metrics.get('strong', 'н/д')}\n"
+                f"Источник {metrics.get('source', 'нет данных')} · статус {metrics.get('status', 'н/д')} · "
+                f"охват своих ходов {metrics.get('coverage', 'н/д')}"
+            )
+            card = QPushButton(card_text)
             card.setObjectName("navItem")
-            card.setMinimumHeight(68)
-            card.setToolTip("Открыть партию в библиотеке Chess Coach")
+            card.setMinimumHeight(112)
+            card.setToolTip(metrics.get("strong_detail", "Открыть партию в библиотеке Chess Coach"))
             card.clicked.connect(lambda _checked=False, item=dict(game): self._open_saved_game(item))
             self._recent_games_layout.addWidget(card)
+
+    def _dashboard_filter_changed(self, *_args) -> None:
+        if hasattr(self, "dashboard_account"):
+            selected = self.dashboard_account.currentData()
+            self.settings.setValue("workspace/selected_account", selected or "")
+        if hasattr(self, "dashboard_clock"):
+            self.settings.setValue("workspace/dashboard_clock",
+                                   self.dashboard_clock.currentData() or "")
+        self._refresh_home_dashboard()
 
     def _layout_dashboard_metrics(self) -> None:
         grid = getattr(self, "dashboard_metrics_grid", None)
