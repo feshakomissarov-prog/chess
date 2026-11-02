@@ -318,6 +318,9 @@ def test_review_training_safety_requires_complete_ai_only_snapshot(
     window = MainWindow(QSettings(str(tmp_path / "review-safety.ini"),
                                   QSettings.Format.IniFormat), offline_mode=True)
     qtbot.addWidget(window)
+    window.game_repository.save_snapshot("review-id", "startpos", "e2e4 e7e5", "white",
+        "Opponent", False, "5+0", "mate", "white")
+    assert window._open_saved_game(window.game_repository.get_game("review-id"))
     class FakeClient:
         rate_limit_remaining = 0
     class FakeService:
@@ -341,6 +344,9 @@ def test_review_training_safety_rejects_stale_response_after_auth_generation_cha
     window = MainWindow(QSettings(str(tmp_path / "review-safety-stale.ini"),
                                   QSettings.Format.IniFormat), offline_mode=True)
     qtbot.addWidget(window)
+    window.game_repository.save_snapshot("review-id", "startpos", "e2e4 e7e5", "white",
+        "Opponent", False, "5+0", "mate", "white")
+    assert window._open_saved_game(window.game_repository.get_game("review-id"))
     class FakeClient:
         rate_limit_remaining = 0
     class FakeService:
@@ -355,11 +361,156 @@ def test_review_training_safety_rejects_stale_response_after_auth_generation_cha
     monkeypatch.setattr(window, "_online_actions_allowed", lambda: True)
     window._request_review_training_safety("review-id")
     request_id = window.lichess.request_id
-    window._analysis_session_generation += 1
+    window._invalidate_analysis_preflight()
     window._analysis_safety_games_received(
         request_id, [{"source": "ai", "opponent": {"ai": 3, "id": None}}])
     assert not window.review_workspace.training_allowed
-    assert "устарел" in window.review_workspace.training_block_reason
+    assert "состояние подключения" in window.review_workspace.training_block_reason
+
+
+def _saved_review_with_engine_facts(window, game_id):
+    window.game_repository.save_snapshot(game_id, "startpos", "e2e4 e7e5 g1f3", "white",
+        "Opponent", False, "5+0", "mate", "white")
+    line = window.game_repository.current_line(game_id)
+    window.game_repository.save_analysis(game_id, line_revision=line["line_revision"],
+        line_hash=line["line_hash"], source="stockfish", engine_name="FakeFish",
+        engine_version="test", parameters={"nodes": 100000}, status="complete",
+        assessments=[
+            {"ply": 0, "white_cp": 20, "depth": 20, "nodes": 100000, "pv": ["e2e4"]},
+            {"ply": 1, "white_cp": -80, "depth": 20, "nodes": 100000, "pv": ["c7c5"]},
+            {"ply": 2, "white_cp": 80, "depth": 20, "nodes": 100000, "pv": ["g1f3"]},
+            {"ply": 3, "white_cp": 20, "depth": 20, "nodes": 100000, "pv": ["b8c6"]},
+        ],
+        classifications=[{"ply": 2, "mover": "black", "eval_loss_cp": 80,
+                          "label": "blunder", "algorithm_version": "fixture-v1"}])
+    return window.game_repository.get_game(game_id)
+
+
+def test_human_game_start_revokes_safety_and_masks_saved_review_analysis(
+        qtbot, tmp_path, monkeypatch):
+    window = MainWindow(QSettings(str(tmp_path / "review-safety-revoke.ini"),
+                                  QSettings.Format.IniFormat), offline_mode=True)
+    qtbot.addWidget(window)
+    game = _saved_review_with_engine_facts(window, "safe-then-human")
+    assert window._open_saved_game(game)
+    window.offline_mode = False
+    window._lichess_connected = True
+    monkeypatch.setattr(window, "_online_actions_allowed", lambda: True)
+
+    class FakeService:
+        username = "Owner"
+        def check_active_games_for_analysis(self, request_id): self.request_id = request_id
+        def close(self, timeout=1.0): return True
+    window.lichess = FakeService()
+    window._request_review_training_safety("safe-then-human")
+    window._review_safety_games_received(window.lichess.request_id, [])
+    assert window.review_workspace.evaluation_allowed
+    assert window.review_workspace.graph._values()
+
+    window._lichess_event({"type": "gameStart", "game": {
+        "gameId": "new-human", "source": "friend", "color": "white",
+        "opponent": {"id": "friend", "username": "Friend"}}})
+
+    assert not window.review_workspace.training_allowed
+    assert not window.review_workspace.evaluation_allowed
+    assert window.review_workspace.graph._values() == []
+    assert "blunder" not in window.review_workspace.moves_list.item(2).text().lower()
+    assert "stockfish" not in window.review_workspace.subtitle.text().lower()
+    assert "cp" not in window.review_workspace.metrics_label.text().lower()
+    assert "· 1" not in window.review_workspace.training_button.text()
+    window.review_workspace.select_ply(2)
+    assert window.review_workspace.move_detail.text() == window.review_workspace.training_block_reason
+
+
+def test_human_game_start_stops_active_review_exercise_before_hint_or_check(
+        qtbot, tmp_path, monkeypatch):
+    window = MainWindow(QSettings(str(tmp_path / "review-training-stop.ini"),
+                                  QSettings.Format.IniFormat), offline_mode=True)
+    qtbot.addWidget(window)
+    game = _saved_review_with_engine_facts(window, "training-then-human")
+    assert window._open_saved_game(game)
+    window.offline_mode = False
+    window._lichess_connected = True
+    monkeypatch.setattr(window, "_online_actions_allowed", lambda: True)
+
+    class FakeService:
+        username = "Owner"
+        def check_active_games_for_analysis(self, request_id): self.request_id = request_id
+        def close(self, timeout=1.0): return True
+    window.lichess = FakeService()
+    window._request_review_training_safety("training-then-human")
+    window._review_safety_games_received(window.lichess.request_id, [])
+    window.review_workspace.start_training()
+    assert window.review_workspace.training_mode
+    window.review_workspace._training_move_intent(chess.Move.from_uci("e7e6"))
+
+    window._lichess_event({"type": "gameStart", "game": {
+        "gameId": "new-human-active-exercise", "source": "friend", "color": "white",
+        "opponent": {"id": "friend", "username": "Friend"}}})
+    previous_status = window.review_workspace.training_status.text()
+    window.review_workspace.show_hint()
+    window.review_workspace.check_training_move()
+
+    assert not window.review_workspace.training_mode
+    assert not window.review_workspace.evaluation_allowed
+    assert window.review_workspace.training_proven == {}
+    assert window.review_workspace.training_status.text() == previous_status
+    assert "e7e5" not in window.review_workspace.training_status.text()
+
+
+def test_late_safe_reply_for_game_a_cannot_authorize_open_game_b(qtbot, tmp_path, monkeypatch):
+    window = MainWindow(QSettings(str(tmp_path / "review-switch-game.ini"),
+                                  QSettings.Format.IniFormat), offline_mode=True)
+    qtbot.addWidget(window)
+    game_a = _saved_review_with_engine_facts(window, "review-a")
+    game_b = _saved_review_with_engine_facts(window, "review-b")
+    assert window._open_saved_game(game_a)
+    window.offline_mode = False
+    window._lichess_connected = True
+    monkeypatch.setattr(window, "_online_actions_allowed", lambda: True)
+
+    class FakeService:
+        username = "Owner"
+        def check_active_games_for_analysis(self, request_id): self.request_id = request_id
+        def close(self, timeout=1.0): return True
+    window.lichess = FakeService()
+    window._request_review_training_safety("review-a")
+    request_a = window.lichess.request_id
+    assert window._open_saved_game(game_b)
+
+    assert not window._review_safety_games_received(
+        request_a, [{"source": "ai", "opponent": {"ai": 3, "id": None}}])
+    assert window.review_workspace.review["game"]["game_id"] == "review-b"
+    assert not window.review_workspace.training_allowed
+    assert not window.review_workspace.evaluation_allowed
+
+
+def test_disconnect_revokes_a_previously_successful_review_safety_lease(
+        qtbot, tmp_path, monkeypatch):
+    window = MainWindow(QSettings(str(tmp_path / "review-disconnect-revoke.ini"),
+                                  QSettings.Format.IniFormat), offline_mode=True)
+    qtbot.addWidget(window)
+    game = _saved_review_with_engine_facts(window, "review-disconnect")
+    assert window._open_saved_game(game)
+    window.offline_mode = False
+    window._lichess_connected = True
+    monkeypatch.setattr(window, "_online_actions_allowed", lambda: True)
+
+    class FakeService:
+        username = "Owner"
+        def check_active_games_for_analysis(self, request_id): self.request_id = request_id
+        def disconnect_account(self): pass
+        def close(self, timeout=1.0): return True
+    window.lichess = FakeService()
+    window._request_review_training_safety("review-disconnect")
+    window._review_safety_games_received(window.lichess.request_id, [])
+    assert window.review_workspace.evaluation_allowed
+
+    window.disconnect_lichess()
+
+    assert not window.review_workspace.evaluation_allowed
+    assert not window.review_workspace.training_allowed
+    assert window.review_workspace.graph._values() == []
 
 
 def test_online_move_sound_waits_for_authoritative_ack_and_deduplicates_replays(qtbot, tmp_path):

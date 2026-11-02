@@ -2376,6 +2376,12 @@ class MainWindow(QMainWindow):
     def _shell_screen_changed(self, _index: int) -> None:
         if not hasattr(self, "sidebar"):
             return
+        if (self.screen_stack.currentWidget() is not self.review_workspace
+                and self._review_safety_request_id is not None):
+            self._review_safety_request_id = None
+            self._review_safety_context = None
+            self.review_workspace.revoke_safety(
+                "Проверка отменена: вы перешли с экрана разбора. Запросите новую проверку.")
         is_board = self.screen_stack.currentWidget() in (
             self.game_page, self.result_page, getattr(self, "review_workspace", None))
         current = self.screen_stack.currentWidget()
@@ -3773,41 +3779,85 @@ class MainWindow(QMainWindow):
             return False, "Проверьте активные партии Lichess перед упражнением."
         return False, "Заблокировано: безопасность аккаунта не подтверждена. Подключите Lichess."
 
+    def _review_workspace_identity(self) -> tuple[str, int, str] | None:
+        review = getattr(self, "review_workspace", None)
+        if not review or not review.review:
+            return None
+        game = review.review.get("game") or {}
+        line = review.review.get("line") or {}
+        try:
+            return (str(game["game_id"]), int(line["line_revision"]),
+                    str(line["line_hash"]))
+        except (KeyError, TypeError, ValueError):
+            return None
+
+    def _revoke_review_safety(self, reason: str, *, preserve_offline: bool = False) -> None:
+        self._review_safety_request_id = None
+        self._review_safety_context = None
+        if preserve_offline and self.offline_mode:
+            return
+        workspace = getattr(self, "review_workspace", None)
+        if workspace is not None:
+            workspace.revoke_safety(reason)
+
     def _request_review_training_safety(self, game_id: str) -> None:
+        identity = self._review_workspace_identity()
+        if (identity is None or identity[0] != str(game_id)
+                or self.screen_stack.currentWidget() is not self.review_workspace
+                or self._screen_mode != "review"):
+            self._revoke_review_safety(
+                "Заблокировано: разбор изменился до проверки безопасности.")
+            return
         service = self.lichess
         username = str(getattr(service, "username", "") or "").strip()
         if not service or not username or not self._online_actions_allowed():
-            self.review_workspace.set_training_safety_result(
-                False, "Заблокировано: не удалось проверить активные партии Lichess.")
+            self._revoke_review_safety(
+                "Заблокировано: не удалось проверить активные партии Lichess.")
             return
         active_human = any(
             session.status in {"started", "playing"} and not session.is_ai_opponent
             for session in self.online_sessions.values())
         if active_human:
-            self.review_workspace.set_training_safety_result(
-                False, "Заблокировано: у вас есть активная партия с человеком.")
+            self._revoke_review_safety(
+                "Заблокировано: у вас есть активная партия с человеком.")
             return
         request_id = uuid.uuid4().hex
         self._review_safety_request_id = request_id
-        self._review_safety_context = (
-            self._analysis_session_generation, username.casefold(), service, game_id)
-        self.review_workspace.training_status.setText(
-            "Проверяем активные партии; учебные варианты пока скрыты.")
-        service.check_active_games_for_analysis(request_id)
+        self._review_safety_context = {
+            "generation": self._analysis_session_generation,
+            "account_id": f"lichess:{username.casefold()}",
+            "username": username.casefold(), "service": service,
+            "game_id": identity[0], "line_revision": identity[1],
+            "line_hash": identity[2],
+        }
+        self.review_workspace.set_safety_pending(
+            "Проверяем активные партии; оценки и варианты пока скрыты.")
+        try:
+            service.check_active_games_for_analysis(request_id)
+        except Exception as exc:
+            self._review_safety_error_received(request_id, str(exc))
 
     def _review_safety_reply_is_current(self, request_id: str) -> bool:
         context = self._review_safety_context
         if request_id != self._review_safety_request_id or not context:
             return False
-        generation, account_id, service, _game_id = context
+        identity = self._review_workspace_identity()
+        current_widget = self.screen_stack.currentWidget()
         current_account = str(getattr(self.lichess, "username", "") or "").strip().casefold()
-        if (service is not self.lichess or generation != self._analysis_session_generation
-                or account_id != current_account or not self._lichess_connected
-                or not self._online_actions_allowed()):
+        current_line = (self.game_repository.current_line(context["game_id"])
+                        if context.get("game_id") else None)
+        current_identity = ((str(context["game_id"]), int(current_line["line_revision"]),
+                            str(current_line["line_hash"])) if current_line else None)
+        if (context["service"] is not self.lichess
+                or context["generation"] != self._analysis_session_generation
+                or context["username"] != current_account
+                or context["account_id"] != f"lichess:{current_account}"
+                or not self._lichess_connected or not self._online_actions_allowed()
+                or current_widget is not self.review_workspace or self._screen_mode != "review"
+                or identity != (context["game_id"], context["line_revision"], context["line_hash"])
+                or current_identity != identity):
             self._review_safety_request_id = None
             self._review_safety_context = None
-            self.review_workspace.set_training_safety_result(
-                False, "Заблокировано: ответ проверки устарел после смены аккаунта/сеанса.")
             return False
         return True
 
@@ -3827,7 +3877,8 @@ class MainWindow(QMainWindow):
         context = self._review_safety_context
         self._review_safety_request_id = None
         self._review_safety_context = None
-        if context:
+        if context and self._review_workspace_identity() == (
+                context["game_id"], context["line_revision"], context["line_hash"]):
             self.review_workspace.set_training_safety_result(safe, reason)
         return True
 
@@ -3837,8 +3888,8 @@ class MainWindow(QMainWindow):
         if self._review_safety_reply_is_current(request_id):
             self._review_safety_request_id = None
             self._review_safety_context = None
-            self.review_workspace.set_training_safety_result(
-                False, f"Заблокировано: проверка Lichess не выполнена ({message}).")
+            self._revoke_review_safety(
+                f"Заблокировано: проверка Lichess не выполнена ({message}).")
         return True
 
     def _export_review_pgn(self, game_id: str) -> None:
@@ -4516,11 +4567,9 @@ class MainWindow(QMainWindow):
     def _invalidate_analysis_preflight(self) -> None:
         """Invalidate a pending safety reply when the authenticated session changes."""
         self._analysis_session_generation += 1
-        if self._review_safety_request_id is not None:
-            self._review_safety_request_id = None
-            self._review_safety_context = None
-            self.review_workspace.set_training_safety_result(
-                False, "Заблокировано: изменилось состояние подключения; проверьте безопасность повторно.")
+        self._revoke_review_safety(
+            "Заблокировано: изменилось состояние подключения; проверьте безопасность повторно.",
+            preserve_offline=True)
         self._pause_batch_analysis()
         self._disable_position_evaluation(
             "Проверка Stockfish остановлена: изменилось состояние подключения Lichess.")
@@ -4966,6 +5015,9 @@ class MainWindow(QMainWindow):
             session.status = "started"
             session.set_server_game_identity(game)
             self.online_sessions[game_id] = session
+            if not session.is_ai_opponent:
+                self._revoke_review_safety(
+                    "Заблокировано: началась человеческая/непроверенная онлайн-партия.")
             self._refresh_batch_readiness()
             if (not session.is_ai_opponent
                     and getattr(self, "_analysis_stop", None) is not None):
@@ -5730,6 +5782,9 @@ class MainWindow(QMainWindow):
             self.home_status.setText(self._raw_only_game_message(game))
             return False
         self._disable_position_evaluation("Открыта другая партия; выполните новую проверку безопасности.")
+        self._revoke_review_safety(
+            "Оценки и варианты скрыты до проверки актуальной безопасности.",
+            preserve_offline=True)
         self.board.clear_annotations()
         session = LichessGameSession(game["game_id"], self.game_repository)
         session.initial_fen = game["initial_fen"]
@@ -5759,6 +5814,8 @@ class MainWindow(QMainWindow):
         self.game_status.setText("Сохранённая завершённая партия · только чтение")
         self._active_route = "games"
         self._schedule_workspace_save()
+        if not self.offline_mode and self._lichess_connected:
+            self._request_review_training_safety(str(game["game_id"]))
         return True
 
     def leave_online_game(self) -> None:

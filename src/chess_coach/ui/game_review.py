@@ -24,6 +24,8 @@ class ReviewGraph(QWidget):
         super().__init__(parent)
         self.assessments = assessments
         self.markers = {int(row["ply"]): row for row in metrics}
+        self.safety_allowed = True
+        self.safety_block_reason = ""
         self.current_ply = 0
         self.setMinimumHeight(170)
         self.setMaximumHeight(220)
@@ -32,6 +34,8 @@ class ReviewGraph(QWidget):
         self.setAccessibleName("Интерактивный график оценки по ходам")
 
     def _values(self):
+        if not self.safety_allowed:
+            return []
         output = []
         for row in self.assessments:
             score = row.get("white_cp")
@@ -57,7 +61,9 @@ class ReviewGraph(QWidget):
         painter.setPen(QPen(QColor(TOKENS.secondary), 1))
         painter.drawLine(rect.left(), rect.center().y(), rect.right(), rect.center().y())
         if not values:
-            painter.drawText(rect, Qt.AlignmentFlag.AlignCenter, "Нет сохранённых оценок")
+            message = (self.safety_block_reason if not self.safety_allowed
+                       else "Нет сохранённых оценок")
+            painter.drawText(rect, Qt.AlignmentFlag.AlignCenter, message)
         else:
             coords = []
             for ply, score, mate in values:
@@ -103,6 +109,11 @@ class ReviewGraph(QWidget):
         self.current_ply = max(0, int(ply))
         self.update()
 
+    def set_safety_gate(self, allowed: bool, reason: str = "") -> None:
+        self.safety_allowed = bool(allowed)
+        self.safety_block_reason = reason or "Оценки скрыты правилами Fair Play"
+        self.update()
+
     def mousePressEvent(self, event):
         values = self._values()
         if not values:
@@ -141,6 +152,7 @@ class GameReviewWorkspace(QWidget):
         super().__init__(parent)
         self.repository = repository
         self.training_allowed = training_allowed
+        self.evaluation_allowed = training_allowed
         self.training_block_reason = training_block_reason
         self.review: dict | None = None
         self.selected_ply = 0
@@ -284,6 +296,7 @@ class GameReviewWorkspace(QWidget):
         self.review = load_game_review(self.repository, game)
         if training_allowed is not None:
             self.training_allowed = training_allowed
+            self.evaluation_allowed = training_allowed
         if training_block_reason is not None:
             self.training_block_reason = training_block_reason
         self.selected_ply = 0
@@ -292,10 +305,12 @@ class GameReviewWorkspace(QWidget):
         black = game.get("black_player") or "Чёрные"
         self.title.setText(f"{white} — {black}")
         source = analysis.get("source") or "локальная оценка не сохранена"
+        game_details = (f"{game.get('started_at') or 'Дата н/д'} · "
+                        f"{game.get('clock') or 'Контроль н/д'} · {game.get('status') or 'результат н/д'}")
         self.subtitle.setText(
-            f"{game.get('started_at') or 'Дата н/д'} · {game.get('clock') or 'Контроль н/д'} · "
-            f"{game.get('status') or 'результат н/д'} · анализ: {source} · "
-            f"охват позиций {self.review['coverage']['scored']}/{self.review['coverage']['total']}")
+            game_details + (f" · анализ: {source} · охват позиций "
+                            f"{self.review['coverage']['scored']}/{self.review['coverage']['total']}"
+                            if self.evaluation_allowed else ""))
         self.white_name.setText(f"♔  {white}")
         self.black_name.setText(f"♚  {black}")
         color = self.review["owner_color"]
@@ -307,7 +322,9 @@ class GameReviewWorkspace(QWidget):
         self.moves_list.addItem(start)
         for move in self.review["moves"]:
             prefix = f"{(move.ply + 1) // 2}." if move.mover == "white" else ""
-            row = QListWidgetItem(f"{prefix}{move.san}   ·   {move.severity}")
+            label = (f"{prefix}{move.san}   ·   {move.severity}"
+                     if self.evaluation_allowed else f"{prefix}{move.san}")
+            row = QListWidgetItem(label)
             row.setData(Qt.ItemDataRole.UserRole, move.ply)
             self.moves_list.addItem(row)
         self.moves_list.setCurrentRow(0)
@@ -324,30 +341,42 @@ class GameReviewWorkspace(QWidget):
             return (f"{color}: хорошие {side['good']}, неточности {side['inaccuracy']}, "
                     f"ошибки {side['mistake']}, зевки {side['blunder']} · "
                     f"охват {side['assessed']}/{side['total']} сравнимых ходов{suffix}")
-        self.metrics_label.setText(
+        if self.evaluation_allowed:
+            metrics_text = (
             f"Источник локальных классов: {source} · статус {analysis.get('status') or 'нет данных'}\n"
             f"Оценено позиций: {self.review['coverage']['scored']}/{self.review['coverage']['total']}\n"
             f"{side_counts('white')}\n{side_counts('black')}\n"
             f"{accuracy_text}")
+        else:
+            metrics_text = (self.training_block_reason or
+                            "Оценки, варианты и подсказки скрыты до проверки Fair Play.")
+        self.metrics_label.setText(metrics_text)
         self.notes_list.clear()
         for note in self.review["notes"]:
             self.notes_list.addItem(f"ply {note.get('ply', 0)} · {note.get('body', '')}")
-        self.graph.assessments = analysis.get("assessments", [])
-        self.graph.markers = {move.ply: {"severity": move.severity, "mover": move.mover}
-                              for move in self.review["moves"]}
+        self.graph.assessments = analysis.get("assessments", []) if self.evaluation_allowed else []
+        self.graph.markers = ({move.ply: {"severity": move.severity, "mover": move.mover}
+                               for move in self.review["moves"]}
+                              if self.evaluation_allowed else {})
+        self.graph.set_safety_gate(self.evaluation_allowed, self.training_block_reason)
         self.graph.select_ply(0)
         eligible = eligible_error_moves(self.review)
-        self.training_button.setText(f"Разобрать мои ошибки · {len(eligible)}")
+        self.training_button.setText(
+            f"Разобрать мои ошибки · {len(eligible)}" if self.evaluation_allowed
+            else "Разобрать мои ошибки")
         reason = self.training_block_reason
         has_errors = bool(eligible)
+        has_saved_analysis = bool(analysis and (analysis.get("assessments") or
+                                                analysis.get("events") or
+                                                analysis.get("alternatives")))
         allowed = self.training_allowed and has_errors
         self.training_button.setEnabled(allowed)
         self.training_button.setToolTip(reason if not self.training_allowed else
             "Нет завершённых собственных ошибок с проверенным улучшенным ходом." if not eligible else "")
-        self.training_safety_button.setVisible(has_errors and not self.training_allowed
-                                               and not reason.startswith("Заблокировано:"))
-        self.training_safety_button.setEnabled(has_errors and not self.training_allowed
-                                               and not reason.startswith("Заблокировано:"))
+        self.training_safety_button.setVisible(
+            has_saved_analysis and not self.training_allowed)
+        self.training_safety_button.setEnabled(
+            has_saved_analysis and not self.training_allowed)
         self.training_safety_button.setToolTip(reason or "Проверить текущие активные партии Lichess.")
         self.training_status.setText("" if allowed else reason or (
             "Нет ошибок, для которых сохранённые оценки позволяют проверить улучшение."))
@@ -361,11 +390,38 @@ class GameReviewWorkspace(QWidget):
 
     def set_training_safety_result(self, allowed: bool, reason: str = ""):
         self.training_allowed = bool(allowed)
+        self.evaluation_allowed = bool(allowed)
         self.training_block_reason = reason
+        if not allowed:
+            self.training_proven = {}
+            self.training_candidate = None
+        if not allowed and self.training_mode:
+            self.stop_training(reason or "Упражнение остановлено: безопасность не подтверждена.")
         if self.review:
-            self.load_game(self.review["game"], training_allowed=allowed,
+            game = self.review["game"]
+            self.load_game(game, training_allowed=allowed,
                            training_block_reason=reason)
         self.training_safety_button.setText("Проверить безопасность")
+
+    def set_safety_pending(self, reason: str = "Проверяем активные партии; оценки скрыты."):
+        self.training_allowed = False
+        self.evaluation_allowed = False
+        self.training_block_reason = reason
+        if self.training_mode:
+            self.stop_training(reason)
+        if self.review:
+            self.graph.set_safety_gate(False, reason)
+            self.graph.assessments = []
+            self.graph.markers = {}
+            self.metrics_label.setText(reason)
+            self.move_detail.setText(reason)
+        self.training_button.setEnabled(False)
+        self.training_safety_button.setEnabled(True)
+        self.training_safety_button.setText("Проверяем…")
+        self.training_status.setText(reason)
+
+    def revoke_safety(self, reason: str) -> None:
+        self.set_training_safety_result(False, reason)
 
     def _export(self):
         if self.review:
@@ -385,7 +441,11 @@ class GameReviewWorkspace(QWidget):
         self.moves_list.blockSignals(True)
         self.moves_list.setCurrentRow(ply)
         self.moves_list.blockSignals(False)
-        if ply:
+        if not self.evaluation_allowed:
+            self.move_detail.setText(
+                self.training_block_reason or
+                "Оценка и варианты скрыты до актуальной проверки безопасности.")
+        elif ply:
             move = self.review["moves"][ply - 1]
             self.move_detail.setText(
                 f"{move.san} · {move.mover} · {move.severity} · "
@@ -396,7 +456,7 @@ class GameReviewWorkspace(QWidget):
         self.position_selected.emit(str(self.review["game"]["game_id"]), ply)
 
     def start_training(self):
-        if not self.training_allowed or not self.review:
+        if not self.training_allowed or not self.evaluation_allowed or not self.review:
             self.training_status.setText(self.training_block_reason or "Упражнение сейчас недоступно.")
             return
         self.training_moves = eligible_error_moves(self.review)
@@ -449,7 +509,8 @@ class GameReviewWorkspace(QWidget):
         self.training_status.setText("Ход готов к проверке.")
 
     def check_training_move(self):
-        if not self.training_mode or self.training_candidate is None:
+        if (not self.training_mode or not self.training_allowed or not self.evaluation_allowed
+                or self.training_candidate is None):
             return
         self.training_checked += 1
         evidence = self.training_proven.get(self.training_candidate.uci())
@@ -490,7 +551,8 @@ class GameReviewWorkspace(QWidget):
                 "Не удалось достоверно проверить этот вариант по сохранённым оценкам. Он не помечен как неверный.")
 
     def show_hint(self):
-        if not self.training_mode or not self.training_proven:
+        if (not self.training_mode or not self.training_allowed or not self.evaluation_allowed
+                or not self.training_proven):
             return
         move = self.training_moves[self.training_index]
         choices = sorted(self.training_proven)
