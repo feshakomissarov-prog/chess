@@ -115,6 +115,8 @@ class CompletedGameAnalyzer:
                 game_id, int(revision["line_revision"]), revision["line_hash"],
                 "stockfish", engine_version, parameters)
             if cache:
+                if stop_event is not None and stop_event.is_set():
+                    raise InterruptedError("Анализ отменён.")
                 cache["cached"] = True
                 return cache
             # MultiPV is marked as a managed UCI option by python-chess. For a
@@ -162,6 +164,8 @@ class CompletedGameAnalyzer:
                                         "phase": self.repository.phase_for_ply(
                                             game_id, int(revision["line_revision"]), ply),
                                         "algorithm_version": CLASSIFIER_VERSION})
+            if stop_event is not None and stop_event.is_set():
+                raise InterruptedError("Анализ отменён до сохранения результата.")
             run_id = self.repository.save_analysis(
                 game_id, line_revision=int(revision["line_revision"]),
                 line_hash=revision["line_hash"], source="stockfish",

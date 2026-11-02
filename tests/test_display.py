@@ -23,8 +23,14 @@ def test_clock_labels_preserve_units_for_base_and_increment():
 def test_opening_families_translate_deterministically_and_keep_eco():
     assert russian_opening_name("B20", "Sicilian Defense") == "B20 · Сицилианская защита"
     assert russian_opening_name("C50", "Italian Game") == "C50 · Итальянская партия"
-    assert russian_opening_name("D05", "") == "D05 · Лондонская система"
-    assert russian_opening_name("Z99", "Rare English line") == "Z99 · дебют"
+    assert russian_opening_name("A40", "Queen's Pawn Game") == "A40 · Дебют ферзевой пешки"
+    assert russian_opening_name("B00", "Elephant Gambit") == "B00 · Слоновий гамбит"
+    assert russian_opening_name("D01", "Queen's Pawn Game: Chigorin Variation") == (
+        "D01 · Дебют ферзевой пешки")
+    assert russian_opening_name("D05", "Queen's Pawn Game: Colle System") == (
+        "D05 · Дебют ферзевой пешки")
+    assert russian_opening_name("D05", "") == "D05 · дебют не классифицирован"
+    assert russian_opening_name("Z99", "Rare English line") == "Z99 · дебют не классифицирован"
     assert russian_opening_name("", "French Defense: Exchange") == "Французская защита"
 
 

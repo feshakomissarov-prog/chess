@@ -15,7 +15,7 @@ from ..lichess.game_review import (
     eligible_error_moves, load_game_review, verified_improved_moves,
 )
 from .display import (
-    evaluation_label, format_clock_control, format_game_date, phase_label,
+    evaluation_label, format_clock_control, format_game_date, opening_tooltip, phase_label,
     russian_opening_name, severity_label, source_short,
 )
 from .move_table import MoveTable
@@ -410,6 +410,7 @@ class GameReviewWorkspace(QWidget):
                         f"{format_clock_control(game.get('clock'))} · "
                         f"{russian_opening_name(game.get('eco'), game.get('opening_name'))}")
         self.subtitle.setText(game_details)
+        self.subtitle.setToolTip(opening_tooltip(game.get("opening_name")))
         self.white_name.setText(f"♔  {white}")
         self.black_name.setText(f"♚  {black}")
         color = self.review["owner_color"]

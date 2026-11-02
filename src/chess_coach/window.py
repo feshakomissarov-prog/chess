@@ -70,7 +70,7 @@ from .ui.move_table import MoveTable
 from .ui.sounds import ChessSoundPlayer
 from .ui.workspace_state import reposition_visible_frame
 from .ui.display import (format_clock_control, format_game_date,
-                         russian_opening_name, source_short)
+                         opening_tooltip, russian_opening_name, source_short)
 
 
 def _puzzle_attempt_summary(attempts: list[dict]) -> str:
@@ -345,7 +345,8 @@ class StatisticsGameDialog(QDialog):
         accuracy_text = (f"Официальная Lichess accuracy игрока ({color}): "
                          f"{owner_accuracy if owner_accuracy is not None else 'нет данных'}"
                          if lichess_origin else "Официальная Lichess accuracy: нет данных от Lichess")
-        opening_text = (f"Справочник: {opening['eco']} {opening['name']} · совпадение до ply {opening['matched_ply']}"
+        opening_text = (f"Справочник: {russian_opening_name(opening['eco'], opening['name'])} · "
+                        f"совпадение до ply {opening['matched_ply']}"
                         if opening else "Справочник дебютов: совпадения пока нет")
         if opening and opening.get("lichess_conflict"):
             opening_text += (f" · конфликт с Lichess: {game.get('opening_eco') or 'ECO —'} "
@@ -357,9 +358,11 @@ class StatisticsGameDialog(QDialog):
             f"{_game_date_label(game)} · "
             f"{game.get('white_player') or 'Белые'} — {game.get('black_player') or 'Чёрные'}\n"
             f"Ваш цвет: {color}; соперник: {opponent}; результат: {result}\n"
-            f"Источник оценки: {source}; дебют: {game.get('opening_eco') or ''} "
-            f"{game.get('opening_name') or 'не указан'}\n{opening_text}\n{accuracy_text}\n{phase_text}")
+            f"Источник оценки: {source}; дебют: "
+            f"{russian_opening_name(game.get('opening_eco'), game.get('opening_name'))}\n"
+            f"{opening_text}\n{accuracy_text}\n{phase_text}")
         header.setWordWrap(True)
+        header.setToolTip(opening_tooltip(opening.get("name") if opening else game.get("opening_name")))
         layout.addWidget(header)
         details = QGridLayout()
         self.moves = QListWidget()
@@ -1849,6 +1852,7 @@ class MainWindow(QMainWindow):
         self._analysis_safety_request_id: str | None = None
         self._analysis_safety_context: tuple | None = None
         self._analysis_safety_phase: str | None = None
+        self._analysis_worker_context: tuple | None = None
         self._review_safety_request_id: str | None = None
         self._review_safety_context: tuple | None = None
         self._analysis_session_generation = 0
@@ -4832,7 +4836,7 @@ class MainWindow(QMainWindow):
             self.lichess.disconnect_account()
 
     def _invalidate_analysis_preflight(self) -> None:
-        """Invalidate a pending safety reply when the authenticated session changes."""
+        """Fail closed and stop pending/running post-game work on trust changes."""
         self._analysis_session_generation += 1
         self._revoke_review_safety(
             "Заблокировано: изменилось состояние подключения; проверьте безопасность повторно.",
@@ -4842,6 +4846,14 @@ class MainWindow(QMainWindow):
             "Проверка Stockfish остановлена: изменилось состояние подключения Lichess.")
         if self._analysis_safety_phase == "preflight" and self._analysis_safety_request_id:
             self._cancel_analysis_action(self._analysis_safety_request_id)
+        elif self._analysis_safety_phase == "running" and self._analysis_stop is not None:
+            self._analysis_stop.set()
+            if self._analysis_dialog is not None:
+                self._analysis_dialog.setLabelText(
+                    "Остановлено: нужна повторная проверка безопасности.")
+                button = self._analysis_dialog.findChild(QPushButton)
+                if button is not None:
+                    button.setEnabled(False)
 
     def _refresh_batch_readiness(self) -> None:
         dialog = self._batch_dialog
@@ -5039,7 +5051,8 @@ class MainWindow(QMainWindow):
     def _lichess_rate_limit_remaining(self) -> int:
         if not self.lichess:
             return 0
-        return max(0, int(getattr(self.lichess.client, "rate_limit_remaining", 0)))
+        client = getattr(self.lichess, "client", None)
+        return max(0, int(getattr(client, "rate_limit_remaining", 0)))
 
     def _online_actions_allowed(self) -> bool:
         return bool(self.lichess and not self.offline_mode and self._lichess_connected
@@ -5830,18 +5843,39 @@ class MainWindow(QMainWindow):
             self.home_status.setText("Проверяется активность Lichess для анализа.")
             return
         options = self._analysis_options_from_settings()
-        if not (self.lichess and self._lichess_connected):
-            answer = QMessageBox.question(
-                self, "Проверка перед анализом",
-                "Подключённый аккаунт Lichess не может быть проверен. Подтвердите, что сейчас "
-                "не участвуете в онлайн-партии с человеком, прежде чем запускать Stockfish.",
-                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel,
-                QMessageBox.StandardButton.Cancel)
-            if answer != QMessageBox.StandardButton.Yes:
-                return
-            self._launch_game_analysis(game_id, engine_path, options)
+        isolated_offline = bool(self.offline_mode and self.lichess is None
+                                and not self._lichess_connected)
+        if isolated_offline:
+            request_id = uuid.uuid4().hex
+            self._analysis_safety_request_id = request_id
+            self._analysis_safety_phase = "running"
+            self._analysis_safety_context = (
+                "offline", request_id, game_id, engine_path,
+                self._analysis_session_generation, None, None)
+            self.home_status.setText("Изолированный офлайн-анализ завершённой партии.")
+            self._launch_game_analysis(game_id, engine_path, options,
+                                       request_id=request_id)
             return
-
+        if (not self.lichess or not self._lichess_connected
+                or self._lichess_rate_limit_remaining() > 0):
+            self.home_status.setText(
+                "Stockfish заблокирован: подключите Lichess и дождитесь новой проверки "
+                "активных партий. Подтверждение пользователя не заменяет проверку безопасности.")
+            QMessageBox.information(
+                self, "Проверка перед анализом",
+                "В обычном режиме Stockfish запускается только после успешной проверки "
+                "активных партий Lichess. Подключитесь и повторите анализ.")
+            return
+        if not self.lichess:
+            # Defensive branch: offline/manual mode must never become a user-confirmed bypass.
+            self.home_status.setText("Stockfish заблокирован: состояние Lichess неизвестно.")
+            return
+        if not self.lichess.username:
+            self.home_status.setText("Не удалось определить подключённый аккаунт; анализ не запущен.")
+            return
+        if not self._online_actions_allowed():
+            self.home_status.setText("Stockfish заблокирован: подключение или Retry-After не готовы.")
+            return
         request_id = uuid.uuid4().hex
         account_id = str(getattr(self.lichess, "username", "") or "").strip().casefold()
         if not account_id:
@@ -5912,7 +5946,7 @@ class MainWindow(QMainWindow):
             return False
         _request, _game_id, _engine_path, _options, generation, account_id, service = context
         current_account = str(getattr(self.lichess, "username", "") or "").strip().casefold()
-        if (not self._lichess_connected or self.lichess is not service
+        if (not self._online_actions_allowed() or self.lichess is not service
                 or generation != self._analysis_session_generation
                 or not account_id or current_account != account_id):
             self._cancel_analysis_action(request_id)
@@ -5958,7 +5992,6 @@ class MainWindow(QMainWindow):
                 "У аккаунта есть активная партия с человеком. Анализ Stockfish не запущен.")
             return
         _request, game_id, engine_path, options, _generation, _account_id, _service = context
-        self._analysis_safety_context = None
         self._analysis_safety_phase = "running"
         if self._analysis_dialog is not None:
             self._analysis_dialog.setLabelText("Анализ партии Stockfish…")
@@ -5991,20 +6024,42 @@ class MainWindow(QMainWindow):
                               *, stop: threading.Event | None = None,
                               dialog: QProgressDialog | None = None,
                               request_id: str | None = None) -> None:
-        stop = stop or threading.Event()
+        """Start UCI only from isolated offline or a current successful preflight."""
+        request_id = request_id or self._analysis_safety_request_id
+        context = self._analysis_safety_context
+        isolated_offline = bool(
+            self.offline_mode and self.lichess is None and not self._lichess_connected
+            and context and context[0] == "offline" and context[1] == request_id
+            and context[2] == game_id
+            and context[4] == self._analysis_session_generation)
+        connected_preflight = bool(
+            not self.offline_mode and self._online_actions_allowed()
+            and self._analysis_safety_phase == "running"
+            and request_id and request_id == self._analysis_safety_request_id
+            and context and context[0] == request_id and context[1] == game_id
+            and context[4] == self._analysis_session_generation
+            and context[5] == str(getattr(self.lichess, "username", "") or "").strip().casefold()
+            and context[6] is self.lichess)
+        if not (isolated_offline or connected_preflight):
+            self.home_status.setText("Stockfish заблокирован: требуется актуальная проверка Fair Play.")
+            if dialog is not None:
+                dialog.close()
+            return
+        stop = stop or self._analysis_stop or threading.Event()
         if dialog is None:
             dialog = QProgressDialog("Запуск Stockfish…", "Отменить", 0, 0, self)
             dialog.setWindowTitle("Послепартийный анализ")
             dialog.setMinimumDuration(0)
             dialog.show()
             self._analysis_dialog = dialog
-            request_id = request_id or uuid.uuid4().hex
-            self._analysis_safety_request_id = request_id
-            self._analysis_safety_phase = "running"
             dialog.canceled.connect(lambda request=request_id: self._cancel_analysis_action(request))
         self._analysis_stop = stop
+        self._analysis_worker_context = (
+            request_id, game_id, self._analysis_session_generation, self.lichess,
+            isolated_offline, stop)
         active_human_ids = {session.game_id for session in self.online_sessions.values()
                             if session.status in {"started", "playing"} and not session.is_ai_opponent}
+
         def work():
             try:
                 result = CompletedGameAnalyzer(self.game_repository).analyze(
@@ -6015,10 +6070,10 @@ class MainWindow(QMainWindow):
                 self.analysis_finished.emit(game_id, result)
             except Exception as exc:
                 self.analysis_finished.emit(game_id, {"error": str(exc)})
+
         thread = threading.Thread(target=work, name="chess-coach-analysis", daemon=True)
         self._analysis_thread = thread
         thread.start()
-
     def _analysis_options_from_settings(self) -> AnalysisOptions:
         kind = self.settings.value("analysis_limit_kind", "nodes", type=str)
         value = self.settings.value("analysis_limit_value", 100_000, type=int)
@@ -6049,14 +6104,31 @@ class MainWindow(QMainWindow):
             self._analysis_dialog.setValue(done)
 
     def _analysis_finished(self, game_id: str, result: object) -> None:
-        self._analysis_stop = None
-        self._analysis_safety_request_id = None
-        self._analysis_safety_context = None
-        self._analysis_safety_phase = None
+        context = self._analysis_worker_context
+        stale_or_cancelled = bool(context and (
+            context[1] != game_id
+            or context[2] != self._analysis_session_generation
+            or context[5].is_set()
+            or (not context[4] and (context[3] is not self.lichess
+                                    or not self._online_actions_allowed()))))
+        if context is None and self._analysis_safety_phase == "running":
+            # Defensive fail-closed handling for any worker signal that lost its
+            # immutable launch context.
+            stale_or_cancelled = True
+        if context is None or context[0] == self._analysis_safety_request_id:
+            self._analysis_stop = None
+            self._analysis_safety_request_id = None
+            self._analysis_safety_context = None
+            self._analysis_safety_phase = None
+            self._analysis_worker_context = None
         if getattr(self, "_analysis_dialog", None):
             self._analysis_dialog.close()
             self._analysis_dialog = None
         if self._shutdown_requested:
+            return
+        if stale_or_cancelled:
+            self.home_status.setText("Анализ остановлен: требуется новая проверка Fair Play.")
+            self._notify_inline("Анализ остановлен: изменилось состояние безопасности Lichess.")
             return
         if isinstance(result, dict) and result.get("error"):
             self._notify_inline(f"Stockfish: {result['error']}")

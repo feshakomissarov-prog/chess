@@ -71,6 +71,26 @@ def format_clock_control(value: Any) -> str:
 
 
 _OPENING_FAMILIES = (
+    (("queen's pawn", "queens pawn"), "Дебют ферзевой пешки"),
+    (("elephant gambit",), "Слоновий гамбит"),
+    (("king's indian", "kings indian"), "Староиндийская защита"),
+    (("nimzo-indian", "nimzo indian"), "Защита Нимцовича"),
+    (("queen's indian", "queens indian"), "Новоиндийская защита"),
+    (("catalan",), "Каталонское начало"),
+    (("benoni",), "Защита Бенони"),
+    (("semi-slav", "semi slav"), "Полуславянская защита"),
+    (("slav",), "Славянская защита"),
+    (("king's gambit", "kings gambit"), "Королевский гамбит"),
+    (("vienna",), "Венская партия"),
+    (("scotch",), "Шотландская партия"),
+    (("four knights",), "Дебют четырёх коней"),
+    (("pirc",), "Защита Пирца"),
+    (("modern defense", "modern defence"), "Современная защита"),
+    (("scandinavian",), "Скандинавская защита"),
+    (("trompowsky",), "Атака Тромповского"),
+    (("colle",), "Система Колле"),
+    (("torre attack",), "Атака Торре"),
+    (("london system", "london defense", "london defence", "london opening"), "Лондонская система"),
     (("sicilian", "sicilian defense", "sicilian defence"), "Сицилианская защита"),
     (("caro-kann", "caro kann"), "Защита Каро-Канн"),
     (("french",), "Французская защита"),
@@ -83,7 +103,6 @@ _OPENING_FAMILIES = (
     (("bishop's opening", "bishops opening"), "Дебют слона"),
     (("ruy lopez", "spanish"), "Испанская партия"),
     (("dutch",), "Голландская защита"),
-    (("london",), "Лондонская система"),
 )
 
 
@@ -114,12 +133,17 @@ def russian_opening_name(eco: Any, name: Any) -> str:
     elif first == "A" and 80 <= number <= 99: label = "Голландская защита"
     elif code in {"C42", "C43"}: label = "Русская партия"
     elif code in {"C23", "C24"}: label = "Дебют слона"
-    elif code in {"D00", "D01", "D02", "D03", "D04", "D05"}: label = "Лондонская система"
     if label:
         return f"{code} · {label}"
     if code:
-        return f"{code} · дебют"
-    return "Дебют не определён" if not raw else f"Дебют · {raw}"
+        return f"{code} · дебют не классифицирован"
+    return "Дебют не определён" if not raw else "Дебют не классифицирован"
+
+
+def opening_tooltip(name: Any) -> str:
+    """Keep the catalog's exact English name available as secondary detail."""
+    value = str(name or "").strip()
+    return f"Название в исходном каталоге: {value}" if value else "Название дебюта отсутствует в PGN."
 
 
 def source_short(source: Any) -> tuple[str, str]:

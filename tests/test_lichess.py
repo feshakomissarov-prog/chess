@@ -1201,6 +1201,41 @@ def test_engine_startup_cancellation_quits_engine_without_analysis(tmp_path):
     repo.shutdown()
 
 
+def test_completed_analysis_cancelled_after_last_position_is_not_persisted(tmp_path):
+    from chess_coach.lichess.analysis import CompletedGameAnalyzer
+
+    repo = GameRepository(tmp_path / "analysis-cancel-before-commit.sqlite3")
+    repo.save_snapshot("cancel-before-commit", "startpos", "", "white", "Friend",
+                       False, "-", "finished", "white")
+    engine_path = tmp_path / "fake-engine.exe"
+    engine_path.write_bytes(b"synthetic executable")
+    stop = threading.Event()
+
+    class FakeEngine:
+        id = {"name": "FakeFish", "author": "Test"}
+        def configure(self, _options): pass
+        def analysis(self, _board, _limit):
+            info = {"score": chess.engine.PovScore(chess.engine.Cp(0), chess.WHITE),
+                    "depth": 20, "nodes": 100_000, "pv": []}
+            class Result:
+                def __init__(self): self.info = info
+                def __enter__(self): return self
+                def __exit__(self, *_args): pass
+                def __iter__(self): return iter((info,))
+            return Result()
+        def quit(self): pass
+
+    def progress(done, total):
+        assert done == total == 1
+        stop.set()
+
+    with pytest.raises(InterruptedError, match="до сохранения"):
+        CompletedGameAnalyzer(repo, lambda _path: FakeEngine()).analyze(
+            "cancel-before-commit", engine_path, progress=progress, stop_event=stop)
+    assert repo.list_analyses("cancel-before-commit") == []
+    repo.shutdown()
+
+
 def test_engine_stream_error_stops_result_quits_engine_and_saves_nothing(tmp_path):
     from chess_coach.lichess.analysis import CompletedGameAnalyzer
 
