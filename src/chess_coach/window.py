@@ -66,6 +66,7 @@ from .ui.dashboard import dashboard_options, dashboard_snapshot, game_card_text
 from .ui.game_review import GameReviewWorkspace
 from .ui.sounds import ChessSoundPlayer
 from .ui.workspace_state import reposition_visible_frame
+from .ui.display import format_clock_control, format_game_date, source_short
 
 
 def _puzzle_attempt_summary(attempts: list[dict]) -> str:
@@ -96,12 +97,8 @@ def _puzzle_attempt_summary(attempts: list[dict]) -> str:
 
 
 def _game_date_label(game: dict) -> str:
-    started = game.get("started_at")
-    if not started:
-        return "дата неизвестна"
-    if game.get("game_time_precision") == "date_only":
-        return f"{str(started)[:10]} (точность до дня)"
-    return str(started)
+    return format_game_date(game.get("started_at"),
+                            precision=game.get("game_time_precision"))
 
 
 def _batch_safety_from_games(games: object) -> bool | None:
@@ -1271,6 +1268,11 @@ class SettingsDialog(QDialog):
         process_parent = self.parent() or QApplication.instance()
         self._engine_probe_owner = process_parent
         process = QProcess(process_parent)
+        if hasattr(process, "setCreateProcessArgumentsModifier"):
+            def hide_console(arguments):
+                if hasattr(QProcess, "CreateProcessArgument"):
+                    arguments.flags |= QProcess.CreateProcessArgument.CreateNoWindow
+            process.setCreateProcessArgumentsModifier(hide_console)
         self._engine_process = process
         self._engine_probe_finishing = False
         self._engine_probe_finish_message = None
@@ -1769,6 +1771,7 @@ class MainWindow(QMainWindow):
     engine_install_progress = Signal(str)
     engine_install_finished = Signal(object)
     position_eval_finished = Signal(int, object, object)
+    dashboard_finished = Signal(int, object, object, object)
 
     def __init__(
         self,
@@ -1823,6 +1826,7 @@ class MainWindow(QMainWindow):
         self.online_sessions: dict[str, LichessGameSession] = {}
         self.online_session: LichessGameSession | None = None
         self._local_board_mode = "free"
+        self._local_sound_game_id = uuid.uuid4().hex
         self._orientation_overrides: dict[str, bool] = {}
         self.online_view_ply: int | None = None
         self._screen_mode = "home"
@@ -1843,6 +1847,9 @@ class MainWindow(QMainWindow):
         self._batch_engine_key: str | None = None
         self._batch_config: tuple[str, int, int] | None = None
         self._statistics_workers: set[threading.Thread] = set()
+        self._dashboard_generation = 0
+        self._dashboard_thread: threading.Thread | None = None
+        self._dashboard_pending: tuple[int, str | None, str | None] | None = None
         self._position_eval_generation = 0
         self._position_eval_thread: threading.Thread | None = None
         self._position_eval_stop: threading.Event | None = None
@@ -1881,6 +1888,7 @@ class MainWindow(QMainWindow):
         self.engine_install_progress.connect(self._engine_install_progress_changed)
         self.engine_install_finished.connect(self._engine_install_finished)
         self.position_eval_finished.connect(self._position_eval_finished)
+        self.dashboard_finished.connect(self._dashboard_result_ready)
         self.setWindowTitle("Chess Coach")
         self.setMinimumSize(500, 360)
         self.resize(1360, 860)
@@ -2523,7 +2531,7 @@ class MainWindow(QMainWindow):
         for account in options["accounts"]:
             self.dashboard_account.addItem(account["username"], account["account_id"])
         for clock in options["clocks"]:
-            self.dashboard_clock.addItem(clock, clock)
+            self.dashboard_clock.addItem(format_clock_control(clock), clock)
         preferred_account = str(self.settings.value("workspace/selected_account", "", type=str))
         if self.lichess and self.lichess.username:
             preferred_account = f"lichess:{self.lichess.username.strip().lower()}"
@@ -2688,29 +2696,65 @@ class MainWindow(QMainWindow):
         scroll.setWidgetResizable(True)
         scroll.setFrameShape(QFrame.Shape.NoFrame)
         scroll.setWidget(page)
-        self._refresh_home_dashboard()
         return scroll
 
     def _refresh_home_dashboard(self) -> None:
         if not hasattr(self, "_dashboard_metric_values"):
             return
-        try:
-            account_id = (self.dashboard_account.currentData()
-                          if hasattr(self, "dashboard_account") else None)
-            clock = (self.dashboard_clock.currentData()
-                     if hasattr(self, "dashboard_clock") else "")
-            snapshot = dashboard_snapshot(self.game_repository, account_id=account_id,
-                                          clock=clock or None)
-        except Exception as exc:
-            for value in self._dashboard_metric_values.values():
-                value.setText("н/д")
-            for detail in self._dashboard_metric_details.values():
-                detail.setText(f"Не удалось прочитать локальную статистику: {exc}")
+        account_id = self.dashboard_account.currentData() if hasattr(self, "dashboard_account") else None
+        clock = (self.dashboard_clock.currentData() if hasattr(self, "dashboard_clock") else "") or None
+        self._dashboard_generation += 1
+        generation = self._dashboard_generation
+        for detail in self._dashboard_metric_details.values():
+            if detail.text() in {"Локальные данные", "Обновляем локальную сводку…"}:
+                detail.setText("Обновляем локальную сводку…")
+        if self._dashboard_thread is not None and self._dashboard_thread.is_alive():
+            self._dashboard_pending = (generation, account_id, clock)
             return
+        self._launch_dashboard_snapshot(generation, account_id, clock)
+
+    def _launch_dashboard_snapshot(self, generation: int, account_id: str | None,
+                                   clock: str | None) -> None:
+        def work():
+            try:
+                result = dashboard_snapshot(self.game_repository, account_id=account_id,
+                                            clock=clock)
+                error = None
+            except Exception as exc:
+                result, error = None, exc
+            self.dashboard_finished.emit(generation, result, error, threading.current_thread())
+        thread = threading.Thread(target=work, name="chess-coach-dashboard-read", daemon=True)
+        self._dashboard_thread = thread
+        thread.start()
+
+    def _dashboard_result_ready(self, generation: int, snapshot: object, error: object,
+                                thread: object) -> None:
+        if isinstance(thread, threading.Thread):
+            thread.join(timeout=0.01)
+            if self._dashboard_thread is thread:
+                self._dashboard_thread = None
+        if self._shutdown_requested:
+            self._dashboard_pending = None
+            return
+        if generation == self._dashboard_generation:
+            if error is not None:
+                for value in self._dashboard_metric_values.values():
+                    value.setText("н/д")
+                for detail in self._dashboard_metric_details.values():
+                    detail.setText("Не удалось прочитать локальные данные. Повторите обновление.")
+            elif isinstance(snapshot, dict):
+                self._render_dashboard_snapshot(snapshot)
+        pending, self._dashboard_pending = self._dashboard_pending, None
+        if pending is not None and not self._shutdown_requested:
+            self._launch_dashboard_snapshot(*pending)
+
+    def _render_dashboard_snapshot(self, snapshot: dict) -> None:
         for metric in snapshot["metrics"]:
             self._dashboard_metric_values[metric["key"]].setText(metric["value"])
             self._dashboard_metric_details[metric["key"]].setText(
-                f"{metric['detail']}\nИсточник: {metric['source']}")
+                metric["detail"])
+            self._dashboard_metric_values[metric["key"]].setToolTip(metric["source"])
+            self._dashboard_metric_details[metric["key"]].setToolTip(metric["source"])
         while self._recent_games_layout.count():
             item = self._recent_games_layout.takeAt(0)
             widget = item.widget()
@@ -2726,20 +2770,41 @@ class MainWindow(QMainWindow):
         for game in games:
             heading, details = game_card_text(game)
             metrics = game.get("review_metrics") or {}
-            card_text = (
-                f"♟  {heading}\n{details}\n"
-                f"Точность Lichess {metrics.get('accuracy', 'н/д')} · "
-                f"неточности {metrics.get('inaccuracies', 'н/д')} · "
-                f"ошибки {metrics.get('mistakes', 'н/д')} · зевки {metrics.get('blunders', 'н/д')} · "
-                f"сильные подтверждённые {metrics.get('strong', 'н/д')}\n"
-                f"Источник {metrics.get('source', 'нет данных')} · статус {metrics.get('status', 'н/д')} · "
-                f"охват своих ходов {metrics.get('coverage', 'н/д')}"
-            )
-            card = QPushButton(card_text)
-            card.setObjectName("navItem")
-            card.setMinimumHeight(112)
-            card.setToolTip(metrics.get("strong_detail", "Открыть партию в библиотеке Chess Coach"))
-            card.clicked.connect(lambda _checked=False, item=dict(game): self._open_saved_game(item))
+            card = QFrame()
+            card.setObjectName("metricCard")
+            card_layout = QVBoxLayout(card)
+            card_layout.setContentsMargins(12, 10, 12, 10)
+            heading_button = QPushButton(f"♟  {heading}")
+            heading_button.setObjectName("navItem")
+            heading_button.clicked.connect(
+                lambda _checked=False, item=dict(game): self._open_saved_game(item))
+            card_layout.addWidget(heading_button)
+            description = QLabel(details)
+            description.setObjectName("secondary")
+            card_layout.addWidget(description)
+            source_code = source_short(metrics.get("source"))[0]
+            coverage = QLabel(f"Источник {source_code} · мои ходы {metrics.get('coverage', '0/0')} · "
+                              f"ходы соперника {metrics.get('opponent_coverage', '0/0')}")
+            coverage.setToolTip(source_short(metrics.get("source"))[1])
+            coverage.setAccessibleName(f"Источник оценки: {source_short(metrics.get('source'))[1]}")
+            card_layout.addWidget(coverage)
+            grid = QGridLayout()
+            grid.addWidget(QLabel("Показатель"), 0, 0)
+            grid.addWidget(QLabel("Я"), 0, 1)
+            grid.addWidget(QLabel("Соперник"), 0, 2)
+            for row, (label, owner_key, opponent_key) in enumerate((
+                    ("Точность Lichess", "owner_accuracy", "opponent_accuracy"),
+                    ("Неточности", "owner_inaccuracies", "opponent_inaccuracies"),
+                    ("Ошибки", "owner_mistakes", "opponent_mistakes"),
+                    ("Зевки", "owner_blunders", "opponent_blunders"),
+                    ("Сильные подтверждённые", "strong", "strong")), start=1):
+                grid.addWidget(QLabel(label), row, 0)
+                for column, key in ((1, owner_key), (2, opponent_key)):
+                    value = QLabel(str(metrics.get(key, "н/д")))
+                    value.setAlignment(Qt.AlignmentFlag.AlignCenter)
+                    value.setToolTip(metrics.get("strong_detail", "Источник и охват указаны отдельно."))
+                    grid.addWidget(value, row, column)
+            card_layout.addLayout(grid)
             self._recent_games_layout.addWidget(card)
 
     def _dashboard_filter_changed(self, *_args) -> None:
@@ -2873,7 +2938,7 @@ class MainWindow(QMainWindow):
             if self.controller.view_ply is None
             else self.controller.view_ply
         )
-        self._sync_online_history(self.controller.board, "__local__", viewed_ply)
+        self._sync_online_history(self.controller.board, self._local_sound_game_id, viewed_ply)
         if self.controller.view_ply == 0:
             self.history_label.setText("Начальная позиция")
         elif not snapshot.live:
@@ -3774,6 +3839,7 @@ class MainWindow(QMainWindow):
         self._review_session = None
         self.board.clear_annotations()
         self.controller.new_game()
+        self._local_sound_game_id = uuid.uuid4().hex
         self._local_board_mode = "free"
         self.controller.set_premove_training(False)
         self.local_mode_combo.blockSignals(True)
@@ -4051,7 +4117,7 @@ class MainWindow(QMainWindow):
             if tuple(self.controller.board.move_stack) != previous:
                 accepted_move = self.controller.board.move_stack[-1]
                 self.sound_player.play_move(
-                    "local", len(self.controller.board.move_stack), before_board, accepted_move,
+                    self._local_sound_game_id, len(self.controller.board.move_stack), before_board, accepted_move,
                     game_finished=self.controller.board.is_game_over())
                 self.board.clear_annotations()
             self.refresh("Ход записан в локальную партию.")
@@ -4323,7 +4389,7 @@ class MainWindow(QMainWindow):
         sound_board = before_board
         for ply, confirmed in enumerate(added, start=len(previous) + 1):
             self.sound_player.play_move(
-                "local", ply, sound_board, confirmed,
+                self._local_sound_game_id, ply, sound_board, confirmed,
                 game_finished=self.controller.board.is_game_over() and ply == len(self.controller.board.move_stack))
             sound_board.push(confirmed)
         if tuple(self.controller.board.move_stack) != previous:
@@ -4337,7 +4403,7 @@ class MainWindow(QMainWindow):
             self.online_view_ply = None if ply >= len(self.online_session.board.move_stack) else ply
             self.refresh()
             return
-        self._play_history_sound("__local__", self.controller.board, ply)
+        self._play_history_sound(self._local_sound_game_id, self.controller.board, ply)
         self.controller.go_to(ply)
         self.refresh()
 
@@ -4422,6 +4488,7 @@ class MainWindow(QMainWindow):
             if answer != QMessageBox.StandardButton.Yes:
                 return
         self.controller.new_game()
+        self._local_sound_game_id = uuid.uuid4().hex
         self.board.clear_annotations()
         self.refresh("Новая локальная партия.")
 
@@ -5994,6 +6061,12 @@ class MainWindow(QMainWindow):
         analysis_running = bool(analysis_thread and analysis_thread.is_alive())
         batch_thread = self._batch_thread
         batch_running = bool(batch_thread and batch_thread.is_alive())
+        dashboard_thread = self._dashboard_thread
+        if dashboard_thread is not None and dashboard_thread.is_alive():
+            dashboard_thread.join(timeout=0.5)
+        dashboard_running = bool(dashboard_thread and dashboard_thread.is_alive())
+        if not dashboard_running:
+            self._dashboard_thread = None
         if analysis_running or batch_running:
             if self._analysis_shutdown_deadline is None:
                 self._analysis_shutdown_deadline = time.monotonic() + 10.0
@@ -6025,7 +6098,7 @@ class MainWindow(QMainWindow):
         # has observed and released that child, even if state() already says stopped.
         engine_probes_stopped = not self._engine_probe_processes
         if (not workers_stopped or not analysis_stopped or not batch_stopped or not install_stopped
-                or not statistics_stopped
+                or not statistics_stopped or dashboard_running
                 or not engine_probes_stopped or self.game_repository.has_pending_writes()):
             event.ignore()
             self.home_status.setText(
@@ -6068,6 +6141,8 @@ class MainWindow(QMainWindow):
                 self._close_retry_timer.start()
             return
         self.game_repository.shutdown()
+        from .position_analysis import close_position_engines
+        close_position_engines()
         if self._offline_data_dir is not None:
             self._offline_data_dir.cleanup()
             self._offline_data_dir = None

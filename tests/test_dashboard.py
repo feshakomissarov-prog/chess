@@ -47,7 +47,7 @@ def test_recent_game_card_does_not_invent_result_without_owner_color():
         "status": "mate", "started_at": "2026-11-02",
     })
     assert title == "Результат н/д с Unknown color"
-    assert "2026-11-02" in detail
+    assert "02.11.2026" in detail
 
 
 def test_dashboard_account_and_clock_filters_match_sql_scope(tmp_path):

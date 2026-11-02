@@ -6,6 +6,7 @@ from typing import Any
 
 from ..lichess.game_review import load_game_review
 from ..lichess.statistics import StatisticsService
+from .display import format_clock_control, format_game_date, russian_opening_name
 
 
 _COMPLETED = "('created','started','started_soon','playing')"
@@ -127,7 +128,11 @@ def game_card_metrics(repository, game: dict[str, Any]) -> dict[str, str]:
                 "coverage": "0/0", "source": "нет данных"}
     analysis = view.get("analysis") or {}
     side = view["per_side"].get(color, {}) if color in {"white", "black"} else {}
+    opponent_color = "black" if color == "white" else "white" if color == "black" else None
+    opponent_side = view["per_side"].get(opponent_color, {}) if opponent_color else {}
     own_color_accuracy = view["official_accuracy"].get(color) if color in {"white", "black"} else None
+    opponent_accuracy = (view["official_accuracy"].get(opponent_color)
+                         if opponent_color else None)
     coverage = int(side.get("assessed") or 0)
     total = int(side.get("total") or 0)
     errors = int(side.get("inaccuracy") or 0) + int(side.get("mistake") or 0) + int(side.get("blunder") or 0)
@@ -144,6 +149,18 @@ def game_card_metrics(repository, game: dict[str, Any]) -> dict[str, str]:
         "coverage": f"{coverage}/{total}",
         "source": str(analysis.get("source") or "нет данных"),
         "strong_detail": "подтверждённый классификатор отсутствует",
+        "owner_accuracy": f"{float(own_color_accuracy):.1f}%" if own_color_accuracy is not None else "н/д",
+        "opponent_accuracy": f"{float(opponent_accuracy):.1f}%" if opponent_accuracy is not None else "н/д",
+        "owner_inaccuracies": str(int(side.get("inaccuracy") or 0)) if coverage else "н/д",
+        "owner_mistakes": str(int(side.get("mistake") or 0)) if coverage else "н/д",
+        "owner_blunders": str(int(side.get("blunder") or 0)) if coverage else "н/д",
+        "opponent_inaccuracies": str(int(opponent_side.get("inaccuracy") or 0))
+        if opponent_side.get("assessed") else "н/д",
+        "opponent_mistakes": str(int(opponent_side.get("mistake") or 0))
+        if opponent_side.get("assessed") else "н/д",
+        "opponent_blunders": str(int(opponent_side.get("blunder") or 0))
+        if opponent_side.get("assessed") else "н/д",
+        "opponent_coverage": f"{int(opponent_side.get('assessed') or 0)}/{int(opponent_side.get('total') or 0)}",
     }
 
 
@@ -157,7 +174,9 @@ def game_card_text(game: dict[str, Any]) -> tuple[str, str]:
         result = "Результат н/д"
     else:
         result = "Победа" if winner == color else "Поражение"
-    details = " · ".join(filter(None, (str(game.get("started_at") or "Дата н/д"),
-                                         str(game.get("clock") or "Контроль н/д"),
-                                         str(game.get("opening_name") or ""))))
+    details = " · ".join((
+        format_game_date(game.get("started_at"), precision=game.get("game_time_precision")),
+        format_clock_control(game.get("clock")),
+        russian_opening_name(game.get("eco"), game.get("opening_name")),
+    ))
     return f"{result} с {opponent}", details

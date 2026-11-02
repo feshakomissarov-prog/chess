@@ -6,6 +6,7 @@ from chess_coach.lichess.game_review import (
     verified_improved_moves,
 )
 from chess_coach.lichess.repository import GameRepository
+from chess_coach.ui.move_table import MoveTable
 
 
 def _review_repo(path, *, severity="blunder", depth=20, nodes=100_000,
@@ -119,6 +120,51 @@ def test_review_moves_graph_and_training_share_position_without_mutating_saved_p
         assert repo.export_pgn(game["game_id"]) == before_pgn
     finally:
         repo.shutdown()
+
+
+def test_move_table_groups_white_and_black_in_fullmove_rows_and_keeps_ply(qtbot):
+    from types import SimpleNamespace
+    table = MoveTable()
+    qtbot.addWidget(table)
+    board = chess.Board()
+    moves_with_positions = []
+    for ply, uci, severity in ((1, "e2e4", "good"), (2, "e7e5", "unknown"),
+                               (3, "g1f3", "blunder")):
+        move = chess.Move.from_uci(uci)
+        san, before_fen = board.san(move), board.fen()
+        moves_with_positions.append((ply, san, board.turn, before_fen, severity))
+        board.push(move)
+    moves = [
+        SimpleNamespace(ply=ply, mover="white" if turn else "black", san=san,
+                        severity=severity, before_fen=before_fen)
+        for ply, san, turn, before_fen, severity in moves_with_positions
+    ]
+    table.set_rows(moves, scores={1: {"white_cp": 25}, 2: {"white_cp": 10}})
+    assert table.table.rowCount() == 2
+    assert table.table.item(0, 1).text().endswith("+0.2 ♔")
+    assert table.table.item(0, 2).text().startswith("e5   +0.1")
+    assert table.table.item(1, 1).text().startswith("?? ")
+    selected = []
+    table.ply_selected.connect(selected.append)
+    table._cell_clicked(0, 2)
+    table._cell_clicked(1, 1)
+    assert selected == [2, 3]
+    assert table.table.item(1, 1).toolTip() == "Зевок"
+
+
+def test_move_table_black_to_move_fen_uses_fullmove_number_and_handles_empty_side(qtbot):
+    from types import SimpleNamespace
+    board = chess.Board("4k3/8/8/8/8/8/4P3/4K3 b - - 0 25")
+    move = chess.Move.from_uci("e8d7")
+    assert move in board.legal_moves
+    table = MoveTable()
+    qtbot.addWidget(table)
+    table.set_rows([SimpleNamespace(ply=1, mover="black", san=board.san(move),
+                                    severity="unknown", before_fen=board.fen())])
+    assert table.table.rowCount() == 1
+    assert table.table.item(0, 0).text() == "25"
+    assert table.table.item(0, 1).text() == ""
+    assert table.table.item(0, 2).text() == "Kd7"
 
 
 def test_review_safety_button_does_not_reveal_solution_before_preflight(qtbot, tmp_path):

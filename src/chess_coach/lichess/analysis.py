@@ -14,6 +14,7 @@ import chess
 import chess.engine
 
 from ..diagnostics import log_event
+from ..uci import popen_uci_hidden
 from .repository import GameRepository
 
 
@@ -58,7 +59,7 @@ class CompletedGameAnalyzer:
     def __init__(self, repository: GameRepository,
                  engine_factory: Callable[[str], chess.engine.SimpleEngine] | None = None) -> None:
         self.repository = repository
-        self.engine_factory = engine_factory or chess.engine.SimpleEngine.popen_uci
+        self.engine_factory = engine_factory or popen_uci_hidden
 
     def analyze(self, game_id: str, engine_path: str | Path,
                 options: AnalysisOptions = AnalysisOptions(), *,

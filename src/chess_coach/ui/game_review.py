@@ -14,6 +14,8 @@ from ..board_view import BoardView
 from ..lichess.game_review import (
     eligible_error_moves, load_game_review, verified_improved_moves,
 )
+from .display import format_clock_control, format_game_date, russian_opening_name
+from .move_table import MoveTable
 from .theme import TOKENS
 
 
@@ -258,9 +260,9 @@ class GameReviewWorkspace(QWidget):
         inspector_layout = QVBoxLayout(inspector)
         self.tabs = QTabWidget()
         self.tabs.setAccessibleName("Панель сведений о партии")
-        self.moves_list = QListWidget()
+        self.moves_list = MoveTable()
         self.moves_list.setAccessibleName("Список ходов партии")
-        self.moves_list.currentItemChanged.connect(self._move_selected)
+        self.moves_list.ply_selected.connect(self.select_ply)
         self.tabs.addTab(self.moves_list, "Ходы")
         facts = QWidget()
         self.metrics_layout = QVBoxLayout(facts)
@@ -359,8 +361,10 @@ class GameReviewWorkspace(QWidget):
         black = game.get("black_player") or "Чёрные"
         self.title.setText(f"{white} — {black}")
         source = analysis.get("source") or "локальная оценка не сохранена"
-        game_details = (f"{game.get('started_at') or 'Дата н/д'} · "
-                        f"{game.get('clock') or 'Контроль н/д'} · {game.get('status') or 'результат н/д'}")
+        game_details = (f"{format_game_date(game.get('started_at'), precision=game.get('game_time_precision'))} · "
+                        f"{format_clock_control(game.get('clock'))} · "
+                        f"{russian_opening_name(game.get('eco'), game.get('opening_name'))} · "
+                        f"{game.get('status') or 'результат н/д'}")
         self.subtitle.setText(
             game_details + (f" · анализ: {source} · охват позиций "
                             f"{self.review['coverage']['scored']}/{self.review['coverage']['total']}"
@@ -370,18 +374,11 @@ class GameReviewWorkspace(QWidget):
         color = self.review["owner_color"]
         self.review_board.set_flipped(color == "black")
         self.review_board.set_position(self.review["positions"][0])
-        self.moves_list.clear()
-        start = QListWidgetItem("Начальная позиция")
-        start.setData(Qt.ItemDataRole.UserRole, 0)
-        self.moves_list.addItem(start)
-        for move in self.review["moves"]:
-            prefix = f"{(move.ply + 1) // 2}." if move.mover == "white" else ""
-            label = (f"{prefix}{move.san}   ·   {move.severity}"
-                     if self.evaluation_allowed else f"{prefix}{move.san}")
-            row = QListWidgetItem(label)
-            row.setData(Qt.ItemDataRole.UserRole, move.ply)
-            self.moves_list.addItem(row)
-        self.moves_list.setCurrentRow(0)
+        assessment_by_ply = {int(item["ply"]): item for item in analysis.get("assessments", [])}
+        self.moves_list.set_rows(
+            self.review["moves"],
+            scores=assessment_by_ply if self.evaluation_allowed else {},
+            enabled=self.evaluation_allowed)
         metrics = self.review["per_side"]
         accuracy = self.review["official_accuracy"]
         accuracy_text = (f"Официальная точность Lichess: белые {accuracy['white'] if accuracy['white'] is not None else 'н/д'}, "
@@ -507,10 +504,6 @@ class GameReviewWorkspace(QWidget):
         if self.review:
             self.export_requested.emit(str(self.review["game"]["game_id"]))
 
-    def _move_selected(self, current, _previous):
-        if current is not None and not self.training_mode:
-            self.select_ply(int(current.data(Qt.ItemDataRole.UserRole)))
-
     def select_ply(self, ply: int):
         if not self.review or self.training_mode:
             return
@@ -518,9 +511,7 @@ class GameReviewWorkspace(QWidget):
         self.selected_ply = ply
         self.review_board.set_position(self.review["positions"][ply])
         self.graph.select_ply(ply)
-        self.moves_list.blockSignals(True)
-        self.moves_list.setCurrentRow(ply)
-        self.moves_list.blockSignals(False)
+        self.moves_list.select_ply(ply)
         if not self.evaluation_allowed:
             self.move_detail.setText(
                 self.training_block_reason or

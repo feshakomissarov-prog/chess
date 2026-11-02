@@ -2744,6 +2744,28 @@ def test_m46_home_has_play_review_context_and_collapsed_secondary_actions(qtbot,
     window.game_repository.shutdown()
 
 
+def test_local_move_sound_deduplication_uses_a_new_identity_for_each_game(qtbot, tmp_path):
+    window = MainWindow(QSettings(str(tmp_path / "local-sound-games.ini"),
+                                  QSettings.Format.IniFormat), offline_mode=True)
+    qtbot.addWidget(window)
+    class FakeSound:
+        def __init__(self): self.events = []
+        def play_move(self, game_id, ply, *_args, **_kwargs):
+            self.events.append((game_id, ply))
+            return True
+    sound = FakeSound()
+    window.sound_player = sound
+    window.start_local_game()
+    first_game_id = window._local_sound_game_id
+    window.on_move_intent(chess.Move.from_uci("e2e4"))
+    window.start_local_game()
+    second_game_id = window._local_sound_game_id
+    window.on_move_intent(chess.Move.from_uci("e2e4"))
+    assert first_game_id != second_game_id
+    assert sound.events == [(first_game_id, 1), (second_game_id, 1)]
+    window.close()
+
+
 def test_game_finish_for_selected_review_does_not_replace_review(qtbot, tmp_path):
     window = MainWindow(QSettings(str(tmp_path / "review-not-stolen.ini"), QSettings.Format.IniFormat))
     qtbot.addWidget(window)
@@ -3168,7 +3190,7 @@ def test_window_close_cancels_analysis_and_waits_for_engine_quit_before_sqlite(
     def make_engine(_path):
         engine_starts.append(True)
         return engine
-    monkeypatch.setattr(analysis_module.chess.engine.SimpleEngine, "popen_uci", make_engine)
+    monkeypatch.setattr(analysis_module, "popen_uci_hidden", make_engine)
     monkeypatch.setattr(QMessageBox, "question",
                         lambda *_args: QMessageBox.StandardButton.Yes)
     repo_shutdown = window.game_repository.shutdown

@@ -13,6 +13,7 @@ from urllib.parse import urlparse
 import zipfile
 
 import chess.engine
+from .uci import popen_uci_hidden
 
 
 STOCKFISH_RELEASE = "19"
@@ -82,7 +83,7 @@ def verify_uci_engine(path: str | os.PathLike[str], *, timeout: float = 5.0) -> 
     if not executable.is_file():
         raise FileNotFoundError(f"Файл движка не найден: {executable}")
     started = time.monotonic()
-    engine = chess.engine.SimpleEngine.popen_uci(
+    engine = popen_uci_hidden(
         str(executable), timeout=timeout, cwd=str(executable.parent))
     try:
         engine.ping()
