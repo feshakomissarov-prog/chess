@@ -6,7 +6,9 @@ import chess
 from decimal import Decimal, ROUND_HALF_UP
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtGui import QColor
-from PySide6.QtWidgets import QAbstractItemView, QTableWidget, QTableWidgetItem, QWidget, QVBoxLayout
+from PySide6.QtWidgets import (
+    QAbstractItemView, QHeaderView, QTableWidget, QTableWidgetItem, QWidget, QVBoxLayout,
+)
 
 
 _SEVERITY = {
@@ -68,7 +70,19 @@ class MoveTable(QWidget):
         self.table.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
         self.table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         self.table.verticalHeader().setVisible(False)
-        self.table.horizontalHeader().setStretchLastSection(True)
+        self.table.setWordWrap(False)
+        self.table.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.table.setMinimumWidth(0)
+        self.table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
+        self.table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
+        self.table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeMode.Stretch)
+        for column, label in enumerate(("Номер полного хода", "Белые", "Чёрные")):
+            self.table.horizontalHeaderItem(column).setToolTip(
+                label if column == 0 else
+                f"{label}; краткая оценка после хода указана за белых, если доступна.")
+        self.table.setAccessibleDescription(
+            "Одна строка на полный ход; оценка после хода приводится с перспективы белых. "
+            "Изменение оценки доступно отдельно для выбранного полухода.")
         self.table.cellClicked.connect(self._cell_clicked)
         self._moves = []
         layout.addWidget(self.table)
@@ -116,12 +130,7 @@ class MoveTable(QWidget):
                 else:
                     score_text = None
                 if score_text:
-                    label += f"   {score_text} · белые"
-                delta_white = score.get("delta_white")
-                delta_mover = score.get("delta_mover")
-                if delta_white is not None and delta_mover is not None:
-                    label += (f"  Δб {int(delta_white) / 100:+.1f}"
-                              f" / Δход {int(delta_mover) / 100:+.1f}")
+                    label += f" {score_text}"
             if severity in _SEVERITY:
                 icon, description = _SEVERITY[severity]
                 label = f"{icon} {label}"
@@ -141,11 +150,10 @@ class MoveTable(QWidget):
             item.setData(Qt.ItemDataRole.UserRole + 1, base_label)
             if score is not None:
                 item.setToolTip((item.toolTip() + "\n" if item.toolTip() else "") +
-                                "Оценка позиции после хода, перспектива белых.")
+                                "Оценка позиции после хода; перспектива белых. Δ показана отдельно.")
             if not enabled:
                 item.setToolTip("Оценки и анализ скрыты до проверки безопасности.")
             self.table.setItem(row, column, item)
-        self.table.resizeColumnsToContents()
 
     def append_move(self, move, *, score=None, enabled=True):
         """Append one confirmed ply without rebuilding existing full-move rows."""
@@ -179,10 +187,7 @@ class MoveTable(QWidget):
                           f"−M{abs(int(mate))}" if mate is not None else
                           _score_tenth(cp) if cp is not None else None)
             if score_text:
-                label += f"   {score_text} · белые"
-            if score.get("delta_white") is not None and score.get("delta_mover") is not None:
-                label += (f"  Δб {int(score['delta_white']) / 100:+.1f}"
-                          f" / Δход {int(score['delta_mover']) / 100:+.1f}")
+                label += f" {score_text}"
         severity = getattr(move, "severity", None) or (
             move.get("severity") if isinstance(move, dict) else None)
         if severity in _SEVERITY:
@@ -205,7 +210,6 @@ class MoveTable(QWidget):
         if not enabled:
             item.setToolTip("Оценки и анализ скрыты до проверки безопасности.")
         self.table.setItem(row, column, item)
-        self.table.resizeColumnsToContents()
 
     def count(self):
         return len(self._moves)
@@ -291,11 +295,12 @@ class MoveTable(QWidget):
         if mate_white is not None:
             value = f"M{abs(int(mate_white))}" if int(mate_white) > 0 else f"−M{abs(int(mate_white))}"
         elif white_cp is not None:
-            value = f"{_score_tenth(white_cp)} · белые"
+            value = _score_tenth(white_cp)
         else:
             return False
         base = item.data(Qt.ItemDataRole.UserRole + 1) or item.text()
         item.setText(f"{base}   {value}")
-        item.setToolTip(f"Оценка позиции после этого хода · {source or 'источник неизвестен'}"
+        item.setToolTip(f"Оценка позиции после этого хода, перспектива белых · "
+                        f"{source or 'источник неизвестен'}"
                         + (f" · глубина {depth}" if depth is not None else ""))
         return True

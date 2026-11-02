@@ -15,6 +15,13 @@
 - Added synthetic regressions for pre-cancel/no process factory and concurrent cancellation at a barrier inside a real temporary SQLite save transaction, verifying rollback and preservation of a prior analysis. Existing UCI analysis-stop/no-save test remains.
 - Local Windows CPython 3.12.10: focused cancellation set **4 passed**; compileall and diff check — PASS. No real engine or user database used.
 
+### 02.11.2026 — PR #41: Video pilot round 3, checkpoint 3 — V3-04 / V3-05
+
+- Move table cells now keep compact `SAN score` text; repeated Δwhite/Δmover details no longer widen every cell. Number uses content width; both color columns stretch evenly, word wrapping is disabled, and the horizontal scrollbar is always off. Tooltips and the table accessible description identify score as post-move/white-perspective. The regression renders a 360 logical px widget and checks both SAN+score strings fit their cells without horizontal scrolling.
+- Evaluation and delta graph share a dynamic symmetric scale based on the 95th percentile and readable cp steps. Values outside the visible range are clipped to the plot rectangle and marked as outliers; tooltips still report actual values. Delta mode uses up/down bars from zero and labels the white-perspective Δ axis. Missing CP and mate-adjacent pairs remain gaps. Mate is a separate terminal marker, including `mate=0` as “Мат в текущей позиции”, never a fabricated cp point.
+- Render regression covers ±0.2, ±2.0, ±15.0, mate/missing, clipped plot coordinates, screenshot capture, tooltip actual value, and delta bars. 
+- Local Windows CPython 3.12.10 / Qt offscreen: `tests/test_game_review.py tests/test_display.py` **30 passed**; compileall and diff check — PASS.
+
 **Статус:** реализация начата 2026-11-02. Рабочая ветка `codex/m46-desktop-experience`, отдельный draft PR. Источник требований — [`M4_6_DESKTOP_EXPERIENCE.md`](../specs/M4_6_DESKTOP_EXPERIENCE.md) v1.1 и issue [#40](https://github.com/feshakomissarov-prog/chess/issues/40). Не выполнять merge самостоятельно.
 
 ## Базовая точка

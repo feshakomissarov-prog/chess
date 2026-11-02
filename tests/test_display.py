@@ -2,7 +2,8 @@ import csv
 from pathlib import Path
 
 from chess_coach.ui.display import (
-    format_clock_control, format_game_date, russian_opening_name, source_short,
+    evaluation_label, format_clock_control, format_game_date, russian_opening_name,
+    source_short,
 )
 
 
@@ -49,6 +50,12 @@ def test_source_badges_have_accessible_explanations():
     assert source_short("stockfish")[0] == "S"
     assert "Lichess" in source_short("lichess")[1]
     assert source_short(None) == ("—", "Оценка отсутствует")
+
+
+def test_terminal_mate_label_never_reports_mate_in_zero():
+    assert evaluation_label(None, 3).startswith("белые ставят мат через 3")
+    assert evaluation_label(None, -2).startswith("чёрные ставят мат через 2")
+    assert evaluation_label(None, 0) == "Мат в текущей позиции · перспектива белых"
 
 
 def test_opening_catalog_translation_coverage_is_reported_and_high_without_guessing():

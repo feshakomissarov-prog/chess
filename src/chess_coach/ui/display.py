@@ -237,6 +237,8 @@ def phase_label(value: Any) -> str:
 
 def evaluation_label(white_cp: int | None, mate_white: int | None = None) -> str:
     if mate_white is not None:
+        if int(mate_white) == 0:
+            return "Мат в текущей позиции · перспектива белых"
         side = "белые ставят мат" if mate_white > 0 else "чёрные ставят мат"
         return f"{side} через {abs(int(mate_white))} · перспектива белых"
     if white_cp is None:

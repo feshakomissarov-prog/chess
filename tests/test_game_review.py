@@ -144,8 +144,8 @@ def test_move_table_groups_white_and_black_in_fullmove_rows_and_keeps_ply(qtbot)
     ]
     table.set_rows(moves, scores={1: {"white_cp": 25}, 2: {"white_cp": 10}})
     assert table.table.rowCount() == 2
-    assert table.table.item(0, 1).text().endswith("+0.3 · белые")
-    assert table.table.item(0, 2).text().startswith("? e5   +0.1")
+    assert table.table.item(0, 1).text().endswith("+0.3")
+    assert table.table.item(0, 2).text().startswith("? e5 +0.1")
     assert table.table.item(0, 1).foreground().color().name() == "#58a978"
     assert table.table.item(0, 2).foreground().color().name() == "#858b93"
     assert table.table.item(1, 1).text().startswith("?? ")
@@ -156,9 +156,9 @@ def test_move_table_groups_white_and_black_in_fullmove_rows_and_keeps_ply(qtbot)
     assert selected == [2, 3]
     assert table.table.item(1, 1).toolTip() == "Зевок"
     assert table.set_score(3, white_cp=75, source="Stockfish", depth=18)
-    assert table.item_by_ply(3).text().endswith("+0.8 · белые")
+    assert table.item_by_ply(3).text().endswith("+0.8")
     assert table.set_score(3, mate_white=-2, source="Stockfish", depth=20)
-    assert table.item_by_ply(3).text().count(" · белые") == 0
+    assert "Δб" not in table.item_by_ply(3).text()
     assert table.item_by_ply(3).text().endswith("−M2")
 
 
@@ -175,6 +175,42 @@ def test_move_table_black_to_move_fen_uses_fullmove_number_and_handles_empty_sid
     assert table.table.item(0, 0).text() == "25"
     assert table.table.item(0, 1).text() == ""
     assert table.table.item(0, 2).text() == "? Kd7"
+
+
+def test_move_table_keeps_both_san_columns_visible_without_horizontal_scroll(qtbot):
+    from PySide6.QtCore import Qt
+    from PySide6.QtWidgets import QHeaderView
+    from types import SimpleNamespace
+
+    board = chess.Board()
+    moves = []
+    for ply, uci in enumerate(("e2e4", "e7e5", "g1f3", "b8c6", "f1b5", "a7a6"), start=1):
+        move = chess.Move.from_uci(uci)
+        moves.append(SimpleNamespace(ply=ply, mover="white" if board.turn else "black",
+                                     san=board.san(move), severity="unknown",
+                                     before_fen=board.fen()))
+        board.push(move)
+    table = MoveTable()
+    qtbot.addWidget(table)
+    table.set_rows(moves, scores={1: {"white_cp": 30}, 2: {"white_cp": -20},
+                                  3: {"white_cp": 1500}})
+    table.resize(360, 280)
+    table.show()
+    qtbot.wait(10)
+
+    assert table.table.horizontalScrollBarPolicy() == Qt.ScrollBarPolicy.ScrollBarAlwaysOff
+    assert table.table.horizontalScrollBar().maximum() == 0
+    assert table.table.horizontalHeader().sectionResizeMode(1) == QHeaderView.ResizeMode.Stretch
+    assert table.table.horizontalHeader().sectionResizeMode(2) == QHeaderView.ResizeMode.Stretch
+    assert table.item_by_ply(1).text() == "? e4 +0.3"
+    assert table.item_by_ply(2).text() == "? e5 -0.2"
+    assert table.item_by_ply(3).text() == "? Nf3 +15.0"
+    for ply in (1, 2, 3):
+        item = table.item_by_ply(ply)
+        assert item is not None and item.text()
+        column = 1 if ply in (1, 3) else 2
+        assert table.table.columnWidth(column) > 80
+        assert table.table.fontMetrics().horizontalAdvance(item.text()) <= table.table.columnWidth(column)
 
 
 def test_review_safety_button_does_not_reveal_solution_before_preflight(qtbot, tmp_path):
@@ -462,7 +498,55 @@ def test_review_graph_delta_omits_missing_and_mate_neighbors_and_markers_default
     graph.set_delta_mode(True)
     assert graph._values() == [(1, 100, None)]
     graph.set_delta_mode(False)
-    assert (2, 200, 3) in graph._values()
+    assert (2, 0, 3) in graph._values()  # mate is a terminal marker, not centipawns
+
+
+def test_review_graph_scales_large_scores_and_delta_bars_inside_plot(qtbot):
+    from PySide6.QtCore import QPointF
+
+    assessments = [{"ply": ply, "white_cp": 20 if ply % 2 else -25}
+                   for ply in range(40)]
+    assessments.extend((
+        {"ply": 40, "white_cp": 200}, {"ply": 41, "white_cp": -200},
+        {"ply": 42, "white_cp": 1500}, {"ply": 43, "white_cp": -1500},
+        {"ply": 44, "white_cp": None, "mate_white": 3},
+        {"ply": 45, "white_cp": None},
+    ))
+    graph = ReviewGraph(assessments, [])
+    graph.full_ply_count = 45
+    qtbot.addWidget(graph)
+    graph.resize(900, 240)
+    graph.show()
+    screenshot = graph.grab()
+    assert not screenshot.isNull()
+    rect = graph._last_plot_rect
+    assert rect is not None
+    assert graph._nice_axis_limit([20, -200, 1500]) == 1500
+    assert graph._last_rendered_points
+    assert all(rect.left() <= x <= rect.right() and rect.top() <= y <= rect.bottom()
+               for _ply, x, y, _clipped in graph._last_rendered_points)
+    assert any(clipped for _ply, _x, _y, clipped in graph._last_rendered_points)
+    assert (44, 0, 3) in graph._values()  # terminal marker is not included in the scale
+
+    outlier_x = rect.left() + round(rect.width() * 42 / graph.full_ply_count)
+    class MoveEvent:
+        def position(self): return QPointF(outlier_x, rect.center().y())
+    graph.mouseMoveEvent(MoveEvent())
+    assert "+15.00" in graph.toolTip()
+
+    graph.assessments = [
+        {"ply": 0, "white_cp": 0}, {"ply": 1, "white_cp": 20},
+        {"ply": 2, "white_cp": -180}, {"ply": 3, "white_cp": 1320},
+        {"ply": 4, "white_cp": None, "mate_white": -2},
+    ]
+    graph.full_ply_count = 4
+    graph.set_delta_mode(True)
+    assert graph._values() == [(1, 20, None), (2, -200, None), (3, 1500, None)]
+    graph.grab()
+    rect = graph._last_plot_rect
+    assert all(rect.left() <= x <= rect.right() and rect.top() <= y <= rect.bottom()
+               for _ply, x, y, _clipped in graph._last_rendered_points)
+    assert not any(mate is not None for _ply, _score, mate in graph._values())
 
 
 def test_review_advantage_bar_uses_mate_status_without_centipawn_fill(qtbot, tmp_path):

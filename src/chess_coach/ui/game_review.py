@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import chess
+import math
 from PySide6.QtCore import QPointF, QSettings, Qt, Signal
 from PySide6.QtGui import QColor, QKeySequence, QPainter, QPen, QPolygonF, QShortcut
 from PySide6.QtWidgets import (
@@ -88,8 +89,11 @@ class ReviewGraph(QWidget):
         self.setMouseTracking(True)
         self.setAccessibleName("Интерактивный график оценки по ходам")
         self.setAccessibleDescription(
-            "Горизонтальная ось — номер хода. Вертикальная — оценка позиции в пешках за белых, "
-            "от −2 до +2. Стрелки влево и вправо перемещают выбор между оценёнными позициями.")
+            "Горизонтальная ось — номер полухода. Вертикальная — оценка позиции или изменение "
+            "оценки за белых. Шкала подбирается по данным; выбросы отмечаются на границе. "
+            "Стрелки влево и вправо перемещают выбор между оценёнными позициями.")
+        self._last_plot_rect = None
+        self._last_rendered_points: list[tuple[int, int, int, bool]] = []
 
     def _values(self):
         if not self.safety_allowed:
@@ -110,13 +114,37 @@ class ReviewGraph(QWidget):
             score = row.get("white_cp")
             mate = row.get("mate_white")
             if mate is not None:
-                # Place mate markers at the corresponding edge; retain mate as a
-                # distinct label instead of fabricating a centipawn score.
-                score = 1000 if int(mate) > 0 else -1000 if int(mate) < 0 else 0
+                # Mate has a separate marker position and label; never encode it
+                # as a synthetic centipawn value on the axis.
+                score = 0
             if score is not None:
-                output.append((int(row["ply"]), max(-200, min(200, int(score))),
+                output.append((int(row["ply"]), int(score),
                                int(mate) if mate is not None else None))
         return output
+
+    @staticmethod
+    def _nice_axis_limit(values) -> int:
+        magnitudes = sorted(abs(int(value)) for value in values if value is not None)
+        if not magnitudes:
+            return 100
+        # Use a high percentile so one huge swing does not flatten every normal
+        # move. Values outside that range remain visible as clipped edge marks.
+        index = max(0, math.ceil(len(magnitudes) * 0.95) - 1)
+        target = max(25, magnitudes[index])
+        steps = (25, 50, 75, 100, 150, 200, 300, 500, 750, 1000, 1500, 2000,
+                 3000, 5000, 7500, 10000, 15000, 20000, 30000, 50000, 75000,
+                 100000, 150000, 200000, 300000, 500000, 750000, 1000000)
+        return next((step for step in steps if step >= target),
+                    int(math.ceil(target / 1_000_000) * 1_000_000))
+
+    def plot_rect(self):
+        return self.rect().adjusted(54, 18, -14, -31)
+
+    @staticmethod
+    def _score_y(rect, score: int, axis_limit: int) -> tuple[int, bool]:
+        clipped = max(-axis_limit, min(axis_limit, int(score)))
+        y = rect.center().y() - round(rect.height() * clipped / (2 * axis_limit))
+        return max(rect.top(), min(rect.bottom(), y)), clipped != score
 
     @staticmethod
     def _continuous_segments(values):
@@ -127,13 +155,19 @@ class ReviewGraph(QWidget):
     def paintEvent(self, _event):
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-        rect = self.rect().adjusted(42, 12, -16, -30)
+        rect = self.plot_rect()
+        self._last_plot_rect = rect
+        self._last_rendered_points = []
         painter.fillRect(rect, QColor(TOKENS.surface))
         painter.setPen(QPen(QColor(TOKENS.border), 1))
         painter.drawRect(rect)
         values = self._values()
         max_ply = max(1, self.full_ply_count,
                       max((ply for ply, _score, _mate in values), default=0))
+        numeric_values = [score for _ply, score, mate in values if mate is None]
+        axis_limit = self._nice_axis_limit(numeric_values)
+        axis_label = lambda value: ("−" if value < 0 else "+" if value > 0 else "") + \
+            f"{abs(value) / 100:.2f}".rstrip("0").rstrip(".")
         phase_colors = {"opening": QColor(84, 132, 98, 25),
                         "middlegame": QColor(192, 141, 72, 22),
                         "endgame": QColor(86, 122, 167, 24)}
@@ -141,19 +175,29 @@ class ReviewGraph(QWidget):
                               if row.get("phase") in phase_colors)
         phase_segments = [(first, second) for first, second in zip(phase_points, phase_points[1:])
                           if first[1] == second[1] and second[0] == first[0] + 1]
+        painter.save()
+        painter.setClipRect(rect.adjusted(1, 1, -1, -1))
         for first, second in phase_segments:
             left = rect.left() + round(rect.width() * first[0] / max_ply)
             right = rect.left() + round(rect.width() * second[0] / max_ply)
             painter.fillRect(left, rect.top(), max(1, right - left), rect.height(),
                              phase_colors[first[1]])
-        if not phase_segments:
-            painter.setPen(QPen(QColor(TOKENS.secondary), 1))
-            painter.drawText(rect.left() + 4, rect.top() + 16, "Фазы не определены")
         painter.setPen(QPen(QColor(TOKENS.secondary), 1))
-        painter.drawLine(rect.left(), rect.center().y(), rect.right(), rect.center().y())
-        painter.drawText(2, rect.top() + 5, "+2.0 за белых" if not self.delta_mode else "+2.0 Δwhite")
-        painter.drawText(10, rect.center().y() + 5, "0")
-        painter.drawText(2, rect.bottom(), "−2.0 за белых" if not self.delta_mode else "−2.0 Δwhite")
+        half = axis_limit // 2
+        for tick in (-axis_limit, -half, 0, half, axis_limit):
+            y = rect.center().y() - round(rect.height() * tick / (2 * axis_limit))
+            painter.setPen(QPen(QColor(TOKENS.text if tick == 0 else TOKENS.border),
+                                1 if tick == 0 else 1,
+                                Qt.PenStyle.SolidLine if tick == 0 else Qt.PenStyle.DotLine))
+            painter.drawLine(rect.left(), y, rect.right(), y)
+        painter.setPen(QPen(QColor(TOKENS.secondary), 1))
+        painter.drawText(2, rect.top() + 5, axis_label(axis_limit))
+        painter.drawText(18, rect.center().y() + 5, "0")
+        painter.drawText(2, rect.bottom(), axis_label(-axis_limit))
+        painter.drawText(rect.left() + 3, rect.top() + 14,
+                         "Δ оценки за белых" if self.delta_mode else "Оценка за белых")
+        if not phase_segments:
+            painter.drawText(rect.right() - 150, rect.top() + 14, "Фазы не определены")
         if not values:
             message = (self.safety_block_reason if not self.safety_allowed
                        else "Нет сохранённых оценок")
@@ -162,14 +206,32 @@ class ReviewGraph(QWidget):
             coords = []
             for ply, score, mate in values:
                 x = rect.left() + round(rect.width() * ply / max_ply)
-                y = rect.center().y() - round(rect.height() * score / 400)
-                coords.append((x, y, ply, mate))
-            painter.setPen(QPen(QColor(TOKENS.accent), 2))
-            coordinate_by_ply = {row[2]: row for row in coords}
-            for first, second in self._continuous_segments(values):
-                a, b = coordinate_by_ply[first[0]], coordinate_by_ply[second[0]]
-                painter.drawLine(a[0], a[1], b[0], b[1])
-            for x, y, ply, mate in coords:
+                if mate is not None:
+                    y = (rect.top() if mate > 0 else rect.bottom() if mate < 0
+                         else rect.center().y())
+                    clipped = False
+                else:
+                    y, clipped = self._score_y(rect, score, axis_limit)
+                coords.append((x, y, ply, mate, score, clipped))
+                self._last_rendered_points.append((ply, x, y, clipped))
+            if self.delta_mode:
+                baseline = rect.center().y()
+                width = max(2, min(10, round(rect.width() / max(1, max_ply + 1) * 0.75)))
+                for x, y, _ply, mate, _score, _clipped in coords:
+                    if mate is not None:
+                        continue
+                    color = QColor(TOKENS.success if y < baseline else TOKENS.danger)
+                    painter.setPen(QPen(color, 1))
+                    painter.setBrush(color)
+                    painter.drawRect(x - width // 2, min(baseline, y), width,
+                                     max(1, abs(baseline - y)))
+            else:
+                coordinate_by_ply = {row[2]: row for row in coords}
+                painter.setPen(QPen(QColor(TOKENS.accent), 2))
+                for first, second in self._continuous_segments(values):
+                    a, b = coordinate_by_ply[first[0]], coordinate_by_ply[second[0]]
+                    painter.drawLine(a[0], a[1], b[0], b[1])
+            for x, y, ply, mate, score, clipped in coords:
                 marker = self.markers.get(ply, {}) if self.markers_visible else {}
                 severity = marker.get("severity")
                 if severity in {"mistake", "blunder"}:
@@ -192,16 +254,27 @@ class ReviewGraph(QWidget):
                 elif severity == "inaccuracy":
                     painter.drawPolygon(QPolygonF([QPointF(x, y - 4), QPointF(x + 4, y),
                                                   QPointF(x, y + 4), QPointF(x - 4, y)]))
+                elif mate == 0:
+                    painter.drawRect(x - 4, y - 4, 8, 8)
                 else:
                     painter.drawEllipse(x - 3, y - 3, 6, 6)
                 if mate is not None:
-                    painter.drawText(x + 5, y - 5, f"Мат {mate}" if mate > 0 else f"−Мат {abs(mate)}")
+                    mate_text = ("Мат в позиции" if mate == 0 else
+                                 f"M{mate}" if mate > 0 else f"−M{abs(mate)}")
+                    painter.drawText(x + 5, max(rect.top() + 12, y - 5), mate_text)
+                elif clipped:
+                    painter.drawPolygon(QPolygonF([QPointF(x, y - 5 if score > 0 else y + 5),
+                                                  QPointF(x - 4, y), QPointF(x + 4, y)]))
+            if any(row[5] for row in coords):
+                painter.setPen(QPen(QColor(TOKENS.warning), 1))
+                painter.drawText(rect.right() - 122, rect.top() + 14,
+                                 "▲ за пределом шкалы")
+        painter.restore()
         selected_x = rect.left() + round(rect.width() * self.current_ply / max_ply)
         painter.setPen(QPen(QColor(TOKENS.text), 1, Qt.PenStyle.DashLine))
         painter.drawLine(selected_x, rect.top(), selected_x, rect.bottom())
         painter.setPen(QPen(QColor(TOKENS.secondary), 1))
-        painter.drawText(rect.left(), self.height() - 5,
-                         "Ход 0 · Δwhite" if self.delta_mode else "Ход 0 · оценка за белых")
+        painter.drawText(rect.left(), self.height() - 5, "Полуход 0")
         painter.drawText(rect.right() - 48, self.height() - 5, f"Ход {max_ply}")
 
     def select_ply(self, ply: int):
@@ -223,7 +296,7 @@ class ReviewGraph(QWidget):
 
     def mousePressEvent(self, event):
         values = self._values()
-        rect = self.rect().adjusted(42, 12, -16, -30)
+        rect = self.plot_rect()
         max_ply = max(1, self.full_ply_count,
                       max((ply for ply, _score, _mate in values), default=0))
         requested = max(0, min(max_ply, round(
@@ -239,7 +312,7 @@ class ReviewGraph(QWidget):
             self.setToolTip(self.safety_block_reason if not self.safety_allowed
                             else "Нет сохранённых оценок")
             return
-        rect = self.rect().adjusted(42, 12, -16, -30)
+        rect = self.plot_rect()
         max_ply = max(1, self.full_ply_count,
                       max(ply for ply, _score, _mate in values))
         requested = round((event.position().x() - rect.left()) * max_ply /
@@ -248,7 +321,9 @@ class ReviewGraph(QWidget):
         assessment = next((row for row in self.assessments if int(row["ply"]) == ply), {})
         marker = self.markers.get(ply, {})
         coverage = self.coverage_text or f"{len(values)}/{self.full_ply_count + 1} сохранённых позиций"
-        value = (f"Мат {mate}" if mate is not None else
+        value = ("Мат в текущей позиции" if mate == 0 else
+                 f"Мат {mate}" if mate is not None and mate > 0 else
+                 f"−Мат {abs(mate)}" if mate is not None else
                  f"Δ {int(score) / 100:+.2f} за белых" if self.delta_mode else
                  evaluation_label(score))
         before = next((row for row in self.assessments
