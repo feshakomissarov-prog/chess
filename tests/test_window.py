@@ -11,7 +11,8 @@ from PySide6.QtWidgets import QComboBox, QDialog, QLabel, QInputDialog, QMessage
 from chess_coach.board_view import BoardView
 from chess_coach.window import (ActiveGamesDialog, BatchAnalysisDialog, EvaluationGraph, MainWindow,
                                 SettingsDialog, StatisticsDialog, StatisticsGameDialog,
-                                _batch_safety_from_games, _puzzle_attempt_summary)
+                                _batch_safety_from_games, _clock_filter_sort_key,
+                                _puzzle_attempt_summary)
 from chess_coach.lichess.session import LichessGameSession
 from chess_coach.lichess.repository import GameRepository
 from chess_coach.ui.workspace_state import geometry_intersects_available, reposition_visible_frame
@@ -309,6 +310,30 @@ def test_m46_board_size_presets_are_available_and_persisted(qtbot, tmp_path, siz
     else:
         assert window.settings.value("board_target_size", type=int) == -1
     assert window.board.width() >= 320
+
+
+def test_clock_filter_sort_uses_raw_control_time_and_keeps_daily_last():
+    values = ["daily:86400", "15+10", "300+3", "3+2", "bad"]
+    assert sorted(values, key=_clock_filter_sort_key) == [
+        "3+2", "15+10", "300+3", "daily:86400", "bad"]
+
+
+@pytest.mark.parametrize(("width", "height", "minimum"), [(1024, 700, 320), (1920, 1080, 800)])
+def test_board_fit_uses_available_window_area_and_focus_hides_inspector(
+        qtbot, tmp_path, width, height, minimum):
+    window = MainWindow(QSettings(str(tmp_path / f"board-fit-{width}.ini"),
+                                  QSettings.Format.IniFormat), offline_mode=True)
+    qtbot.addWidget(window)
+    window.resize(width, height)
+    window.board_size_combo.setCurrentIndex(window.board_size_combo.findData(-1))
+    window._apply_board_size()
+    assert window.board.width() >= minimum
+    if width == 1920:
+        before = window.board.width()
+        window.focus_mode_button.setChecked(True)
+        assert window.game_splitter.widget(1).isHidden()
+        assert window.board.width() >= before
+    window.close()
 
 
 @pytest.mark.parametrize(("games", "allowed"), [
@@ -979,6 +1004,7 @@ def test_statistics_unknown_own_coverage_and_real_collapsed_advanced_filters(qtb
     text = dialog.summary_label.text()
     row_text = dialog.games.item(0).text()
     assert "ошибки на 100 оценённых моих ходов: нет данных" in text
+    assert "Классификация собственных ходов: нет данных" in text
     assert "Официальная точность Lichess" in text and "нет данных" in text
     assert "Нет оценённых моих ходов (0/465)" in row_text
     assert "свои н/о/з 0/0/0" not in row_text
@@ -1377,6 +1403,7 @@ def test_position_evaluation_is_explicit_offline_only_and_stale_result_is_hidden
     qtbot.waitUntil(lambda: len(calls) == 2 and window._position_eval_thread is None,
                     timeout=3000)
     assert calls[-1] == final_fen  # debounce evaluates only the final position
+    assert window.moves.item_by_ply(4).text().endswith("+0.4 · белые")
 
     window._lichess_connected = True
     window.analyze_local_position()
@@ -2711,6 +2738,56 @@ def test_sidebar_play_opens_mode_picker_without_resetting_local_game(qtbot, tmp_
     assert tuple(window.controller.board.move_stack) == before
     assert not window.play_ai_button.isEnabled()
     assert window.play_active_button.toolTip()
+    window.close()
+
+
+def test_home_dashboard_refresh_is_background_and_drops_stale_generation(
+        qtbot, tmp_path, monkeypatch):
+    started, release = threading.Event(), threading.Event()
+    calls = []
+
+    def fake_snapshot(_repository, *, account_id=None, clock=None):
+        calls.append((account_id, clock))
+        started.set()
+        release.wait(2)
+        tag = "старая" if len(calls) == 1 else "новая"
+        return {"metrics": [{"key": key, "value": tag, "detail": tag, "source": "synthetic"}
+                           for key in ("games", "accuracy", "analysis", "errors")],
+                "recent_games": [], "filter": {"account_id": account_id, "clock": clock}}
+
+    monkeypatch.setattr("chess_coach.window.dashboard_snapshot", fake_snapshot)
+    window = MainWindow(QSettings(str(tmp_path / "dashboard-worker.ini"),
+                                  QSettings.Format.IniFormat), offline_mode=True)
+    qtbot.addWidget(window)
+    qtbot.waitUntil(started.is_set, timeout=1000)
+    # Route switching completes while the database read remains blocked off-thread.
+    window.show_home()
+    assert window.screen_stack.currentWidget() is window.home_page
+    assert not release.is_set()
+    window._refresh_home_dashboard()  # supersede generation one while it is in flight
+    release.set()
+    qtbot.waitUntil(lambda: len(calls) == 2 and window._dashboard_thread is None,
+                    timeout=3000)
+    assert all(value.text() == "новая" for value in window._dashboard_metric_values.values())
+    window.close()
+
+
+def test_recent_game_card_does_not_show_zero_coverage_when_analysis_is_missing(
+        qtbot, tmp_path):
+    window = MainWindow(QSettings(str(tmp_path / "missing-card-analysis.ini"),
+                                  QSettings.Format.IniFormat), offline_mode=True)
+    qtbot.addWidget(window)
+    qtbot.waitUntil(lambda: window._dashboard_thread is None, timeout=3000)
+    game = {"game_id": "synthetic-card", "status": "mate", "winner": "white",
+            "color": "white", "opponent": "Synthetic", "started_at": "2026-11-02",
+            "clock": "300+3", "eco": "B20", "opening_name": "Sicilian Defense",
+            "review_metrics": {"status": "без анализа", "coverage": "0/12",
+                               "opponent_coverage": "0/12", "source": "нет данных"}}
+    window._render_dashboard_snapshot({"metrics": [], "recent_games": [game]})
+    labels = [label.text() for label in window.home_page.findChildren(QLabel)]
+    card_detail = next(value for value in labels if "Оценки пока нет" in value)
+    assert "0/12" not in card_detail
+    assert "Источник —" in card_detail
     window.close()
 
 

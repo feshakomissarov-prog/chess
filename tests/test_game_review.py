@@ -141,8 +141,10 @@ def test_move_table_groups_white_and_black_in_fullmove_rows_and_keeps_ply(qtbot)
     ]
     table.set_rows(moves, scores={1: {"white_cp": 25}, 2: {"white_cp": 10}})
     assert table.table.rowCount() == 2
-    assert table.table.item(0, 1).text().endswith("+0.2 · белые")
+    assert table.table.item(0, 1).text().endswith("+0.3 · белые")
     assert table.table.item(0, 2).text().startswith("? e5   +0.1")
+    assert table.table.item(0, 1).foreground().color().name() == "#58a978"
+    assert table.table.item(0, 2).foreground().color().name() == "#858b93"
     assert table.table.item(1, 1).text().startswith("?? ")
     selected = []
     table.ply_selected.connect(selected.append)
@@ -150,6 +152,11 @@ def test_move_table_groups_white_and_black_in_fullmove_rows_and_keeps_ply(qtbot)
     table._cell_clicked(1, 1)
     assert selected == [2, 3]
     assert table.table.item(1, 1).toolTip() == "Зевок"
+    assert table.set_score(3, white_cp=75, source="Stockfish", depth=18)
+    assert table.item_by_ply(3).text().endswith("+0.8 · белые")
+    assert table.set_score(3, mate_white=-2, source="Stockfish", depth=20)
+    assert table.item_by_ply(3).text().count(" · белые") == 0
+    assert table.item_by_ply(3).text().endswith("−M2")
 
 
 def test_move_table_black_to_move_fen_uses_fullmove_number_and_handles_empty_side(qtbot):
@@ -183,6 +190,22 @@ def test_review_safety_button_does_not_reveal_solution_before_preflight(qtbot, t
         assert requested == ["review-test"]
         assert "пока скрыты" in workspace.training_status.text()
         assert not workspace.graph.isHidden()  # graph stays visible; no solution/PV is exposed
+    finally:
+        repo.shutdown()
+
+
+def test_saved_finished_review_exposes_explicit_stockfish_request(qtbot, tmp_path):
+    repo, game = _review_repo(tmp_path / "review-engine-cta.sqlite3")
+    try:
+        workspace = GameReviewWorkspace(repo, training_allowed=False)
+        qtbot.addWidget(workspace)
+        workspace.load_game(game)
+        assert not workspace.analysis_button.isHidden()
+        assert workspace.analysis_button.text() == "Повторить анализ Stockfish"
+        requested = []
+        workspace.analysis_requested.connect(requested.append)
+        workspace.analysis_button.click()
+        assert requested == [game["game_id"]]
     finally:
         repo.shutdown()
 
@@ -246,8 +269,12 @@ def test_review_events_and_saved_pv_follow_selection_and_fair_play_gate(qtbot, t
         assert [workspace.tabs.tabText(i) for i in range(workspace.tabs.count())] == [
             "Ходы", "Разбор", "События", "Заметки"]
         workspace.select_ply(1)
+        assert workspace.review_board._hint_arrows == {(chess.C7, chess.C5)}
         assert "Сохранённое продолжение: c5 Nf3" in workspace.event_detail.text()
         workspace.set_safety_pending("Активная человеческая партия")
+        assert workspace.review_board._hint_arrows == set()
+        assert "Активная человеческая партия" in workspace.selected_move_summary.text()
+        assert workspace.moves_list.item(0).text() == "e4"
         assert workspace.event_list.count() == 0
         assert "Активная человеческая партия" in workspace.event_detail.text()
         assert "Сохранённый PV" not in workspace.event_detail.text()

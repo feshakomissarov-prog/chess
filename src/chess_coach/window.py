@@ -6,6 +6,7 @@ import chess
 import json
 import os
 import time
+import re
 import threading
 import platform
 from datetime import datetime, timedelta, timezone
@@ -121,6 +122,19 @@ def _puzzle_themes_label(value: object) -> str:
 def _game_date_label(game: dict) -> str:
     return format_game_date(game.get("started_at"),
                             precision=game.get("game_time_precision"))
+
+
+def _clock_filter_sort_key(value: object) -> tuple:
+    """Sort raw controls by base time/increment, retaining raw values for SQL."""
+    raw = str(value or "").strip()
+    match = re.fullmatch(r"(\d+)\s*\+\s*(\d+)", raw)
+    if match:
+        base, increment = map(int, match.groups())
+        return (0, base, increment, raw.casefold())
+    daily = re.fullmatch(r"(?:daily:)?(\d{4,6})", raw.casefold())
+    if daily:
+        return (1, int(daily.group(1)), 0, raw.casefold())
+    return (2, 0, 0, raw.casefold())
 
 
 def _batch_safety_from_games(games: object) -> bool | None:
@@ -552,8 +566,13 @@ class StatisticsDialog(QDialog):
         self.period.setCurrentIndex(self.period.findData(90))
         self.clock = QComboBox()
         self.clock.addItem("Любой контроль", "")
-        for value in options["clocks"]:
-            self.clock.addItem(format_clock_control(value), value)
+        seen_clock_labels: set[str] = set()
+        for value in sorted(set(options["clocks"]), key=_clock_filter_sort_key):
+            label = format_clock_control(value)
+            if label in seen_clock_labels:
+                label = f"{label} ({value})"
+            seen_clock_labels.add(label)
+            self.clock.addItem(label, value)
         self.clock.setEditable(True)
         self.clock.lineEdit().setPlaceholderText("Любой контроль")
         self.side = QComboBox()
@@ -919,6 +938,11 @@ class StatisticsDialog(QDialog):
                                     for phase in errors.values()
                                     for side_counts in phase.values())
                           for kind in ("inaccuracy", "mistake", "blunder")}
+            classified_text = (
+                f"Мои неточности / ошибки / зевки: {classified['inaccuracy']} / "
+                f"{classified['mistake']} / {classified['blunder']}"
+                if int(summary.get("own_assessed_moves") or 0) > 0 else
+                "Классификация собственных ходов: нет данных")
             accuracy = summary["lichess_accuracy"]
             scope = ("Смешанные локальные аккаунты; результаты по цвету в профиле партии."
                      if not self.account.currentData() else
@@ -928,8 +952,7 @@ class StatisticsDialog(QDialog):
                 f"Партии: {total} · победы {summary['wins']} · ничьи {summary['draws']} · "
                 f"поражения {summary['losses']}\n"
                 f"Анализ есть у {summary['analysis_games']}/{total} партий · {coverage_text}\n"
-                f"Мои неточности / ошибки / зевки: {classified['inaccuracy']} / "
-                f"{classified['mistake']} / {classified['blunder']} · ошибки на 100 оценённых моих ходов: "
+                f"{classified_text} · ошибки на 100 оценённых моих ходов: "
                 f"{summary['own_error_rate_per_100'] if summary['own_error_rate_per_100'] is not None else 'нет данных'}\n"
                 f"Официальная точность Lichess: белые {accuracy['white'] if accuracy['white'] is not None else 'нет данных'}, "
                 f"чёрные {accuracy['black'] if accuracy['black'] is not None else 'нет данных'}. "
@@ -1337,10 +1360,12 @@ class SettingsDialog(QDialog):
                 engine.ping()
                 if self._engine_probe_cancel.is_set():
                     raise RuntimeError("Проверка остановлена.")
-                self.engine_probe_result.emit(
-                    generation, True, str(engine.id.get("name") or "UCI engine"))
+                if shiboken6.isValid(self):
+                    self.engine_probe_result.emit(
+                        generation, True, str(engine.id.get("name") or "UCI engine"))
             except Exception as exc:
-                self.engine_probe_result.emit(generation, False, str(exc))
+                if shiboken6.isValid(self):
+                    self.engine_probe_result.emit(generation, False, str(exc))
             finally:
                 if engine is not None:
                     try:
@@ -2221,6 +2246,7 @@ class MainWindow(QMainWindow):
         self.review_workspace = GameReviewWorkspace(self.game_repository, parent=self)
         self.review_workspace.return_requested.connect(self.show_home)
         self.review_workspace.export_requested.connect(self._export_review_pgn)
+        self.review_workspace.analysis_requested.connect(self._request_saved_game_analysis)
         self.review_workspace.safety_requested.connect(self._request_review_training_safety)
         self.review_workspace.position_selected.connect(self._review_position_selected)
         self.review_workspace.tabs.currentChanged.connect(self._schedule_workspace_save)
@@ -2801,8 +2827,10 @@ class MainWindow(QMainWindow):
             description.setObjectName("secondary")
             card_layout.addWidget(description)
             source_code = source_short(metrics.get("source"))[0]
-            coverage = QLabel(f"Источник {source_code} · мои ходы {metrics.get('coverage', '0/0')} · "
-                              f"ходы соперника {metrics.get('opponent_coverage', '0/0')}")
+            coverage_text = ("Оценки пока нет" if metrics.get("status") == "без анализа" else
+                             f"Оценено моих ходов {metrics.get('coverage', '—')} · "
+                             f"ходов соперника {metrics.get('opponent_coverage', '—')}")
+            coverage = QLabel(f"Источник {source_code} · {coverage_text}")
             coverage.setToolTip(source_short(metrics.get("source"))[1])
             coverage.setAccessibleName(f"Источник оценки: {source_short(metrics.get('source'))[1]}")
             card_layout.addWidget(coverage)
@@ -3174,10 +3202,7 @@ class MainWindow(QMainWindow):
 
     @staticmethod
     def _format_sync_time(value: str) -> str:
-        try:
-            return datetime.fromisoformat(value.replace("Z", "+00:00")).astimezone().strftime("%Y-%m-%d %H:%M")
-        except (AttributeError, ValueError):
-            return str(value)
+        return format_game_date(value)
 
     def _archive_game_refresh_finished(self, game_id: str, message: str) -> None:
         if message.startswith("История этой партии обновлена"):
@@ -4376,6 +4401,12 @@ class MainWindow(QMainWindow):
                     f"Stockfish · {score} · лучший ход {best} · "
                     f"глубина {payload.get('depth') or 'н/д'} · вариант "
                     f"{' '.join(pv_san) or 'н/д'}; это оценка движка, не точность Lichess.")
+                live_board = (self.online_session.render_board if self.online_session is not None
+                              else self.controller.snapshot().board)
+                current_ply = len(live_board.move_stack)
+                self.moves.set_score(current_ply, white_cp=payload.get("score_white_cp"),
+                                     mate_white=payload.get("mate_white"), source="Stockfish",
+                                     depth=payload.get("depth"))
         if self._position_eval_queued and self._position_eval_mode:
             self._position_eval_queued = False
             self._position_eval_timer.start(0)
@@ -4550,6 +4581,8 @@ class MainWindow(QMainWindow):
         self._local_sound_game_id = uuid.uuid4().hex
         self.board.clear_annotations()
         self.refresh("Новая локальная партия.")
+        if self._position_eval_mode:
+            self._position_eval_timer.start(300)
 
     def open_settings(self) -> None:
         dialog = SettingsDialog(self.settings, self, repository=self.game_repository)
@@ -5829,6 +5862,25 @@ class MainWindow(QMainWindow):
         )
         dialog.canceled.connect(lambda request=request_id: self._cancel_analysis_action(request))
         self.lichess.check_active_games_for_analysis(request_id)
+
+    def _request_saved_game_analysis(self, game_id: str) -> None:
+        """Route the review CTA through the existing post-game safety preflight."""
+        review = self.review_workspace.review
+        if (not review or str(review["game"].get("game_id")) != str(game_id)
+                or review["game"].get("status") in {"created", "started", "started_soon", "playing"}):
+            return
+        game = self.game_repository.get_game(str(game_id))
+        if not game or not self._is_standard_board_game(game):
+            self._notify_inline("Эту запись нельзя анализировать как стандартную завершённую партию.")
+            return
+        engine_path = str(self.settings.value("stockfish_path", "", type=str)).strip()
+        verified_path = str(self.settings.value("stockfish_verified_path", "", type=str)).strip()
+        if not engine_path or engine_path != verified_path or not Path(engine_path).is_file():
+            QMessageBox.information(
+                self, "Stockfish не настроен",
+                "Укажите локальный Stockfish в настройках и проверьте его перед анализом.")
+            return
+        self._start_game_analysis(str(game_id), engine_path)
 
     def _cancel_analysis_action(self, request_id: str) -> None:
         """Cancel either the server preflight or the analysis using one dialog."""

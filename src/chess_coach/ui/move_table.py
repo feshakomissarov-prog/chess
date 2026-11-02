@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import chess
+from decimal import Decimal, ROUND_HALF_UP
 from PySide6.QtCore import Qt, Signal
+from PySide6.QtGui import QColor
 from PySide6.QtWidgets import QAbstractItemView, QTableWidget, QTableWidgetItem, QWidget, QVBoxLayout
 
 
@@ -15,6 +17,16 @@ _SEVERITY = {
     "blunder": ("??", "Зевок"),
     "strong": ("★", "Подтверждённый сильный ход"),
 }
+_SEVERITY_COLORS = {
+    "good": "#58a978", "inaccuracy": "#d1a638", "mistake": "#dd7a36",
+    "blunder": "#d95050", "strong": "#4aa6d8", "unknown": "#858b93",
+}
+
+
+def _score_tenth(white_cp: int) -> str:
+    score = (Decimal(int(white_cp)) / Decimal(100)).quantize(
+        Decimal("0.1"), rounding=ROUND_HALF_UP)
+    return format(score, "+.1f")
 
 
 class MoveTable(QWidget):
@@ -38,7 +50,7 @@ class MoveTable(QWidget):
         self._moves = []
         layout.addWidget(self.table)
 
-    def set_rows(self, moves, *, scores=None, enabled=True):
+    def set_rows(self, moves, *, scores=None, enabled=True, show_severity=True):
         """Moves contain ply, SAN, mover and optional severity; scores are post-ply dicts."""
         self._moves = list(moves)
         self.table.setRowCount(0)
@@ -48,6 +60,8 @@ class MoveTable(QWidget):
             mover = str(move.mover if hasattr(move, "mover") else move["mover"])
             san = str(move.san if hasattr(move, "san") else move["san"])
             severity = getattr(move, "severity", None) or (move.get("severity") if isinstance(move, dict) else None)
+            if not show_severity:
+                severity = None
             before_fen = getattr(move, "before_fen", None)
             if before_fen is None and isinstance(move, dict):
                 before_fen = move.get("before_fen")
@@ -75,7 +89,7 @@ class MoveTable(QWidget):
                 if mate is not None:
                     score_text = f"M{abs(int(mate))}" if int(mate) > 0 else f"−M{abs(int(mate))}"
                 elif cp is not None:
-                    score_text = f"{int(cp) / 100:+.1f}"
+                    score_text = _score_tenth(cp)
                 else:
                     score_text = None
                 if score_text:
@@ -83,16 +97,20 @@ class MoveTable(QWidget):
             if severity in _SEVERITY:
                 icon, description = _SEVERITY[severity]
                 label = f"{icon} {label}"
+                base_label = f"{icon} {san}"
                 item = QTableWidgetItem(label)
                 item.setToolTip(description)
                 item.setData(Qt.ItemDataRole.AccessibleDescriptionRole, f"{description}: {san}")
+                item.setForeground(QColor(_SEVERITY_COLORS[severity]))
             else:
                 item = QTableWidgetItem(label)
+                base_label = san
                 if severity:
                     item.setToolTip(f"Класс хода: {severity}")
                     item.setData(Qt.ItemDataRole.AccessibleDescriptionRole,
                                  f"Класс хода не распознан: {san}")
             item.setData(Qt.ItemDataRole.UserRole, ply)
+            item.setData(Qt.ItemDataRole.UserRole + 1, base_label)
             if score is not None:
                 item.setToolTip((item.toolTip() + "\n" if item.toolTip() else "") +
                                 "Оценка позиции после хода, перспектива белых.")
@@ -131,7 +149,7 @@ class MoveTable(QWidget):
             cp, mate = score.get("white_cp"), score.get("mate_white")
             score_text = (f"M{abs(int(mate))}" if mate is not None and int(mate) > 0 else
                           f"−M{abs(int(mate))}" if mate is not None else
-                          f"{int(cp) / 100:+.1f}" if cp is not None else None)
+                          _score_tenth(cp) if cp is not None else None)
             if score_text:
                 label += f"   {score_text} · белые"
         severity = getattr(move, "severity", None) or (
@@ -139,13 +157,17 @@ class MoveTable(QWidget):
         if severity in _SEVERITY:
             icon, description = _SEVERITY[severity]
             item = QTableWidgetItem(f"{icon} {label}")
+            base_label = f"{icon} {san}"
             item.setToolTip(description)
             item.setData(Qt.ItemDataRole.AccessibleDescriptionRole, f"{description}: {san}")
+            item.setForeground(QColor(_SEVERITY_COLORS[severity]))
         else:
             item = QTableWidgetItem(label)
+            base_label = san
             if severity:
                 item.setToolTip(f"Класс хода: {severity}")
         item.setData(Qt.ItemDataRole.UserRole, ply)
+        item.setData(Qt.ItemDataRole.UserRole + 1, base_label)
         if score is not None:
             item.setToolTip((item.toolTip() + "\n" if item.toolTip() else "") +
                             "Оценка позиции после хода, перспектива белых.")
@@ -227,3 +249,21 @@ class MoveTable(QWidget):
                 if cell is not None and cell.data(Qt.ItemDataRole.UserRole) == int(ply):
                     return cell
         return None
+
+    def set_score(self, ply: int, *, white_cp: int | None = None,
+                  mate_white: int | None = None, source: str = "", depth: int | None = None) -> bool:
+        """Attach a post-move evaluation to the exact SAN cell, if present."""
+        item = self.item_by_ply(ply)
+        if item is None:
+            return False
+        if mate_white is not None:
+            value = f"M{abs(int(mate_white))}" if int(mate_white) > 0 else f"−M{abs(int(mate_white))}"
+        elif white_cp is not None:
+            value = f"{_score_tenth(white_cp)} · белые"
+        else:
+            return False
+        base = item.data(Qt.ItemDataRole.UserRole + 1) or item.text()
+        item.setText(f"{base}   {value}")
+        item.setToolTip(f"Оценка позиции после этого хода · {source or 'источник неизвестен'}"
+                        + (f" · глубина {depth}" if depth is not None else ""))
+        return True

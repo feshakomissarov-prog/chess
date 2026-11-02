@@ -21,45 +21,50 @@ SOUND_IDS = ("move", "capture", "check", "castle", "promotion", "premove", "game
 
 
 def _cue_samples(cue: str, sample_rate: int = 22_050) -> bytes:
-    """Synthesize short mono PCM tones owned by this project (no borrowed assets)."""
-    notes = {
-        "move": ((420, 0.055),),
-        "capture": ((300, 0.08), (560, 0.045)),
-        "check": ((740, 0.09),),
-        "castle": ((390, 0.045), (510, 0.045)),
-        "promotion": ((520, 0.06), (660, 0.055)),
-        "premove": ((880, 0.025),),
-        "game_end": ((440, 0.08), (554, 0.09), (659, 0.12)),
-        "notification": ((720, 0.045), (840, 0.05)),
-    }[cue]
-    total = sum(duration for _frequency, duration in notes) + 0.012 * (len(notes) - 1)
-    samples = bytearray()
-    cursor = 0
-    for note_index, (frequency, duration) in enumerate(notes):
-        count = int(sample_rate * duration)
+    """Synthesize short original wood-like impact clicks; no borrowed samples."""
+    patterns = {
+        "move": ((0.0, 1.0),),
+        "capture": ((0.0, 1.0), (0.042, 0.78)),
+        "check": ((0.0, 0.86), (0.038, 0.7)),
+        "castle": ((0.0, 0.85), (0.034, 0.85)),
+        "promotion": ((0.0, 0.8), (0.038, 0.95), (0.076, 0.8)),
+        "premove": ((0.0, 0.55),),
+        "game_end": ((0.0, 0.9), (0.055, 0.72), (0.11, 0.58)),
+        "notification": ((0.0, 0.55), (0.048, 0.65)),
+    }
+    impacts = patterns[cue]
+    duration = 0.064
+    frame_count = int(sample_rate * (max(offset for offset, _gain in impacts) + duration))
+    output = bytearray(frame_count * 2)
+    for impact_index, (offset, gain) in enumerate(impacts):
+        start = int(offset * sample_rate)
+        count = int(duration * sample_rate)
+        state = 0x9E3779B9 ^ (impact_index * 0x45D9F3B)
+        previous_noise = 0.0
         for index in range(count):
+            state = (1664525 * state + 1013904223) & 0xFFFFFFFF
+            noise = ((state >> 8) / 0xFFFFFF) * 2.0 - 1.0
+            # A short noisy attack with a damped wooden resonance, not a pitched tone.
+            previous_noise += 0.22 * (noise - previous_noise)
             t = index / sample_rate
-            envelope = (1.0 - index / count) ** 2.4
-            fundamental = math.sin(2 * math.pi * frequency * t)
-            wood_harmonic = 0.28 * math.sin(2 * math.pi * frequency * 2.37 * t)
-            amplitude = 0.23 * envelope * (fundamental + wood_harmonic)
-            samples.extend(struct.pack("<h", int(max(-1.0, min(1.0, amplitude)) * 32767)))
-            cursor += 1
-        if note_index + 1 < len(notes):
-            silence = int(sample_rate * 0.012)
-            samples.extend(b"\x00\x00" * silence)
-            cursor += silence
-    expected = int(sample_rate * total)
-    if cursor < expected:
-        samples.extend(b"\x00\x00" * (expected - cursor))
-    return bytes(samples)
+            attack = min(1.0, index / max(1.0, sample_rate * 0.0015))
+            envelope = attack * math.exp(-t * 62.0)
+            body = 0.62 * math.sin(2 * math.pi * 205 * t) + 0.21 * math.sin(2 * math.pi * 495 * t)
+            sample = gain * 0.34 * envelope * (0.76 * previous_noise + body)
+            frame = start + index
+            old = struct.unpack_from("<h", output, frame * 2)[0] / 32767.0
+            value = max(-1.0, min(1.0, old + sample))
+            struct.pack_into("<h", output, frame * 2, int(value * 32767))
+    return bytes(output)
 
 
 def ensure_sound_assets(directory: Path) -> dict[str, Path]:
     directory.mkdir(parents=True, exist_ok=True)
     output = {}
     for cue in SOUND_IDS:
-        path = directory / f"{cue}.wav"
+        # Versioned filenames prevent a previously generated tonal cue from
+        # silently overriding this original transient-click set.
+        path = directory / f"{cue}-click-v2.wav"
         if not path.is_file():
             with wave.open(str(path), "wb") as wav:
                 wav.setnchannels(1)

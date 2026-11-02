@@ -43,6 +43,9 @@ class ReviewGraph(QWidget):
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
         self.setMouseTracking(True)
         self.setAccessibleName("Интерактивный график оценки по ходам")
+        self.setAccessibleDescription(
+            "Горизонтальная ось — номер хода. Вертикальная — оценка позиции в пешках за белых, "
+            "от −2 до +2. Стрелки влево и вправо перемещают выбор между оценёнными позициями.")
 
     def _values(self):
         if not self.safety_allowed:
@@ -105,8 +108,10 @@ class ReviewGraph(QWidget):
                     color = QColor(TOKENS.warning)
                 elif severity == "good":
                     color = QColor(TOKENS.success)
-                else:
+                elif severity == "strong":
                     color = QColor(TOKENS.info)
+                else:
+                    color = QColor("#858b93")
                 painter.setBrush(color)
                 painter.setPen(QPen(color, 1))
                 if severity == "blunder":
@@ -206,6 +211,7 @@ class GameReviewWorkspace(QWidget):
     return_requested = Signal()
     export_requested = Signal(str)
     safety_requested = Signal(str)
+    analysis_requested = Signal(str)
 
     def __init__(self, repository, *, training_allowed: bool = False,
                  training_block_reason: str = "", parent=None):
@@ -349,8 +355,14 @@ class GameReviewWorkspace(QWidget):
         self.repeat_button.clicked.connect(self._repeat_training_error)
         self.return_review_button = QPushButton("Вернуться к разбору")
         self.return_review_button.clicked.connect(self.stop_training)
+        self.analysis_button = QPushButton("Проанализировать Stockfish")
+        self.analysis_button.setToolTip(
+            "Явно запускает сохранённый послепартийный анализ после проверки Fair Play.")
+        self.analysis_button.clicked.connect(
+            lambda: self.review and self.analysis_requested.emit(str(self.review["game"]["game_id"])))
         for button in (self.previous_error_button, self.next_error_button,
-                       self.training_button, self.training_safety_button, self.check_button, self.hint_button,
+                       self.analysis_button, self.training_button, self.training_safety_button,
+                       self.check_button, self.hint_button,
                        self.skip_button, self.continue_button, self.return_review_button):
             actions.addWidget(button)
             button.setVisible(False)
@@ -383,6 +395,13 @@ class GameReviewWorkspace(QWidget):
             self.training_block_reason = training_block_reason
         self.selected_ply = 0
         analysis = self.review["analysis"] or {}
+        game_finished = game.get("status") not in {
+            "created", "started", "started_soon", "playing"}
+        has_engine_analysis = (analysis.get("source") == "stockfish" and
+                               analysis.get("status") == "complete")
+        self.analysis_button.setVisible(game_finished)
+        self.analysis_button.setText("Повторить анализ Stockfish" if has_engine_analysis
+                                     else "Проанализировать Stockfish")
         white = game.get("white_player") or "Белые"
         black = game.get("black_player") or "Чёрные"
         self.title.setText(f"{white} — {black}")
@@ -400,7 +419,8 @@ class GameReviewWorkspace(QWidget):
         self.moves_list.set_rows(
             self.review["moves"],
             scores=assessment_by_ply if self.evaluation_allowed else {},
-            enabled=self.evaluation_allowed)
+            enabled=self.evaluation_allowed,
+            show_severity=self.evaluation_allowed)
         metrics = self.review["per_side"]
         accuracy = self.review["official_accuracy"]
         accuracy_text = (f"Точность Lichess: белые {accuracy['white'] if accuracy['white'] is not None else '—'}, "
@@ -520,6 +540,10 @@ class GameReviewWorkspace(QWidget):
             self.graph.set_safety_gate(False, reason)
             self.graph.assessments = []
             self.graph.markers = {}
+            self.review_board.set_hint_arrows(())
+            self.selected_move_summary.setText(reason)
+            self.moves_list.set_rows(self.review["moves"], scores={}, enabled=False,
+                                     show_severity=False)
             self.event_list.clear()
             self.event_detail.setText(reason)
             self.metrics_label.setText(reason)
@@ -543,6 +567,24 @@ class GameReviewWorkspace(QWidget):
         self.selected_ply = ply
         self.review_board.set_position(self.review["positions"][ply])
         self.review_board.set_hint_arrows(())
+        position_best_label = ""
+        if self.evaluation_allowed:
+            analysis_at_position = self.review.get("analysis") or {}
+            current_assessment = next((item for item in analysis_at_position.get("assessments", [])
+                                       if int(item.get("ply", -1)) == ply), None)
+            current_pv = ((current_assessment or {}).get("pv") or
+                          (current_assessment or {}).get("pv_uci") or [])
+            if isinstance(current_pv, str):
+                current_pv = current_pv.split()
+            if current_pv:
+                try:
+                    candidate = chess.Move.from_uci(str(current_pv[0]))
+                    board_at_position = self.review["positions"][ply].copy(stack=False)
+                    if candidate in board_at_position.legal_moves:
+                        position_best_label = board_at_position.san(candidate)
+                        self.review_board.set_hint_arrows([candidate])
+                except (ValueError, IndexError, chess.InvalidMoveError):
+                    pass
         self.graph.select_ply(ply)
         self.moves_list.select_ply(ply)
         if not self.evaluation_allowed:
@@ -575,7 +617,9 @@ class GameReviewWorkspace(QWidget):
                     pass
             self.selected_move_summary.setText(
                 f"Ход {move.san} · {severity_label(move.severity)}\n"
-                f"До: {before_label} · после: {after_label} · {delta_label}\n{best_label}")
+                f"До: {before_label} · после: {after_label} · {delta_label}\n{best_label}"
+                + (f"\nЛучший ход из выбранной позиции: {position_best_label}"
+                   if position_best_label else ""))
             self.selected_move_summary.setToolTip(
                 f"{source_short(analysis.get('source'))[1]} · глубина {move.depth or '—'}")
             move_metric = next((item for item in analysis.get("move_metrics", [])
@@ -592,7 +636,8 @@ class GameReviewWorkspace(QWidget):
             self.selected_move_summary.setText(
                 "Начальная позиция · " + (evaluation_label(assessment.get("white_cp"),
                 assessment.get("mate_white")) if self.evaluation_allowed and assessment else
-                "оценка отсутствует"))
+                "оценка отсутствует")
+                + (f" · лучший ход: {position_best_label}" if position_best_label else ""))
         self._refresh_selected_ply_events()
         self.position_selected.emit(str(self.review["game"]["game_id"]), ply)
 
