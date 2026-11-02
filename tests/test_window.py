@@ -6,12 +6,14 @@ import pytest
 from pathlib import Path
 from PySide6.QtCore import QPoint, QSettings, QStandardPaths, Qt
 from PySide6.QtGui import QCloseEvent
-from PySide6.QtWidgets import QComboBox, QDialog, QLabel, QInputDialog, QMessageBox, QPushButton
+from PySide6.QtWidgets import (QComboBox, QDialog, QDialogButtonBox, QLabel, QInputDialog,
+                               QMessageBox, QPushButton)
 
 from chess_coach.board_view import BoardView
 from chess_coach.window import (ActiveGamesDialog, BatchAnalysisDialog, EvaluationGraph, MainWindow,
+                                OnlineGameDialog,
                                 SettingsDialog, StatisticsDialog, StatisticsGameDialog,
-                                _batch_safety_from_games, _clock_filter_sort_key,
+                                _archive_row_presentation, _batch_safety_from_games, _clock_filter_sort_key,
                                 _puzzle_attempt_summary)
 from chess_coach.lichess.session import LichessGameSession
 from chess_coach.lichess.repository import GameRepository
@@ -182,6 +184,33 @@ def test_statistics_dialog_restores_and_exports_small_filter_state(qtbot, tmp_pa
     assert state["period_days"] == 30 and state["tab"] == 1
     assert state["opponent"] == "Rival" and state["opening"] == "C20"
     repository.shutdown()
+
+
+def test_statistics_empty_states_and_account_action_are_truthful(qtbot, tmp_path):
+    repository = GameRepository(tmp_path / "stats-empty.sqlite3")
+    dialog = StatisticsDialog(repository)
+    qtbot.addWidget(dialog)
+    dialog._refresh_timer.stop()
+    assert "sqlite" in dialog.overview_description.text().casefold()
+    assert "локальной классификации" in dialog.openings_description.text().casefold()
+    assert "активным фильтрам" in dialog.games_description.text().casefold()
+    assert "подтверждённые события" in dialog.critical_description.text().casefold()
+    assert not dialog.critical_select_account.isEnabled()
+    assert "аккаунт" in dialog.critical_summary.text().casefold()
+    assert "локального анализа" in dialog.critical_summary.text().casefold()
+    repository.shutdown()
+
+
+def test_archive_row_presentation_localizes_date_status_and_source():
+    text, source = _archive_row_presentation({
+        "started_at": "2026-11-02T12:30:00Z", "status": "mate",
+        "source": "lichess_archive", "opponent_type": "official_ai",
+        "account_opponent": "Lichess AI level 3", "white_player": "Me",
+        "black_player": "Lichess AI level 3", "variant": "standard",
+    })
+    assert "2026" in text and "Мат" in text and "Lichess AI" in text
+    assert source == "Lichess AI"
+    assert "mate" not in text
 
 
 def test_completed_analysis_uses_unified_review_route_and_inline_notice(qtbot, tmp_path):
@@ -2751,7 +2780,7 @@ def test_home_has_two_columns_and_three_recent_game_cards(qtbot, tmp_path):
     qtbot.waitUntil(lambda: window._dashboard_thread is None, timeout=3000)
     assert window.home_primary_actions.itemAt(0).widget() is window.home_play_card
     assert window.home_primary_actions.itemAt(1).widget() is window.home_recent_card
-    assert window.home_friend_button.parentWidget() is window.home_play_card
+    assert window.home_friend_button in window.home_more.findChildren(QPushButton)
     games = [{
         "game_id": f"synthetic-{index}", "status": "mate", "winner": "white",
         "color": "white", "opponent": f"Opponent {index}",
@@ -2763,7 +2792,8 @@ def test_home_has_two_columns_and_three_recent_game_cards(qtbot, tmp_path):
     window._render_dashboard_snapshot({"metrics": [], "recent_games": games})
     assert window._recent_games_layout.count() == 3
     cards = [window._recent_games_layout.itemAt(i).widget() for i in range(3)]
-    headings = [card.findChildren(QPushButton)[0].text() for card in cards]
+    from PySide6.QtWidgets import QLabel, QWidget
+    headings = [card.findChild(QLabel).text() for card in cards]
     assert all("Победа с Opponent" in heading for heading in headings)
     assert all("Queen's Pawn Game" not in heading for heading in headings)
     assert window.dashboard_account.currentIndex() == 0
@@ -2776,10 +2806,16 @@ def test_home_has_two_columns_and_three_recent_game_cards(qtbot, tmp_path):
     # the three cards remain compact and do not introduce horizontal scrolling.
     assert window.home_page.verticalScrollBar().maximum() <= 100
     assert all(card.sizeHint().height() <= 200 for card in cards)
+    assert window.home_play_card.maximumHeight() <= 230
+    opened = []
+    window._open_saved_game = lambda game: opened.append(game["game_id"]) or True
+    qtbot.mouseClick(cards[1].findChildren(QLabel)[1], Qt.MouseButton.LeftButton)
+    assert opened == ["synthetic-1"]
     window.close()
 
 
 def test_sidebar_play_opens_mode_picker_without_resetting_local_game(qtbot, tmp_path):
+    from PySide6.QtWidgets import QFrame
     window = MainWindow(QSettings(str(tmp_path / "play-picker.ini"),
                                   QSettings.Format.IniFormat), offline_mode=True)
     qtbot.addWidget(window)
@@ -2790,8 +2826,60 @@ def test_sidebar_play_opens_mode_picker_without_resetting_local_game(qtbot, tmp_
     window._nav_buttons["play"].click()
     assert window.screen_stack.currentWidget() is window.play_page
     assert tuple(window.controller.board.move_stack) == before
+    assert sum(widget.objectName() == "metricCard"
+               for widget in window.play_page.findChildren(QFrame)) == 5
+    assert window.play_local_button.text() == "Свободная доска"
     assert not window.play_ai_button.isEnabled()
     assert window.play_active_button.toolTip()
+    window.setFixedSize(1000, 720)
+    window._layout_play_mode_cards()
+    assert window._play_mode_columns == 1
+    window.setFixedSize(1360, 860)
+    window._layout_play_mode_cards()
+    assert window._play_mode_columns == 2
+    window.close()
+
+
+def test_ai_dialog_has_russian_controls_and_all_eight_visible_levels(qtbot):
+    dialog = OnlineGameDialog("Играть против Lichess AI", include_level=True,
+                              defaults={"color": "black", "clock_limit": 600,
+                                        "clock_increment": 0, "level": 7})
+    qtbot.addWidget(dialog)
+    buttons = dialog.level_buttons.buttons()
+    assert len(buttons) == 8
+    assert dialog.color.currentData() == "black"
+    assert dialog.clock.currentData() == (600, 0)
+    assert dialog.level.currentData() == 7
+    for level in range(1, 9):
+        button = dialog.level_buttons.button(level)
+        assert button.isVisible() or not dialog.isVisible()
+        button.click()
+        assert dialog.level.currentData() == level
+        assert dialog.selection()[3] == level
+    box = dialog.findChild(QDialogButtonBox)
+    assert box.button(QDialogButtonBox.StandardButton.Ok).text() == "Начать"
+    assert box.button(QDialogButtonBox.StandardButton.Cancel).text() == "Отмена"
+    box.button(QDialogButtonBox.StandardButton.Cancel).click()
+    assert dialog.result() == QDialog.DialogCode.Rejected
+
+
+def test_cancel_ai_dialog_has_no_network_or_saved_preference_side_effect(qtbot, tmp_path, monkeypatch):
+    window = MainWindow(QSettings(str(tmp_path / "ai-cancel.ini"),
+                                  QSettings.Format.IniFormat), offline_mode=True)
+    qtbot.addWidget(window)
+    window._online_actions_allowed = lambda: True
+    calls = []
+    class FakeService:
+        def create_ai_game(self, *args):
+            calls.append(args)
+        def close(self):
+            return True
+    window.lichess = FakeService()
+    monkeypatch.setattr(OnlineGameDialog, "exec", lambda _self: QDialog.DialogCode.Rejected)
+    before = window.settings.value("workspace/ai_level")
+    window.play_ai()
+    assert calls == []
+    assert window.settings.value("workspace/ai_level") == before
     window.close()
 
 

@@ -16,10 +16,11 @@ import uuid
 import weakref
 import PySide6
 import shiboken6
-from PySide6.QtCore import QProcess, QSettings, Qt, QStandardPaths, QTimer, Signal, qVersion, QUrl
+from PySide6.QtCore import QEvent, QProcess, QSettings, Qt, QStandardPaths, QTimer, Signal, qVersion, QUrl
 from PySide6.QtGui import QKeySequence, QShortcut, QColor, QPainter, QPen, QDesktopServices, QGuiApplication
 from PySide6.QtWidgets import (
     QCheckBox,
+    QButtonGroup,
     QApplication,
     QComboBox,
     QDialog,
@@ -137,6 +138,27 @@ def _clock_filter_sort_key(value: object) -> tuple:
     return (2, 0, 0, raw.casefold())
 
 
+def _archive_row_presentation(game: dict) -> tuple[str, str]:
+    statuses = {
+        "mate": "Мат", "resign": "Сдался", "draw": "Ничья",
+        "stalemate": "Пат", "timeout": "Время вышло", "outoftime": "Время вышло",
+        "aborted": "Прервана", "noStart": "Не началась", "cheat": "Завершена сервером",
+        "variantEnd": "Завершена", "unknownFinish": "Завершена", "finished": "Завершена",
+    }
+    status = statuses.get(str(game.get("status")), "Завершена")
+    source = str(game.get("source") or "")
+    source_label = ("Локальная" if source == "local" else
+                    "Lichess AI" if game.get("opponent_type") == "official_ai" else "Lichess")
+    date_label = format_game_date(game.get("started_at") or game.get("updated_at"),
+                                  precision=game.get("game_time_precision"))
+    opponent = game.get("account_opponent") or game.get("opponent") or "Соперник неизвестен"
+    text = (f"{date_label} · {opponent} · {status} · {source_label}\n"
+            f"{game.get('white_player') or 'Белые'} — {game.get('black_player') or 'Чёрные'}")
+    if game.get("import_error") or game.get("variant", "standard") != "standard":
+        text += f" · просмотр недоступен ({game.get('variant') or 'вариант'})"
+    return text, source_label
+
+
 def _batch_safety_from_games(games: object) -> bool | None:
     """Classify one complete /api/account/playing snapshot; uncertainty blocks UCI."""
     if not isinstance(games, list) or len(games) >= 50:
@@ -145,9 +167,11 @@ def _batch_safety_from_games(games: object) -> bool | None:
 
 
 class OnlineGameDialog(QDialog):
-    def __init__(self, title: str, include_level: bool = False, parent=None) -> None:
+    def __init__(self, title: str, include_level: bool = False, parent=None,
+                 defaults: dict | None = None) -> None:
         super().__init__(parent)
         self.setWindowTitle(title)
+        self.setMinimumWidth(450 if include_level else 400)
         form = QVBoxLayout(self)
         self.color = QComboBox()
         self.color.addItem("Случайный", "random")
@@ -160,6 +184,15 @@ class OnlineGameDialog(QDialog):
         self.clock.addItem("3 + 2", (180, 2))
         self.clock.addItem("10 + 0", (600, 0))
         self.clock.addItem("15 + 10", (900, 10))
+        defaults = defaults or {}
+        color_index = self.color.findData(defaults.get("color"))
+        if color_index >= 0:
+            self.color.setCurrentIndex(color_index)
+        clock_value = (defaults.get("clock_limit"), int(defaults.get("clock_increment") or 0))
+        clock_index = next((index for index in range(self.clock.count())
+                            if self.clock.itemData(index) == clock_value), -1)
+        if clock_index >= 0:
+            self.clock.setCurrentIndex(clock_index)
         form.addWidget(QLabel("Контроль времени"))
         form.addWidget(self.clock)
         self.rated = QCheckBox("Рейтинговая партия (изменит рейтинг)")
@@ -167,16 +200,68 @@ class OnlineGameDialog(QDialog):
             form.addWidget(self.rated)
         self.level = QComboBox()
         for level in range(1, 9):
-            self.level.addItem(f"Lichess AI · уровень {level}", level)
+            self.level.addItem(f"Уровень {level}", level)
         if include_level:
-            form.addWidget(self.level)
+            form.addWidget(QLabel("Сила Lichess AI"))
+            self.level_buttons = QButtonGroup(self)
+            self.level_buttons.setExclusive(True)
+            levels = QGridLayout()
+            levels.setHorizontalSpacing(8)
+            levels.setVerticalSpacing(6)
+            for level in range(1, 9):
+                button = QRadioButton(str(level))
+                button.setAccessibleName(f"Уровень Lichess AI {level}")
+                button.setStyleSheet("QRadioButton { border: 1px solid #46505c; border-radius: 6px; "
+                                     "padding: 9px 18px; font-size: 14px; font-weight: 700; } "
+                                     "QRadioButton:checked { background: #174e41; border-color: #55b894; }")
+                self.level_buttons.addButton(button, level)
+                levels.addWidget(button, (level - 1) // 4, (level - 1) % 4)
+                button.toggled.connect(lambda checked, value=level:
+                                       self.level.setCurrentIndex(value - 1) if checked else None)
+            self.level_buttons.button(1).setChecked(True)
+            level_index = self.level.findData(defaults.get("level", 1))
+            if level_index >= 0:
+                self.level_buttons.button(int(defaults.get("level", 1))).setChecked(True)
+            form.addLayout(levels)
+            self.level.setVisible(False)
+        else:
+            self.level_buttons = None
         buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
+        buttons.button(QDialogButtonBox.StandardButton.Ok).setText("Начать")
+        buttons.button(QDialogButtonBox.StandardButton.Cancel).setText("Отмена")
         buttons.accepted.connect(self.accept)
         buttons.rejected.connect(self.reject)
         form.addWidget(buttons)
 
     def selection(self):
         return self.color.currentData(), *self.clock.currentData(), self.level.currentData(), self.rated.isChecked()
+
+
+class _DashboardGameCard(QFrame):
+    activated = Signal()
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+
+    def watch_children(self):
+        for child in self.findChildren(QWidget):
+            child.installEventFilter(self)
+
+    def eventFilter(self, watched, event):
+        if event.type() == QEvent.Type.MouseButtonRelease and event.button() == Qt.MouseButton.LeftButton:
+            self.setFocus(Qt.FocusReason.MouseFocusReason)
+            self.activated.emit()
+            return True
+        return super().eventFilter(watched, event)
+
+    def keyPressEvent(self, event):
+        if event.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter, Qt.Key.Key_Space):
+            self.activated.emit()
+            event.accept()
+            return
+        super().keyPressEvent(event)
 
 
 class EvaluationGraph(QWidget):
@@ -642,6 +727,11 @@ class StatisticsDialog(QDialog):
             "Все локальные данные: цвета/стороны из разных аккаунтов могут смешиваться.")
         self.mixed_warning.setWordWrap(True)
         overview_layout.addWidget(self.mixed_warning)
+        overview_note = QLabel("Что показывает: результаты и личный профиль. Источник — локальная SQLite; официальная точность берётся только из данных Lichess.")
+        self.overview_description = overview_note
+        overview_note.setWordWrap(True)
+        overview_note.setObjectName("secondary")
+        overview_layout.addWidget(overview_note)
         self.summary_label = QLabel("Загружаем статистику…")
         self.summary_label.setWordWrap(True)
         overview_layout.addWidget(self.summary_label)
@@ -655,6 +745,11 @@ class StatisticsDialog(QDialog):
         self.opening_summary.setWordWrap(True)
         opening_actions.addWidget(self.opening_summary, 1)
         openings_layout.addLayout(opening_actions)
+        openings_note = QLabel("Дебюты и фазы строятся из сохранённых партий и локальной классификации; без данных показатели остаются пустыми.")
+        self.openings_description = openings_note
+        openings_note.setWordWrap(True)
+        openings_note.setObjectName("secondary")
+        openings_layout.addWidget(openings_note)
         self.opening_table = QListWidget()
         self.opening_table.itemDoubleClicked.connect(self._drill_down_opening)
         openings_layout.addWidget(self.opening_table, 1)
@@ -662,10 +757,27 @@ class StatisticsDialog(QDialog):
                                        " Критические позиции появятся после локального анализа.")
         self.critical_summary.setWordWrap(True)
         critical_layout.addWidget(self.critical_summary)
+        self.critical_select_account = QPushButton("Выбрать аккаунт")
+        self.critical_select_account.setEnabled(len(options["accounts"]) > 0)
+        self.critical_select_account.clicked.connect(self._select_personal_analytics_account)
+        critical_layout.addWidget(self.critical_select_account, 0, Qt.AlignmentFlag.AlignLeft)
+        self.critical_description = QLabel("Показываются только подтверждённые события и позиции из выбранной выборки.")
+        self.critical_description.setObjectName("secondary")
+        self.critical_description.setWordWrap(True)
+        critical_layout.addWidget(self.critical_description)
         self.trend = RatingTrendGraph([])
         self.trend.game_selected.connect(self._select_game_id)
         overview_layout.addWidget(self.trend)
         self.games = QListWidget()
+        self.games_description = QLabel("Партии соответствуют активным фильтрам. Двойной щелчок открывает карточку и переход к позиции.")
+        self.games_description.setObjectName("secondary")
+        self.games_description.setWordWrap(True)
+        games_layout.addWidget(self.games_description)
+        self.games_empty = QLabel("В этой выборке партий нет. Измените фильтры или выберите другой аккаунт.")
+        self.games_empty.setObjectName("secondary")
+        self.games_empty.setWordWrap(True)
+        self.games_empty.setVisible(False)
+        games_layout.addWidget(self.games_empty)
         games_layout.addWidget(self.games, 1)
         self.page_label = QLabel()
         self.details_button = QPushButton("Открыть карточку партии")
@@ -750,6 +862,12 @@ class StatisticsDialog(QDialog):
     def _fill_combo(combo: QComboBox, items: tuple[tuple[str, str], ...]) -> None:
         for label, value in items:
             combo.addItem(label, value)
+
+    def _select_personal_analytics_account(self) -> None:
+        if self.account.count() > 1 and self.account.currentData() is None:
+            self.account.setCurrentIndex(1)
+        self.tabs.setCurrentIndex(0)
+        self.account.setFocus()
 
     def _filters(self) -> dict:
         days = int(self.period.currentData() or 0)
@@ -888,6 +1006,7 @@ class StatisticsDialog(QDialog):
         elif generation == self._generation and isinstance(summary, dict) and isinstance(parties, dict):
             self._rows = parties["items"]
             self.games.clear()
+            self.games_empty.setVisible(not self._rows)
             for game in self._rows:
                 me_color = game.get("account_color") or game.get("color")
                 outcome = _result_label(chess.WHITE if me_color == "white" else chess.BLACK,
@@ -2328,6 +2447,7 @@ class MainWindow(QMainWindow):
                 Qt.Orientation.Vertical if self.width() < 1120 else Qt.Orientation.Horizontal)
         self._apply_header_responsive()
         self._layout_dashboard_metrics()
+        self._layout_play_mode_cards()
         self._schedule_workspace_save()
 
     def _apply_header_responsive(self) -> None:
@@ -2624,14 +2744,18 @@ class MainWindow(QMainWindow):
         play_card = QFrame()
         self.home_play_card = play_card
         play_card.setObjectName("metricCard")
+        play_card.setMaximumHeight(230)
         play_layout = QVBoxLayout(play_card)
+        play_layout.setContentsMargins(12, 10, 12, 10)
+        play_layout.setSpacing(7)
         play_title = QLabel("Играть")
         play_title.setStyleSheet("font-size: 20px; font-weight: 700;")
         play_layout.addWidget(play_title)
         play_hint = QLabel("Локальная доска или нерейтинговая партия Lichess AI")
         play_hint.setObjectName("secondary")
+        play_hint.setWordWrap(True)
         play_layout.addWidget(play_hint)
-        play_buttons = QHBoxLayout()
+        play_buttons = QVBoxLayout()
         self.home_ai_button = QPushButton("Играть против Lichess AI")
         self.home_ai_button.setObjectName("primaryAction")
         self.home_ai_button.clicked.connect(self.play_ai)
@@ -2644,7 +2768,7 @@ class MainWindow(QMainWindow):
         play_buttons.addWidget(self.home_local_button)
         play_buttons.addWidget(self.resume_game_button)
         play_layout.addLayout(play_buttons)
-        primary_actions.addWidget(play_card, 2)
+        primary_actions.addWidget(play_card, 0, Qt.AlignmentFlag.AlignTop)
         primary_actions.addWidget(recent_card, 3)
         review_buttons = QHBoxLayout()
         self.home_review_button = QPushButton("Выбрать партию")
@@ -2689,16 +2813,14 @@ class MainWindow(QMainWindow):
         self.home_puzzles_pilot_button.setEnabled(False)
         self.home_settings_button = QPushButton("Настройки")
         self.home_settings_button.clicked.connect(self.open_settings)
-        for action in (self.home_friend_button, self.home_username_button,
-                       self.active_games_button):
-            play_layout.addWidget(action)
         self.home_more_toggle = QPushButton("Другие разделы и синхронизация  ▸")
         self.home_more_toggle.setCheckable(True)
         self.home_more_toggle.setAccessibleName("Показать другие разделы и синхронизацию")
         layout.addWidget(self.home_more_toggle)
         self.home_more = QGroupBox("Дополнительные разделы и синхронизация")
         more_layout = QVBoxLayout(self.home_more)
-        for button in (self.home_review_button, self.resume_review_button,
+        for button in (self.home_friend_button, self.home_username_button,
+                       self.active_games_button, self.home_review_button, self.resume_review_button,
                        self.home_games_button, self.home_stats_button,
                        self.home_batch_analysis_button, self.home_puzzles_button,
                        self.home_settings_button, self.home_archive_status_button,
@@ -2734,27 +2856,58 @@ class MainWindow(QMainWindow):
         title = QLabel("Выберите режим игры")
         title.setObjectName("pageTitle")
         layout.addWidget(title)
-        note = QLabel("Открытие этого раздела не сбрасывает текущую доску или партию.")
+        note = QLabel("Выберите локальную доску или сетевую партию. Текущая партия не сбрасывается.")
         note.setObjectName("secondary")
         layout.addWidget(note)
-        self.play_local_button = QPushButton("Свободная локальная доска")
-        self.play_local_button.setObjectName("primaryAction")
-        self.play_local_button.clicked.connect(self.start_local_game)
-        layout.addWidget(self.play_local_button)
-        self.play_ai_button = QPushButton("Играть против Lichess AI")
-        self.play_ai_button.clicked.connect(self.play_ai)
-        layout.addWidget(self.play_ai_button)
-        self.play_friend_button = QPushButton("Играть с другом по ссылке")
-        self.play_friend_button.clicked.connect(self.open_friend_game)
-        layout.addWidget(self.play_friend_button)
-        self.play_challenge_button = QPushButton("Вызвать игрока Lichess")
-        self.play_challenge_button.clicked.connect(self.challenge_username)
-        layout.addWidget(self.play_challenge_button)
-        self.play_active_button = QPushButton("Активные партии / продолжить")
-        self.play_active_button.clicked.connect(self.show_active_games)
-        layout.addWidget(self.play_active_button)
+        modes = (
+            ("Локально", "Свободная доска для двух сторон.", "Свободная доска", "play_local_button", self.start_local_game, True),
+            ("Lichess AI", "Нерейтинговая партия против встроенного AI.", "Играть против AI", "play_ai_button", self.play_ai, False),
+            ("Друг", "Создать ссылку-приглашение или открыть игру.", "Играть с другом", "play_friend_button", self.open_friend_game, False),
+            ("Соперник Lichess", "Вызвать игрока по имени аккаунта.", "Вызвать игрока", "play_challenge_button", self.challenge_username, False),
+            ("Активные партии", "Открыть и продолжить текущую сетевую игру.", "Показать партии", "play_active_button", self.show_active_games, False),
+        )
+        grid = QGridLayout()
+        grid.setHorizontalSpacing(12)
+        grid.setVerticalSpacing(12)
+        for index, (heading, description, button_text, attr, callback, primary) in enumerate(modes):
+            card = QFrame()
+            card.setObjectName("metricCard")
+            card_layout = QVBoxLayout(card)
+            card_layout.setContentsMargins(14, 12, 14, 12)
+            title_label = QLabel(heading)
+            title_label.setStyleSheet("font-size: 16px; font-weight: 700;")
+            card_layout.addWidget(title_label)
+            description_label = QLabel(description)
+            description_label.setObjectName("secondary")
+            description_label.setWordWrap(True)
+            card_layout.addWidget(description_label)
+            button = QPushButton(button_text)
+            if primary:
+                button.setObjectName("primaryAction")
+            button.clicked.connect(callback)
+            setattr(self, attr, button)
+            card_layout.addWidget(button)
+            grid.addWidget(card, index // 2, index % 2)
+        self._play_mode_grid = grid
+        self._play_mode_card_widgets = [grid.itemAt(index).widget() for index in range(grid.count())]
+        self._play_mode_columns = 2
+        layout.addLayout(grid)
         layout.addStretch(1)
         return page
+
+    def _layout_play_mode_cards(self) -> None:
+        grid = getattr(self, "_play_mode_grid", None)
+        cards = getattr(self, "_play_mode_card_widgets", None)
+        if grid is None or not cards:
+            return
+        columns = 1 if self.width() < 1100 else 2
+        if columns == self._play_mode_columns:
+            return
+        self._play_mode_columns = columns
+        for card in cards:
+            grid.removeWidget(card)
+        for index, card in enumerate(cards):
+            grid.addWidget(card, index // columns, index % columns)
 
     def show_play(self) -> None:
         """Show mode selection without resetting the controller or online game."""
@@ -2856,58 +3009,43 @@ class MainWindow(QMainWindow):
         for game in games:
             heading, details = game_card_text(game)
             metrics = game.get("review_metrics") or {}
-            card = QFrame()
+            card = _DashboardGameCard()
             card.setObjectName("metricCard")
+            card.setAccessibleName(f"Открыть разбор партии: {heading}")
+            card.setAccessibleDescription("Нажмите Enter или пробел, чтобы открыть разбор.")
+            card.setToolTip("Открыть разбор партии")
             card_layout = QVBoxLayout(card)
-            card_layout.setContentsMargins(8, 6, 8, 6)
-            card_layout.setSpacing(3)
-            heading_button = QPushButton(f"♟  {heading}")
-            heading_button.setObjectName("navItem")
-            heading_button.setStyleSheet("font-size: 12px; text-align: left; padding: 2px 4px;")
-            heading_button.setMinimumHeight(24)
-            heading_button.setMaximumHeight(28)
-            heading_button.clicked.connect(
-                lambda _checked=False, item=dict(game): self._open_saved_game(item))
-            card_layout.addWidget(heading_button)
+            card_layout.setContentsMargins(10, 7, 10, 7)
+            card_layout.setSpacing(4)
+            heading_label = QLabel(f"♟  {heading}")
+            heading_label.setStyleSheet("font-size: 13px; font-weight: 700;")
+            heading_label.setWordWrap(False)
+            card_layout.addWidget(heading_label)
             description = QLabel(details)
             description.setObjectName("secondary")
-            description.setStyleSheet("font-size: 11px;")
-            description.setMaximumHeight(32)
             description.setWordWrap(True)
             description.setToolTip(opening_tooltip(game.get("opening_name")))
             card_layout.addWidget(description)
             source_code = source_short(metrics.get("source"))[0]
-            coverage_text = ("Оценки пока нет" if metrics.get("status") == "без анализа" else
-                             f"Оценено моих ходов {metrics.get('coverage', '—')} · "
-                             f"ходов соперника {metrics.get('opponent_coverage', '—')}")
-            coverage = QLabel(f"Источник {source_code} · {coverage_text}")
-            coverage.setStyleSheet("font-size: 10px;")
-            coverage.setMaximumHeight(20)
+            def count(key):
+                return str(metrics.get(key, "н/д"))
+            comparison = QLabel(
+                f"Я: неточн. {count('owner_inaccuracies')} · ошибки {count('owner_mistakes')} · "
+                f"зевки {count('owner_blunders')}     │     "
+                f"Соперник: {count('opponent_inaccuracies')} · {count('opponent_mistakes')} · "
+                f"{count('opponent_blunders')}")
+            comparison.setWordWrap(True)
+            comparison.setMaximumHeight(40)
+            comparison.setToolTip("Неточности · ошибки · зевки; подробности доступны в разборе.")
+            card_layout.addWidget(comparison)
+            coverage_text = ("анализа пока нет" if metrics.get("status") == "без анализа" else
+                             f"{metrics.get('coverage', 'н/д')} / {metrics.get('opponent_coverage', 'н/д')}")
+            coverage = QLabel(f"{source_code} · охват Я / соперник: {coverage_text}")
             coverage.setToolTip(source_short(metrics.get("source"))[1])
             coverage.setAccessibleName(f"Источник оценки: {source_short(metrics.get('source'))[1]}")
             card_layout.addWidget(coverage)
-            grid = QGridLayout()
-            grid.setHorizontalSpacing(4)
-            grid.setVerticalSpacing(0)
-            for column, text in enumerate(("Показатель", "Я", "Соперник")):
-                label_widget = QLabel(text)
-                label_widget.setStyleSheet("font-size: 10px; font-weight: 700;")
-                grid.addWidget(label_widget, 0, column)
-            for row, (label, owner_key, opponent_key) in enumerate((
-                    ("Точность Lichess", "owner_accuracy", "opponent_accuracy"),
-                    ("Неточности", "owner_inaccuracies", "opponent_inaccuracies"),
-                    ("Ошибки", "owner_mistakes", "opponent_mistakes"),
-                    ("Зевки", "owner_blunders", "opponent_blunders"),
-                    ("Сильные подтверждённые", "strong", "strong")), start=1):
-                grid.addWidget(QLabel(label), row, 0)
-                grid.itemAtPosition(row, 0).widget().setStyleSheet("font-size: 10px;")
-                for column, key in ((1, owner_key), (2, opponent_key)):
-                    value = QLabel(str(metrics.get(key, "н/д")))
-                    value.setStyleSheet("font-size: 10px;")
-                    value.setAlignment(Qt.AlignmentFlag.AlignCenter)
-                    value.setToolTip(metrics.get("strong_detail", "Источник и охват указаны отдельно."))
-                    grid.addWidget(value, row, column)
-            card_layout.addLayout(grid)
+            card.activated.connect(lambda item=dict(game): self._open_saved_game(item))
+            card.watch_children()
             self._recent_games_layout.addWidget(card)
 
     def _dashboard_filter_changed(self, *_args) -> None:
@@ -5303,10 +5441,21 @@ class MainWindow(QMainWindow):
     def play_ai(self) -> None:
         if not self._online_actions_allowed():
             return
-        dialog = OnlineGameDialog("Игра против Lichess AI", include_level=True, parent=self)
+        saved_limit = self.settings.value("workspace/ai_clock_limit", 180, type=int)
+        dialog = OnlineGameDialog("Игра против Lichess AI", include_level=True, parent=self,
+                                  defaults={
+                                      "color": self.settings.value("workspace/ai_color", "random", type=str),
+                                      "clock_limit": None if saved_limit < 0 else saved_limit,
+                                      "clock_increment": self.settings.value("workspace/ai_clock_increment", 2, type=int),
+                                      "level": self.settings.value("workspace/ai_level", 3, type=int),
+                                  })
         if dialog.exec() != QDialog.DialogCode.Accepted:
             return
         color, limit, increment, level, _ = dialog.selection()
+        self.settings.setValue("workspace/ai_color", color)
+        self.settings.setValue("workspace/ai_clock_limit", -1 if limit is None else int(limit))
+        self.settings.setValue("workspace/ai_clock_increment", int(increment))
+        self.settings.setValue("workspace/ai_level", int(level))
         self._awaiting_game_start = True
         self.game_status.setText("Создаём партию против Lichess AI…")
         self.home_status.setText("Создаём партию против Lichess AI…")
@@ -5800,13 +5949,14 @@ class MainWindow(QMainWindow):
             state["items"] = result["items"]
             games_list.clear()
             for game in result["items"]:
-                view_state = (f" · просмотр/анализ недоступны ({game.get('variant') or 'variant'})"
-                              if game.get("import_error") or game.get("variant", "standard") != "standard"
-                              else "")
-                opponent_label = game.get("account_opponent") or game["opponent"]
-                games_list.addItem(f"{game['white_player']} – {game['black_player']}  ·  "
-                                   f"для вас: {opponent_label}  ·  "
-                                   f"{game['status']}  ·  {game['updated_at'][:10]}{view_state}")
+                row_text, source_label = _archive_row_presentation(game)
+                item = QListWidgetItem(
+                    row_text)
+                item.setToolTip(f"Источник: {source_label}")
+                item.setData(Qt.ItemDataRole.AccessibleDescriptionRole, row_text.replace("\n", ". "))
+                games_list.addItem(item)
+            if not result["items"]:
+                games_list.addItem("Завершённых партий в этой выборке нет.")
             page_label.setText(f"Страница {state['page'] + 1} из {max(1, result['pages'])}"
                                f"  ·  {result['total']} партий")
             previous.setEnabled(state["page"] > 0)

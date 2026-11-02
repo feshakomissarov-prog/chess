@@ -37,6 +37,14 @@ def _review_repo(path, *, severity="blunder", depth=20, nodes=100_000,
     return repo, repo.get_game("review-test")
 
 
+def _metrics_text(table):
+    return "\n".join(
+        table.item(row, col).text()
+        for row in range(table.rowCount())
+        for col in range(table.columnCount())
+        if table.item(row, col) is not None)
+
+
 def test_read_model_is_current_revision_source_aware_and_contains_two_sided_counts(tmp_path):
     repo, game = _review_repo(tmp_path / "review-model.sqlite3")
     try:
@@ -110,6 +118,10 @@ def test_review_moves_graph_and_training_share_position_without_mutating_saved_p
         assert workspace.training_mode
         assert not workspace.graph.isVisible()
         assert not workspace.tabs.isVisible()
+        assert workspace.left_metrics.isHidden()
+        assert workspace.review_inspector.isHidden()
+        assert not workspace.training_prompt.isHidden()
+        assert "Найди улучшение" in workspace.training_prompt.text()
         assert workspace.review_board._board.fen() == workspace.review["moves"][1].before_fen
         workspace._training_move_intent(chess.Move.from_uci("c7c5"))
         assert workspace.check_button.isEnabled()
@@ -118,6 +130,8 @@ def test_review_moves_graph_and_training_share_position_without_mutating_saved_p
         assert repo.export_pgn(game["game_id"]) == before_pgn
         workspace.continue_button.click()
         assert not workspace.training_mode
+        assert not workspace.left_metrics.isHidden()
+        assert not workspace.review_inspector.isHidden()
         assert "проверено 1, улучшено 1" in workspace.training_status.text()
         assert workspace.review_board._board.fen() == workspace.review["positions"][2].fen()
         assert repo.export_pgn(game["game_id"]) == before_pgn
@@ -327,12 +341,15 @@ def test_phase_summary_shows_both_sides_coverage_and_never_fabricates_accuracy(q
         workspace = GameReviewWorkspace(repo, training_allowed=True)
         qtbot.addWidget(workspace)
         workspace.load_game(game)
-        text = workspace.phase_summary.text()
-        assert "Дебют · точность н/д" in text
-        assert "Я:" in text and "Соперник:" in text
-        assert "охват" in text and "неточн." in text and "зевков" in text
-        assert "сильных н/д" in text
+        assert workspace.side_metrics_summary.rowCount() == 7
+        assert "Зевки" in _metrics_text(workspace.side_metrics_summary)
+        assert "н/д" in _metrics_text(workspace.side_metrics_summary)
+        assert "Источник: Stockfish" in workspace.phase_summary.text()
         workspace.select_ply(2)
+        assert workspace.phase_selector.currentData() == "opening"
+        assert "Зевки" in _metrics_text(workspace.side_metrics_summary)
+        assert "1" in _metrics_text(workspace.side_metrics_summary)
+        assert workspace.side_metrics_summary.item(0, 1).text() == "н/д"
         assert "дебют" in workspace.phase_summary.toolTip()
     finally:
         repo.shutdown()
@@ -355,12 +372,12 @@ def test_fair_play_revocation_masks_every_rendered_analysis_surface(
         workspace.show()
         QCoreApplication.processEvents()
 
-        assert "зевков 1" in workspace.phase_summary.text()
+        assert "1" in _metrics_text(workspace.side_metrics_summary)
         assert "+2.5" in workspace.moves_list.item_by_ply(2).text()
         assert workspace.graph._values()
         assert workspace.review_board._hint_arrows
         assert "Сохранённое продолжение" in workspace.event_detail.text()
-        assert workspace.side_metrics_summary.text() != ""
+        assert workspace.side_metrics_summary.rowCount() == 7
 
         reason = {
             "pending": "Проверяем активные партии; оценки скрыты.",
@@ -402,7 +419,7 @@ def test_fair_play_revocation_masks_every_rendered_analysis_surface(
             assert secret.casefold() not in rendered.casefold(), (transition, secret, rendered)
 
         assert workspace.phase_summary.text() == reason
-        assert workspace.side_metrics_summary.text() == reason
+        assert workspace.side_metrics_summary.rowCount() == 0
         assert workspace.graph._values() == []
         assert workspace.graph.assessments == []
         assert workspace.graph.markers == {}
@@ -420,13 +437,14 @@ def test_fair_play_revocation_masks_every_rendered_analysis_surface(
             assert workspace.phase_summary.text() == reason
             workspace.set_training_safety_result(True)
             QCoreApplication.processEvents()
-            assert "зевков 1" in workspace.phase_summary.text()
+            assert "1" in _metrics_text(workspace.side_metrics_summary)
             assert workspace.graph._values()
     finally:
         repo.shutdown()
 
 
 def test_review_layout_has_no_outer_scroll_and_renders_at_desktop_sizes(qtbot, tmp_path):
+    from PySide6.QtCore import QCoreApplication, QPoint
     from PySide6.QtWidgets import QScrollArea
 
     repo, game = _review_repo(tmp_path / "review-layout.sqlite3")
@@ -435,7 +453,7 @@ def test_review_layout_has_no_outer_scroll_and_renders_at_desktop_sizes(qtbot, t
         qtbot.addWidget(workspace)
         workspace.load_game(game)
         assert not workspace.findChildren(QScrollArea)
-        for width, height in ((1024, 700), (1360, 860), (1920, 1080)):
+        for width, height in ((1024, 700), (1280, 720), (1360, 860), (1920, 1080)):
             workspace.setFixedSize(width, height)
             workspace.show()
             qtbot.wait(10)
@@ -444,6 +462,20 @@ def test_review_layout_has_no_outer_scroll_and_renders_at_desktop_sizes(qtbot, t
             assert workspace.graph.width() > 0
             shot = workspace.grab()
             assert shot.width() == width and shot.height() == height
+            QCoreApplication.processEvents()
+            board_rect = workspace.review_board.geometry()
+            board_x = workspace.review_board.mapTo(workspace, QPoint(0, 0)).x()
+            table_x = workspace.moves_list.mapTo(workspace, QPoint(0, 0)).x()
+            assert abs(board_rect.width() - board_rect.height()) <= 1
+            assert table_x >= board_x + board_rect.width()
+            assert table_x - (board_x + board_rect.width()) <= 24
+            assert workspace.moves_list.table.horizontalScrollBar().maximum() == 0
+            for row in range(workspace.moves_list.table.rowCount()):
+                for column in (1, 2):
+                    item = workspace.moves_list.table.item(row, column)
+                    if item and item.text():
+                        assert workspace.moves_list.table.fontMetrics().horizontalAdvance(
+                            item.text()) <= workspace.moves_list.table.columnWidth(column)
         assert workspace.workspace_splitter.orientation().name == "Horizontal"
     finally:
         repo.shutdown()
