@@ -134,10 +134,13 @@ def test_manual_annotation_arrows_are_prominent_at_supported_board_sizes():
         assert width >= 8
         assert width <= 17
         assert 0.20 * square <= width <= 0.23 * square or width == 17
-    # Premove shaft is at least 30% wider than its previously reviewed 10.5 px
-    # floor at normal board sizes; its blue tint distinguishes the cue.
-    assert BoardView._arrow_width(55, 0.82) >= 10.5 * 1.30
-    assert BoardView._arrow_width(55, 0.82) > BoardView._arrow_width(55, 0.9)
+    # Premove shaft is 30–50% wider than the reviewed formula at normal board
+    # square sizes; its blue tint distinguishes the cue.
+    for square in (55, 64, 80, 90):
+        old_width = min(17.0, max(8.0, square * 0.10 * 0.76))
+        new_width = BoardView._arrow_width(square, 0.82)
+        assert 1.30 <= new_width / old_width <= 1.50
+    assert BoardView._arrow_width(55, 0.82) < BoardView._arrow_width(55, 0.9)
 
 
 def test_annotation_action_signal_records_add_remove_and_clear_context(qtbot) -> None:

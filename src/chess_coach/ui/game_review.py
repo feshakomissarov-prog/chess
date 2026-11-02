@@ -109,7 +109,7 @@ class ReviewGraph(QWidget):
         for row in self.assessments:
             score = row.get("white_cp")
             mate = row.get("mate_white")
-            if score is None and mate is not None:
+            if mate is not None:
                 # Place mate markers at the corresponding edge; retain mate as a
                 # distinct label instead of fabricating a centipawn score.
                 score = 1000 if int(mate) > 0 else -1000 if int(mate) < 0 else 0
@@ -139,14 +139,14 @@ class ReviewGraph(QWidget):
                         "endgame": QColor(86, 122, 167, 24)}
         phase_points = sorted((ply, row.get("phase")) for ply, row in self.markers.items()
                               if row.get("phase") in phase_colors)
-        for first, second in zip(phase_points, phase_points[1:]):
-            if first[1] != second[1] or second[0] != first[0] + 1:
-                continue
+        phase_segments = [(first, second) for first, second in zip(phase_points, phase_points[1:])
+                          if first[1] == second[1] and second[0] == first[0] + 1]
+        for first, second in phase_segments:
             left = rect.left() + round(rect.width() * first[0] / max_ply)
             right = rect.left() + round(rect.width() * second[0] / max_ply)
             painter.fillRect(left, rect.top(), max(1, right - left), rect.height(),
                              phase_colors[first[1]])
-        if not phase_points:
+        if not phase_segments:
             painter.setPen(QPen(QColor(TOKENS.secondary), 1))
             painter.drawText(rect.left() + 4, rect.top() + 16, "Фазы не определены")
         painter.setPen(QPen(QColor(TOKENS.secondary), 1))
@@ -744,7 +744,9 @@ class GameReviewWorkspace(QWidget):
         position_assessments = {int(item.get("ply", -1)): item
                                 for item in position_analysis.get("assessments", [])}
         position_score = position_assessments.get(ply, {})
-        self.advantage_bar.set_evaluation(position_score.get("white_cp"),
+        score_for_bar = (None if position_score.get("mate_white") is not None
+                         else position_score.get("white_cp"))
+        self.advantage_bar.set_evaluation(score_for_bar,
                                           allowed=self.evaluation_allowed)
         self.advantage_label.setText(
             evaluation_label(position_score.get("white_cp"), position_score.get("mate_white"))

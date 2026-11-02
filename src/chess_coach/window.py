@@ -349,8 +349,8 @@ class StatisticsGameDialog(QDialog):
                         f"совпадение до ply {opening['matched_ply']}"
                         if opening else "Справочник дебютов: совпадения пока нет")
         if opening and opening.get("lichess_conflict"):
-            opening_text += (f" · конфликт с Lichess: {game.get('opening_eco') or 'ECO —'} "
-                             f"{game.get('opening_name') or ''}")
+            opening_text += (f" · название Lichess отличается: "
+                             f"{russian_opening_name(game.get('opening_eco'), game.get('opening_name'))}")
         phase_text = (f"Фазы: {phases['source']} / {phases['method_version']} · "
                       f"middlegame={phases['middle_start_ply']}, endgame={phases['end_start_ply']}"
                       if phases else "Границы фаз неизвестны")
@@ -362,7 +362,10 @@ class StatisticsGameDialog(QDialog):
             f"{russian_opening_name(game.get('opening_eco'), game.get('opening_name'))}\n"
             f"{opening_text}\n{accuracy_text}\n{phase_text}")
         header.setWordWrap(True)
-        header.setToolTip(opening_tooltip(opening.get("name") if opening else game.get("opening_name")))
+        source_opening = opening_tooltip(opening.get("name") if opening else game.get("opening_name"))
+        if opening and opening.get("lichess_conflict"):
+            source_opening += "\nНазвание Lichess: " + str(game.get("opening_name") or "не указано")
+        header.setToolTip(source_opening)
         layout.addWidget(header)
         details = QGridLayout()
         self.moves = QListWidget()
@@ -1104,7 +1107,7 @@ class StatisticsDialog(QDialog):
 
 class SettingsDialog(QDialog):
     install_requested = Signal()
-    sound_preview_requested = Signal()
+    sound_preview_requested = Signal(str)
     engine_probe_result = Signal(int, bool, str)
 
     def __init__(self, settings: QSettings, parent=None, repository: GameRepository | None = None) -> None:
@@ -1155,10 +1158,18 @@ class SettingsDialog(QDialog):
             lambda value: self.sound_volume_label.setText(f"Громкость · {value}%"))
         layout.addWidget(self.sound_volume_label)
         layout.addWidget(self.sound_volume)
-        self.sound_preview = QPushButton("Прослушать звук хода")
-        self.sound_preview.setToolTip("Воспроизводит короткий локальный звук без обращения к сети.")
-        self.sound_preview.clicked.connect(self.sound_preview_requested.emit)
+        self.sound_preview = QPushButton("Послушать ход")
+        self.sound_preview.setToolTip("Прослушать натуральную запись обычного хода.")
+        self.sound_preview.clicked.connect(lambda: self.sound_preview_requested.emit("move"))
         layout.addWidget(self.sound_preview)
+        self.sound_capture_preview = QPushButton("Послушать взятие")
+        self.sound_capture_preview.setToolTip("Прослушать отдельную запись взятия фигуры.")
+        self.sound_capture_preview.clicked.connect(
+            lambda: self.sound_preview_requested.emit("capture"))
+        layout.addWidget(self.sound_capture_preview)
+        self.sound_classic_preset = QPushButton("Пресет «Классический» · 45%")
+        self.sound_classic_preset.clicked.connect(self._set_classic_sound_preset)
+        layout.addWidget(self.sound_classic_preset)
         layout.addWidget(QLabel("Stockfish для завершённых партий и свободной доски"))
         engine_row = QHBoxLayout()
         configured_path = settings.value("stockfish_path", "", type=str)
@@ -1268,6 +1279,10 @@ class SettingsDialog(QDialog):
                            if self._diagnostics_repository is not None else {})))
         self.engine_test_status.setText("Обезличенный диагностический отчёт скопирован.")
 
+
+    def _set_classic_sound_preset(self) -> None:
+        self.sound_moves.setChecked(True)
+        self.sound_volume.setValue(45)
 
     def save(self, settings: QSettings) -> None:
         settings.setValue("player_color", self.color.currentData())
@@ -1997,12 +2012,12 @@ class MainWindow(QMainWindow):
         self.disconnect_button.setVisible(False)
         for button in (
             self.friend_link_button, self.username_button, self.ai_button,
-            self.home_ai_button, self.home_friend_button, self.home_username_button,
-            self.cancel_challenge_button, self.active_games_button, self.home_pilot_import_button,
+            self.cancel_challenge_button, self.home_pilot_import_button,
             self.home_puzzles_pilot_button,
         ):
             button.setEnabled(False)
             button.setVisible(False)
+        self._update_home_game_actions()
 
     def _build_ui(self) -> None:
         root = QWidget()
@@ -2247,7 +2262,8 @@ class MainWindow(QMainWindow):
         self.screen_stack.addWidget(self.game_page)
         self.result_page = self._build_result_page()
         self.screen_stack.addWidget(self.result_page)
-        self.review_workspace = GameReviewWorkspace(self.game_repository, parent=self)
+        self.review_workspace = GameReviewWorkspace(self.game_repository, settings=self.settings,
+                                                    parent=self)
         self.review_workspace.return_requested.connect(self.show_home)
         self.review_workspace.export_requested.connect(self._export_review_pgn)
         self.review_workspace.analysis_requested.connect(self._request_saved_game_analysis)
@@ -2402,6 +2418,7 @@ class MainWindow(QMainWindow):
         is_board = self.screen_stack.currentWidget() in (
             self.game_page, self.result_page, getattr(self, "review_workspace", None))
         current = self.screen_stack.currentWidget()
+        self.screen_title.setVisible(current is not self.review_workspace)
         route = ("games" if current is getattr(self, "review_workspace", None) else
                  "play" if is_board or current is getattr(self, "play_page", None) else "home")
         self._active_route = route
@@ -2524,7 +2541,8 @@ class MainWindow(QMainWindow):
         title = QLabel("Ваша шахматная практика")
         title.setObjectName("pageTitle")
         layout.addWidget(title)
-        self.home_status = QLabel("Выберите режим игры. Анализ и тренировки появятся позже.")
+        self.home_status = QLabel(
+            "Начните локальную партию или подключите Lichess. Сводка и последние партии — ниже.")
         self.home_status.setWordWrap(True)
         self.home_status.setObjectName("secondary")
         layout.addWidget(self.home_status)
@@ -2571,11 +2589,14 @@ class MainWindow(QMainWindow):
             card = QFrame()
             card.setObjectName("metricCard")
             card_layout = QVBoxLayout(card)
-            card_layout.setContentsMargins(16, 14, 16, 14)
+            card_layout.setContentsMargins(10, 8, 10, 8)
+            card_layout.setSpacing(4)
             caption = QLabel(label)
             caption.setObjectName("secondary")
+            caption.setWordWrap(True)
+            caption.setMaximumHeight(34)
             value = QLabel("—")
-            value.setStyleSheet("font-size: 25px; font-weight: 700;")
+            value.setStyleSheet("font-size: 22px; font-weight: 700;")
             detail = QLabel("Локальные данные")
             detail.setObjectName("muted")
             detail.setWordWrap(True)
@@ -2587,14 +2608,21 @@ class MainWindow(QMainWindow):
             self.dashboard_metrics[key] = card
         self._layout_dashboard_metrics()
         layout.addLayout(metrics_grid)
-        recent_title = QLabel("Недавние партии")
+        recent_card = QFrame()
+        self.home_recent_card = recent_card
+        recent_card.setObjectName("metricCard")
+        recent_layout = QVBoxLayout(recent_card)
+        recent_layout.setContentsMargins(12, 10, 12, 10)
+        recent_title = QLabel("Последние партии")
         recent_title.setStyleSheet("font-size: 18px; font-weight: 700;")
-        layout.addWidget(recent_title)
+        recent_layout.addWidget(recent_title)
         self._recent_games_layout = QVBoxLayout()
         self._recent_games_layout.setSpacing(8)
-        layout.addLayout(self._recent_games_layout)
+        recent_layout.addLayout(self._recent_games_layout, 1)
         primary_actions = QHBoxLayout()
+        self.home_primary_actions = primary_actions
         play_card = QFrame()
+        self.home_play_card = play_card
         play_card.setObjectName("metricCard")
         play_layout = QVBoxLayout(play_card)
         play_title = QLabel("Играть")
@@ -2616,16 +2644,8 @@ class MainWindow(QMainWindow):
         play_buttons.addWidget(self.home_local_button)
         play_buttons.addWidget(self.resume_game_button)
         play_layout.addLayout(play_buttons)
-        primary_actions.addWidget(play_card, 1)
-        review_card = QFrame()
-        review_card.setObjectName("metricCard")
-        review_layout = QVBoxLayout(review_card)
-        review_title = QLabel("Разобрать")
-        review_title.setStyleSheet("font-size: 20px; font-weight: 700;")
-        review_layout.addWidget(review_title)
-        review_hint = QLabel("Открой завершённую партию или продолжи просмотр")
-        review_hint.setObjectName("secondary")
-        review_layout.addWidget(review_hint)
+        primary_actions.addWidget(play_card, 2)
+        primary_actions.addWidget(recent_card, 3)
         review_buttons = QHBoxLayout()
         self.home_review_button = QPushButton("Выбрать партию")
         self.home_review_button.clicked.connect(self.show_saved_games)
@@ -2636,8 +2656,7 @@ class MainWindow(QMainWindow):
         self.resume_review_button.clicked.connect(self.resume_saved_review)
         self.resume_review_button.setVisible(False)
         review_buttons.addWidget(self.resume_review_button)
-        review_layout.addLayout(review_buttons)
-        primary_actions.addWidget(review_card, 1)
+        play_layout.addLayout(review_buttons)
         layout.addLayout(primary_actions)
 
         self.home_friend_button = QPushButton("Играть с другом по ссылке")
@@ -2670,14 +2689,20 @@ class MainWindow(QMainWindow):
         self.home_puzzles_pilot_button.setEnabled(False)
         self.home_settings_button = QPushButton("Настройки")
         self.home_settings_button.clicked.connect(self.open_settings)
-        self.home_more_toggle = QPushButton("Хранилище и обслуживание  ▸")
+        for action in (self.home_friend_button, self.home_username_button,
+                       self.active_games_button):
+            play_layout.addWidget(action)
+        self.home_more_toggle = QPushButton("Другие разделы и синхронизация  ▸")
         self.home_more_toggle.setCheckable(True)
-        self.home_more_toggle.setAccessibleName("Показать обслуживание и синхронизацию архива")
+        self.home_more_toggle.setAccessibleName("Показать другие разделы и синхронизацию")
         layout.addWidget(self.home_more_toggle)
-        self.home_more = QGroupBox("Обслуживание архива")
+        self.home_more = QGroupBox("Дополнительные разделы и синхронизация")
         more_layout = QVBoxLayout(self.home_more)
-        for button in (self.home_archive_status_button, self.home_pilot_import_button,
-                       self.home_archive_button):
+        for button in (self.home_review_button, self.resume_review_button,
+                       self.home_games_button, self.home_stats_button,
+                       self.home_batch_analysis_button, self.home_puzzles_button,
+                       self.home_settings_button, self.home_archive_status_button,
+                       self.home_pilot_import_button, self.home_archive_button):
             more_layout.addWidget(button)
         more_layout_widget = QWidget()
         more_content = QVBoxLayout(more_layout_widget)
@@ -2693,7 +2718,8 @@ class MainWindow(QMainWindow):
         self.home_more_toggle.toggled.connect(self.home_more.setVisible)
         self.home_more_toggle.toggled.connect(more_layout_widget.setVisible)
         self.home_more_toggle.toggled.connect(lambda checked: self.home_more_toggle.setText(
-            "Хранилище и обслуживание  ▾" if checked else "Хранилище и обслуживание  ▸"))
+            "Другие разделы и синхронизация  ▾" if checked else
+            "Другие разделы и синхронизация  ▸"))
         layout.addWidget(self.home_more)
         layout.addStretch(1)
         scroll = QScrollArea()
@@ -2745,6 +2771,18 @@ class MainWindow(QMainWindow):
             button.setEnabled(online)
             button.setToolTip("Подключите Lichess; запросы остаются отключены до готовности соединения."
                               if not online else "Доступно при активном соединении Lichess.")
+        self._update_home_game_actions()
+
+    def _update_home_game_actions(self) -> None:
+        if not hasattr(self, "home_ai_button"):
+            return
+        online = self._online_actions_allowed()
+        reason = ("Подключите Lichess и дождитесь готовности соединения; свободная доска доступна без сети."
+                  if not online else "Доступно при активном соединении Lichess.")
+        for button in (self.home_ai_button, self.home_friend_button,
+                       self.home_username_button, self.active_games_button):
+            button.setEnabled(online)
+            button.setToolTip(reason)
 
     def _refresh_home_dashboard(self) -> None:
         if not hasattr(self, "_dashboard_metric_values"):
@@ -2821,27 +2859,40 @@ class MainWindow(QMainWindow):
             card = QFrame()
             card.setObjectName("metricCard")
             card_layout = QVBoxLayout(card)
-            card_layout.setContentsMargins(12, 10, 12, 10)
+            card_layout.setContentsMargins(8, 6, 8, 6)
+            card_layout.setSpacing(3)
             heading_button = QPushButton(f"♟  {heading}")
             heading_button.setObjectName("navItem")
+            heading_button.setStyleSheet("font-size: 12px; text-align: left; padding: 2px 4px;")
+            heading_button.setMinimumHeight(24)
+            heading_button.setMaximumHeight(28)
             heading_button.clicked.connect(
                 lambda _checked=False, item=dict(game): self._open_saved_game(item))
             card_layout.addWidget(heading_button)
             description = QLabel(details)
             description.setObjectName("secondary")
+            description.setStyleSheet("font-size: 11px;")
+            description.setMaximumHeight(32)
+            description.setWordWrap(True)
+            description.setToolTip(opening_tooltip(game.get("opening_name")))
             card_layout.addWidget(description)
             source_code = source_short(metrics.get("source"))[0]
             coverage_text = ("Оценки пока нет" if metrics.get("status") == "без анализа" else
                              f"Оценено моих ходов {metrics.get('coverage', '—')} · "
                              f"ходов соперника {metrics.get('opponent_coverage', '—')}")
             coverage = QLabel(f"Источник {source_code} · {coverage_text}")
+            coverage.setStyleSheet("font-size: 10px;")
+            coverage.setMaximumHeight(20)
             coverage.setToolTip(source_short(metrics.get("source"))[1])
             coverage.setAccessibleName(f"Источник оценки: {source_short(metrics.get('source'))[1]}")
             card_layout.addWidget(coverage)
             grid = QGridLayout()
-            grid.addWidget(QLabel("Показатель"), 0, 0)
-            grid.addWidget(QLabel("Я"), 0, 1)
-            grid.addWidget(QLabel("Соперник"), 0, 2)
+            grid.setHorizontalSpacing(4)
+            grid.setVerticalSpacing(0)
+            for column, text in enumerate(("Показатель", "Я", "Соперник")):
+                label_widget = QLabel(text)
+                label_widget.setStyleSheet("font-size: 10px; font-weight: 700;")
+                grid.addWidget(label_widget, 0, column)
             for row, (label, owner_key, opponent_key) in enumerate((
                     ("Точность Lichess", "owner_accuracy", "opponent_accuracy"),
                     ("Неточности", "owner_inaccuracies", "opponent_inaccuracies"),
@@ -2849,8 +2900,10 @@ class MainWindow(QMainWindow):
                     ("Зевки", "owner_blunders", "opponent_blunders"),
                     ("Сильные подтверждённые", "strong", "strong")), start=1):
                 grid.addWidget(QLabel(label), row, 0)
+                grid.itemAtPosition(row, 0).widget().setStyleSheet("font-size: 10px;")
                 for column, key in ((1, owner_key), (2, opponent_key)):
                     value = QLabel(str(metrics.get(key, "н/д")))
+                    value.setStyleSheet("font-size: 10px;")
                     value.setAlignment(Qt.AlignmentFlag.AlignCenter)
                     value.setToolTip(metrics.get("strong_detail", "Источник и охват указаны отдельно."))
                     grid.addWidget(value, row, column)
@@ -3056,9 +3109,7 @@ class MainWindow(QMainWindow):
         else:
             self.resume_game_button.setVisible(False)
             self.home_status.setText("Выберите режим игры. Анализ и тренировки появятся позже.")
-        for button in (self.home_ai_button, self.home_friend_button, self.home_username_button):
-            button.setEnabled(self._online_actions_allowed())
-        self.active_games_button.setEnabled(self._online_actions_allowed())
+        self._update_home_game_actions()
         self.home_archive_button.setEnabled(self._online_actions_allowed())
         self.home_batch_analysis_button.setEnabled(True)
         self.home_pilot_import_button.setEnabled(self._online_actions_allowed())
@@ -4449,6 +4500,9 @@ class MainWindow(QMainWindow):
 
     def cancel_premove(self) -> None:
         if self.online_session is not None:
+            if self.online_session.premove is None and self.online_session.pending_uci:
+                self._refresh_online("Этот ход уже отправлен Lichess; отменить его на сервере нельзя.")
+                return
             self.online_session.premove = None
             self.board.set_premove(None, self.online_session.color)
             self.refresh("Предход отменён.")
@@ -5028,9 +5082,7 @@ class MainWindow(QMainWindow):
         online_allowed = connected and self._lichess_rate_limit_remaining() == 0
         for button in (self.friend_link_button, self.username_button, self.ai_button):
             button.setEnabled(online_allowed)
-        for button in (self.home_ai_button, self.home_friend_button, self.home_username_button):
-            button.setEnabled(online_allowed)
-        self.active_games_button.setEnabled(online_allowed)
+        self._update_home_game_actions()
         self.home_archive_button.setEnabled(online_allowed)
         self.home_batch_analysis_button.setEnabled(True)
         self.home_pilot_import_button.setEnabled(online_allowed)
@@ -6194,7 +6246,7 @@ class MainWindow(QMainWindow):
         self.online_view_ply = None
         self._screen_mode = "review"
         self.board.set_flipped(session.color == chess.BLACK)
-        self.screen_title.setText("Просмотр сохранённой партии")
+        self.screen_title.setText("Разбор партии")
         allowed, reason = self._review_training_safety()
         try:
             self.review_workspace.load_game(game, training_allowed=allowed,

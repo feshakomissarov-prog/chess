@@ -75,6 +75,10 @@ def test_saved_game_orientation_uses_selected_account_color(qtbot, tmp_path):
     assert window._open_saved_game(game)
     assert window.online_session.color == chess.BLACK
     assert window.board._flipped
+    assert window.screen_title.isHidden()
+    assert window.review_workspace.title.text() == "Owner — Opponent · 1–0"
+    window.show_home()
+    assert not window.screen_title.isHidden()
 
 
 def test_workspace_review_resumes_same_revision_ply_and_inspector_tab(qtbot, tmp_path):
@@ -1352,7 +1356,9 @@ def test_explicit_offline_window_never_constructs_or_uses_lichess_credentials(qt
     assert window.lichess is None
     assert "Офлайн-режим" in window.connection.text()
     assert not window.connect_button.isEnabled()
-    assert not window.home_ai_button.isVisible()
+    assert not window.home_ai_button.isHidden()
+    assert not window.home_ai_button.isEnabled()
+    assert "Подключите Lichess" in window.home_ai_button.toolTip()
     offline_dir = Path(window.game_repository.path).parent
     assert offline_dir.name.startswith("chess-coach-offline-")
     assert window.settings is not live_settings
@@ -2166,9 +2172,10 @@ def test_visual_preferences_persist_in_qsettings(tmp_path) -> None:
     dialog.sound_history.setChecked(True)
     dialog.sound_volume.setValue(73)
     preview = []
-    dialog.sound_preview_requested.connect(lambda: preview.append(True))
+    dialog.sound_preview_requested.connect(preview.append)
     dialog.sound_preview.click()
-    assert preview == [True]
+    dialog.sound_capture_preview.click()
+    assert preview == ["move", "capture"]
     dialog.save(settings)
 
     loaded = QSettings(path, QSettings.Format.IniFormat)
@@ -2181,6 +2188,12 @@ def test_visual_preferences_persist_in_qsettings(tmp_path) -> None:
     assert loaded.value("sound_notifications_enabled", type=bool) is False
     assert loaded.value("sound_history_enabled", type=bool) is True
     assert loaded.value("sound_volume", type=int) == 73
+    preset = SettingsDialog(loaded)
+    preset.sound_moves.setChecked(False)
+    preset.sound_volume.setValue(0)
+    preset.sound_classic_preset.click()
+    assert preset.sound_moves.isChecked()
+    assert preset.sound_volume.value() == 45
 
 
 def test_stockfish_settings_persist_without_launching_engine(tmp_path) -> None:
@@ -2719,10 +2732,45 @@ def test_m46_home_has_play_review_context_and_collapsed_secondary_actions(qtbot,
     assert {"games", "accuracy", "analysis", "errors"} == set(window.dashboard_metrics)
     assert window.dashboard_account.count() >= 1
     assert window.dashboard_clock.count() >= 1
+    assert window.home_friend_button.parentWidget() is not None
+    assert window.home_ai_button.parentWidget() is not None
+    assert window.home_batch_analysis_button.parentWidget() is window.home_more_content
     window.home_more_toggle.setChecked(True)
     assert not window.home_more_content.isHidden()
     assert window.home_batch_analysis_button.isEnabled()
     window.game_repository.shutdown()
+
+
+def test_home_has_two_columns_and_three_recent_game_cards(qtbot, tmp_path):
+    window = MainWindow(QSettings(str(tmp_path / "home-columns.ini"),
+                                  QSettings.Format.IniFormat), offline_mode=True)
+    qtbot.addWidget(window)
+    assert window.home_primary_actions.itemAt(0).widget() is window.home_play_card
+    assert window.home_primary_actions.itemAt(1).widget() is window.home_recent_card
+    assert window.home_friend_button.parentWidget() is window.home_play_card
+    games = [{
+        "game_id": f"synthetic-{index}", "status": "mate", "winner": "white",
+        "color": "white", "opponent": f"Opponent {index}",
+        "started_at": "2026-11-02", "clock": "300+3", "eco": "B20",
+        "opening_name": "Sicilian Defense",
+        "review_metrics": {"status": "без анализа", "coverage": "0/12",
+                            "opponent_coverage": "0/12", "source": "нет данных"},
+    } for index in range(3)]
+    window._render_dashboard_snapshot({"metrics": [], "recent_games": games})
+    assert window._recent_games_layout.count() == 3
+    cards = [window._recent_games_layout.itemAt(i).widget() for i in range(3)]
+    headings = [card.findChildren(QPushButton)[0].text() for card in cards]
+    assert all("Победа с Opponent" in heading for heading in headings)
+    assert all("Queen's Pawn Game" not in heading for heading in headings)
+    assert window.dashboard_account.currentIndex() == 0
+    assert window.dashboard_clock.currentIndex() == 0
+    window.setFixedSize(1360, 860)
+    window.show()
+    qtbot.wait(20)
+    assert window.home_page.horizontalScrollBar().maximum() == 0
+    assert window.home_page.verticalScrollBar().maximum() <= 50
+    assert all(card.sizeHint().height() <= 200 for card in cards)
+    window.close()
 
 
 def test_sidebar_play_opens_mode_picker_without_resetting_local_game(qtbot, tmp_path):
@@ -2998,6 +3046,75 @@ def test_cancel_premove_does_not_undo_a_move_already_submitted_to_lichess(qtbot,
 
     assert session.pending_uci == "g1f3"
     assert session.pending_request_id == sent_request_id
+    assert "уже отправлен Lichess" in window.game_status.text()
+
+
+def test_online_own_piece_click_cancels_local_premove_before_opponent_event(qtbot, tmp_path,
+                                                                            monkeypatch):
+    session_id = "cancel-before-state"
+    window = MainWindow(QSettings(str(tmp_path / f"{session_id}.ini"), QSettings.Format.IniFormat))
+    qtbot.addWidget(window)
+    posts, sounds = [], []
+    monkeypatch.setattr(window.lichess, "send_move", lambda *args: posts.append(args))
+    monkeypatch.setattr(window.sound_player, "play_move", lambda *args, **kwargs:
+                        sounds.append(("move", args, kwargs)))
+    monkeypatch.setattr(window.sound_player, "play_premove", lambda *args, **kwargs:
+                        sounds.append(("premove", args, kwargs)))
+    session = LichessGameSession(session_id, window.game_repository)
+    session.color = chess.WHITE
+    session.apply_event({"type": "gameFull", "initialFen": "startpos",
+                         "state": {"moves": "e2e4", "status": "started"}})
+    select_online(window, session)
+    window.show()
+    window._refresh_online()
+    assert session.queue_premove(chess.Move.from_uci("g1f3"))
+    window._refresh_online()
+    before_moves = session.moves
+    rect = window.board._get_board_rect()
+    side = rect.width() / 8
+    row, col = window.board._renderer.get_visual_coordinates(chess.G1, window.board._flipped)
+    start = QPoint(int(rect.x() + (col + .5) * side), int(rect.y() + (row + .5) * side))
+
+    qtbot.mouseClick(window.board, Qt.MouseButton.LeftButton, pos=start)
+
+    assert session.premove is None
+    assert session.moves == before_moves
+    assert posts == []
+    assert sounds == []
+    assert "Предход отменён" in window.game_status.text()
+
+
+def test_local_training_own_piece_click_cancels_premove_without_playing_a_move(qtbot, tmp_path,
+                                                                               monkeypatch):
+    window = MainWindow(QSettings(str(tmp_path / "local-premove-click.ini"),
+                                  QSettings.Format.IniFormat), offline_mode=True)
+    qtbot.addWidget(window)
+    sound_events = []
+    monkeypatch.setattr(window.sound_player, "play_move", lambda *args, **kwargs:
+                        sound_events.append(("move", args, kwargs)))
+    monkeypatch.setattr(window.sound_player, "play_premove", lambda *args, **kwargs:
+                        sound_events.append(("premove", args, kwargs)))
+    window.start_local_game()
+    window.on_move_intent(chess.Move.from_uci("e2e4"))
+    window.local_mode_combo.setCurrentIndex(window.local_mode_combo.findData("premove_training"))
+    assert window.controller.queue_premove(chess.Move.from_uci("g1f3"))
+    window.refresh()
+    before_moves = tuple(window.controller.board.move_stack)
+    before_notation = tuple(window.controller.san_moves())
+    before_sounds = list(sound_events)
+    rect = window.board._get_board_rect()
+    side = rect.width() / 8
+    row, col = window.board._renderer.get_visual_coordinates(chess.G1, window.board._flipped)
+    start = QPoint(int(rect.x() + (col + .5) * side), int(rect.y() + (row + .5) * side))
+
+    qtbot.mouseClick(window.board, Qt.MouseButton.LeftButton, pos=start)
+
+    assert window.controller.premove is None
+    assert tuple(window.controller.board.move_stack) == before_moves
+    assert tuple(window.controller.san_moves()) == before_notation
+    assert sound_events == before_sounds
+    assert "Предход отменён" in window.game_status.text()
+    window.close()
 
 
 def test_offline_undo_button_is_separate_from_premove_cancel(qtbot, tmp_path):

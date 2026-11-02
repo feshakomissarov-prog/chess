@@ -518,7 +518,7 @@ class BoardView(BoardWidget):
         manual = thickness >= 0.85
         if manual:
             return min(17.0, max(8.0, side * 0.22))
-        return min(18.0, max(14.0, side * 0.18 * thickness))
+        return min(17.0, max(10.5, side * 0.14 * thickness))
 
     def _draw_square_mark(self, painter: QPainter, square: int, color: QColor) -> None:
         rect = self._get_board_rect()

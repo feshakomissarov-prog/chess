@@ -364,7 +364,7 @@ def test_review_graph_delta_omits_missing_and_mate_neighbors_and_markers_default
     graph = ReviewGraph([
         {"ply": 0, "white_cp": 0},
         {"ply": 1, "white_cp": 100},
-        {"ply": 2, "white_cp": None, "mate_white": 3},
+        {"ply": 2, "white_cp": 100, "mate_white": 3},
         {"ply": 3, "white_cp": 200},
         {"ply": 5, "white_cp": 250},
     ], [{"ply": 1, "severity": "blunder"}])
@@ -372,3 +372,22 @@ def test_review_graph_delta_omits_missing_and_mate_neighbors_and_markers_default
     assert graph.markers_visible is False
     graph.set_delta_mode(True)
     assert graph._values() == [(1, 100, None)]
+    graph.set_delta_mode(False)
+    assert (2, 200, 3) in graph._values()
+
+
+def test_review_advantage_bar_uses_mate_status_without_centipawn_fill(qtbot, tmp_path):
+    repo, game = _review_repo(tmp_path / "review-mate-bar.sqlite3")
+    try:
+        workspace = GameReviewWorkspace(repo, training_allowed=True)
+        qtbot.addWidget(workspace)
+        workspace.load_game(game)
+        assessment = next(row for row in workspace.review["analysis"]["assessments"]
+                          if int(row["ply"]) == 3)
+        assessment["white_cp"] = 180
+        assessment["mate_white"] = 3
+        workspace.select_ply(3)
+        assert workspace.advantage_bar.white_cp is None
+        assert "белые ставят мат через 3" in workspace.advantage_label.text()
+    finally:
+        repo.shutdown()

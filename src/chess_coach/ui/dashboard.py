@@ -6,8 +6,7 @@ from typing import Any
 
 from ..lichess.game_review import load_game_review
 from ..lichess.statistics import StatisticsService
-from .display import (format_clock_control, format_game_date, opening_tooltip,
-                      russian_opening_name)
+from .display import format_clock_control, format_game_date, russian_opening_name
 
 
 _COMPLETED = "('created','started','started_soon','playing')"
@@ -180,4 +179,4 @@ def game_card_text(game: dict[str, Any]) -> tuple[str, str]:
         format_clock_control(game.get("clock")),
         russian_opening_name(game.get("eco"), game.get("opening_name")),
     ))
-    return f"{result} с {opponent}", details + "\n" + opening_tooltip(game.get("opening_name"))
+    return f"{result} с {opponent}", details
