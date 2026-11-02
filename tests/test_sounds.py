@@ -115,4 +115,3 @@ def test_missing_audio_device_fails_gracefully(tmp_path):
     assert not player.available
     assert player.effects == {}
     assert not player.play_premove("premove")
-

@@ -17,4 +17,3 @@ def test_primary_and_secondary_text_meet_normal_text_contrast_on_surfaces():
     for foreground in (TOKENS.text, TOKENS.secondary):
         for background in (TOKENS.app, TOKENS.sidebar, TOKENS.surface):
             assert contrast_ratio(foreground, background) >= 4.5
-

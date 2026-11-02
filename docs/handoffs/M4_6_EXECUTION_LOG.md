@@ -19,9 +19,9 @@
 | C | Главная, честные KPI, последние три реальные партии/empty states | Выполнен, checkpoint ниже |
 | D | Board workspace sizes/inspector; единый GameReviewWorkspace; интерактивный graph и per-side summary; улучшение ошибки | Выполнен локально, checkpoint ниже |
 | E | Оригинальные звуки, mute/volume и dedup событий | Выполнен, commit `61212bd` |
-| F | CMD/debug launcher, optional shortcut action, single instance, startup diagnostics | Реализован локально, ожидает checkpoint |
-| G | Workspace restore, loading/notifications/accessibility/responsive behavior | Реализован локально, ожидает checkpoint |
-| H | Регрессии, display/DPI acceptance, полный Windows CI на точном SHA, handoff | Ожидает A0–G |
+| F | CMD/debug launcher, optional shortcut action, single instance, startup diagnostics | Выполнен, commit `601df64d71242a1bd56818c9466a0b8bb0270a30` |
+| G | Workspace restore, loading/notifications/accessibility/responsive behavior | Выполнен, commit `b3b469ed7bf3350dfa68ef58b2e362c85b4b87c8` |
+| H | Регрессии, display/DPI acceptance, полный Windows CI на точном SHA, handoff | Локальные проверки задокументированы; hosted Windows CI ожидается |
 
 ## Решения
 
@@ -95,6 +95,15 @@
 - Добавлены regressions на совпадающий resume, stale revision/hash fallback, окно вне/частично вне экрана, отсутствие захвата экрана отложенным restore, persistence statistics filters, unified analysis completion, inline error notice и keyboard graph navigation.
 - Windows CPython 3.12.10 / Qt offscreen: `pytest tests/test_window.py tests/test_game_review.py tests/test_theme.py tests/test_dashboard.py tests/test_launcher.py tests/test_single_instance.py`: **135 passed**; `compileall src/chess_coach tests` PASS; `git diff --check` PASS.
 - Проверка на физических DPI/мониторах, изменение разрешения в ходе работы, клавиатурный/скринридер smoke и ручная проверка сохранённого окна — **НЕ ПРОВЕРЯЛИСЬ**; для этого нужен владелец на Windows GUI. Следующий этап: H — полный regression matrix, compile/diff, точный Windows CI и финальный handoff.
+
+### H — полная регрессионная проверка и handoff
+
+- Локальный CPython 3.12.10 / PySide6 6.12.0. Один полный offscreen pytest запуск и отдельный запуск `tests/test_board_view.py` завершились native exit code 1 без pytest summary. Event Viewer содержит Application Error 1000 / WER 1001: `python.exe` из `.venv312`, модуль `G:\project\chess\.venv312\Lib\site-packages\PySide6\Qt6Core.dll`, exception `0xc0000409` (BEX64). Причина внутри native Qt не установлена; связь с Dr.Web не подтверждена. Полные/падающие Qt-наборы повторно не гонялись.
+- Диагностическое разделение: все тесты, кроме `tests/test_board_view.py`, — **407 passed за 122.12 с**. Изолированный smoke `tests/test_theme.py` — **2 passed**; Python / pytest / PySide6 import проходит. `compileall` и `pip check` — PASS. На GitHub hosted runner полный набор остаётся обязательной проверкой перед завершением.
+- Текущая проверка `git diff --check origin/main` — PASS. Удалены только лишние пустые строки EOF в двух тестах, чтобы у PR diff был чистый whitespace check.
+- Полная проверка на физических DPI/нескольких мониторах, клавиатура/скринридер с пользователем, звук через реальное устройство, ручной запуск `.cmd` и создание ярлыка с пользовательским профилем — **НЕ ПРОВЕРЯЛИСЬ**.
+- Реальные OAuth/Lichess, PAT, архив, пользовательская SQLite и Stockfish не запускались/не открывались. Их проверка не является частью M4.6 CI.
+- Финальный hosted Windows CI на точном итоговом SHA и его ссылка будут добавлены после последнего push; PR #41 остаётся draft.
 
 ### F — пользовательский запуск, single-instance и иконка
 
