@@ -1277,6 +1277,11 @@ class SettingsDialog(QDialog):
             lambda value: self.sound_volume_label.setText(f"Громкость · {value}%"))
         layout.addWidget(self.sound_volume_label)
         layout.addWidget(self.sound_volume)
+        self.sound_start_preview = QPushButton("Прослушать начало партии")
+        self.sound_start_preview.setToolTip("Прослушать отдельный сигнал начала новой партии.")
+        self.sound_start_preview.clicked.connect(
+            lambda: self.sound_preview_requested.emit("game_start"))
+        layout.addWidget(self.sound_start_preview)
         self.sound_preview = QPushButton("Послушать ход")
         self.sound_preview.setToolTip("Прослушать натуральную запись обычного хода.")
         self.sound_preview.clicked.connect(lambda: self.sound_preview_requested.emit("move"))
@@ -1286,6 +1291,10 @@ class SettingsDialog(QDialog):
         self.sound_capture_preview.clicked.connect(
             lambda: self.sound_preview_requested.emit("capture"))
         layout.addWidget(self.sound_capture_preview)
+        self.sound_availability_note = QLabel(
+            "Если звуки не слышны, проверьте устройство вывода Windows; игра продолжит работать.")
+        self.sound_availability_note.setWordWrap(True)
+        layout.addWidget(self.sound_availability_note)
         self.sound_classic_preset = QPushButton("Пресет «Классический» · 45%")
         self.sound_classic_preset.clicked.connect(self._set_classic_sound_preset)
         layout.addWidget(self.sound_classic_preset)
@@ -4089,6 +4098,7 @@ class MainWindow(QMainWindow):
         self._screen_mode = "local"
         self.screen_title.setText("Локальная партия")
         self.screen_stack.setCurrentWidget(self.game_page)
+        self.sound_player.play_game_start(self._local_sound_game_id)
         self.refresh("Новая свободная партия. Можно ходить за обе стороны.")
 
     def _local_board_mode_changed(self, _index: int) -> None:
@@ -4778,6 +4788,7 @@ class MainWindow(QMainWindow):
         self.controller.new_game()
         self._local_sound_game_id = uuid.uuid4().hex
         self.board.clear_annotations()
+        self.sound_player.play_game_start(self._local_sound_game_id)
         self.refresh("Новая локальная партия.")
         if self._position_eval_mode:
             self._position_eval_timer.start(300)
@@ -5168,7 +5179,9 @@ class MainWindow(QMainWindow):
         ))
 
     def _lichess_status(self, status: str) -> None:
-        self.connection.setText("●  " + status)
+        display_status = ("●  Не подключено — подключите Lichess"
+                          if status == "Не подключено" else "●  " + status)
+        self.connection.setText(display_status)
         if not self.offline_mode and self._lichess_status_invalidates_safety(status):
             # Revoke review leases/exercises as well as live engine and batch
             # work. A recovered transport never grants a new review lease.
@@ -5190,6 +5203,8 @@ class MainWindow(QMainWindow):
             self._event_stream_recovery_pending = False
         connected = bool(self._lichess_connected and not self.offline_mode)
         if status == "Не подключено":
+            self.home_status.setText(
+                "Не подключено к Lichess. Подключите аккаунт, если хотите играть онлайн.")
             for session in self.online_sessions.values():
                 session.clear_unconfirmed_move_intent()
             if self.online_session is not None:
@@ -5551,6 +5566,7 @@ class MainWindow(QMainWindow):
                 self._pause_batch_analysis()
             if self._awaiting_game_start and previous is None:
                 self._awaiting_game_start = False
+                self.sound_player.play_game_start(game_id)
                 self.board.clear_annotations()
                 self._selected_live_game_id = game_id
                 self.online_session = session

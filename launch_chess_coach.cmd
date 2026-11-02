@@ -24,7 +24,7 @@ for /f "tokens=1,2 delims=." %%A in ("%PYVER%") do (
   if %%A LSS 3 goto :unsupported
   if %%A EQU 3 if %%B LSS 12 goto :unsupported
 )
-start "Chess Coach" "%PYTHONW%" -m chess_coach --manual-connect
+start "Chess Coach" "%PYTHONW%" -m chess_coach
 popd
 exit /b 0
 

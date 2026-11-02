@@ -175,6 +175,53 @@ def test_personal_token_success_saves_only_after_account_validation_and_restores
     restarted.close()
 
 
+def test_restore_without_selected_credential_stays_local_and_makes_no_api_request(qtbot):
+    class TrackingEmptyStore(MemoryStore):
+        def __init__(self):
+            super().__init__()
+            self.reads = 0
+
+        def get(self):
+            self.reads += 1
+            return None
+
+    store = TrackingEmptyStore()
+    client = AccountClient()
+    service = LichessService(client=client, token_store=store,
+                             personal_token_store=MemoryStore(), auth_method="oauth")
+    statuses = []
+    service.session_status_changed.connect(lambda generation, value: statuses.append(value))
+    service.restore()
+    join_worker(service)
+    qtbot.waitUntil(lambda: bool(statuses) and statuses[-1] == "Не подключено", timeout=1000)
+    assert store.reads == 1
+    assert client.calls == []
+    assert service.username is None
+    assert statuses[-1] == "Не подключено"
+    service.close()
+
+
+def test_restore_reads_credentials_off_the_calling_thread():
+    entered = threading.Event()
+    release = threading.Event()
+
+    class BlockingStore(MemoryStore):
+        def get(self):
+            entered.set()
+            assert release.wait(2)
+            return None
+
+    service = LichessService(client=AccountClient(), token_store=BlockingStore(),
+                             personal_token_store=MemoryStore(), auth_method="oauth")
+    service.restore()
+    assert entered.wait(1)
+    assert any(worker.name == "chess-coach-restore-auth" and worker.is_alive()
+               for worker in service._threads)
+    release.set()
+    join_worker(service)
+    service.close()
+
+
 @pytest.mark.parametrize("status", [401, 403])
 def test_invalid_personal_token_is_not_saved_and_never_connects(qtbot, status, monkeypatch):
     oauth = MemoryStore("untouched-oauth")

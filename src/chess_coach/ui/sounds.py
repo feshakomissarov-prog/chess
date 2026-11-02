@@ -14,13 +14,16 @@ try:
 except ImportError:  # Audio is an optional runtime facility; the board remains usable.
     QSoundEffect = None
 
-SOUND_IDS = ("move", "capture")
-_SOUND_FILES = {"move": "move-recording-v1.wav",
-                "capture": "capture-recording-v1.wav"}
+SOUND_IDS = ("game_start", "move", "capture")
+_SOUND_FILES = {
+    "game_start": "game-start-cc0-v1.wav",
+    "move": "move-cc0-v1.wav",
+    "capture": "capture-cc0-v1.wav",
+}
 
 
 def ensure_sound_assets(directory: Path) -> dict[str, Path]:
-    """Return versioned, packaged CC0 recordings; never synthesize at runtime."""
+    """Return the packaged CC0 recordings; never synthesize at runtime."""
     del directory  # retained for source compatibility; assets ship with the package
     asset_dir = Path(__file__).resolve().parents[1] / "assets" / "sounds"
     output = {cue: asset_dir / filename for cue, filename in _SOUND_FILES.items()}
@@ -129,7 +132,7 @@ class ChessSoundPlayer(QObject):
         return self._play("notification")
 
     def preview(self, cue: str = "move") -> bool:
-        """Preview one of the two actual recordings without live-event dedupe."""
+        """Preview one of the three actual recordings without live-event dedupe."""
         if cue not in _SOUND_FILES:
             return False
         return bool(self.moves_enabled and self._play(cue))
@@ -146,3 +149,10 @@ class ChessSoundPlayer(QObject):
             return False
         effect.play()
         return True
+
+    def play_game_start(self, game_id: str) -> bool:
+        """Play once for a newly started game, never for replay or reconnect."""
+        if (not game_id or not self.moves_enabled
+                or not self.deduplicator.claim(f"game-start:{game_id}", 0)):
+            return False
+        return self._play("game_start")

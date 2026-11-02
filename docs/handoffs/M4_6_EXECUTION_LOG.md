@@ -1,5 +1,13 @@
 # M4.6 — Desktop Experience execution log
 
+### 03.11.2026 — PR #41: startup restore and sound revision
+
+- Standard `launch_chess_coach.cmd` and the opt-in desktop shortcut now run `pythonw.exe -m chess_coach` without `--manual-connect`; normal `MainWindow` startup already starts the selected OAuth/PAT restore asynchronously. Debug launcher remains `--manual-connect`; `--manual-connect` and `--offline` constructor isolation is unchanged. A missing credential produces an explicit disconnected UI state and does not make an API request. No authentication restore grants a Stockfish safety lease; per-game Fair Play preflight remains required.
+- Replaced the two previously rejected recordings with three distinct, preloaded mono PCM cues: new game, ordinary move and capture. New-game sound is emitted once per new local game identity or newly accepted Lichess `gameStart`; history/reconnect/duplicate start events do not emit it. Capture remains a single cue; a finishing capture does not also play the ordinary move cue. Settings contains a separate preview button for each cue and notes that audio-device failure does not block play.
+- Bundled tracks are CC0 Freesound recordings by `el_boss`; original pages, processing, output SHA-256, and source boundaries are recorded in `src/chess_coach/assets/sounds/NOTICE.md`. The local Lichess archive and MyInstants Beep were auditioned only as private references and are not redistributed. The sound selection remains pending owner listening/approval.
+- Added regressions for normal vs manual/offline launch mode, no-token restore/no API call, worker-thread credential read, three sound assets/previews, per-game start dedupe and online start event dedupe. No real Credential Manager secret, OAuth, Lichess API, or user database was used.
+- Validation on Windows CPython 3.12.10: focused launch/sound/credential/Qt checks PASS; full `QT_QPA_PLATFORM=offscreen python -m pytest -q` **519 PASS**; `python -m compileall -q src tests` PASS; `git diff --check` PASS. Sound decoding used the Qt FFmpeg backend; no real audio-device listening was used as an acceptance claim.
+
 ### 02.11.2026 — PR #41: Video pilot round 3, checkpoint 1 — P0-V3-01
 
 - Added a single synchronous `mask_review_analysis()` path for pending/revoked/denied Fair Play states. It clears side and phase summaries, old tooltips/accessibility descriptions, move detail, event/PV content, graph points/markers/source/coverage, severity colors, advantage bar, engine arrows and training feedback. Neutral PGN SAN, position and game identity remain. Persisted analysis is not deleted.

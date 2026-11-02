@@ -45,7 +45,7 @@ if (Test-Path -LiteralPath $shortcutPath) {
 
 $shortcut = $shell.CreateShortcut($shortcutPath)
 $shortcut.TargetPath = $pythonw
-$shortcut.Arguments = "-m chess_coach --manual-connect"
+$shortcut.Arguments = "-m chess_coach"
 $shortcut.WorkingDirectory = $repoRoot
 $shortcut.Description = "Chess Coach — локальная шахматная доска и Lichess-клиент"
 $iconPath = Join-Path $repoRoot "src\chess_coach\resources\chess_coach.ico"
@@ -57,4 +57,4 @@ if (Test-Path -LiteralPath $iconPath -PathType Leaf) {
 $shortcut.Save()
 
 Write-Host "Создан ярлык: $shortcutPath"
-Write-Host "Запуск: pythonw.exe -m chess_coach --manual-connect; рабочая папка: $repoRoot"
+Write-Host "Запуск: pythonw.exe -m chess_coach; при наличии сохранённого Lichess-подключения приложение проверит его асинхронно. Рабочая папка: $repoRoot"

@@ -877,6 +877,30 @@ def test_online_move_sound_waits_for_authoritative_ack_and_deduplicates_replays(
     window._lichess_game_event(session.game_id, {
         "type": "gameState", "moves": "e2e4", "status": "started"})
     assert len(window.sound_player.moves) == 1
+    window.close()
+
+
+def test_online_game_start_sound_plays_only_for_new_challenge_start(qtbot, tmp_path):
+    window = MainWindow(QSettings(str(tmp_path / "sound-start-event.ini"),
+                                  QSettings.Format.IniFormat), offline_mode=True)
+    qtbot.addWidget(window)
+
+    class FakeSound:
+        def __init__(self): self.starts = []
+        def play_game_start(self, game_id): self.starts.append(game_id); return True
+
+    sound = FakeSound()
+    window.sound_player = sound
+    window._awaiting_game_start = True
+    event = {"type": "gameStart", "game": {"gameId": "synthetic-online",
+              "color": "white", "source": "ai", "opponent": {"ai": 2, "id": None}}}
+    window._lichess_event(event)
+    window._lichess_event(event)  # Duplicate event/reconnect must not sound again.
+    window._awaiting_game_start = False
+    window._lichess_event({"type": "gameStart", "game": {
+        "gameId": "already-running", "color": "black"}})
+    assert sound.starts == ["synthetic-online"]
+    window.close()
 
 
 def test_browsing_move_history_does_not_emit_sounds(qtbot, tmp_path):
@@ -1688,6 +1712,41 @@ def test_manual_connect_defers_lichess_and_credentials_until_button(qtbot, tmp_p
     window.close()
 
 
+def test_normal_window_starts_async_restore_for_selected_auth_method(qtbot, tmp_path, monkeypatch):
+    settings = QSettings(str(tmp_path / "normal-restore.ini"), QSettings.Format.IniFormat)
+    settings.setValue("lichess/selected_auth_method", "personal_token")
+    settings.sync()
+
+    class FakeClient:
+        rate_limit_remaining = 0
+
+    class FakeService:
+        def __init__(self):
+            self.auth_method = "personal_token"
+            self.username = None
+            self.token = None
+            self.client = FakeClient()
+            self.restores = 0
+
+        def restore(self):
+            self.restores += 1
+
+        def close(self, timeout=1.0):
+            return True
+
+    service = FakeService()
+    monkeypatch.setattr(MainWindow, "_create_lichess_service", lambda _self: service)
+    monkeypatch.setattr(MainWindow, "_attach_lichess_service", lambda *_args: None)
+    window = MainWindow(settings, asynchronous_storage=False)
+    qtbot.addWidget(window)
+    assert window.lichess is service
+    assert service.restores == 1
+    assert settings.value("lichess/selected_auth_method") == "personal_token"
+    assert window._position_eval_safety_lease is None
+    assert window._review_safety_request_id is None
+    window.close()
+
+
 def test_manual_connect_restores_saved_token_only_after_explicit_button(qtbot, tmp_path, monkeypatch):
     calls = []
 
@@ -2204,7 +2263,8 @@ def test_visual_preferences_persist_in_qsettings(tmp_path) -> None:
     dialog.sound_preview_requested.connect(preview.append)
     dialog.sound_preview.click()
     dialog.sound_capture_preview.click()
-    assert preview == ["move", "capture"]
+    dialog.sound_start_preview.click()
+    assert preview == ["move", "capture", "game_start"]
     dialog.save(settings)
 
     loaded = QSettings(path, QSettings.Format.IniFormat)
@@ -2938,7 +2998,8 @@ def test_local_move_sound_deduplication_uses_a_new_identity_for_each_game(qtbot,
                                   QSettings.Format.IniFormat), offline_mode=True)
     qtbot.addWidget(window)
     class FakeSound:
-        def __init__(self): self.events = []
+        def __init__(self): self.events = []; self.starts = []
+        def play_game_start(self, game_id): self.starts.append(game_id); return True
         def play_move(self, game_id, ply, *_args, **_kwargs):
             self.events.append((game_id, ply))
             return True
@@ -2952,6 +3013,7 @@ def test_local_move_sound_deduplication_uses_a_new_identity_for_each_game(qtbot,
     window.on_move_intent(chess.Move.from_uci("e2e4"))
     assert first_game_id != second_game_id
     assert sound.events == [(first_game_id, 1), (second_game_id, 1)]
+    assert sound.starts == [first_game_id, second_game_id]
     window.close()
 
 

@@ -24,16 +24,20 @@ def _player(tmp_path, **options):
 
 def test_versioned_recording_assets_are_packaged_mono_pcm_wav(tmp_path):
     assets = ensure_sound_assets(tmp_path / "sounds")
-    assert set(assets) == {"move", "capture"}
-    for path in assets.values():
+    assert set(assets) == {"game_start", "move", "capture"}
+    durations = {"game_start": (0.60, 0.63), "move": (0.32, 0.36),
+                 "capture": (0.22, 0.25)}
+    for cue, path in assets.items():
         assert path.is_file()
         with wave.open(str(path), "rb") as wav:
             assert wav.getnchannels() == 1
             assert wav.getsampwidth() == 2
             assert wav.getframerate() == 44_100
-            assert 0.07 <= wav.getnframes() / wav.getframerate() <= 0.25
+            lower, upper = durations[cue]
+            assert lower <= wav.getnframes() / wav.getframerate() <= upper
             assert wav.getnframes() > 100
     assert assets["move"] != assets["capture"]
+    assert assets["game_start"] not in {assets["move"], assets["capture"]}
 
 
 def test_move_sound_classification_obeys_result_and_move_priority():
@@ -120,10 +124,12 @@ def test_missing_audio_device_fails_gracefully(tmp_path):
 
 def test_preview_is_explicit_and_does_not_consume_live_game_dedupe(tmp_path):
     player = _player(tmp_path)
+    assert player.preview("game_start")
     assert player.preview()
     assert player.effects["move"].play_count == 1
     assert player.preview("capture")
     assert player.effects["capture"].play_count == 1
+    assert player.effects["game_start"].play_count == 1
     board = chess.Board()
     assert player.play_move("next-game", 1, board, chess.Move.from_uci("e2e4"))
     assert player.effects["move"].play_count == 2
@@ -136,17 +142,31 @@ def test_recording_sources_are_preloaded_once_and_reused_for_later_games(tmp_pat
         created.append(effect)
         return effect
     player = ChessSoundPlayer(tmp_path / "sounds", effect_factory=factory)
-    assert set(player.effects) == {"move", "capture"}
-    assert len(created) == 2
+    assert set(player.effects) == {"game_start", "move", "capture"}
+    assert len(created) == 3
     assert all(effect.source.isLocalFile() for effect in player.effects.values())
-    assert player.effects["move"].source.toLocalFile().endswith("move-recording-v1.wav")
-    assert player.effects["capture"].source.toLocalFile().endswith("capture-recording-v1.wav")
+    assert player.effects["game_start"].source.toLocalFile().endswith("game-start-cc0-v1.wav")
+    assert player.effects["move"].source.toLocalFile().endswith("move-cc0-v1.wav")
+    assert player.effects["capture"].source.toLocalFile().endswith("capture-cc0-v1.wav")
     board = chess.Board()
     e4 = chess.Move.from_uci("e2e4")
     for game_id in ("game-1", "game-2", "game-3"):
         assert player.play_move(game_id, 1, board, e4)
+        assert player.play_game_start(game_id)
     assert player.effects["move"].play_count == 3
-    assert len(created) == 2
+    assert player.effects["game_start"].play_count == 3
+    assert len(created) == 3
+
+
+def test_new_game_signal_is_once_per_game_identity_and_muted_with_move_audio(tmp_path):
+    player = _player(tmp_path)
+    assert player.play_game_start("local-1")
+    assert not player.play_game_start("local-1")
+    assert player.play_game_start("local-2")
+    assert player.effects["game_start"].play_count == 2
+    player.configure(moves_enabled=False, notifications_enabled=True,
+                     history_enabled=False, volume=45)
+    assert not player.play_game_start("local-3")
 
 
 def test_game_finishing_capture_uses_one_capture_recording_without_double_audio(tmp_path):

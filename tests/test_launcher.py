@@ -74,6 +74,35 @@ def test_manual_connect_cli_passes_non_isolated_mode_to_window(monkeypatch):
     assert "activation_callback" in calls
 
 
+def test_ordinary_cli_launch_uses_auto_restore_mode(monkeypatch):
+    calls = {}
+
+    class FakeApplication:
+        def __init__(self, _argv): pass
+        def setOrganizationName(self, _value): pass
+        def setApplicationName(self, _value): pass
+        def exec(self): return 0
+
+    class FakeWindow:
+        def __init__(self, **kwargs): calls["kwargs"] = kwargs
+        def show(self): calls["shown"] = True
+
+    class FakeGuard:
+        def set_activation_callback(self, callback): calls["callback"] = callback
+        def close(self): pass
+
+    monkeypatch.setattr(launcher, "QApplication", FakeApplication)
+    monkeypatch.setattr(launcher, "MainWindow", FakeWindow)
+    monkeypatch.setattr(launcher, "acquire_single_instance", lambda _path: FakeGuard())
+    assert launcher.main([]) == 0
+    assert calls["kwargs"] == {
+        "asynchronous_storage": True,
+        "offline_mode": False,
+        "manual_connect_mode": False,
+    }
+    assert calls["shown"]
+
+
 def test_offline_and_manual_connect_cli_modes_are_mutually_exclusive(monkeypatch):
     monkeypatch.setattr(launcher, "QApplication", lambda _argv: pytest.fail("app must not start"))
     with pytest.raises(SystemExit):
@@ -103,12 +132,14 @@ def test_windows_launch_files_are_relative_and_do_not_install_or_use_offline_mod
     debug = (root / "debug_chess_coach.cmd").read_text(encoding="utf-8")
     shortcut = (root / "scripts" / "create_desktop_shortcut.ps1").read_text(encoding="utf-8")
     assert "%~dp0" in cmd and ".venv312\\Scripts\\pythonw.exe" in cmd
-    assert "--manual-connect" in cmd and "--offline" not in cmd
+    assert "-m chess_coach" in cmd and "--manual-connect" not in cmd
+    assert "--offline" not in cmd
     assert "pip install" not in cmd.lower()
     assert "chess-coach-launcher.log" in cmd
     assert "python.exe" in debug and "--manual-connect" in debug
     assert 'pushd "%ROOT%"' in cmd and 'pushd "%ROOT%"' in debug
-    assert "-m chess_coach --manual-connect" in shortcut
+    assert '$shortcut.Arguments = "-m chess_coach"' in shortcut
+    assert "--manual-connect" not in shortcut
     assert "chess_coach.ico" in shortcut
 
 
