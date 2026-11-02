@@ -13,9 +13,9 @@
 
 | Этап | Содержание | Статус / доказательства |
 | --- | --- | --- |
-| A0 | Issue #40: generation-safe disconnect/revoke, stale stream suppression, Event/Barrier tests | Выполнен локально, commit pending |
-| A | Аудит маршрутов/read-model, дизайн-токены, baseline | В работе |
-| B | AppShell, header/sidebar, responsive route navigation | Ожидает A0/A |
+| A0 | Issue #40: generation-safe disconnect/revoke, stale stream suppression, Event/Barrier tests | Выполнен, commit `e0a397d` |
+| A | Аудит маршрутов/read-model, дизайн-токены, baseline | Выполнен; tokens вынесены в `ui/theme.py` |
+| B | AppShell, header/sidebar, responsive route navigation | Выполнен локально; commit checkpoint ниже |
 | C | Главная, честные KPI, последние три реальные партии/empty states | Ожидает B |
 | D | Board workspace sizes/inspector; единый GameReviewWorkspace; интерактивный graph и per-side summary; улучшение ошибки | Ожидает C |
 | E | Оригинальные звуки, mute/volume и dedup событий | Ожидает D |
@@ -38,9 +38,20 @@
 - События/status/auth/error для Lichess получают `auth_generation`; MainWindow применяет только текущую generation. Запуск stream/game stream атомарно связывает generation с session stop-event. Смена метода инвалидирует callback/streams/games; старый worker не удаляет новую OAuth запись и не меняет сессию с тем же username.
 - Добавлены Event-based тесты на PAT disconnect → OAuth, старый 403/429 после переключения, отложенный gameFull, идентичный username, replace-during-revoke и UI-фильтрацию queued status.
 - Целевой прогон Windows/Python 3.12 offscreen: `compileall src tests` PASS; `pytest tests/test_lichess_credentials.py tests/test_lichess.py tests/test_window.py -k 'disconnect or event_stream or stream_start or credential or oauth_revoke or previous_auth_generation or manual_connect_defers or manual_connect_restores or new_generation_can_restore or late_old_game_start'`: **34 passed, 194 deselected**.
+- Commit: `e0a397d0e2a219103fa46514e978a4fedba12d4d`, pushed to feature branch.
 - Ограничение: настоящие Lichess/OAuth не запускались; race доказан fake `Event` concurrency.
 
 ### A — исходный аудит
 
 - Подтверждены две параллельные поверхности завершённой партии (`_open_saved_game` и `StatisticsGameDialog`) и единый SQL источник `latest_analysis_detail`; BoardView минимум 440dp мешает пресету 400dp. MainWindow имеет 4K строк, поэтому новые theme/shell/review components будут вынесены в отдельные модули.
 - Нет миграции/новой базы в M4.6. Dashboard read-model должен брать ограниченные последние партии и существующие profile queries; открытие экрана остаётся read-only.
+
+### A/B — theme tokens и AppShell
+
+- Добавлен `ui/theme.py` с утверждёнными dark-v1 HEX, общей QSS-темой и вычислением WCAG contrast ratio; обычные primary/secondary тексты проверяются на app/sidebar/surface backgrounds.
+- Top navigation перенесена в sidebar: стабильные маршруты Главная/Играть/Мои партии/Аналитика/Задачи; Settings закреплены снизу. Sidebar 212dp на широкой главной и 60dp на доске/узком окне; ручной override живёт в пределах сессии. Header фиксирован на 64dp.
+- Маршруты используют существующие экраны/обработчики; игровой поток и Lichess state machine не переписаны. Qt-тесты изолируют хранилище.
+- Проверки Windows CPython 3.12.10, Qt offscreen: `compileall src tests` PASS; `pytest tests/test_theme.py tests/test_window.py` — **100 passed**; `git diff --check` PASS.
+- При первом полном прогоне выявлены две тестовые fake-service заглушки без generation-tagged signal из A0; заглушки приведены к актуальному контракту, повторный прогон прошёл.
+- Ручная визуальная проверка, 150–200% DPI, ширина 1024dp и живой Lichess — **НЕ ПРОВЕРЯЛИСЬ**.
+- Следующий этап: C — dashboard с ограниченным read-model, реальными источниками KPI и тремя последними карточками.

@@ -2,7 +2,7 @@
 
 Начата отдельная ветка `codex/m46-desktop-experience` от актуального main (`3387dd38643eaa4ea2fac17fa17ba08cfc43e47f`); draft PR M4.6 будет отдельным от слитого PR #30. Обязательный первый этап — закрытие race #40 по S0–S2; далее A–H по [ТЗ M4.6 v1.1](specs/M4_6_DESKTOP_EXPERIENCE.md). Актуальный поэтапный handoff: [M4_6_EXECUTION_LOG.md](handoffs/M4_6_EXECUTION_LOG.md). Реальные секреты/Lichess, личная SQLite/архив и Stockfish не используются в тестах.
 
-Локально закрыты пункты A0/S0–S2: disconnect теперь local-only, OAuth revoke выделен отдельно и credential-safe; session signals tagged generation и фильтруются в UI. Event-based targeted suite: **32 PASS**. Интеграционный тест с реальным Windows Credential Manager/Lichess **НЕ ЗАПУСКАЛСЯ**.
+Локально закрыты пункты A0/S0–S2: disconnect теперь local-only, OAuth revoke выделен отдельно и credential-safe; session signals tagged generation и фильтруются в UI. Целевой Event-based suite: **34 PASS**. Этапы A/B добавили утверждённые dark-v1 tokens и responsive sidebar/header; `tests/test_theme.py tests/test_window.py`: **100 PASS** на Python 3.12.10 / Qt offscreen. Ручная визуальная приёмка и реальный Windows Credential Manager/Lichess **НЕ ЗАПУСКАЛИСЬ**. Подробности, коммиты и ограничения — в [M4.6 execution log](handoffs/M4_6_EXECUTION_LOG.md).
 
 ## 02.11.2026 — M4.5/M4.5.1 принят пользователем и слит; следующий этап M4.6
 

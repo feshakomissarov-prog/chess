@@ -59,6 +59,7 @@ from .lichess.service import LichessService
 from .lichess.session import LichessGameSession, classify_lichess_opponent
 from .lichess.statistics import StatisticsService
 from .diagnostics import anonymized_report, log_event, logs_directory
+from .ui.theme import stylesheet as desktop_stylesheet
 
 
 def _puzzle_attempt_summary(attempts: list[dict]) -> str:
@@ -1915,27 +1916,27 @@ class MainWindow(QMainWindow):
 
     def _build_ui(self) -> None:
         root = QWidget()
-        outer = QVBoxLayout(root)
-        outer.setContentsMargins(18, 14, 18, 18)
+        shell = QHBoxLayout(root)
+        shell.setContentsMargins(0, 0, 0, 0)
+        shell.setSpacing(0)
+        self.sidebar = self._build_sidebar()
+        shell.addWidget(self.sidebar)
+        content = QWidget()
+        shell.addWidget(content, 1)
+        outer = QVBoxLayout(content)
+        outer.setContentsMargins(24, 0, 24, 20)
         outer.setSpacing(12)
         header = QHBoxLayout()
-        brand = QLabel("♟  Chess Coach")
-        brand.setStyleSheet("font-size: 22px; font-weight: 700;")
-        header.addWidget(brand)
-        header.addSpacing(24)
-        for label in ("Играть", "Мои партии", "Анализ", "Тренировки"):
-            button = QPushButton(label)
-            if label == "Играть":
-                button.clicked.connect(self.show_home)
-            elif label == "Мои партии":
-                button.clicked.connect(self.show_saved_games)
-            elif label == "Анализ":
-                button.clicked.connect(self.show_batch_analysis)
-            else:
-                button.clicked.connect(self.open_puzzle_history_local)
-            header.addWidget(button)
+        header.setContentsMargins(0, 0, 0, 0)
+        header_widget = QWidget()
+        header_widget.setFixedHeight(64)
+        header_widget.setLayout(header)
+        self.header_brand = QLabel("♟  Chess Coach")
+        self.header_brand.setStyleSheet("font-size: 20px; font-weight: 700;")
+        header.addWidget(self.header_brand)
         header.addStretch(1)
         self.connection = QLabel("●  Не подключено")
+        self.connection.setObjectName("connectionStatus")
         self.connection.setStyleSheet("color: #77766f;")
         header.addWidget(self.connection)
         self.connect_button = QPushButton("Подключить Lichess")
@@ -1950,7 +1951,7 @@ class MainWindow(QMainWindow):
         self.settings_button = QPushButton("Настройки")
         self.settings_button.clicked.connect(self.open_settings)
         header.addWidget(self.settings_button)
-        outer.addLayout(header)
+        outer.addWidget(header_widget)
 
         self.screen_title = QLabel("Главная")
         self.screen_title.setStyleSheet("font-size: 18px; font-weight: 700; padding: 2px 4px;")
@@ -2129,8 +2130,89 @@ class MainWindow(QMainWindow):
         self.result_page = self._build_result_page()
         self.screen_stack.addWidget(self.result_page)
         self.screen_stack.setCurrentWidget(self.home_page)
+        self.screen_stack.currentChanged.connect(self._shell_screen_changed)
         outer.addWidget(self.screen_stack, 1)
         self.setCentralWidget(root)
+        self.setStyleSheet(desktop_stylesheet())
+        self._set_sidebar_collapsed(self.width() < 1160)
+        self._set_active_route("home")
+
+    def _build_sidebar(self) -> QWidget:
+        sidebar = QFrame()
+        sidebar.setObjectName("appSidebar")
+        sidebar.setFixedWidth(212)
+        layout = QVBoxLayout(sidebar)
+        layout.setContentsMargins(12, 16, 12, 12)
+        layout.setSpacing(8)
+        self.sidebar_toggle = QPushButton("☰")
+        self.sidebar_toggle.setObjectName("navItem")
+        self.sidebar_toggle.setToolTip("Свернуть или развернуть меню")
+        self.sidebar_toggle.clicked.connect(lambda: self._set_sidebar_collapsed(
+            self.sidebar.width() > 60, explicit=True))
+        layout.addWidget(self.sidebar_toggle)
+        self.sidebar_brand = QLabel("♟  Chess Coach")
+        self.sidebar_brand.setStyleSheet("font-size: 18px; font-weight: 700; padding: 4px;")
+        layout.addWidget(self.sidebar_brand)
+        self._nav_buttons: dict[str, QPushButton] = {}
+        items = (("home", "⌂", "Главная", self.show_home),
+                 ("play", "♟", "Играть", self.start_local_game),
+                 ("games", "▤", "Мои партии", self.show_saved_games),
+                 ("analytics", "⌁", "Аналитика", self.show_statistics),
+                 ("puzzles", "♞", "Задачи", self.open_puzzle_history_local))
+        for key, icon, label, callback in items:
+            button = QPushButton(f"{icon}   {label}")
+            button.setObjectName("navItem")
+            button.setProperty("route", key)
+            button.setProperty("route_label", label)
+            button.setMinimumHeight(44)
+            button.clicked.connect(callback)
+            self._nav_buttons[key] = button
+            layout.addWidget(button)
+        layout.addStretch(1)
+        divider = QFrame()
+        divider.setFrameShape(QFrame.Shape.HLine)
+        layout.addWidget(divider)
+        self.sidebar_settings = QPushButton("⚙   Настройки")
+        self.sidebar_settings.setObjectName("navItem")
+        self.sidebar_settings.clicked.connect(self.open_settings)
+        layout.addWidget(self.sidebar_settings)
+        self._sidebar_explicit_override = False
+        return sidebar
+
+    def _set_sidebar_collapsed(self, collapsed: bool, *, explicit: bool = False) -> None:
+        if explicit:
+            self._sidebar_explicit_override = True
+        collapsed = bool(collapsed)
+        self.sidebar.setFixedWidth(60 if collapsed else 212)
+        self.sidebar_brand.setVisible(not collapsed)
+        self.sidebar_settings.setText("⚙" if collapsed else "⚙   Настройки")
+        icons = {"home": "⌂", "play": "♟", "games": "▤", "analytics": "⌁", "puzzles": "♞"}
+        for key, button in self._nav_buttons.items():
+            label = button.property("route_label")
+            button.setText(icons[key] if collapsed else f"{icons[key]}   {label}")
+            button.setToolTip(label if collapsed else "")
+        self.header_brand.setVisible(collapsed)
+
+    def _shell_screen_changed(self, _index: int) -> None:
+        if not hasattr(self, "sidebar"):
+            return
+        is_board = self.screen_stack.currentWidget() in (self.game_page, self.result_page)
+        route = "play" if is_board else "home"
+        self._set_active_route(route)
+        if not self._sidebar_explicit_override:
+            self._set_sidebar_collapsed(is_board or self.width() < 1160)
+
+    def _set_active_route(self, route: str) -> None:
+        for key, button in self._nav_buttons.items():
+            button.setProperty("active", key == route)
+            button.style().unpolish(button)
+            button.style().polish(button)
+
+    def resizeEvent(self, event) -> None:
+        super().resizeEvent(event)
+        if (hasattr(self, "sidebar") and not self._sidebar_explicit_override
+                and self.width() < 1160):
+            self._set_sidebar_collapsed(True)
 
     def _build_home_page(self) -> QWidget:
         page = QWidget()

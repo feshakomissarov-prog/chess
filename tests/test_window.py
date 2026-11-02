@@ -135,6 +135,37 @@ def test_main_window_smoke_and_game_controller_integration(qtbot, tmp_path) -> N
     assert window.controller.viewing_live_position
 
 
+def test_m46_shell_has_stable_routes_and_collapses_for_board_screens(qtbot, tmp_path):
+    window = MainWindow(QSettings(str(tmp_path / "m46-shell.ini"),
+                                  QSettings.Format.IniFormat), offline_mode=True)
+    qtbot.addWidget(window)
+    assert window.sidebar.width() == 212
+    assert set(window._nav_buttons) == {"home", "play", "games", "analytics", "puzzles"}
+    assert window._nav_buttons["home"].property("active") is True
+    window.start_local_game()
+    assert window.sidebar.width() == 60
+    assert window._nav_buttons["play"].property("active") is True
+
+    window._set_sidebar_collapsed(False, explicit=True)
+    assert window.sidebar.width() == 212
+    assert window.screen_stack.currentWidget() is window.game_page
+    assert window.sidebar.width() == 212  # explicit session override is preserved
+    window._set_sidebar_collapsed(True, explicit=True)
+    assert window.sidebar.width() == 60
+
+
+def test_m46_shell_uses_expanded_sidebar_at_wide_home_and_compact_board(qtbot, tmp_path):
+    window = MainWindow(QSettings(str(tmp_path / "m46-responsive.ini"),
+                                  QSettings.Format.IniFormat), offline_mode=True)
+    qtbot.addWidget(window)
+    window.resize(1280, 800)
+    window._sidebar_explicit_override = False
+    window._shell_screen_changed(window.screen_stack.currentIndex())
+    assert window.sidebar.width() == 212
+    window.start_local_game()
+    assert window.sidebar.width() == 60
+
+
 def test_evaluation_graph_click_emits_nearest_ply(qtbot):
     graph = EvaluationGraph([
         {"ply": 0, "white_cp": 0}, {"ply": 1, "white_cp": 30},
@@ -333,17 +364,16 @@ def test_offline_window_never_enables_or_starts_batch_engine(qtbot, tmp_path):
     assert window._batch_thread is None
 
 
-def test_header_analysis_and_training_navigation_open_real_screens(qtbot, tmp_path, monkeypatch):
+def test_sidebar_analytics_and_puzzles_navigation_open_real_screens(qtbot, tmp_path, monkeypatch):
     window = MainWindow(offline_mode=True)
     qtbot.addWidget(window)
     window.show()
     calls = []
-    monkeypatch.setattr(window, "show_batch_analysis", lambda: calls.append("analysis"))
+    monkeypatch.setattr(window, "show_statistics", lambda: calls.append("analytics"))
     monkeypatch.setattr(window, "open_puzzle_history_local", lambda: calls.append("training"))
-    buttons = {button.text(): button for button in window.findChildren(QPushButton)}
-    qtbot.mouseClick(buttons["Анализ"], Qt.MouseButton.LeftButton)
-    qtbot.mouseClick(buttons["Тренировки"], Qt.MouseButton.LeftButton)
-    assert calls == ["analysis", "training"]
+    qtbot.mouseClick(window._nav_buttons["analytics"], Qt.MouseButton.LeftButton)
+    qtbot.mouseClick(window._nav_buttons["puzzles"], Qt.MouseButton.LeftButton)
+    assert calls == ["analytics", "training"]
     window.close()
 
 
@@ -2307,6 +2337,7 @@ def test_429_restore_retry_button_waits_for_cooldown_and_uses_saved_token(qtbot,
         selected_token_store = oauth_token_store
         auth_method = "oauth"
         status_changed = Signal()
+        session_status_changed = Signal()
         client = type("Client", (), {"rate_limit_remaining": 0})()
         def __init__(self): self.restore_calls = 0
         def restore(self): self.restore_calls += 1
@@ -2727,6 +2758,7 @@ def test_late_safety_snapshot_cannot_authorize_old_account_session(
         selected_token_store = oauth_token_store
         auth_method = "oauth"
         status_changed = Signal()
+        session_status_changed = Signal()
         client = type("Client", (), {"rate_limit_remaining": 0})()
         def __init__(self): self.requests = []
         def check_active_games_for_analysis(self, request_id): self.requests.append(request_id)
