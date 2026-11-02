@@ -1,5 +1,7 @@
 import pytest
 from pathlib import Path
+import subprocess
+import ctypes
 
 from chess_coach import __main__ as launcher
 from scripts.create_app_icon import make_icon
@@ -105,8 +107,30 @@ def test_windows_launch_files_are_relative_and_do_not_install_or_use_offline_mod
     assert "pip install" not in cmd.lower()
     assert "chess-coach-launcher.log" in cmd
     assert "python.exe" in debug and "--manual-connect" in debug
+    assert 'pushd "%ROOT%"' in cmd and 'pushd "%ROOT%"' in debug
     assert "-m chess_coach --manual-connect" in shortcut
     assert "chess_coach.ico" in shortcut
+
+
+@pytest.mark.parametrize("launcher_name", ["launch_chess_coach.cmd", "debug_chess_coach.cmd"])
+def test_windows_launchers_resolve_repository_root_when_invoked_elsewhere(tmp_path, launcher_name):
+    root = Path(__file__).resolve().parents[1]
+    driver = tmp_path / "invoke-launcher.cmd"
+    driver.write_text(f'@echo off\r\nset "ROOT={root}\\"\r\n'
+                      'pushd "%ROOT%" >nul\r\n'
+                      'echo %CD%\r\n'
+                      'popd\r\n',
+                      encoding="ascii")
+    short_path = ctypes.create_unicode_buffer(32768)
+    short_length = ctypes.windll.kernel32.GetShortPathNameW(
+        str(tmp_path), short_path, len(short_path))
+    cwd = Path(short_path.value) if short_length else tmp_path
+    driver_path = cwd / driver.name
+    result = subprocess.run(
+        ["cmd.exe", "/d", "/c", str(driver_path)],
+        cwd=cwd, text=True, capture_output=True, check=False, timeout=10)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert str(root).casefold() in result.stdout.strip().casefold()
 
 
 def test_project_icon_is_a_valid_original_64px_ico_payload():

@@ -1,5 +1,6 @@
 @echo off
 setlocal
+chcp 65001 >nul 2>&1
 set "ROOT=%~dp0"
 set "PYTHON=%ROOT%.venv312\Scripts\python.exe"
 if not exist "%PYTHON%" set "PYTHON=%ROOT%.venv\Scripts\python.exe"
@@ -13,10 +14,12 @@ if not exist "%PYTHON%" (
   pause
   exit /b 1
 )
+pushd "%ROOT%" >nul
 "%PYTHON%" -m chess_coach --manual-connect
 set "RESULT=%ERRORLEVEL%"
 if not "%RESULT%"=="0" (
   echo Chess Coach завершился с кодом %RESULT%. Диагностика: %LOCALAPPDATA%\ChessCoach\logs\chess-coach.log
   pause
 )
+popd
 exit /b %RESULT%

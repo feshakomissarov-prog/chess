@@ -1,5 +1,6 @@
 @echo off
 setlocal
+chcp 65001 >nul 2>&1
 set "ROOT=%~dp0"
 set "PYTHONW=%ROOT%.venv312\Scripts\pythonw.exe"
 set "PYTHON=%ROOT%.venv312\Scripts\python.exe"
@@ -10,9 +11,11 @@ if not exist "%PYTHONW%" (
 if not exist "%PYTHONW%" goto :missing
 if not exist "%PYTHON%" goto :missing
 if not defined PYTHON goto :missing
+pushd "%ROOT%" >nul
 for /f "tokens=2" %%V in ('"%PYTHON%" --version 2^>^&1') do set "PYVER=%%V"
 if not defined PYVER (
   echo Chess Coach: не удалось определить версию Python.
+  popd
   call :write_log python_version_unavailable
   pause
   exit /b 1
@@ -22,6 +25,7 @@ for /f "tokens=1,2 delims=." %%A in ("%PYVER%") do (
   if %%A EQU 3 if %%B LSS 12 goto :unsupported
 )
 start "Chess Coach" "%PYTHONW%" -m chess_coach --manual-connect
+popd
 exit /b 0
 
 :missing
@@ -33,6 +37,7 @@ exit /b 0
 
 :unsupported
 echo Chess Coach требует Python 3.12 или новее. Найдено: %PYVER%
+popd
 call :write_log unsupported_python_version
 pause
 exit /b 1
