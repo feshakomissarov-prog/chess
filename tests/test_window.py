@@ -2462,14 +2462,15 @@ def test_m46_home_has_play_review_context_and_collapsed_secondary_actions(qtbot,
     assert window.home_local_button.text() == "Свободная доска"
     assert window.home_review_button.text() == "Выбрать партию"
     assert window.resume_review_button.text() == "Продолжить последний разбор"
-    assert window.home_more.isCheckable()
-    assert not window.home_more.isChecked()
+    assert window.home_more_toggle.isCheckable()
+    assert not window.home_more_toggle.isChecked()
     assert window.home_more_content.isHidden()
     assert {"games", "accuracy", "analysis", "errors"} == set(window.dashboard_metrics)
     assert window.dashboard_account.count() >= 1
     assert window.dashboard_clock.count() >= 1
-    window.home_more.setChecked(True)
+    window.home_more_toggle.setChecked(True)
     assert not window.home_more_content.isHidden()
+    assert window.home_batch_analysis_button.isEnabled()
     window.game_repository.shutdown()
 
 

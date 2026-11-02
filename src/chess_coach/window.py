@@ -2653,9 +2653,11 @@ class MainWindow(QMainWindow):
         self.home_puzzles_pilot_button.setEnabled(False)
         self.home_settings_button = QPushButton("Настройки")
         self.home_settings_button.clicked.connect(self.open_settings)
-        self.home_more = QGroupBox("Ещё")
-        self.home_more.setCheckable(True)
-        self.home_more.setChecked(False)
+        self.home_more_toggle = QPushButton("Ещё  ▸")
+        self.home_more_toggle.setCheckable(True)
+        self.home_more_toggle.setAccessibleName("Показать дополнительные действия")
+        layout.addWidget(self.home_more_toggle)
+        self.home_more = QGroupBox("Дополнительные действия")
         more_layout = QVBoxLayout(self.home_more)
         for button in (self.home_friend_button, self.home_username_button,
                        self.active_games_button, self.home_games_button,
@@ -2674,7 +2676,11 @@ class MainWindow(QMainWindow):
         self.home_more_content = more_layout_widget
         more_layout_widget.setVisible(False)
         more_layout.addWidget(more_layout_widget)
-        self.home_more.toggled.connect(more_layout_widget.setVisible)
+        self.home_more.setVisible(False)
+        self.home_more_toggle.toggled.connect(self.home_more.setVisible)
+        self.home_more_toggle.toggled.connect(more_layout_widget.setVisible)
+        self.home_more_toggle.toggled.connect(
+            lambda checked: self.home_more_toggle.setText("Ещё  ▾" if checked else "Ещё  ▸"))
         layout.addWidget(self.home_more)
         layout.addStretch(1)
         scroll = QScrollArea()
