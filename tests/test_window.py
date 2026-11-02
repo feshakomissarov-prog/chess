@@ -78,7 +78,7 @@ def test_saved_game_orientation_uses_selected_account_color(qtbot, tmp_path):
     assert window.online_session.color == chess.BLACK
     assert window.board._flipped
     assert window.screen_title.isHidden()
-    assert window.review_workspace.title.text() == "Owner — Opponent · 1–0"
+    assert window.review_workspace.title.text().startswith("Owner — Opponent · 1–0 ·")
     window.show_home()
     assert not window.screen_title.isHidden()
 
@@ -1438,7 +1438,7 @@ def test_position_evaluation_is_explicit_offline_only_and_stale_result_is_hidden
     qtbot.waitUntil(lambda: len(calls) == 2 and window._position_eval_thread is None,
                     timeout=3000)
     assert calls[-1] == final_fen  # debounce evaluates only the final position
-    assert window.moves.item_by_ply(4).text().endswith("+0.4 · белые")
+    assert window.moves.item_by_ply(4).text().endswith("+0.4")
 
     window._lichess_connected = True
     window.analyze_local_position()
@@ -2927,9 +2927,9 @@ def test_recent_game_card_does_not_show_zero_coverage_when_analysis_is_missing(
                                "opponent_coverage": "0/12", "source": "нет данных"}}
     window._render_dashboard_snapshot({"metrics": [], "recent_games": [game]})
     labels = [label.text() for label in window.home_page.findChildren(QLabel)]
-    card_detail = next(value for value in labels if "Оценки пока нет" in value)
+    card_detail = next(value for value in labels if "анализа пока нет" in value)
     assert "0/12" not in card_detail
-    assert "Источник —" in card_detail
+    assert "охват Я / соперник" in card_detail
     window.close()
 
 

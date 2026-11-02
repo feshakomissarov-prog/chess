@@ -121,6 +121,10 @@ def test_review_moves_graph_and_training_share_position_without_mutating_saved_p
         assert workspace.left_metrics.isHidden()
         assert workspace.review_inspector.isHidden()
         assert not workspace.training_prompt.isHidden()
+        assert not workspace.training_status.isHidden()
+        assert workspace.previous_error_button.isHidden()
+        assert workspace.next_error_button.isHidden()
+        assert workspace.analysis_button.isHidden()
         assert "Найди улучшение" in workspace.training_prompt.text()
         assert workspace.review_board._board.fen() == workspace.review["moves"][1].before_fen
         workspace._training_move_intent(chess.Move.from_uci("c7c5"))
@@ -342,9 +346,12 @@ def test_phase_summary_shows_both_sides_coverage_and_never_fabricates_accuracy(q
         qtbot.addWidget(workspace)
         workspace.load_game(game)
         assert workspace.side_metrics_summary.rowCount() == 7
+        assert [workspace.side_metrics_summary.horizontalHeaderItem(i).text()
+                for i in range(3)] == ["Показатель", "Я", "Соперник"]
         assert "Зевки" in _metrics_text(workspace.side_metrics_summary)
         assert "н/д" in _metrics_text(workspace.side_metrics_summary)
-        assert "Источник: Stockfish" in workspace.phase_summary.text()
+        assert "S · 4/4" in workspace.phase_summary.text()
+        assert "Stockfish" in workspace.phase_summary.toolTip()
         workspace.select_ply(2)
         assert workspace.phase_selector.currentData() == "opening"
         assert "Зевки" in _metrics_text(workspace.side_metrics_summary)
@@ -467,9 +474,17 @@ def test_review_layout_has_no_outer_scroll_and_renders_at_desktop_sizes(qtbot, t
             board_x = workspace.review_board.mapTo(workspace, QPoint(0, 0)).x()
             table_x = workspace.moves_list.mapTo(workspace, QPoint(0, 0)).x()
             assert abs(board_rect.width() - board_rect.height()) <= 1
+            assert workspace.board_column.width() - board_rect.width() <= 24
             assert table_x >= board_x + board_rect.width()
             assert table_x - (board_x + board_rect.width()) <= 24
             assert workspace.moves_list.table.horizontalScrollBar().maximum() == 0
+            metric_headers = workspace.side_metrics_summary.horizontalHeader()
+            for column in range(workspace.side_metrics_summary.columnCount()):
+                label = workspace.side_metrics_summary.horizontalHeaderItem(column).text()
+                assert workspace.side_metrics_summary.fontMetrics().horizontalAdvance(label) <= \
+                    metric_headers.sectionSize(column)
+            assert workspace.left_metrics.width() >= 360
+            assert workspace.selected_move_summary.maximumHeight() <= 62
             for row in range(workspace.moves_list.table.rowCount()):
                 for column in (1, 2):
                     item = workspace.moves_list.table.item(row, column)

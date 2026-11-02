@@ -2660,11 +2660,13 @@ class MainWindow(QMainWindow):
         layout = QVBoxLayout(page)
         title = QLabel("Ваша шахматная практика")
         title.setObjectName("pageTitle")
+        title.setVisible(False)
         layout.addWidget(title)
         self.home_status = QLabel(
             "Начните локальную партию или подключите Lichess. Сводка и последние партии — ниже.")
         self.home_status.setWordWrap(True)
         self.home_status.setObjectName("secondary")
+        self.home_status.setVisible(False)
         layout.addWidget(self.home_status)
         scope_row = QHBoxLayout()
         self.dashboard_account = QComboBox()
@@ -3246,7 +3248,7 @@ class MainWindow(QMainWindow):
             )
         else:
             self.resume_game_button.setVisible(False)
-            self.home_status.setText("Выберите режим игры. Анализ и тренировки появятся позже.")
+            self.home_status.setText("Откройте завершённую партию или начните новую игру.")
         self._update_home_game_actions()
         self.home_archive_button.setEnabled(self._online_actions_allowed())
         self.home_batch_analysis_button.setEnabled(True)

@@ -422,12 +422,15 @@ class GameReviewWorkspace(QWidget):
         board_layout.setContentsMargins(0, 0, 0, 0)
         board_layout.setSpacing(0)
         self.board_column = board_column
+        self.board_layout = board_layout
         self.training_prompt = QLabel()
         self.training_prompt.setObjectName("trainingPrompt")
         self.training_prompt.setWordWrap(True)
         self.training_prompt.setStyleSheet(
             "font-size: 14px; font-weight: 700; padding: 10px 12px; "
             "background: #24333c; border: 1px solid #3d5e68; border-radius: 8px;")
+        self.training_prompt.setMaximumHeight(70)
+        self.training_prompt.setAlignment(Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft)
         self.training_prompt.setVisible(False)
         board_layout.addWidget(self.training_prompt)
         self.white_name = QLabel("Белые")
@@ -451,8 +454,8 @@ class GameReviewWorkspace(QWidget):
         board_layout.addWidget(self.black_name)
 
         self.left_metrics = QWidget()
-        self.left_metrics.setMinimumWidth(190)
-        self.left_metrics.setMaximumWidth(290)
+        self.left_metrics.setMinimumWidth(360)
+        self.left_metrics.setMaximumWidth(370)
         metrics_column = QVBoxLayout(self.left_metrics)
         metrics_column.setContentsMargins(2, 2, 4, 2)
         metrics_column.setSpacing(5)
@@ -486,7 +489,8 @@ class GameReviewWorkspace(QWidget):
         self.left_metrics_label.setVisible(False)
         self.phase_summary = QLabel("Фазы: н/д")
         self.phase_summary.setWordWrap(True)
-        self.phase_summary.setMaximumHeight(38)
+        self.phase_summary.setMaximumHeight(22)
+        self.phase_summary.setWordWrap(False)
         self.phase_summary.setToolTip(
             "Официальная Lichess accuracy доступна только для партии целиком. "
             "Фазовая точность не выводится без отдельной доказанной метрики.")
@@ -496,12 +500,13 @@ class GameReviewWorkspace(QWidget):
 
         inspector = QWidget()
         self.review_inspector = inspector
-        inspector.setMinimumWidth(280)
+        inspector.setMinimumWidth(340)
         inspector_layout = QVBoxLayout(inspector)
         self.advantage_bar = AdvantageBar()
         inspector_layout.addWidget(self.advantage_bar, 0, Qt.AlignmentFlag.AlignLeft)
         self.selected_move_summary = QLabel("Выберите ход, чтобы увидеть его оценку.")
         self.selected_move_summary.setWordWrap(True)
+        self.selected_move_summary.setMaximumHeight(62)
         inspector_layout.addWidget(self.selected_move_summary)
         right_row = QHBoxLayout()
         self.advantage_label = QLabel("н/д")
@@ -552,7 +557,7 @@ class GameReviewWorkspace(QWidget):
         split.setStretchFactor(1, 48)
         split.setStretchFactor(2, 31)
         split.setHandleWidth(4)
-        split.setSizes([240, 560, 360])
+        split.setSizes([240, 360, 400])
         self.workspace_splitter = split
         self._review_splitter_initialized = False
         self._review_splitter_user_sized = False
@@ -602,6 +607,9 @@ class GameReviewWorkspace(QWidget):
         self.training_safety_button.clicked.connect(self._request_safety)
         self.training_status = QLabel()
         self.training_status.setWordWrap(True)
+        self.training_status.setObjectName("secondary")
+        self.training_status.setVisible(False)
+        root.addWidget(self.training_status)
         self.check_button = QPushButton("Проверить")
         self.check_button.clicked.connect(self.check_training_move)
         self.hint_button = QPushButton("Подсказка")
@@ -629,8 +637,6 @@ class GameReviewWorkspace(QWidget):
         self.repeat_button.setVisible(False)
         self.training_button.setVisible(True)
         self.training_safety_button.setVisible(False)
-        self.training_status.setObjectName("secondary")
-        actions.addWidget(self.training_status, 1)
         root.addLayout(actions)
         self.check_button.setEnabled(False)
         self.continue_button.setVisible(False)
@@ -643,9 +649,14 @@ class GameReviewWorkspace(QWidget):
             splitter.setOrientation(Qt.Orientation.Vertical if compact else Qt.Orientation.Horizontal)
             if not compact and not self._review_splitter_user_sized:
                 available = max(1, splitter.width() - 8)
-                splitter.setSizes([round(available * .21), round(available * .48),
-                                   round(available * .31)])
-            self.left_metrics.setMaximumWidth(16777215 if compact else 290)
+                left_width = min(370, max(360, round(available * .30)))
+                board_side = max(180, min(splitter.height() - 8,
+                                          available - left_width - 340 - 8))
+                board_width = board_side + 8
+                splitter.setSizes([left_width, board_width,
+                                   max(340, available - left_width - board_width)])
+            self.left_metrics.setMinimumWidth(0 if compact else 360)
+            self.left_metrics.setMaximumWidth(16777215 if compact else 370)
             self._fit_review_board()
 
     def _review_splitter_moved(self, *_args):
@@ -755,11 +766,12 @@ class GameReviewWorkspace(QWidget):
         self.left_metrics_label.setText("")
         self._render_side_metrics(color)
         self.phase_summary.setText(
-            (f"Источник: {source_short(source)[1]} · охват "
-             f"{self.review['coverage']['scored']}/{self.review['coverage']['total']} позиций"
+            (f"{source_short(source)[0]} · {self.review['coverage']['scored']}/"
+             f"{self.review['coverage']['total']} позиций"
              if self.evaluation_allowed else self._blocked_analysis_text()))
         self.phase_summary.setToolTip(
-            "Фазовые показатели рассчитаны по сохранённым меткам классификатора."
+            f"Источник: {source_short(source)[1]} · покрытие по оценённым позициям. "
+            "Фазовые показатели используют сохранённую классификацию."
             if self.evaluation_allowed else "Фазовая аналитика скрыта правилами Fair Play.")
         self.selected_move_summary.setToolTip(
             source_short(source)[1] if self.evaluation_allowed else "")
@@ -872,9 +884,10 @@ class GameReviewWorkspace(QWidget):
         game = self.review["game"]
         names = (game.get("white_player") or "Белые", game.get("black_player") or "Чёрные")
         table.setToolTip(f"{source_short(source)[1]} · {names[0]} / {names[1]}; точность — только Lichess.")
+        row_height = max(table.fontMetrics().height() + 3, 22)
         for row in range(table.rowCount()):
-            table.setRowHeight(row, max(table.fontMetrics().height() + 7, 26))
-        table.setMinimumHeight(min(245, table.horizontalHeader().height() + table.rowCount() * 26))
+            table.setRowHeight(row, row_height)
+        table.setMinimumHeight(min(225, table.horizontalHeader().height() + table.rowCount() * row_height))
         if scope != "all" and not moves:
             self.phase_summary.setText("Фаза не определена для выбранной партии.")
     def navigate_error(self, direction: int):
@@ -1071,13 +1084,20 @@ class GameReviewWorkspace(QWidget):
                         best_label = f"лучший ход по сохранённой оценке: {position.san(first)}"
                 except (ValueError, IndexError, chess.InvalidMoveError):
                     pass
+            delta_compact = delta_label.replace("Δ белых ", "ΔБ ").replace(
+                " · Δ ходившего ", " · Δх ").replace(" пешки", "")
+            best_compact = best_label.replace("лучший ход по сохранённой оценке: ", "Лучший: ")
+            if position_best_label:
+                best_compact += f" · из позиции: {position_best_label}"
             self.selected_move_summary.setText(
                 f"Ход {move.san} · {severity_label(move.severity)}\n"
-                f"До: {before_label} · после: {after_label} · {delta_label}\n{best_label}"
+                f"До {before_label} → после {after_label} · {delta_compact}\n"
+                f"{best_compact}")
+            self.selected_move_summary.setToolTip(
+                f"{source_short(analysis.get('source'))[1]} · глубина {move.depth or '—'}\n"
+                f"{delta_label}\n{best_label}"
                 + (f"\nЛучший ход из выбранной позиции: {position_best_label}"
                    if position_best_label else ""))
-            self.selected_move_summary.setToolTip(
-                f"{source_short(analysis.get('source'))[1]} · глубина {move.depth or '—'}")
             move_metric = next((item for item in analysis.get("move_metrics", [])
                                 if int(item.get("ply", -1)) == ply), {})
             self.move_detail.setText(
@@ -1237,6 +1257,9 @@ class GameReviewWorkspace(QWidget):
                        self.return_review_button):
             button.setVisible(True)
         self.training_button.setVisible(False)
+        for button in (self.previous_error_button, self.next_error_button,
+                       self.analysis_button, self.training_safety_button):
+            button.hide()
         self.tabs.hide()
         self.left_metrics.hide()
         self.review_inspector.hide()
@@ -1246,6 +1269,7 @@ class GameReviewWorkspace(QWidget):
         self.moves_list.hide()
         self.advanced_group.hide()
         self.training_prompt.show()
+        self.board_layout.setAlignment(self.review_board, Qt.AlignmentFlag.AlignHCenter)
         self.workspace_splitter.setSizes([0, 1, 0])
         self._fit_review_board()
         self.graph.hide()
@@ -1265,6 +1289,7 @@ class GameReviewWorkspace(QWidget):
         self.review_board.set_interaction_enabled(True)
         self.training_status.setText(
             f"Твой ход — найди продолжение лучше сыгранного · ошибка {self.training_index + 1} из {len(self.training_moves)}")
+        self.training_status.setVisible(True)
         side = "белых" if move.mover == "white" else "чёрных"
         self.training_prompt.setText(
             f"Найди улучшение после {move.san} · ход {side}\n"
@@ -1380,6 +1405,8 @@ class GameReviewWorkspace(QWidget):
         self.tabs.show()
         self.training_button.setVisible(True)
         self.training_prompt.hide()
+        self.board_layout.setAlignment(
+            self.review_board, Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
         self.left_metrics.show()
         self.review_inspector.show()
         self.selected_move_summary.show()
@@ -1388,12 +1415,20 @@ class GameReviewWorkspace(QWidget):
         self.moves_list.show()
         self.advanced_group.show()
         self._review_splitter_user_sized = False
-        self.workspace_splitter.setSizes([240, 560, 360])
+        self.workspace_splitter.setSizes([240, 360, 400])
         self._fit_review_board()
         self.training_button.setEnabled(self.training_allowed and bool(eligible_error_moves(self.review)))
+        eligible = eligible_error_moves(self.review) if self.evaluation_allowed else []
+        self.previous_error_button.setVisible(bool(eligible))
+        self.next_error_button.setVisible(bool(eligible))
+        game = self.review.get("game", {}) if self.review else {}
+        finished = game.get("status") not in {"created", "started", "started_soon", "playing"}
+        self.analysis_button.setVisible(bool(finished))
+        self.training_safety_button.setVisible(bool(finished and not self.training_allowed))
         for button in (self.check_button, self.hint_button, self.skip_button,
                        self.repeat_button,
                        self.continue_button, self.return_review_button):
             button.setVisible(False)
         self.training_status.setText(summary or "Упражнение завершено. Исходная партия и PGN не менялись.")
+        self.training_status.setVisible(bool(summary))
         self.select_ply(self.selected_ply)
