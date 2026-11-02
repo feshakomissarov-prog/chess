@@ -8,6 +8,13 @@
 - Local Windows CPython 3.12.10 / Qt offscreen: `tests/test_game_review.py` **22 passed**; focused P0/workspace integration set **8 passed**; `compileall -q src tests` and `git diff --check` — PASS.
 - All remaining V3 UI tasks are intentionally not started until this P0 checkpoint is committed and its tests pass. Full hosted CI will run at the final SHA.
 
+### 02.11.2026 — PR #41: Video pilot round 3, checkpoint 2 — V3-10 engine lifecycle
+
+- `CompletedGameAnalyzer.analyze()` now rejects a pre-cancelled request before engine factory invocation and checks again immediately before process creation. It still checks after factory returns and quits an engine created during a concurrent cancellation. Selective review has the same pre/post startup cancellation and a final Fair Play/stop check.
+- `GameRepository.save_analysis()` accepts a cancellation predicate checked after all rows are inserted but inside the SQLite transaction, immediately before commit. If cancellation is observed there, raising `InterruptedError` rolls back the newly created run and derived rows; previously valid runs remain untouched. This policy does not claim to reverse a commit if cancellation arrives after the final transaction check/commit boundary; Fair Play presentation is independently revoked and gated.
+- Added synthetic regressions for pre-cancel/no process factory and concurrent cancellation at a barrier inside a real temporary SQLite save transaction, verifying rollback and preservation of a prior analysis. Existing UCI analysis-stop/no-save test remains.
+- Local Windows CPython 3.12.10: focused cancellation set **4 passed**; compileall and diff check — PASS. No real engine or user database used.
+
 **Статус:** реализация начата 2026-11-02. Рабочая ветка `codex/m46-desktop-experience`, отдельный draft PR. Источник требований — [`M4_6_DESKTOP_EXPERIENCE.md`](../specs/M4_6_DESKTOP_EXPERIENCE.md) v1.1 и issue [#40](https://github.com/feshakomissarov-prog/chess/issues/40). Не выполнять merge самостоятельно.
 
 ## Базовая точка

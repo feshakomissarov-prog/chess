@@ -1628,7 +1628,8 @@ class GameRepository:
                       parameters: dict, assessments: list[dict],
                       classifications: list[dict], status: str = "complete",
                       error: str | None = None,
-                      alternatives: list[dict] | None = None) -> str:
+                      alternatives: list[dict] | None = None,
+                      cancel_check: Callable[[], bool] | None = None) -> str:
         from .move_metrics import build_move_facts
 
         self._wait_before_read(game_id)
@@ -1685,6 +1686,11 @@ class GameRepository:
                   row["severity"], row["severity_policy_version"], row["legacy_label"])
                  for row in metrics])
             self._insert_event_rows(db, events, run_id, game_id, line_revision)
+            # This final check runs inside the same SQLite transaction. If the
+            # worker was cancelled before the commit boundary, raising here
+            # rolls back only this new run and leaves prior valid runs intact.
+            if cancel_check is not None and cancel_check():
+                raise InterruptedError("Analysis cancelled before SQLite commit.")
         self.invalidate_statistics_cache()
         return run_id
 

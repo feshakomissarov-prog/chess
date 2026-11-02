@@ -1201,6 +1201,102 @@ def test_engine_startup_cancellation_quits_engine_without_analysis(tmp_path):
     repo.shutdown()
 
 
+def test_pre_cancelled_analysis_never_creates_engine_process(tmp_path):
+    from chess_coach.lichess.analysis import CompletedGameAnalyzer
+
+    repo = GameRepository(tmp_path / "analysis-pre-cancel.sqlite3")
+    repo.save_snapshot("pre-cancel", "startpos", "e2e4", "white", "Friend",
+                       False, "-", "finished", "white")
+    engine_path = tmp_path / "fake-engine.exe"
+    engine_path.write_bytes(b"synthetic executable")
+    stop = threading.Event()
+    stop.set()
+    factory_calls = []
+
+    def factory(path):
+        factory_calls.append(path)
+        pytest.fail("pre-cancelled analysis must not spawn an engine")
+
+    with pytest.raises(InterruptedError, match="до запуска движка"):
+        CompletedGameAnalyzer(repo, factory).analyze(
+            "pre-cancel", engine_path, stop_event=stop)
+    assert factory_calls == []
+    assert repo.list_analyses("pre-cancel") == []
+    repo.shutdown()
+
+
+def test_cancel_during_sqlite_analysis_transaction_rolls_back_only_new_run(tmp_path):
+    from chess_coach.lichess.analysis import AnalysisOptions, CompletedGameAnalyzer
+
+    repo = GameRepository(tmp_path / "analysis-cancel-transaction.sqlite3")
+    repo.save_snapshot("transaction-cancel", "startpos", "", "white", "Friend",
+                       False, "-", "finished", "white")
+    line = repo.current_line("transaction-cancel")
+    old_run = repo.save_analysis(
+        "transaction-cancel", line_revision=line["line_revision"],
+        line_hash=line["line_hash"], source="stockfish", engine_name="PreviousFish",
+        engine_version="previous-version", parameters={"previous": True},
+        assessments=[{"ply": 0, "white_cp": 15, "depth": 10, "nodes": 100}],
+        classifications=[])
+    engine_path = tmp_path / "fake-engine.exe"
+    engine_path.write_bytes(b"synthetic executable")
+    stop = threading.Event()
+    entered_commit_check, allow_commit_check = threading.Event(), threading.Event()
+    failure = []
+
+    class FakeResult:
+        def __init__(self):
+            self.info = {"score": chess.engine.PovScore(chess.engine.Cp(30), chess.WHITE),
+                         "depth": 12, "nodes": 1000, "pv": []}
+        def __enter__(self): return self
+        def __exit__(self, *_args): pass
+        def __iter__(self): return iter((self.info,))
+
+    class FakeEngine:
+        id = {"name": "CommitFish", "author": "synthetic"}
+        def configure(self, _options): pass
+        def analysis(self, _board, _limit): return FakeResult()
+        def quit(self): pass
+
+    def cancel_check_at_commit():
+        entered_commit_check.set()
+        if not allow_commit_check.wait(3):
+            raise AssertionError("test did not release the SQLite commit barrier")
+        return stop.is_set()
+
+    original_save = repo.save_analysis
+    def save_with_commit_barrier(*args, **kwargs):
+        kwargs["cancel_check"] = cancel_check_at_commit
+        return original_save(*args, **kwargs)
+    repo.save_analysis = save_with_commit_barrier
+
+    analyzer = CompletedGameAnalyzer(repo, lambda _path: FakeEngine())
+    def worker():
+        try:
+            analyzer.analyze("transaction-cancel", engine_path,
+                             AnalysisOptions(limit_kind="nodes", limit_value=30_000),
+                             stop_event=stop)
+        except Exception as exc:
+            failure.append(exc)
+
+    thread = threading.Thread(target=worker, name="synthetic-analysis-commit-test")
+    thread.start()
+    assert entered_commit_check.wait(3), "analysis never reached its in-transaction cancel check"
+    stop.set()
+    allow_commit_check.set()
+    thread.join(5)
+
+    assert not thread.is_alive()
+    assert len(failure) == 1 and isinstance(failure[0], InterruptedError)
+    runs = repo.list_analyses("transaction-cancel")
+    assert [run["run_id"] for run in runs] == [old_run]
+    with repo._connection() as db:
+        stored = db.execute("SELECT white_cp FROM position_assessments WHERE run_id=?",
+                            (old_run,)).fetchone()
+    assert stored["white_cp"] == 15
+    repo.shutdown()
+
+
 def test_completed_analysis_cancelled_after_last_position_is_not_persisted(tmp_path):
     from chess_coach.lichess.analysis import CompletedGameAnalyzer
 
