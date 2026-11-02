@@ -18,7 +18,7 @@
 | B | AppShell, header/sidebar, responsive route navigation | Выполнен локально; commit checkpoint ниже |
 | C | Главная, честные KPI, последние три реальные партии/empty states | Выполнен, checkpoint ниже |
 | D | Board workspace sizes/inspector; единый GameReviewWorkspace; интерактивный graph и per-side summary; улучшение ошибки | Выполнен локально, checkpoint ниже |
-| E | Оригинальные звуки, mute/volume и dedup событий | Ожидает D |
+| E | Оригинальные звуки, mute/volume и dedup событий | Реализован локально, ожидает checkpoint |
 | F | CMD/debug launcher, optional shortcut action, single instance, startup diagnostics | Ожидает E |
 | G | Workspace restore, loading/notifications/accessibility/responsive behavior | Ожидает F |
 | H | Регрессии, display/DPI acceptance, полный Windows CI на точном SHA, handoff | Ожидает A0–G |
@@ -75,3 +75,13 @@
 - Windows CPython 3.12.10 / Qt offscreen: `compileall src tests` PASS; `pytest tests/test_theme.py tests/test_dashboard.py tests/test_game_review.py tests/test_board_view.py tests/test_window.py`: **138 passed**; `git diff --check` PASS.
 - Stockfish real binary, online preflight, Lichess OAuth, 150–200% DPI, визуальная композиция на 1024×700 и пользовательская SQLite — **НЕ ПРОВЕРЯЛИСЬ**.
 - Следующий этап: E — оригинальные локальные chess sound cues, mute/volume and event dedup.
+
+### E — локальные звуки и защита от дублей
+
+- Добавлен `ui/sounds.py`: локальные короткие PCM WAV сигналы синтезируются приложением, сторонние звуковые наборы не используются и сеть не вызывается. `QSoundEffect` воспроизводит их неблокирующе; если multimedia/audio недоступны, приложение продолжает работать без звука.
+- Сигналы разделены на обычный ход, взятие, шах, рокировку, превращение, предход, окончание партии и уведомление. Приоритет завершения результата выше классификации хода. Настройки ходов/уведомлений/явного выбора исторического хода и громкость 0–100 сохраняются в QSettings; defaults: moves ON, notifications ON, history OFF, volume 45.
+- Live own move ждёт authoritative Lichess event, локальный ход подаёт сигнал после принятия контроллером; повторный ACK/stream ply и повторное gameFinish подавляются event deduplicator. Reject и фоновые события не озвучиваются. Premove placement имеет отдельный тихий click; исполнение звучит только после подтверждения. История звучит только при явном клике по записи и включённой настройке; навигация, колесо, refresh и rebuild остаются тихими.
+- Добавлены unit и Qt regressions на WAV формат, классификацию check/capture/castle/promotion/mate, move ACK/dedup, pending rejection, отдельный notification cue, mute/volume, premove, повторное завершение, explicit history и отсутствие звука при навигации.
+- Windows CPython 3.12.10 / Qt offscreen: `pytest tests/test_sounds.py tests/test_theme.py tests/test_dashboard.py tests/test_game_review.py tests/test_board_view.py tests/test_window.py`: **148 passed**; `compileall src/chess_coach tests` PASS; `git diff --check` PASS.
+- Реальное аудиоустройство/задержка <100ms и ручная проверка динамиков на Windows — **НЕ ПРОВЕРЯЛИСЬ**.
+- Следующий этап: F — прозрачные CMD/debug launchers, явное создание Desktop shortcut по действию владельца, single-instance и ограниченные startup logs.

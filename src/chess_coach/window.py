@@ -41,6 +41,7 @@ from PySide6.QtWidgets import (
     QScrollArea,
     QTabWidget,
     QSpinBox,
+    QSlider,
     QSplitter,
     QStackedWidget,
     QTextEdit,
@@ -63,6 +64,7 @@ from .diagnostics import anonymized_report, log_event, logs_directory
 from .ui.theme import stylesheet as desktop_stylesheet
 from .ui.dashboard import dashboard_snapshot, game_card_text
 from .ui.game_review import GameReviewWorkspace
+from .ui.sounds import ChessSoundPlayer
 
 
 def _puzzle_attempt_summary(attempts: list[dict]) -> str:
@@ -1020,6 +1022,27 @@ class SettingsDialog(QDialog):
         self.allow_premoves = QCheckBox("Разрешить предходы")
         self.allow_premoves.setChecked(settings.value("allow_premoves", True, type=bool))
         layout.addWidget(self.allow_premoves)
+        sounds_header = QLabel("Звуки приложения")
+        sounds_header.setStyleSheet("font-size: 15px; font-weight: 700;")
+        layout.addWidget(sounds_header)
+        self.sound_moves = QCheckBox("Звуки ходов")
+        self.sound_moves.setChecked(settings.value("sound_moves_enabled", True, type=bool))
+        layout.addWidget(self.sound_moves)
+        self.sound_notifications = QCheckBox("Звуки уведомлений")
+        self.sound_notifications.setChecked(settings.value("sound_notifications_enabled", True, type=bool))
+        layout.addWidget(self.sound_notifications)
+        self.sound_history = QCheckBox("Звуки при просмотре истории")
+        self.sound_history.setChecked(settings.value("sound_history_enabled", False, type=bool))
+        layout.addWidget(self.sound_history)
+        self.sound_volume = QSlider(Qt.Orientation.Horizontal)
+        self.sound_volume.setRange(0, 100)
+        self.sound_volume.setValue(settings.value("sound_volume", 45, type=int))
+        self.sound_volume.setAccessibleName("Громкость звуков")
+        self.sound_volume_label = QLabel(f"Громкость · {self.sound_volume.value()}%")
+        self.sound_volume.valueChanged.connect(
+            lambda value: self.sound_volume_label.setText(f"Громкость · {value}%"))
+        layout.addWidget(self.sound_volume_label)
+        layout.addWidget(self.sound_volume)
         layout.addWidget(QLabel("Stockfish для завершённых партий и свободной доски"))
         engine_row = QHBoxLayout()
         configured_path = settings.value("stockfish_path", "", type=str)
@@ -1137,6 +1160,10 @@ class SettingsDialog(QDialog):
         settings.setValue("show_last_move", self.last.isChecked())
         settings.setValue("annotations_enabled", self.annotations.isChecked())
         settings.setValue("allow_premoves", self.allow_premoves.isChecked())
+        settings.setValue("sound_moves_enabled", self.sound_moves.isChecked())
+        settings.setValue("sound_notifications_enabled", self.sound_notifications.isChecked())
+        settings.setValue("sound_history_enabled", self.sound_history.isChecked())
+        settings.setValue("sound_volume", self.sound_volume.value())
         settings.setValue("stockfish_path", self.engine_path.text().strip())
         settings.setValue("stockfish_verified_path", self._engine_verified_path)
         settings.setValue("analysis_preset", self.analysis_preset.currentData())
@@ -1736,6 +1763,12 @@ class MainWindow(QMainWindow):
         color = self.settings.value("player_color", chess.WHITE, type=int)
         self.controller = GameController(chess.Color(color))
         self.game_repository = GameRepository(data_root / "games.sqlite3", async_writes=asynchronous_storage)
+        self.sound_player = ChessSoundPlayer(
+            data_root / "sounds",
+            moves_enabled=self.settings.value("sound_moves_enabled", True, type=bool),
+            notifications_enabled=self.settings.value("sound_notifications_enabled", True, type=bool),
+            history_enabled=self.settings.value("sound_history_enabled", False, type=bool),
+            volume=self.settings.value("sound_volume", 45, type=int), parent=self)
         self._online_history_game_id: str | None = None
         self._online_history_moves: tuple[chess.Move, ...] = ()
         self._online_history_position: chess.Board | None = None
@@ -3622,6 +3655,7 @@ class MainWindow(QMainWindow):
             self.lichess.send_move(session.game_id, move.uci(), session.pending_request_id)
             self.refresh(f"Отправляем ход {move.uci()}; ожидаем подтверждения Lichess.")
             return
+        before_board = self.controller.board.copy(stack=True)
         previous = tuple(self.controller.board.move_stack)
         if self.controller.apply_move_intent(move):
             if self._position_eval_thread is not None:
@@ -3630,6 +3664,10 @@ class MainWindow(QMainWindow):
                 self.position_eval_label.setText("Позиция обновлена; ждём завершения ходов…")
                 self._position_eval_timer.start(300)
             if tuple(self.controller.board.move_stack) != previous:
+                accepted_move = self.controller.board.move_stack[-1]
+                self.sound_player.play_move(
+                    "local", len(self.controller.board.move_stack), before_board, accepted_move,
+                    game_finished=self.controller.board.is_game_over())
                 self.board.clear_annotations()
             self.refresh("Ход записан в локальную партию.")
         else:
@@ -3856,12 +3894,14 @@ class MainWindow(QMainWindow):
     def on_premove_intent(self, move: chess.Move) -> None:
         if self.online_session is not None:
             if self.online_session.queue_premove(move):
+                self.sound_player.play_premove(uuid.uuid4().hex)
                 self.board.set_premove(move, self.online_session.color)
                 self.refresh("Предход записан и будет проверен после хода соперника.")
             else:
                 self.refresh("Предход не принят в текущей позиции.")
             return
         if self.controller.queue_premove(move):
+            self.sound_player.play_premove(uuid.uuid4().hex)
             self.refresh("Предход поставлен. Он будет проверен после хода соперника.")
         else:
             self.refresh("Предход не принят в текущем состоянии.")
@@ -3891,20 +3931,40 @@ class MainWindow(QMainWindow):
         if not raw:
             return
         move = chess.Move.from_uci(raw)
+        before_board = self.controller.board.copy(stack=True)
         previous = tuple(self.controller.board.move_stack)
         _, message = self.controller.apply_test_opponent_move(move)
+        added = self.controller.board.move_stack[len(previous):]
+        sound_board = before_board
+        for ply, confirmed in enumerate(added, start=len(previous) + 1):
+            self.sound_player.play_move(
+                "local", ply, sound_board, confirmed,
+                game_finished=self.controller.board.is_game_over() and ply == len(self.controller.board.move_stack))
+            sound_board.push(confirmed)
         if tuple(self.controller.board.move_stack) != previous:
             self.board.clear_annotations()
         self.refresh(message)
 
     def on_move_selected(self, item: QListWidgetItem) -> None:
+        ply = int(item.data(Qt.ItemDataRole.UserRole))
         if self.online_session is not None:
-            ply = int(item.data(Qt.ItemDataRole.UserRole))
+            self._play_history_sound(self.online_session.game_id, self.online_session.board, ply)
             self.online_view_ply = None if ply >= len(self.online_session.board.move_stack) else ply
             self.refresh()
             return
-        self.controller.go_to(int(item.data(Qt.ItemDataRole.UserRole)))
+        self._play_history_sound("__local__", self.controller.board, ply)
+        self.controller.go_to(ply)
         self.refresh()
+
+    def _play_history_sound(self, game_id: str, board: chess.Board, ply: int) -> None:
+        """Play history audio only for an explicit move-row click, never scrolling."""
+        if not 1 <= ply <= len(board.move_stack):
+            return
+        before = board.root()
+        for move in board.move_stack[:ply - 1]:
+            before.push(move)
+        move = board.move_stack[ply - 1]
+        self.sound_player.play_move(game_id, ply, before, move, source="history")
 
     def navigate_to(self, ply: int) -> None:
         if self.online_session is not None:
@@ -3987,6 +4047,11 @@ class MainWindow(QMainWindow):
         dialog.finished.connect(lambda _result: self._cancel_stockfish_install())
         if dialog.exec() == QDialog.DialogCode.Accepted:
             dialog.save(self.settings)
+            self.sound_player.configure(
+                moves_enabled=self.settings.value("sound_moves_enabled", True, type=bool),
+                notifications_enabled=self.settings.value("sound_notifications_enabled", True, type=bool),
+                history_enabled=self.settings.value("sound_history_enabled", False, type=bool),
+                volume=self.settings.value("sound_volume", 45, type=int))
             new_color = chess.Color(int(self.settings.value("player_color", chess.WHITE)))
             self.controller.player_color = new_color
             if not self.settings.value("allow_premoves", True, type=bool):
@@ -4693,6 +4758,7 @@ class MainWindow(QMainWindow):
                 game_status = game.get("status", {})
                 status = game_status.get("name", "unknownFinish") if isinstance(game_status, dict) else str(game_status)
                 session = self.online_sessions[game_id]
+                was_active = session.status in {"started", "playing", "created"}
                 error = None
                 if session.status in {"started", "playing", "created"}:
                     try:
@@ -4704,6 +4770,8 @@ class MainWindow(QMainWindow):
                 if session.final_sync_pending:
                     self.lichess.mark_game_finished(game_id)
                     self.lichess.start_game(game_id)
+                if was_active and game_id == self._selected_live_game_id:
+                    self.sound_player.play_game_end(game_id, len(session.board.move_stack))
                 self._refresh_batch_readiness()
                 if (game_id == self._selected_live_game_id
                         and self.online_session is session
@@ -4716,6 +4784,8 @@ class MainWindow(QMainWindow):
                             f"Партия завершена, локальная запись не подтверждена: {error}"
                         )
         elif kind == "challenge":
+            challenge_id = str(event.get("challenge", {}).get("id") or uuid.uuid4().hex)
+            self.sound_player.play_notification(challenge_id)
             if self._screen_mode == "home":
                 self.home_status.setText("Получено или обновлено приглашение Lichess.")
 
@@ -4749,6 +4819,8 @@ class MainWindow(QMainWindow):
                 self.refresh("Соперник временно отключился; ждём переподключения.")
             return
         previous_moves = tuple(session.moves.split())
+        previous_board = session.board.copy(stack=True)
+        previous_status = session.status
         previous_view_ply = self.online_view_ply if (
             game_id == self._selected_live_game_id and self.online_session is session
         ) else None
@@ -4781,6 +4853,15 @@ class MainWindow(QMainWindow):
             # Only the selected game's authoritative line can clear current
             # marks. A duplicate/clock event or background game must not.
             self.board.clear_annotations()
+            if (len(current_moves) == len(previous_moves) + 1
+                    and current_moves[:-1] == previous_moves):
+                confirmed = chess.Move.from_uci(current_moves[-1])
+                self.sound_player.play_move(
+                    game_id, len(current_moves), previous_board, confirmed,
+                    game_finished=session.status not in {"started", "playing", "created"})
+            elif (session.status not in {"started", "playing", "created"}
+                  and previous_status in {"started", "playing", "created"}):
+                self.sound_player.play_game_end(game_id, len(current_moves))
         if is_selected_live:
             if previous_view_ply is not None:
                 self.online_view_ply = min(previous_view_ply, len(session.board.move_stack))

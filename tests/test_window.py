@@ -236,6 +236,60 @@ def test_review_training_safety_rejects_stale_response_after_auth_generation_cha
     assert "устарел" in window.review_workspace.training_block_reason
 
 
+def test_online_move_sound_waits_for_authoritative_ack_and_deduplicates_replays(qtbot, tmp_path):
+    window = MainWindow(QSettings(str(tmp_path / "sound-ack.ini"),
+                                  QSettings.Format.IniFormat), offline_mode=True)
+    qtbot.addWidget(window)
+    class FakeLichess:
+        def __init__(self): self.sent = []
+        def send_move(self, *args): self.sent.append(args)
+        def close(self, timeout=1.0): return True
+    class FakeSound:
+        def __init__(self): self.moves = []
+        def play_move(self, *args, **kwargs): self.moves.append((args, kwargs))
+        def play_game_end(self, *args): return False
+    window.lichess = FakeLichess()
+    window.sound_player = FakeSound()
+    session = LichessGameSession("sound-game", window.game_repository)
+    session.color = chess.WHITE
+    session.apply_event({"type": "gameFull", "initialFen": "startpos",
+                         "state": {"moves": "", "status": "started"}})
+    select_online(window, session)
+    move = chess.Move.from_uci("e2e4")
+    window.on_move_intent(move)
+    assert len(window.lichess.sent) == 1
+    assert window.sound_player.moves == []  # pending move is not yet confirmed
+    window._lichess_move_failed(session.game_id, "e2e4", session.pending_request_id, 400)
+    assert window.sound_player.moves == []
+
+    window.on_move_intent(move)
+    window._lichess_game_event(session.game_id, {
+        "type": "gameState", "moves": "e2e4", "status": "started"})
+    assert len(window.sound_player.moves) == 1
+    window._lichess_game_event(session.game_id, {
+        "type": "gameState", "moves": "e2e4", "status": "started"})
+    assert len(window.sound_player.moves) == 1
+
+
+def test_browsing_move_history_does_not_emit_sounds(qtbot, tmp_path):
+    window = MainWindow(QSettings(str(tmp_path / "history-sound.ini"),
+                                  QSettings.Format.IniFormat), offline_mode=True)
+    qtbot.addWidget(window)
+    class FakeSound:
+        def __init__(self): self.moves = []
+        def play_move(self, *args, **kwargs): self.moves.append((args, kwargs))
+    window.sound_player = FakeSound()
+    window._screen_mode = "local"
+    window._local_board_mode = "free"
+    window.controller.board.push_uci("e2e4")
+    window.controller.board.push_uci("e7e5")
+    window.refresh()
+    window.navigate_to(1)
+    window.navigate_by(1)
+    window.navigate_to(0)
+    assert window.sound_player.moves == []
+
+
 def test_evaluation_graph_click_emits_nearest_ply(qtbot):
     graph = EvaluationGraph([
         {"ply": 0, "white_cp": 0}, {"ply": 1, "white_cp": 30},
@@ -1521,6 +1575,10 @@ def test_visual_preferences_persist_in_qsettings(tmp_path) -> None:
     dialog.legal.setChecked(False)
     dialog.last.setChecked(False)
     dialog.annotations.setChecked(True)
+    dialog.sound_moves.setChecked(False)
+    dialog.sound_notifications.setChecked(False)
+    dialog.sound_history.setChecked(True)
+    dialog.sound_volume.setValue(73)
     dialog.save(settings)
 
     loaded = QSettings(path, QSettings.Format.IniFormat)
@@ -1529,6 +1587,10 @@ def test_visual_preferences_persist_in_qsettings(tmp_path) -> None:
     assert loaded.value("show_legal_moves", type=bool) is False
     assert loaded.value("show_last_move", type=bool) is False
     assert loaded.value("annotations_enabled", type=bool) is True
+    assert loaded.value("sound_moves_enabled", type=bool) is False
+    assert loaded.value("sound_notifications_enabled", type=bool) is False
+    assert loaded.value("sound_history_enabled", type=bool) is True
+    assert loaded.value("sound_volume", type=int) == 73
 
 
 def test_stockfish_settings_persist_without_launching_engine(tmp_path) -> None:
