@@ -27,10 +27,15 @@ class ReviewGraph(QWidget):
         self.safety_allowed = True
         self.safety_block_reason = ""
         self.current_ply = 0
+        self.full_ply_count = 0
+        self.analysis_source = ""
+        self.analysis_status = ""
+        self.coverage_text = ""
         self.setMinimumHeight(170)
         self.setMaximumHeight(220)
         self.setMinimumWidth(320)
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+        self.setMouseTracking(True)
         self.setAccessibleName("Интерактивный график оценки по ходам")
 
     def _values(self):
@@ -57,7 +62,8 @@ class ReviewGraph(QWidget):
         painter.setPen(QPen(QColor(TOKENS.border), 1))
         painter.drawRect(rect)
         values = self._values()
-        max_ply = max(1, max((ply for ply, _score, _mate in values), default=0))
+        max_ply = max(1, self.full_ply_count,
+                      max((ply for ply, _score, _mate in values), default=0))
         painter.setPen(QPen(QColor(TOKENS.secondary), 1))
         painter.drawLine(rect.left(), rect.center().y(), rect.right(), rect.center().y())
         if not values:
@@ -72,7 +78,8 @@ class ReviewGraph(QWidget):
                 coords.append((x, y, ply, mate))
             painter.setPen(QPen(QColor(TOKENS.accent), 2))
             for first, second in zip(coords, coords[1:]):
-                painter.drawLine(first[0], first[1], second[0], second[1])
+                if second[2] - first[2] == 1:
+                    painter.drawLine(first[0], first[1], second[0], second[1])
             for x, y, ply, mate in coords:
                 marker = self.markers.get(ply, {})
                 severity = marker.get("severity")
@@ -116,19 +123,46 @@ class ReviewGraph(QWidget):
 
     def mousePressEvent(self, event):
         values = self._values()
+        rect = self.rect().adjusted(42, 12, -16, -30)
+        max_ply = max(1, self.full_ply_count,
+                      max((ply for ply, _score, _mate in values), default=0))
+        requested = max(0, min(max_ply, round(
+            (event.position().x() - rect.left()) * max_ply / max(1, rect.width()))))
+        if values:
+            requested = min((ply for ply, _score, _mate in values),
+                            key=lambda ply: (abs(ply - requested), ply))
+        self.selected_ply.emit(requested)
+
+    def mouseMoveEvent(self, event):
+        values = self._values()
         if not values:
+            self.setToolTip(self.safety_block_reason if not self.safety_allowed
+                            else "Нет сохранённых оценок")
             return
         rect = self.rect().adjusted(42, 12, -16, -30)
-        max_ply = max(1, max(ply for ply, _score, _mate in values))
-        ply = round((event.position().x() - rect.left()) * max_ply / max(1, rect.width()))
-        self.selected_ply.emit(max(0, min(max_ply, ply)))
+        max_ply = max(1, self.full_ply_count,
+                      max(ply for ply, _score, _mate in values))
+        requested = round((event.position().x() - rect.left()) * max_ply /
+                          max(1, rect.width()))
+        ply, score, mate = min(values, key=lambda row: (abs(row[0] - requested), row[0]))
+        assessment = next((row for row in self.assessments if int(row["ply"]) == ply), {})
+        marker = self.markers.get(ply, {})
+        coverage = self.coverage_text or f"{len(values)}/{self.full_ply_count + 1} сохранённых позиций"
+        value = f"Мат {mate}" if mate is not None else f"{score / 100:+.2f}"
+        self.setToolTip(
+            f"Ближайшая оценённая позиция: ply {ply} (запрошено {requested})\n"
+            f"Оценка: {value} · источник {assessment.get('source') or self.analysis_source or 'не указан'}\n"
+            f"Статус: {assessment.get('status') or self.analysis_status or 'сохранённая оценка'} · "
+            f"классификация: {marker.get('severity') or 'неизвестно'}\n"
+            f"Охват: {coverage}; отсутствующие позиции не интерполируются")
 
     def keyPressEvent(self, event):
         values = self._values()
         if not values:
             super().keyPressEvent(event)
             return
-        max_ply = max(ply for ply, _score, _mate in values)
+        max_ply = max(self.full_ply_count,
+                      max((ply for ply, _score, _mate in values), default=0))
         if event.key() == Qt.Key.Key_Left:
             self.selected_ply.emit(max(0, self.current_ply - 1))
         elif event.key() == Qt.Key.Key_Right:
@@ -229,9 +263,17 @@ class GameReviewWorkspace(QWidget):
         self.move_detail = QLabel("Выберите позицию на графике или ход в списке.")
         self.move_detail.setWordWrap(True)
         self.metrics_layout.addWidget(self.move_detail)
-        self.tabs.addTab(facts, "Показатели")
+        self.tabs.addTab(facts, "Разбор")
+        self.event_list = QListWidget()
+        events_page = QWidget()
+        events_layout = QVBoxLayout(events_page)
+        events_layout.addWidget(self.event_list, 1)
+        self.event_detail = QLabel("Выберите позицию, чтобы увидеть сохранённые события и PV.")
+        self.event_detail.setWordWrap(True)
+        events_layout.addWidget(self.event_detail)
+        self.tabs.addTab(events_page, "События")
         self.notes_list = QListWidget()
-        self.tabs.addTab(self.notes_list, "Заметки")
+        self.notes_tab_index = self.tabs.addTab(self.notes_list, "Заметки")
         inspector_layout.addWidget(self.tabs, 1)
         split.addWidget(inspector)
         split.setStretchFactor(0, 6)
@@ -252,6 +294,10 @@ class GameReviewWorkspace(QWidget):
         self.training_button = QPushButton("Разобрать мои ошибки")
         self.training_button.setObjectName("primaryAction")
         self.training_button.clicked.connect(self.start_training)
+        self.previous_error_button = QPushButton("Предыдущая ошибка")
+        self.previous_error_button.clicked.connect(lambda: self.navigate_error(-1))
+        self.next_error_button = QPushButton("Следующая ошибка")
+        self.next_error_button.clicked.connect(lambda: self.navigate_error(1))
         self.training_safety_button = QPushButton("Проверить безопасность")
         self.training_safety_button.clicked.connect(self._request_safety)
         self.training_status = QLabel()
@@ -268,7 +314,8 @@ class GameReviewWorkspace(QWidget):
         self.repeat_button.clicked.connect(self._repeat_training_error)
         self.return_review_button = QPushButton("Вернуться к разбору")
         self.return_review_button.clicked.connect(self.stop_training)
-        for button in (self.training_button, self.training_safety_button, self.check_button, self.hint_button,
+        for button in (self.previous_error_button, self.next_error_button,
+                       self.training_button, self.training_safety_button, self.check_button, self.hint_button,
                        self.skip_button, self.continue_button, self.return_review_button):
             actions.addWidget(button)
             button.setVisible(False)
@@ -354,13 +401,22 @@ class GameReviewWorkspace(QWidget):
         self.notes_list.clear()
         for note in self.review["notes"]:
             self.notes_list.addItem(f"ply {note.get('ply', 0)} · {note.get('body', '')}")
+        self.tabs.setTabVisible(self.notes_tab_index, bool(self.review["notes"]))
         self.graph.assessments = analysis.get("assessments", []) if self.evaluation_allowed else []
+        self.graph.full_ply_count = len(self.review["moves"])
+        self.graph.analysis_source = str(analysis.get("source") or "")
+        self.graph.analysis_status = str(analysis.get("status") or "")
+        coverage = self.review.get("coverage", {})
+        self.graph.coverage_text = f"{coverage.get('scored', 0)}/{coverage.get('total', 0)} позиций"
         self.graph.markers = ({move.ply: {"severity": move.severity, "mover": move.mover}
                                for move in self.review["moves"]}
                               if self.evaluation_allowed else {})
         self.graph.set_safety_gate(self.evaluation_allowed, self.training_block_reason)
         self.graph.select_ply(0)
+        self._refresh_selected_ply_events()
         eligible = eligible_error_moves(self.review)
+        self.previous_error_button.setVisible(self.evaluation_allowed and bool(eligible))
+        self.next_error_button.setVisible(self.evaluation_allowed and bool(eligible))
         self.training_button.setText(
             f"Разобрать мои ошибки · {len(eligible)}" if self.evaluation_allowed
             else "Разобрать мои ошибки")
@@ -380,6 +436,21 @@ class GameReviewWorkspace(QWidget):
         self.training_safety_button.setToolTip(reason or "Проверить текущие активные партии Lichess.")
         self.training_status.setText("" if allowed else reason or (
             "Нет ошибок, для которых сохранённые оценки позволяют проверить улучшение."))
+
+    def navigate_error(self, direction: int):
+        if not self.evaluation_allowed or not self.review or self.training_mode:
+            return
+        errors = eligible_error_moves(self.review)
+        if not errors:
+            return
+        plies = [int(move.ply) for move in errors]
+        if direction < 0:
+            candidates = [ply for ply in plies if ply < self.selected_ply]
+            target = candidates[-1] if candidates else plies[-1]
+        else:
+            candidates = [ply for ply in plies if ply > self.selected_ply]
+            target = candidates[0] if candidates else plies[0]
+        self.select_ply(target)
 
     def _request_safety(self):
         if self.review:
@@ -413,6 +484,8 @@ class GameReviewWorkspace(QWidget):
             self.graph.set_safety_gate(False, reason)
             self.graph.assessments = []
             self.graph.markers = {}
+            self.event_list.clear()
+            self.event_detail.setText(reason)
             self.metrics_label.setText(reason)
             self.move_detail.setText(reason)
         self.training_button.setEnabled(False)
@@ -453,7 +526,38 @@ class GameReviewWorkspace(QWidget):
                 f"источник {move.source} · depth {move.depth or 'н/д'} / nodes {move.nodes or 'н/д'}")
         else:
             self.move_detail.setText("Начальная позиция партии.")
+        self._refresh_selected_ply_events()
         self.position_selected.emit(str(self.review["game"]["game_id"]), ply)
+
+    def _refresh_selected_ply_events(self):
+        self.event_list.clear()
+        if not self.review or not self.evaluation_allowed:
+            self.event_detail.setText(self.training_block_reason or
+                                      "Оценки и события скрыты до проверки безопасности.")
+            return
+        analysis = self.review.get("analysis") or {}
+        events = [row for row in analysis.get("events", [])
+                  if int(row.get("ply", -1)) == self.selected_ply]
+        alternatives = [row for row in analysis.get("alternatives", [])
+                        if int(row.get("ply", -1)) == self.selected_ply]
+        for row in events:
+            self.event_list.addItem(
+                f"{row.get('event_type', 'Событие')} · {row.get('confidence_state', 'unknown')} · "
+                f"{row.get('source', 'источник не указан')}")
+        assessment = next((row for row in analysis.get("assessments", [])
+                           if int(row.get("ply", -1)) == self.selected_ply), None)
+        pv = (assessment or {}).get("pv") or (assessment or {}).get("pv_uci") or ""
+        pv_text = " ".join(pv) if isinstance(pv, (list, tuple)) else str(pv)
+        details = [f"ply {self.selected_ply}"]
+        if pv_text:
+            details.append(f"Сохранённый PV: {pv_text}")
+        if alternatives:
+            details.append("Сохранённые альтернативы: " + "; ".join(
+                str(row.get("uci") or row.get("san") or row.get("move") or "вариант")
+                for row in alternatives))
+        if not events and not alternatives and not pv_text:
+            details.append("Для этой позиции сохранённых событий или PV нет.")
+        self.event_detail.setText("\n".join(details))
 
     def start_training(self):
         if not self.training_allowed or not self.evaluation_allowed or not self.review:

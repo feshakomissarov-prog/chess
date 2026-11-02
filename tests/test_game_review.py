@@ -154,3 +154,55 @@ def test_review_graph_supports_keyboard_position_navigation(qtbot):
     qtbot.keyClick(graph, Qt.Key.Key_End)
     qtbot.keyClick(graph, Qt.Key.Key_Left)
     assert selected == [3, 2]
+
+
+def test_review_graph_uses_full_game_axis_and_never_interpolates_sparse_gaps(qtbot):
+    from PySide6.QtCore import Qt
+    from PySide6.QtTest import QTest
+
+    graph = ReviewGraph([
+        {"ply": 0, "white_cp": 0},
+        {"ply": 4, "white_cp": 60},
+        {"ply": 37, "white_cp": -120, "mate_white": -3},
+        {"ply": 70, "white_cp": 15},
+    ], [])
+    graph.full_ply_count = 80
+    qtbot.addWidget(graph)
+    graph.resize(700, 190)
+    graph.show()
+    graph.setFocus()
+    selected = []
+    graph.selected_ply.connect(selected.append)
+    qtbot.keyClick(graph, Qt.Key.Key_End)
+    assert selected == [80]
+
+    # A click near a missing ply selects an actual stored assessment, never a
+    # fabricated unscored ply. Right-side axis remains the actual game length.
+    rect = graph.rect().adjusted(42, 12, -16, -30)
+    target_x = rect.left() + round(rect.width() * 55 / 80)
+    QTest.mouseClick(graph, Qt.MouseButton.LeftButton, pos=__import__(
+        "PySide6.QtCore", fromlist=["QPoint"]).QPoint(target_x, rect.center().y()))
+    assert selected[-1] in {37, 70}
+
+    QTest.mouseMove(graph, __import__("PySide6.QtCore", fromlist=["QPoint"]).QPoint(
+        target_x, rect.center().y()))
+    assert "Охват:" in graph.toolTip()
+    assert "не интерполируются" in graph.toolTip()
+
+
+def test_review_events_and_saved_pv_follow_selection_and_fair_play_gate(qtbot, tmp_path):
+    repo, game = _review_repo(tmp_path / "review-events.sqlite3")
+    try:
+        workspace = GameReviewWorkspace(repo, training_allowed=True)
+        qtbot.addWidget(workspace)
+        workspace.load_game(game)
+        assert [workspace.tabs.tabText(i) for i in range(workspace.tabs.count())] == [
+            "Ходы", "Разбор", "События", "Заметки"]
+        workspace.select_ply(1)
+        assert "Сохранённый PV: c7c5 g1f3" in workspace.event_detail.text()
+        workspace.set_safety_pending("Активная человеческая партия")
+        assert workspace.event_list.count() == 0
+        assert "Активная человеческая партия" in workspace.event_detail.text()
+        assert "Сохранённый PV" not in workspace.event_detail.text()
+    finally:
+        repo.shutdown()
