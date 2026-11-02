@@ -21,7 +21,7 @@
 | E | Оригинальные звуки, mute/volume и dedup событий | Выполнен, commit `61212bd` |
 | F | CMD/debug launcher, optional shortcut action, single instance, startup diagnostics | Выполнен, commit `601df64d71242a1bd56818c9466a0b8bb0270a30` |
 | G | Workspace restore, loading/notifications/accessibility/responsive behavior | Выполнен, commit `b3b469ed7bf3350dfa68ef58b2e362c85b4b87c8` |
-| H | Регрессии, display/DPI acceptance, полный Windows CI на точном SHA, handoff | Локальные проверки задокументированы; hosted Windows CI ожидается |
+| H | Регрессии, display/DPI acceptance, полный Windows CI на точном SHA, handoff | Локальные проверки PASS; hosted Windows CI run #41370237285 PASS на code SHA `45f52dbe73dc5ac0a23e851186a2ce28a79fbbf5`; exact final docs SHA проверяется |
 
 ## Решения
 
@@ -103,7 +103,7 @@
 - Текущая проверка `git diff --check origin/main` — PASS. Удалены только лишние пустые строки EOF в двух тестах, чтобы у PR diff был чистый whitespace check.
 - Полная проверка на физических DPI/нескольких мониторах, клавиатура/скринридер с пользователем, звук через реальное устройство, ручной запуск `.cmd` и создание ярлыка с пользовательским профилем — **НЕ ПРОВЕРЯЛИСЬ**.
 - Реальные OAuth/Lichess, PAT, архив, пользовательская SQLite и Stockfish не запускались/не открывались. Их проверка не является частью M4.6 CI.
-- Предыдущий hosted Windows CI на SHA `c8d3e81e907dc324928afc6c2675039204d6e0fd` остановился при offscreen pytest; после исправления времени жизни виджета запускается повторный CI. Его точный head SHA и результат указать в финальном handoff; PR #41 остаётся draft.
+- Hosted Windows CI run [#41370237285](https://github.com/feshakomissarov-prog/chess/actions/runs/41370237285) на code SHA `45f52dbe73dc5ac0a23e851186a2ce28a79fbbf5` — **SUCCESS**, **428 passed за 236.61 с**, Windows Server 2025 / CPython 3.12.10 / PySide6 6.12.0; compileall и isolated offline window initialization PASS. Предыдущий CI на `c8d3e81` выявил unmanaged `BoardView` в новом palette-тесте; lifecycle исправлен регистрацией через `qtbot`. После текущей документационной записи требуется финальная проверка точного handoff SHA. PR #41 остаётся draft.
 
 ### F — пользовательский запуск, single-instance и иконка
 
