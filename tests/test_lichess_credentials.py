@@ -49,7 +49,7 @@ class AccountClient:
             raise self.error
         return self.result
 
-    def stream_events(self, token, stop):
+    def stream_events(self, token, stop, on_connected=None):
         return iter(())
 
 
@@ -368,7 +368,7 @@ def test_old_stream_error_after_switch_cannot_replace_new_connected_status(qtbot
     release = threading.Event()
 
     class Client(AccountClient):
-        def stream_events(self, token, stop):
+        def stream_events(self, token, stop, on_connected=None):
             if token == "old-session":
                 entered.set()
                 assert release.wait(2)
@@ -454,7 +454,7 @@ def test_old_game_full_event_after_account_switch_is_discarded(qtbot):
             assert release.wait(2)
             yield {"type": "gameFull", "state": {"moves": "e2e4", "status": "started"}}
 
-        def stream_events(self, token, stop):
+        def stream_events(self, token, stop, on_connected=None):
             new_stop_ref.append(stop)
             stop.wait(2)
             return
@@ -491,7 +491,7 @@ def test_late_old_game_start_is_not_delivered_or_started(qtbot):
     new_started = threading.Event()
 
     class Client(AccountClient):
-        def stream_events(self, token, stop):
+        def stream_events(self, token, stop, on_connected=None):
             if token == "old-session":
                 entered.set()
                 assert release.wait(2)

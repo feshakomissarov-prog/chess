@@ -31,9 +31,11 @@ class FakeTransport:
         self.calls.append((method, url, headers, body))
         return self.responses.pop(0)
 
-    def stream(self, method, url, headers, body, timeout, stop_event):
+    def stream(self, method, url, headers, body, timeout, stop_event, on_connected=None):
         if self.stream_error:
             raise self.stream_error
+        if on_connected is not None:
+            on_connected()
         yield from self.lines
 
 
@@ -392,7 +394,7 @@ def test_event_stream_429_waits_before_retry_and_does_not_spin(monkeypatch):
         def __init__(self):
             self.calls = 0
 
-        def stream_events(self, token, stop_event):
+        def stream_events(self, token, stop_event, on_connected=None):
             self.calls += 1
             raise RateLimitError(70)
             yield  # pragma: no cover
@@ -448,10 +450,11 @@ def test_event_stream_recovery_is_reported_only_after_same_generation_event(monk
     class Client:
         def __init__(self):
             self.calls = 0
-        def stream_events(self, _token, _stop_event):
+        def stream_events(self, _token, _stop_event, on_connected=None):
             self.calls += 1
             if self.calls == 1:
                 raise LichessError("synthetic temporary disconnect")
+            on_connected()
             yield {"type": "challenge", "challenge": {"id": "synthetic"}}
 
     stop = StopControl()
@@ -473,6 +476,120 @@ def test_event_stream_recovery_is_reported_only_after_same_generation_event(monk
     assert (service.auth_generation, "Поток восстановлен: Owner") in statuses
     assert events == [(service.auth_generation,
                        {"type": "challenge", "challenge": {"id": "synthetic"}})]
+
+
+def test_idle_keepalive_stream_confirms_recovery_without_emitting_game_event(monkeypatch):
+    class TokenStore:
+        def get(self):
+            return "fake-token"
+
+    class StopControl:
+        def __init__(self):
+            self.stopped = False
+            self.waits = 0
+        def is_set(self):
+            return self.stopped
+        def set(self):
+            self.stopped = True
+        def wait(self, _seconds):
+            self.waits += 1
+            return False
+
+    class KeepaliveTransport:
+        def __init__(self):
+            self.calls = 0
+            self.service = None
+            self.stop = None
+        def stream(self, _method, _url, _headers, _body, _timeout, _stop_event,
+                   on_connected=None):
+            self.calls += 1
+            if self.calls == 1:
+                raise LichessError("synthetic temporary disconnect")
+            on_connected()  # Headers accepted; no JSON event is sent.
+            yield b"\n"
+            self.stop.set()
+
+    stop = StopControl()
+    transport = KeepaliveTransport()
+    client = LichessClient(transport=transport, base_url="https://lichess.test")
+    service = LichessService(client=client, token_store=TokenStore())
+    service.username = "Owner"
+    service._connection_stop = stop
+    transport.service = service
+    transport.stop = stop
+    statuses, events = [], []
+    service.session_status_changed.connect(lambda generation, status:
+                                           statuses.append((generation, status)))
+    service.session_status_changed.connect(
+        lambda _generation, status: stop.set()
+        if status.startswith("Поток восстановлен:") else None)
+    service.session_event_received.connect(lambda generation, event:
+                                           events.append((generation, event)))
+    monkeypatch.setattr(service, "_thread", lambda target, _name: target())
+
+    service._start_event_stream("fake-token", expected_generation=service.auth_generation)
+
+    assert transport.calls == 2
+    assert (service.auth_generation, "Переподключение…") in statuses
+    assert (service.auth_generation, "Поток восстановлен: Owner") in statuses
+    assert events == []  # Empty keepalive is transport liveness, never a game event.
+
+
+@pytest.mark.parametrize("invalidator", ["stale_generation", "cancelled_connection"])
+def test_late_stream_ready_after_stale_or_cancelled_session_is_ignored(
+        monkeypatch, invalidator):
+    class TokenStore:
+        def get(self):
+            return "fake-token"
+
+    class StopControl:
+        def __init__(self):
+            self.stopped = False
+            self.waits = 0
+        def is_set(self):
+            return self.stopped
+        def set(self):
+            self.stopped = True
+        def wait(self, _seconds):
+            self.waits += 1
+            return False
+
+    class DelayedReadyTransport:
+        def __init__(self):
+            self.calls = 0
+            self.service = None
+            self.stop = None
+        def stream(self, _method, _url, _headers, _body, _timeout, _stop_event,
+                   on_connected=None):
+            self.calls += 1
+            if self.calls == 1:
+                raise LichessError("synthetic temporary disconnect")
+            if invalidator == "stale_generation":
+                self.service._auth_generation += 1
+            else:
+                self.stop.set()
+            on_connected()
+            yield b"\n"
+
+    stop = StopControl()
+    transport = DelayedReadyTransport()
+    service = LichessService(
+        client=LichessClient(transport=transport, base_url="https://lichess.test"),
+        token_store=TokenStore())
+    service.username = "Owner"
+    service._connection_stop = stop
+    transport.service = service
+    transport.stop = stop
+    statuses = []
+    service.session_status_changed.connect(lambda generation, status:
+                                           statuses.append((generation, status)))
+    monkeypatch.setattr(service, "_thread", lambda target, _name: target())
+    original_generation = service.auth_generation
+
+    service._start_event_stream("fake-token", expected_generation=original_generation)
+
+    assert transport.calls == 2
+    assert not any(status.startswith("Поток восстановлен:") for _, status in statuses)
 
 
 def test_finished_game_stream_interrupt_has_bounded_retry_and_keeps_sync_pending(monkeypatch):
@@ -800,8 +917,10 @@ def test_targeted_game_export_requests_only_the_validated_game_id():
 def test_archive_endpoint_streams_json_page_with_cursor_parameters():
     stop = threading.Event()
     class StreamTransport(FakeTransport):
-        def stream(self, method, url, headers, body, timeout, stop_event):
+        def stream(self, method, url, headers, body, timeout, stop_event, on_connected=None):
             self.calls.append((method, url, headers, body))
+            if on_connected is not None:
+                on_connected()
             yield from self.lines
     fake = StreamTransport(lines=[b'{"id":"game1","pgn":"1. e4 *"}\n'])
     client = LichessClient(fake, base_url="https://lichess.test")
@@ -1382,8 +1501,10 @@ def test_puzzle_activity_oauth_scope_and_activity_endpoint_are_explicit():
     auth = create_authorization_request("http://127.0.0.1/callback", scopes="puzzle:read")
     assert parse_qs(urlparse(auth.url).query)["scope"] == ["puzzle:read"]
     class StreamTransport(FakeTransport):
-        def stream(self, method, url, headers, body, timeout, stop_event):
+        def stream(self, method, url, headers, body, timeout, stop_event, on_connected=None):
             self.calls.append((method, url, headers, body))
+            if on_connected is not None:
+                on_connected()
             yield b'{"date":100,"win":true,"puzzle":{"id":"p1"}}\n'
     fake = StreamTransport()
     client = LichessClient(fake, base_url="https://lichess.test")
@@ -1820,13 +1941,15 @@ def test_puzzle_incremental_imports_1501_records_in_durable_pages(tmp_path):
 
 def test_archive_games_endpoint_uses_until_and_rejects_before_parameter():
     class StrictTransport(FakeTransport):
-        def stream(self, method, url, headers, body, timeout, stop_event):
+        def stream(self, method, url, headers, body, timeout, stop_event, on_connected=None):
             query = parse_qs(urlparse(url).query)
             allowed = {"max", "sort", "pgnInJson", "clocks", "evals", "accuracy",
                        "opening", "division", "finished", "ongoing", "since", "until"}
             assert not (set(query) - allowed)
             assert "before" not in query
             self.calls.append((method, url, headers, body))
+            if on_connected is not None:
+                on_connected()
             yield b'{"id":"g1","pgn":"1. e4 *"}\n'
     fake = StrictTransport()
     list(LichessClient(fake, base_url="https://lichess.test").stream_user_games(

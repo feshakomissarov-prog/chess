@@ -782,20 +782,28 @@ class LichessService(QObject):
         def work():
             delay = 1
             recovering_stream = False
+
+            def stream_connected():
+                nonlocal recovering_stream
+                if (not recovering_stream or self._stop.is_set()
+                        or connection_stop.is_set()
+                        or self._connection_stop is not connection_stop
+                        or not self.is_auth_generation_current(auth_generation)):
+                    return
+                if self._emit_session_status(
+                        auth_generation,
+                        f"Поток восстановлен: {username or 'Lichess'}"):
+                    recovering_stream = False
+
             try:
                 while not self._stop.is_set() and not connection_stop.is_set():
                     try:
-                        for event in self.client.stream_events(token, connection_stop):
+                        for event in self.client.stream_events(
+                                token, connection_stop, on_connected=stream_connected):
                             delay = 1
                             if (self._stop.is_set() or connection_stop.is_set()
                                     or not self.is_auth_generation_current(auth_generation)):
                                 break
-                            if recovering_stream:
-                                if not self._emit_session_status(
-                                        auth_generation,
-                                        f"Поток восстановлен: {username or 'Lichess'}"):
-                                    break
-                                recovering_stream = False
                             if not self._emit_session_event(auth_generation, event):
                                 break
                             if event.get("type") == "gameStart":

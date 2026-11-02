@@ -1830,6 +1830,7 @@ class MainWindow(QMainWindow):
         self._selected_live_game_id: str | None = None
         self._review_session: LichessGameSession | None = None
         self._lichess_connected = False
+        self._event_stream_recovery_pending = False
         self._archive_progress_dialog: QProgressDialog | None = None
         self._puzzle_progress_dialog: QProgressDialog | None = None
         self._close_retry_scheduled = False
@@ -4808,14 +4809,19 @@ class MainWindow(QMainWindow):
             self._invalidate_analysis_preflight()
             if self._lichess_status_clears_authenticated_identity(status):
                 self._lichess_connected = False
-            elif status.startswith("Переподключение"):
+                self._event_stream_recovery_pending = False
+            elif (status.startswith("Переподключение")
+                  or (status.startswith("Ограничение Lichess (429)")
+                      and "переподключение" in status.casefold())):
                 # The account identity remains authenticated, but live actions
                 # stay gated until the current generation confirms stream recovery.
                 self._lichess_connected = False
+                self._event_stream_recovery_pending = True
         elif status.startswith("Поток восстановлен: ") and not self.offline_mode:
             # This status arrives through _lichess_session_status, which rejects
             # stale auth generations before reaching this method.
             self._lichess_connected = True
+            self._event_stream_recovery_pending = False
         connected = bool(self._lichess_connected and not self.offline_mode)
         if status == "Не подключено":
             for session in self.online_sessions.values():
@@ -4865,7 +4871,7 @@ class MainWindow(QMainWindow):
 
     def _enable_restore_retry(self) -> None:
         if (self.lichess and self.lichess.token and not self._lichess_connected
-                and not self.offline_mode):
+                and not self.offline_mode and not self._event_stream_recovery_pending):
             self._restore_retry_ready = True
             self.connect_button.setText("Повторить подключение")
             self.connect_button.setEnabled(True)
@@ -4901,6 +4907,7 @@ class MainWindow(QMainWindow):
             return
         self._invalidate_analysis_preflight()
         self._lichess_connected = True
+        self._event_stream_recovery_pending = False
         self.settings.setValue("workspace/selected_account", f"lichess:{username.strip().lower()}")
         self.connection.setText(f"●  Подключено: {username}")
         if self._connection_dialog is not None:

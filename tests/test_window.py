@@ -727,6 +727,62 @@ def test_single_game_stream_retry_does_not_clear_authenticated_account(
     assert window.review_workspace.graph._values() == []
 
 
+def test_stream_429_retry_after_never_reenables_actions_before_stream_ready(
+        qtbot, tmp_path):
+    window = MainWindow(QSettings(str(tmp_path / "event-stream-429-ready.ini"),
+                                  QSettings.Format.IniFormat), offline_mode=True)
+    qtbot.addWidget(window)
+    game = _saved_review_with_engine_facts(window, "event-stream-429-ready")
+    assert window._open_saved_game(game)
+    window.offline_mode = False
+
+    class FakeClient:
+        rate_limit_remaining = 0
+    class FakeService:
+        username = "Owner"
+        token = "fake-token"
+        auth_generation = 82
+        client = FakeClient()
+        def __init__(self): self.safety_requests = []
+        def is_auth_generation_current(self, generation):
+            return generation == self.auth_generation
+        def check_active_games_for_analysis(self, request_id):
+            self.safety_requests.append(request_id)
+        def close(self, timeout=1.0): return True
+    service = FakeService()
+    window.lichess = service
+    window._lichess_connected = True
+    window._request_review_training_safety("event-stream-429-ready")
+    window._review_safety_games_received(service.safety_requests[-1], [])
+    assert window.review_workspace.evaluation_allowed
+
+    window._lichess_status(
+        "Ограничение Lichess (429): переподключение через 60 с")
+    service.client.rate_limit_remaining = 0  # Retry-After elapsed.
+    window._enable_restore_retry()
+    window._request_review_training_safety("event-stream-429-ready")
+
+    assert not window._lichess_connected
+    assert window._event_stream_recovery_pending
+    assert not window._online_actions_allowed()
+    assert not window.connect_button.isEnabled()
+    assert len(service.safety_requests) == 1
+    assert not window.review_workspace.evaluation_allowed
+
+    window._lichess_session_status(service.auth_generation,
+                                   "Поток восстановлен: Owner")
+    assert window._lichess_connected
+    assert not window._event_stream_recovery_pending
+    assert window._online_actions_allowed()
+    assert not window.review_workspace.evaluation_allowed
+    assert len(service.safety_requests) == 1
+
+    window._request_review_training_safety("event-stream-429-ready")
+    assert len(service.safety_requests) == 2
+    window._review_safety_games_received(service.safety_requests[-1], [])
+    assert window.review_workspace.evaluation_allowed
+
+
 def test_online_move_sound_waits_for_authoritative_ack_and_deduplicates_replays(qtbot, tmp_path):
     window = MainWindow(QSettings(str(tmp_path / "sound-ack.ini"),
                                   QSettings.Format.IniFormat), offline_mode=True)
