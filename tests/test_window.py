@@ -5,9 +5,9 @@ import time
 import pytest
 from pathlib import Path
 from PySide6.QtCore import QPoint, QSettings, QStandardPaths, Qt
-from PySide6.QtGui import QCloseEvent
+from PySide6.QtGui import QColor, QCloseEvent, QImage, QPainter
 from PySide6.QtWidgets import (QComboBox, QDialog, QDialogButtonBox, QLabel, QInputDialog,
-                               QMessageBox, QPushButton)
+                               QApplication, QMessageBox, QPushButton)
 
 from chess_coach.board_view import BoardView
 from chess_coach.window import (ActiveGamesDialog, BatchAnalysisDialog, EvaluationGraph, MainWindow,
@@ -1643,6 +1643,7 @@ def test_finished_game_review_position_uses_same_live_safety_preflight(qtbot, tm
     window._screen_mode = "review"
     window.screen_stack.setCurrentWidget(window.game_page)
     window.show()
+    QApplication.processEvents()
     window.refresh()
     assert window.position_eval_button.isVisible() and window.position_eval_button.isEnabled()
     seen = []
@@ -3401,6 +3402,93 @@ def test_online_clocks_use_authoritative_snapshot_and_pause_in_history_or_unknow
     session.status = "mate"
     window._update_clock()
     assert window.opponent_clock_label.text() == "03:00"
+
+
+def test_clock_styles_are_readable_in_rendered_active_inactive_and_warning_states(
+        qtbot, tmp_path, monkeypatch):
+    import chess_coach.window as window_module
+    window = MainWindow(QSettings(str(tmp_path / "clock-render.ini"), QSettings.Format.IniFormat),
+                        offline_mode=True)
+    qtbot.addWidget(window)
+    window.resize(1360, 860)
+    window.screen_stack.setCurrentWidget(window.game_page)
+    window.show()
+    session = LichessGameSession("rendered-clock", window.game_repository)
+    session.status = "playing"
+    session.awaiting_authoritative_snapshot = False
+    session.white_ms = 180_000
+    session.black_ms = 180_000
+    session.color = chess.WHITE
+    window.online_session = session
+    window.online_sessions[session.game_id] = session
+    window._screen_mode = "online"
+    monkeypatch.setattr(window_module.time, "monotonic", lambda: 10.0)
+
+    def render_clock(label) -> QImage:
+        image = QImage(label.size(), QImage.Format.Format_ARGB32_Premultiplied)
+        image.fill(QColor("#14171C"))
+        painter = QPainter(image)
+        label.render(painter, QPoint())
+        painter.end()
+        return image
+
+    def contains_color(image: QImage, hex_color: str) -> bool:
+        expected = QColor(hex_color).rgb()
+        return any(image.pixel(x, y) == expected
+                   for y in range(image.height()) for x in range(image.width()))
+
+    window._update_clock()
+    active = render_clock(window.you_clock_label)
+    assert active.width() > 0 and active.height() > 0
+    assert contains_color(active, "#F0EBE3")
+    assert "font-size: 28px" in window.you_clock_label.styleSheet()
+    assert window.you_clock_label.isVisible()
+    opponent_inactive = render_clock(window.opponent_clock_label)
+    assert contains_color(opponent_inactive, "#B8BDC7")
+
+    session.board.push_uci("e2e4")
+    window._update_clock()
+    inactive = render_clock(window.you_clock_label)
+    assert contains_color(inactive, "#B8BDC7")
+    opponent_active = render_clock(window.opponent_clock_label)
+    assert contains_color(opponent_active, "#F0EBE3")
+
+    session.black_ms = 20_000
+    window._update_clock()
+    opponent_warning = render_clock(window.opponent_clock_label)
+    assert contains_color(opponent_warning, "#F3C969")
+    assert "⚠ МЕНЬШЕ 30 СЕК" in window.opponent_clock_label.text()
+
+    session.board.turn = chess.WHITE
+    session.white_ms = 20_000
+    window._update_clock()
+    warning = render_clock(window.you_clock_label)
+    assert contains_color(warning, "#F3C969")
+    assert "⚠ МЕНЬШЕ 30 СЕК" in window.you_clock_label.text()
+    from chess_coach.ui.theme import contrast_ratio
+    assert contrast_ratio("#F0EBE3", "#14171C") >= 4.5
+    assert contrast_ratio("#B8BDC7", "#14171C") >= 4.5
+    assert contrast_ratio("#F3C969", "#14171C") >= 4.5
+
+
+def test_queued_backfill_status_from_previous_account_is_ignored(qtbot, tmp_path):
+    window = MainWindow(QSettings(str(tmp_path / "backfill-account-status.ini"),
+                                  QSettings.Format.IniFormat), offline_mode=True)
+    qtbot.addWidget(window)
+
+    class Service:
+        username = "Current"
+        auth_generation = 12
+        def is_auth_generation_current(self, generation): return generation == self.auth_generation
+
+    window.lichess = Service()
+    window.lichess_analysis_status.setText("Текущий аккаунт")
+    window._lichess_analysis_backfill_progress(11, "Previous", 1, 10, {})
+    window._lichess_analysis_backfill_finished(11, "Previous", 1, 10, 1, 1, 0, 0, "готово")
+    assert window.lichess_analysis_status.text() == "Текущий аккаунт"
+
+    window._lichess_analysis_backfill_finished(12, "Current", 1, 10, 1, 1, 0, 0, "готово")
+    assert window.lichess_analysis_status.text().startswith("Lichess · проверено 1/10")
 
 
 def test_ready_event_stream_automatically_starts_bounded_old_game_analytics(qtbot, tmp_path):

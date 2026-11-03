@@ -54,8 +54,8 @@ class LichessService(QObject):
     puzzles_started = Signal(str)
     puzzles_finished = Signal(int, str)
     background_sync_finished = Signal(str, str)
-    lichess_analysis_backfill_progress = Signal(int, int, object)
-    lichess_analysis_backfill_finished = Signal(int, int, int, int, int, int, str)
+    lichess_analysis_backfill_progress = Signal(int, str, int, int, object)
+    lichess_analysis_backfill_finished = Signal(int, str, int, int, int, int, int, int, str)
     puzzle_pilot_progress = Signal(int, int)
     puzzle_pilot_finished = Signal(int, int, str, str)
 
@@ -414,6 +414,7 @@ class LichessService(QObject):
                                    else "пауза · Retry-After" if retry_at
                                    else "очередь готовой аналитики пуста")
                         self.lichess_analysis_backfill_finished.emit(
+                            generation, username,
                             int(summary.get("checked") or 0), int(summary.get("total") or 0),
                             int(summary.get("accuracy") or 0), int(summary.get("evals") or 0),
                             int(summary.get("no_data") or 0), int(summary.get("errors") or 0),
@@ -424,6 +425,7 @@ class LichessService(QObject):
                     if any(classify_lichess_opponent(game) != "official_ai"
                            for game in active_games):
                         self.lichess_analysis_backfill_finished.emit(
+                            generation, username,
                             0, 0, 0, 0, 0, 0,
                             "отложено · есть человеческая/неизвестная активная партия")
                         return
@@ -435,7 +437,7 @@ class LichessService(QObject):
                             self.is_auth_generation_current(generation)
                             and self.username == username and not self._closing),
                         progress=lambda done, total, game: self.lichess_analysis_backfill_progress.emit(
-                            done, total, game))
+                            generation, username, done, total, game))
                 fatal_status = report.get("fatal_status")
                 if fatal_status in {401, 403}:
                     account_id = self.repository.ensure_archive_account(username)
@@ -456,6 +458,7 @@ class LichessService(QObject):
                            "пауза · суточный лимит достигнут" if report.get("limited") else
                            "приостановлено" if report.get("paused") else "проверка завершена")
                 self.lichess_analysis_backfill_finished.emit(
+                    generation, username,
                     int(summary.get("checked") or 0), int(summary.get("total") or 0),
                     int(summary.get("accuracy") or 0),
                     int(summary.get("evals") or 0), int(summary.get("no_data") or 0),
@@ -479,6 +482,7 @@ class LichessService(QObject):
                         message = f"ошибка · {type(exc).__name__}"
                     summary = self.repository.lichess_analysis_backfill_summary(account_id)
                     self.lichess_analysis_backfill_finished.emit(
+                        generation, username,
                         int(summary.get("checked") or 0), int(summary.get("total") or 0),
                         int(summary.get("accuracy") or 0), int(summary.get("evals") or 0),
                         int(summary.get("no_data") or 0), int(summary.get("errors") or 0), message)

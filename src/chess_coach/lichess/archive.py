@@ -10,7 +10,8 @@ import time
 from typing import Callable
 
 from .api import LichessClient, RateLimitError
-from .repository import GameRepository
+from .repository import GameRepository, StaleGameLineError
+from .analysis_json import normalize_game_analytics
 
 _LICHESS_EPOCH_MS = 1_356_998_400_070
 
@@ -263,7 +264,9 @@ class ArchiveSync:
                     account_id, daily_limit=daily_limit):
                 limited = True
                 break
-            self.repository.mark_lichess_analysis_backfill_running(account_id, game_id)
+            self.repository.mark_lichess_analysis_backfill_running(
+                account_id, game_id, line_revision=int(item["line_revision"]),
+                line_hash=str(item["line_hash"]))
             try:
                 payload = self.client.export_game_json(token, str(item["source_game_id"]))
                 if not current():
@@ -272,26 +275,55 @@ class ArchiveSync:
                 self._validate_backfill_export(username, item, payload)
                 previous_revision = int(item["line_revision"])
                 previous_hash = str(item["line_hash"])
-                # The normal archive importer already knows how to preserve typed
-                # Lichess PGN evals and COALESCE missing accuracy metadata without
-                # deleting local Stockfish runs. Refuse line changes before calling it.
-                self.repository.import_archive_record(
-                    username, payload, checkpoint_ms=None, backfill=False)
-                latest = self.repository.get_game(game_id)
-                if (not latest or int(latest.get("line_revision") or 0) != previous_revision):
-                    raise ValueError("Экспорт Lichess изменил сохранённую линию; данные не объединены.")
+                expected_moves = str(item["moves"])
+                normalized = normalize_game_analytics(payload, len(expected_moves.split()))
+                pgn_assessments = self._pgn_eval_assessments(str(payload.get("pgn") or ""))
+                assessments_by_ply = {int(row["ply"]): row for row in pgn_assessments}
+                # JSON slots are authoritative for their exact ply. If both forms
+                # supply a score, repository depth preference preserves deeper PGN data.
+                for row in normalized.assessments:
+                    previous = assessments_by_ply.get(int(row["ply"]))
+                    if previous and previous.get("depth") is not None:
+                        continue
+                    assessments_by_ply[int(row["ply"])] = dict(row)
+                players = payload.get("players") if isinstance(payload.get("players"), dict) else {}
+                white = players.get("white") if isinstance(players.get("white"), dict) else {}
+                black = players.get("black") if isinstance(players.get("black"), dict) else {}
+                opening = payload.get("opening") if isinstance(payload.get("opening"), dict) else {}
+                opening_metadata = {
+                    "eco": opening.get("eco"), "name": opening.get("name"),
+                    "white_rating": white.get("rating"), "black_rating": black.get("rating"),
+                    "lastMoveAt": payload.get("lastMoveAt"),
+                }
+                self.repository.merge_lichess_ready_analysis(
+                    username, game_id, source_game_id=str(item["source_game_id"]),
+                    account_id=account_id, expected_line_revision=previous_revision,
+                    expected_line_hash=previous_hash, expected_moves=expected_moves,
+                    accuracy=normalized.accuracy, player_analysis=normalized.player_analysis,
+                    assessments=list(assessments_by_ply.values()),
+                    move_annotations=list(normalized.move_annotations),
+                    validation_issues=list(normalized.issues), opening=opening_metadata,
+                    division=payload.get("division"),
+                    generation_is_current=current)
                 eval_positions = self.repository.lichess_eval_score_count(game_id, previous_revision)
                 # Every completed decision has one post-move position. A position
                 # zero baseline improves comparability but is optional in Lichess PGN.
                 position_count = max(1, self.repository.game_move_count(game_id, previous_revision))
-                accuracy_values = self._official_accuracy_values(payload)
+                accuracy_values = normalized.accuracy
                 has_accuracy = any(value is not None for value in accuracy_values.values())
                 complete_accuracy = all(value is not None for value in accuracy_values.values())
                 has_evals = eval_positions > 0
+                invalid_accuracy = any(issue in {"invalid_white_accuracy", "invalid_black_accuracy"}
+                                       for issue in normalized.issues)
                 accuracy_status = ("has_data" if complete_accuracy else
-                                   "partial" if has_accuracy else "no_server_data")
-                evals_status = ("has_data" if eval_positions >= position_count else
-                                "partial" if has_evals else "no_server_data")
+                                   "partial" if has_accuracy or invalid_accuracy else "no_server_data")
+                malformed_array = any(issue.startswith(("analysis_", "invalid_analysis_",
+                                                        "conflicting_score_", "invalid_eval_",
+                                                        "invalid_mate_")) for issue in normalized.issues)
+                evals_status = ("has_data" if eval_positions >= position_count and not malformed_array else
+                                "partial" if has_evals or (normalized.array_present and
+                                                          not normalized.array_complete)
+                                else "no_server_data")
                 retry_seconds = (7 * 24 * 60 * 60 if "no_server_data" in
                                  {accuracy_status, evals_status} or "partial" in
                                  {accuracy_status, evals_status} else 0)
@@ -305,14 +337,16 @@ class ArchiveSync:
             except Exception as exc:
                 errors += 1
                 retry_after = max(60, int(getattr(exc, "retry_after", 60)))
-                status = "rate_limited" if getattr(exc, "status", None) == 429 else "error"
+                status = ("stale_line" if isinstance(exc, StaleGameLineError) else
+                          "rate_limited" if getattr(exc, "status", None) == 429 else "error")
                 http_status = getattr(exc, "status", None)
                 backoff = (max(retry_after, 86_400) if http_status in {401, 403}
                            else max(retry_after, 3_600) if status == "error" else retry_after)
                 self.repository.record_lichess_analysis_backfill(
                     account_id, game_id, accuracy_status=status, evals_status=status,
-                    retry_after_seconds=backoff,
-                    error=f"{type(exc).__name__}" + (f" HTTP {http_status}" if http_status else ""))
+                    retry_after_seconds=(max(60, retry_after) if status == "stale_line" else backoff),
+                    error=f"{type(exc).__name__}" + (f" HTTP {http_status}" if http_status else ""),
+                    line_revision=int(item["line_revision"]), line_hash=str(item["line_hash"]))
                 if http_status in {401, 403, 429}:
                     fatal_status = int(http_status)
                     if http_status == 429:
@@ -328,14 +362,28 @@ class ArchiveSync:
 
     @staticmethod
     def _official_accuracy_values(payload: dict) -> dict[str, float | None]:
-        accuracy = payload.get("accuracy")
-        if not isinstance(accuracy, dict):
-            accuracy = {}
-        values = {}
-        for color in ("white", "black"):
-            value = accuracy.get(color)
-            values[color] = (float(value) if isinstance(value, (int, float))
-                             and not isinstance(value, bool) and 0 <= float(value) <= 100 else None)
+        return normalize_game_analytics(payload, 0).accuracy
+
+    @staticmethod
+    def _pgn_eval_assessments(raw_pgn: str) -> list[dict]:
+        import chess
+        import chess.pgn
+
+        parsed = chess.pgn.read_game(io.StringIO(raw_pgn))
+        if parsed is None or parsed.errors:
+            return []
+        values = []
+        initial = parsed.eval()
+        if initial is not None:
+            score = initial.pov(chess.WHITE)
+            values.append({"ply": 0, "white_cp": score.score(mate_score=None),
+                           "mate_white": score.mate(), "depth": parsed.eval_depth()})
+        for ply, node in enumerate(parsed.mainline(), start=1):
+            evaluation = node.eval()
+            if evaluation is not None:
+                score = evaluation.pov(chess.WHITE)
+                values.append({"ply": ply, "white_cp": score.score(mate_score=None),
+                               "mate_white": score.mate(), "depth": node.eval_depth()})
         return values
 
     @staticmethod

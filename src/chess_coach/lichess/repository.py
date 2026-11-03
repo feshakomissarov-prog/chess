@@ -18,7 +18,7 @@ import chess
 import chess.pgn
 
 
-SCHEMA_VERSION = 18
+SCHEMA_VERSION = 19
 DEFAULT_PAGE_SIZE = 100
 MAX_PAGE_SIZE = 500
 
@@ -29,6 +29,10 @@ def puzzle_attempt_uid(account_id: str, puzzle_id: str, attempt_date_ms: int,
     payload = json.dumps([str(account_id), str(puzzle_id), int(attempt_date_ms),
                           int(bool(win))], separators=(",", ":"), ensure_ascii=False)
     return hashlib.sha256(("lichess-puzzle-attempt:v1:" + payload).encode("utf-8")).hexdigest()
+
+
+class StaleGameLineError(RuntimeError):
+    """A delayed server metadata response no longer matches the linked game line."""
 
 
 class GameRepository:
@@ -52,6 +56,157 @@ class GameRepository:
 
     def invalidate_statistics_cache(self) -> None:
         self._statistics_revision += 1
+
+    def merge_lichess_ready_analysis(self, username: str, game_id: str, *,
+                                     source_game_id: str, account_id: str,
+                                     expected_line_revision: int, expected_line_hash: str,
+                                     expected_moves: str, accuracy: dict,
+                                     player_analysis: dict, assessments: list[dict],
+                                     move_annotations: list[dict], validation_issues: list[str],
+                                     opening: dict | None = None,
+                                     division: dict | None = None,
+                                     generation_is_current: Callable[[], bool] | None = None) -> int:
+        """CAS-merge server analytics without replacing PGN or the current line.
+
+        The account link and immutable line identity are checked after acquiring a
+        SQLite write transaction. Any stale/cancelled response rolls back every field.
+        """
+        from .analysis_json import ANALYTICS_SCHEMA_VERSION
+
+        def current() -> bool:
+            return generation_is_current is None or generation_is_current()
+
+        def merge() -> int:
+            with self._connection() as db:
+                db.execute("BEGIN IMMEDIATE")
+                if not current():
+                    raise StaleGameLineError("stale_session: аккаунт уже сменился")
+                linked = db.execute("""
+                    SELECT g.line_revision,g.source_game_id,g.moves,gr.line_hash,
+                           gr.is_current,a.username
+                    FROM games g JOIN game_revisions gr ON gr.game_id=g.game_id
+                      AND gr.line_revision=?
+                    JOIN accounts a ON a.account_id=? AND a.provider='lichess'
+                    JOIN account_games ag ON ag.account_id=a.account_id AND ag.game_id=g.game_id
+                    WHERE g.game_id=?
+                """, (expected_line_revision, account_id, game_id)).fetchone()
+                if (not linked or not linked["is_current"]
+                        or int(linked["line_revision"]) != int(expected_line_revision)
+                        or str(linked["line_hash"]) != str(expected_line_hash)
+                        or str(linked["moves"]) != str(expected_moves)
+                        or str(linked["source_game_id"] or "") != str(source_game_id)
+                        or str(linked["username"]).casefold() != username.casefold()):
+                    raise StaleGameLineError("stale_line: партия, линия или account link изменились")
+
+                white = player_analysis.get("white", {}) if isinstance(player_analysis, dict) else {}
+                black = player_analysis.get("black", {}) if isinstance(player_analysis, dict) else {}
+                players_opening = opening if isinstance(opening, dict) else {}
+                db.execute("UPDATE games SET "
+                           "lichess_accuracy_white=COALESCE(?,lichess_accuracy_white),"
+                           "lichess_accuracy_black=COALESCE(?,lichess_accuracy_black),"
+                           "white_rating=COALESCE(?,white_rating),black_rating=COALESCE(?,black_rating),"
+                           "opening_eco=COALESCE(?,opening_eco),opening_name=COALESCE(?,opening_name),"
+                           "last_move_at=COALESCE(?,last_move_at),updated_at=? WHERE game_id=?",
+                           (accuracy.get("white"), accuracy.get("black"),
+                            (players_opening.get("white_rating")),
+                            (players_opening.get("black_rating")),
+                            players_opening.get("eco"), players_opening.get("name"),
+                            players_opening.get("lastMoveAt"), datetime.now(timezone.utc).isoformat(),
+                            game_id))
+                now = datetime.now(timezone.utc).isoformat()
+                db.execute("""INSERT INTO lichess_ready_analysis_metadata(
+                    account_id,game_id,line_revision,source,schema_version,
+                    white_analysis_json,black_analysis_json,move_annotations_json,
+                    validation_issues_json,updated_at) VALUES (?,?,?,'lichess-json',?,?,?,?,?,?)
+                    ON CONFLICT(account_id,game_id,line_revision) DO UPDATE SET
+                    source=excluded.source,schema_version=excluded.schema_version,
+                    white_analysis_json=excluded.white_analysis_json,
+                    black_analysis_json=excluded.black_analysis_json,
+                    move_annotations_json=excluded.move_annotations_json,
+                    validation_issues_json=excluded.validation_issues_json,
+                    updated_at=excluded.updated_at""",
+                           (account_id, game_id, expected_line_revision, ANALYTICS_SCHEMA_VERSION,
+                            json.dumps(white, sort_keys=True, separators=(",", ":")),
+                            json.dumps(black, sort_keys=True, separators=(",", ":")),
+                            json.dumps(move_annotations, sort_keys=True, separators=(",", ":")),
+                            json.dumps(validation_issues, sort_keys=True, separators=(",", ":")), now))
+
+                params_json = json.dumps({"format": "pgn-eval-v1"}, sort_keys=True)
+                run = db.execute("SELECT * FROM analysis_runs WHERE game_id=? AND line_revision=? "
+                                 "AND line_hash=? AND source='lichess-pgn' AND parameters_json=? "
+                                 "ORDER BY finished_at DESC,run_id DESC LIMIT 1",
+                                 (game_id, expected_line_revision, expected_line_hash,
+                                  params_json)).fetchone()
+                if assessments or run:
+                    if run:
+                        run_id = str(run["run_id"])
+                        changed = False
+                    else:
+                        run_id = uuid.uuid4().hex
+                        db.execute("INSERT INTO analysis_runs VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+                                   (run_id, game_id, expected_line_revision, expected_line_hash,
+                                    "lichess-pgn", "Lichess", None, params_json, now, now,
+                                    "partial", None))
+                        changed = True
+                    for item in assessments:
+                        ply = int(item["ply"])
+                        old = db.execute("SELECT white_cp,mate_white,depth FROM position_assessments "
+                                         "WHERE run_id=? AND ply=?", (run_id, ply)).fetchone()
+                        incoming_score = item.get("white_cp") is not None or item.get("mate_white") is not None
+                        if not incoming_score:
+                            continue
+                        if old:
+                            # PGN scores with a known depth are preferred over JSON scores
+                            # whose documented schema carries no depth field.
+                            if old["depth"] is not None:
+                                continue
+                            values = (item.get("white_cp"), item.get("mate_white"), None)
+                            if tuple(old[:3]) != values:
+                                db.execute("UPDATE position_assessments SET white_cp=?,mate_white=?,depth=? "
+                                           "WHERE run_id=? AND ply=?", (*values, run_id, ply))
+                                changed = True
+                        else:
+                            db.execute("INSERT INTO position_assessments VALUES (?,?,?,?,?,?,?,?,?)",
+                                       (run_id, game_id, expected_line_revision, ply,
+                                        item.get("white_cp"), item.get("mate_white"), None, None, ""))
+                            changed = True
+                    expected = int(db.execute("SELECT COUNT(*) FROM game_moves WHERE game_id=? "
+                                              "AND line_revision=?", (game_id, expected_line_revision)).fetchone()[0])
+                    scored = int(db.execute("SELECT COUNT(*) FROM position_assessments WHERE run_id=? "
+                                            "AND ply>0 AND (white_cp IS NOT NULL OR mate_white IS NOT NULL)",
+                                            (run_id,)).fetchone()[0])
+                    run_status = "complete" if expected and scored >= expected else "partial"
+                    if run and run["status"] != run_status:
+                        changed = True
+                    if changed:
+                        db.execute("UPDATE analysis_runs SET status=?,finished_at=?,error=NULL WHERE run_id=?",
+                                   (run_status, now, run_id))
+                        owner_color = db.execute(
+                            "SELECT color FROM account_games WHERE account_id=? AND game_id=?",
+                            (account_id, game_id)).fetchone()[0]
+                        self._insert_derived_metrics_for_run(
+                            db, run_id, user_color=str(owner_color), replace=True)
+                division_data = division if isinstance(division, dict) else {}
+                middle = _phase_ply(division_data.get("middle"))
+                end = _phase_ply(division_data.get("end"))
+                if ((middle is not None or end is not None)
+                        and (middle is None or middle <= len(expected_moves.split()))
+                        and (end is None or end <= len(expected_moves.split()))):
+                    db.execute("INSERT INTO game_phase_boundaries VALUES (?,?,?,?,?,?) "
+                               "ON CONFLICT(game_id,line_revision) DO UPDATE SET "
+                               "middle_start_ply=excluded.middle_start_ply,end_start_ply=excluded.end_start_ply,"
+                               "source='lichess',method_version='lichess-division-v1'",
+                               (game_id, expected_line_revision, middle, end,
+                                "lichess", "lichess-division-v1"))
+                    self._apply_phase_labels(db, game_id, expected_line_revision, middle, end)
+                if not current():
+                    raise StaleGameLineError("stale_session: ответ Lichess устарел до commit")
+            self.invalidate_statistics_cache()
+            return len(assessments)
+
+        if self._writer is not None:
+            return int(self._submit_writer(merge, wait=True))
+        return merge()
 
     def _connect(self) -> sqlite3.Connection:
         db = sqlite3.connect(self.path, timeout=5)
@@ -285,9 +440,9 @@ class GameRepository:
                     line_revision INTEGER NOT NULL,
                     line_hash TEXT NOT NULL,
                     accuracy_status TEXT NOT NULL DEFAULT 'queued'
-                      CHECK(accuracy_status IN ('queued','running','has_data','no_server_data','partial','rate_limited','error')),
+                      CHECK(accuracy_status IN ('queued','running','has_data','no_server_data','partial','rate_limited','error','stale_line')),
                     evals_status TEXT NOT NULL DEFAULT 'queued'
-                      CHECK(evals_status IN ('queued','running','has_data','no_server_data','partial','rate_limited','error')),
+                      CHECK(evals_status IN ('queued','running','has_data','no_server_data','partial','rate_limited','error','stale_line')),
                     accuracy_checked_at TEXT,
                     evals_checked_at TEXT,
                     accuracy_next_retry_at TEXT,
@@ -299,6 +454,21 @@ class GameRepository:
                 );
                 CREATE INDEX IF NOT EXISTS idx_lichess_analysis_backfill_due
                   ON lichess_analysis_backfill(account_id,accuracy_next_retry_at,evals_next_retry_at,updated_at);
+                CREATE TABLE IF NOT EXISTS lichess_ready_analysis_metadata (
+                    account_id TEXT NOT NULL REFERENCES accounts(account_id) ON DELETE CASCADE,
+                    game_id TEXT NOT NULL REFERENCES games(game_id) ON DELETE CASCADE,
+                    line_revision INTEGER NOT NULL,
+                    source TEXT NOT NULL DEFAULT 'lichess-json',
+                    schema_version TEXT NOT NULL,
+                    white_analysis_json TEXT NOT NULL DEFAULT '{}',
+                    black_analysis_json TEXT NOT NULL DEFAULT '{}',
+                    move_annotations_json TEXT NOT NULL DEFAULT '[]',
+                    validation_issues_json TEXT NOT NULL DEFAULT '[]',
+                    updated_at TEXT NOT NULL,
+                    PRIMARY KEY(account_id,game_id,line_revision),
+                    FOREIGN KEY(game_id,line_revision)
+                      REFERENCES game_revisions(game_id,line_revision) ON DELETE CASCADE
+                );
                 CREATE TABLE IF NOT EXISTS lichess_analysis_backfill_budget (
                     account_id TEXT PRIMARY KEY REFERENCES accounts(account_id) ON DELETE CASCADE,
                     utc_day TEXT NOT NULL,
@@ -342,6 +512,30 @@ class GameRepository:
             for statement in schema_sql.split(";"):
                 if statement.strip():
                     db.execute(statement)
+            queue_schema = db.execute(
+                "SELECT sql FROM sqlite_master WHERE type='table' AND name='lichess_analysis_backfill'"
+            ).fetchone()
+            if queue_schema and "'stale_line'" not in str(queue_schema[0]):
+                # Expand the status CHECK constraint without losing the durable queue.
+                db.execute("DROP INDEX IF EXISTS idx_lichess_analysis_backfill_due")
+                db.execute("ALTER TABLE lichess_analysis_backfill RENAME TO lichess_analysis_backfill_v18")
+                db.execute("""CREATE TABLE lichess_analysis_backfill (
+                    account_id TEXT NOT NULL REFERENCES accounts(account_id) ON DELETE CASCADE,
+                    game_id TEXT NOT NULL REFERENCES games(game_id) ON DELETE CASCADE,
+                    line_revision INTEGER NOT NULL, line_hash TEXT NOT NULL,
+                    accuracy_status TEXT NOT NULL DEFAULT 'queued'
+                      CHECK(accuracy_status IN ('queued','running','has_data','no_server_data','partial','rate_limited','error','stale_line')),
+                    evals_status TEXT NOT NULL DEFAULT 'queued'
+                      CHECK(evals_status IN ('queued','running','has_data','no_server_data','partial','rate_limited','error','stale_line')),
+                    accuracy_checked_at TEXT, evals_checked_at TEXT,
+                    accuracy_next_retry_at TEXT, evals_next_retry_at TEXT,
+                    attempts INTEGER NOT NULL DEFAULT 0, last_error TEXT, updated_at TEXT NOT NULL,
+                    PRIMARY KEY(account_id,game_id))""")
+                db.execute("INSERT INTO lichess_analysis_backfill SELECT * FROM lichess_analysis_backfill_v18")
+                db.execute("DROP TABLE lichess_analysis_backfill_v18")
+                db.execute("CREATE INDEX idx_lichess_analysis_backfill_due ON "
+                           "lichess_analysis_backfill(account_id,accuracy_next_retry_at,"
+                           "evals_next_retry_at,updated_at)")
             budget_columns = {row[1] for row in db.execute(
                 "PRAGMA table_info(lichess_analysis_backfill_budget)")}
             if "retry_after_at" not in budget_columns:
@@ -826,7 +1020,7 @@ class GameRepository:
         """Select a small due page; no full archive materialization in Python."""
         now = datetime.now(timezone.utc).isoformat()
         limit = max(1, min(25, int(limit)))
-        due = "('queued','error','rate_limited','no_server_data','partial')"
+        due = "('queued','error','rate_limited','no_server_data','partial','stale_line')"
         with self._connection() as db:
             budget = db.execute(
                 "SELECT retry_after_at FROM lichess_analysis_backfill_budget WHERE account_id=?",
@@ -884,40 +1078,57 @@ class GameRepository:
         return bool(self.list_lichess_analysis_backfill(
             account_id, limit=1, force_retry=force_retry))
 
-    def mark_lichess_analysis_backfill_running(self, account_id: str, game_id: str) -> None:
+    def mark_lichess_analysis_backfill_running(self, account_id: str, game_id: str, *,
+                                               line_revision: int | None = None,
+                                               line_hash: str | None = None) -> None:
+        revision_guard = " AND line_revision=?" if line_revision is not None else ""
+        hash_guard = " AND line_hash=?" if line_hash is not None else ""
+        params = [datetime.now(timezone.utc).isoformat(), account_id, game_id]
+        if line_revision is not None:
+            params.append(int(line_revision))
+        if line_hash is not None:
+            params.append(str(line_hash))
         with self._connection() as db:
             db.execute("UPDATE lichess_analysis_backfill SET accuracy_status=CASE "
-                       "WHEN accuracy_status IN ('queued','error','rate_limited','no_server_data','partial') "
+                       "WHEN accuracy_status IN ('queued','error','rate_limited','no_server_data','partial','stale_line') "
                        "THEN 'running' ELSE accuracy_status END,evals_status=CASE "
-                       "WHEN evals_status IN ('queued','error','rate_limited','no_server_data','partial') "
+                       "WHEN evals_status IN ('queued','error','rate_limited','no_server_data','partial','stale_line') "
                        "THEN 'running' ELSE evals_status END,attempts=attempts+1,updated_at=? "
-                       "WHERE account_id=? AND game_id=?",
-                       (datetime.now(timezone.utc).isoformat(), account_id, game_id))
+                       "WHERE account_id=? AND game_id=?" + revision_guard + hash_guard, params)
 
     def record_lichess_analysis_backfill(self, account_id: str, game_id: str, *,
                                          accuracy_status: str, evals_status: str,
                                          retry_after_seconds: int = 0,
-                                         error: str | None = None) -> None:
+                                         error: str | None = None,
+                                         line_revision: int | None = None,
+                                         line_hash: str | None = None) -> None:
         allowed = {"queued", "running", "has_data", "no_server_data", "partial",
-                   "rate_limited", "error"}
+                   "rate_limited", "error", "stale_line"}
         if accuracy_status not in allowed or evals_status not in allowed:
             raise ValueError("Invalid Lichess analytics status")
         now = datetime.now(timezone.utc)
         checked = now.isoformat()
         retry = ((now + timedelta(seconds=max(1, int(retry_after_seconds)))).isoformat()
                  if retry_after_seconds else None)
+        revision_guard = " AND line_revision=?" if line_revision is not None else ""
+        hash_guard = " AND line_hash=?" if line_hash is not None else ""
+        params = [accuracy_status, evals_status, accuracy_status, checked,
+                  evals_status, checked, accuracy_status, retry, evals_status, retry,
+                  (str(error)[:500] if error else None), checked, account_id, game_id]
+        if line_revision is not None:
+            params.append(int(line_revision))
+        if line_hash is not None:
+            params.append(str(line_hash))
         with self._connection() as db:
             db.execute("""
               UPDATE lichess_analysis_backfill SET
                 accuracy_status=?,evals_status=?,
                 accuracy_checked_at=CASE WHEN ? IN ('has_data','no_server_data','partial') THEN ? ELSE accuracy_checked_at END,
                 evals_checked_at=CASE WHEN ? IN ('has_data','no_server_data','partial') THEN ? ELSE evals_checked_at END,
-                accuracy_next_retry_at=CASE WHEN ? IN ('no_server_data','partial','rate_limited','error') THEN ? ELSE NULL END,
-                evals_next_retry_at=CASE WHEN ? IN ('no_server_data','partial','rate_limited','error') THEN ? ELSE NULL END,
+                accuracy_next_retry_at=CASE WHEN ? IN ('no_server_data','partial','rate_limited','error','stale_line') THEN ? ELSE NULL END,
+                evals_next_retry_at=CASE WHEN ? IN ('no_server_data','partial','rate_limited','error','stale_line') THEN ? ELSE NULL END,
                 last_error=?,updated_at=? WHERE account_id=? AND game_id=?
-            """, (accuracy_status, evals_status, accuracy_status, checked,
-                  evals_status, checked, accuracy_status, retry, evals_status, retry,
-                  (str(error)[:500] if error else None), checked, account_id, game_id))
+            """ + revision_guard + hash_guard, params)
 
     def lichess_analysis_backfill_summary(self, account_id: str) -> dict[str, int | str | None]:
         with self._connection() as db:
@@ -926,7 +1137,7 @@ class GameRepository:
                 SUM(accuracy_status IN ('has_data','partial')) accuracy,
                 SUM(evals_status IN ('has_data','partial')) evals,
                 SUM(accuracy_status='no_server_data' AND evals_status='no_server_data') no_data,
-                SUM(accuracy_status IN ('error','rate_limited') OR evals_status IN ('error','rate_limited')) errors,
+                SUM(accuracy_status IN ('error','rate_limited','stale_line') OR evals_status IN ('error','rate_limited','stale_line')) errors,
                 SUM(accuracy_status='queued' OR evals_status='queued' OR accuracy_status='running' OR evals_status='running') pending,
                 SUM(accuracy_checked_at IS NOT NULL OR evals_checked_at IS NOT NULL) checked,
                 MAX(updated_at) updated_at,
@@ -1581,6 +1792,8 @@ class GameRepository:
         for move in parsed.mainline_moves():
             uci_moves.append(move.uci())
         moves = " ".join(uci_moves)
+        from .analysis_json import ANALYTICS_SCHEMA_VERSION, normalize_game_analytics
+        normalized_analytics = normalize_game_analytics(record, len(uci_moves))
         white = parsed.headers.get("White", "?")
         black = parsed.headers.get("Black", "?")
         is_white = white.casefold() == username.casefold()
@@ -1627,6 +1840,8 @@ class GameRepository:
                 "ply": ply, "white_cp": score.score(mate_score=None),
                 "mate_white": score.mate(), "depth": node.eval_depth(),
             })
+        for item in normalized_analytics.assessments:
+            lichess_assessments.append(dict(item))
         raw_hash = hashlib.sha256(raw_pgn.encode("utf-8")).hexdigest()
         players = record.get("players") if isinstance(record.get("players"), dict) else {}
         white_data = players.get("white") if isinstance(players.get("white"), dict) else {}
@@ -1665,8 +1880,8 @@ class GameRepository:
                        "WHERE game_id=?",
                        (game_id, variant, started_at, time_precision, time_precision,
                         raw_hash, raw_pgn, record.get("lastMoveAt"),
-                        (record.get("accuracy") or {}).get("white"),
-                        (record.get("accuracy") or {}).get("black"), white_data.get("rating"),
+                       normalized_analytics.accuracy.get("white"),
+                       normalized_analytics.accuracy.get("black"), white_data.get("rating"),
                         black_data.get("rating"), opening.get("eco"), opening.get("name"), game_id))
             player_rating = white_data.get("rating") if player_color == "white" else black_data.get("rating")
             opponent_rating = black_data.get("rating") if player_color == "white" else white_data.get("rating")
@@ -1682,6 +1897,25 @@ class GameRepository:
                        "opponent=excluded.opponent,player_name=excluded.player_name",
                        (account_id, game_id, game_id, imported_at, player_color, player_rating,
                         opponent_rating, opponent, white if player_color == "white" else black))
+            db.execute("""INSERT INTO lichess_ready_analysis_metadata(
+                account_id,game_id,line_revision,source,schema_version,white_analysis_json,
+                black_analysis_json,move_annotations_json,validation_issues_json,updated_at)
+                VALUES (?,?,?,'lichess-json',?,?,?,?,?,?) ON CONFLICT(account_id,game_id,line_revision)
+                DO UPDATE SET source=excluded.source,schema_version=excluded.schema_version,
+                white_analysis_json=excluded.white_analysis_json,
+                black_analysis_json=excluded.black_analysis_json,
+                move_annotations_json=excluded.move_annotations_json,
+                validation_issues_json=excluded.validation_issues_json,updated_at=excluded.updated_at""",
+                       (account_id, game_id, revision,
+                        ANALYTICS_SCHEMA_VERSION,
+                        json.dumps(normalized_analytics.player_analysis.get("white", {}), sort_keys=True,
+                                   separators=(",", ":")),
+                        json.dumps(normalized_analytics.player_analysis.get("black", {}), sort_keys=True,
+                                   separators=(",", ":")),
+                        json.dumps(list(normalized_analytics.move_annotations), sort_keys=True,
+                                   separators=(",", ":")),
+                        json.dumps(list(normalized_analytics.issues), sort_keys=True,
+                                   separators=(",", ":")), imported_at))
             eval_parameters = json.dumps({"format": "pgn-eval-v1"}, sort_keys=True)
             existing_eval_run = db.execute(
                 "SELECT * FROM analysis_runs WHERE game_id=? AND line_revision=? AND line_hash=? "
@@ -2737,7 +2971,29 @@ class GameRepository:
         self._wait_before_read(game_id)
         with self._connection() as db:
             row = db.execute("SELECT * FROM games WHERE game_id=?", (game_id,)).fetchone()
-            return dict(row) if row else None
+            if not row:
+                return None
+            result = dict(row)
+            metadata = db.execute(
+                "SELECT source,schema_version,white_analysis_json,black_analysis_json,"
+                "move_annotations_json,validation_issues_json FROM lichess_ready_analysis_metadata "
+                "WHERE game_id=? AND line_revision=? ORDER BY updated_at DESC LIMIT 1",
+                (game_id, result.get("line_revision"))).fetchone()
+            if metadata:
+                result["lichess_analysis_source"] = metadata["source"]
+                result["lichess_analysis_schema_version"] = metadata["schema_version"]
+                for key in ("white_analysis_json", "black_analysis_json",
+                            "move_annotations_json", "validation_issues_json"):
+                    try:
+                        result[key.removesuffix("_json")] = json.loads(metadata[key])
+                    except (TypeError, json.JSONDecodeError):
+                        result[key.removesuffix("_json")] = {} if key.endswith("analysis_json") else []
+            else:
+                result["lichess_analysis_source"] = None
+                result["lichess_analysis_schema_version"] = None
+                result["white_analysis"] = result["black_analysis"] = {}
+                result["move_annotations"] = result["validation_issues"] = []
+            return result
 
     def list_pending_final_sync(self) -> list[dict]:
         self._wait_before_read()

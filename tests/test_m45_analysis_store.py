@@ -55,7 +55,7 @@ def test_schema_v16_includes_openings_and_date_precision_without_copying_game_fa
     path = tmp_path / "synthetic.sqlite3"
     repository, line_hash = _seed_repository(path)
     try:
-        assert SCHEMA_VERSION == 18
+        assert SCHEMA_VERSION == 19
         with repository._connection() as db:
             version = db.execute("PRAGMA user_version").fetchone()[0]
             game = db.execute("SELECT game_id,pgn,moves FROM games WHERE game_id=?",
@@ -67,7 +67,7 @@ def test_schema_v16_includes_openings_and_date_precision_without_copying_game_fa
             tables = {row[0] for row in db.execute(
                 "SELECT name FROM sqlite_master WHERE type='table'")}
             columns = {row[1] for row in db.execute("PRAGMA table_info(games)")}
-            assert version == 18
+            assert version == 19
         assert game["game_id"] == "synthetic-game" and game["moves"] == "e2e4 e7e5"
         assert game["pgn"]
         assert revision["line_hash"] == line_hash
@@ -91,7 +91,7 @@ def test_v16_to_v17_eval_refresh_migration_is_additive_and_backed_up(tmp_path):
         db.execute("PRAGMA user_version=16")
     migrated = GameRepository(path)
     try:
-        backup = path.with_name(path.name + ".pre-m3-v18.bak")
+        backup = path.with_name(path.name + ".pre-m3-v19.bak")
         assert backup.exists()
         with sqlite3.connect(backup) as db:
             assert db.execute("PRAGMA integrity_check").fetchone()[0] == "ok"
@@ -99,7 +99,7 @@ def test_v16_to_v17_eval_refresh_migration_is_additive_and_backed_up(tmp_path):
             assert db.execute("SELECT COUNT(*) FROM games").fetchone()[0] == 1
             assert db.execute("SELECT COUNT(*) FROM game_notes").fetchone()[0] == 1
         with migrated._connection() as db:
-            assert db.execute("PRAGMA user_version").fetchone()[0] == 18
+            assert db.execute("PRAGMA user_version").fetchone()[0] == 19
             assert db.execute("SELECT COUNT(*) FROM games").fetchone()[0] == 1
             assert db.execute("SELECT COUNT(*) FROM game_moves").fetchone()[0] == 2
             assert db.execute("SELECT COUNT(*) FROM position_assessments").fetchone()[0] == 3
@@ -136,7 +136,7 @@ def test_v9_upgrade_creates_verified_backup_and_preserves_existing_records(tmp_p
 
     upgraded = GameRepository(path)
     try:
-        backup = path.with_name(path.name + ".pre-m3-v18.bak")
+        backup = path.with_name(path.name + ".pre-m3-v19.bak")
         assert backup.exists()
         with sqlite3.connect(backup) as backup_db:
             assert backup_db.execute("PRAGMA integrity_check").fetchone()[0] == "ok"
@@ -145,7 +145,7 @@ def test_v9_upgrade_creates_verified_backup_and_preserves_existing_records(tmp_p
             assert backup_db.execute("SELECT COUNT(*) FROM game_notes").fetchone()[0] == 1
             assert backup_db.execute("SELECT COUNT(*) FROM analysis_runs").fetchone()[0] == 1
         with upgraded._connection() as db:
-            assert db.execute("PRAGMA user_version").fetchone()[0] == 18
+            assert db.execute("PRAGMA user_version").fetchone()[0] == 19
             assert db.execute("SELECT COUNT(*) FROM games").fetchone()[0] == 1
             assert db.execute("SELECT COUNT(*) FROM game_moves").fetchone()[0] == 2
             assert db.execute("SELECT COUNT(*) FROM game_positions").fetchone()[0] == 3
@@ -178,13 +178,13 @@ def test_v10_database_with_preexisting_analysis_jobs_is_upgraded_additively(tmp_
 
     upgraded = GameRepository(path)
     try:
-        backup = path.with_name(path.name + ".pre-m3-v18.bak")
+        backup = path.with_name(path.name + ".pre-m3-v19.bak")
         with sqlite3.connect(backup) as db:
             assert db.execute("PRAGMA integrity_check").fetchone()[0] == "ok"
             assert db.execute("PRAGMA user_version").fetchone()[0] == 10
             assert db.execute("SELECT COUNT(*) FROM analysis_jobs").fetchone()[0] == 1
         with upgraded._connection() as db:
-            assert db.execute("PRAGMA user_version").fetchone()[0] == 18
+            assert db.execute("PRAGMA user_version").fetchone()[0] == 19
             columns = {row[1] for row in db.execute("PRAGMA table_info(analysis_jobs)")}
             assert {"lease_owner", "lease_until", "result_run_id"} <= columns
             job = db.execute("SELECT status,game_id FROM analysis_jobs").fetchone()
@@ -206,12 +206,12 @@ def test_v11_database_upgrades_additively_to_move_metrics_and_events(tmp_path):
         db.execute("PRAGMA user_version=11")
     upgraded = GameRepository(path)
     try:
-        backup = path.with_name(path.name + ".pre-m3-v18.bak")
+        backup = path.with_name(path.name + ".pre-m3-v19.bak")
         with sqlite3.connect(backup) as db:
             assert db.execute("PRAGMA user_version").fetchone()[0] == 11
             assert db.execute("PRAGMA integrity_check").fetchone()[0] == "ok"
         with upgraded._connection() as db:
-            assert db.execute("PRAGMA user_version").fetchone()[0] == 18
+            assert db.execute("PRAGMA user_version").fetchone()[0] == 19
             assert db.execute("SELECT line_hash FROM game_revisions").fetchone()[0] == line_hash
             assert db.execute("SELECT COUNT(*) FROM games").fetchone()[0] == 1
             assert db.execute("SELECT COUNT(*) FROM analysis_runs").fetchone()[0] == 1
@@ -231,12 +231,12 @@ def test_v12_database_adds_many_to_many_event_tags_without_touching_analysis(tmp
         db.execute("PRAGMA user_version=12")
     upgraded = GameRepository(path)
     try:
-        backup = path.with_name(path.name + ".pre-m3-v18.bak")
+        backup = path.with_name(path.name + ".pre-m3-v19.bak")
         with sqlite3.connect(backup) as db:
             assert db.execute("PRAGMA user_version").fetchone()[0] == 12
             assert db.execute("PRAGMA integrity_check").fetchone()[0] == "ok"
         with upgraded._connection() as db:
-            assert db.execute("PRAGMA user_version").fetchone()[0] == 18
+            assert db.execute("PRAGMA user_version").fetchone()[0] == 19
             assert db.execute("SELECT line_hash FROM game_revisions").fetchone()[0] == line_hash
             assert db.execute("SELECT COUNT(*) FROM position_assessments").fetchone()[0] == 3
             assert db.execute("SELECT COUNT(*) FROM move_metrics").fetchone()[0] == 2
@@ -256,12 +256,12 @@ def test_v13_database_adds_review_alternatives_and_preserves_event_tags(tmp_path
         db.execute("PRAGMA user_version=13")
     upgraded = GameRepository(path)
     try:
-        backup = path.with_name(path.name + ".pre-m3-v18.bak")
+        backup = path.with_name(path.name + ".pre-m3-v19.bak")
         with sqlite3.connect(backup) as db:
             assert db.execute("PRAGMA user_version").fetchone()[0] == 13
             assert db.execute("PRAGMA integrity_check").fetchone()[0] == "ok"
         with upgraded._connection() as db:
-            assert db.execute("PRAGMA user_version").fetchone()[0] == 18
+            assert db.execute("PRAGMA user_version").fetchone()[0] == 19
             assert db.execute("SELECT COUNT(*) FROM event_tags").fetchone()[0] == tagged
             assert db.execute("SELECT COUNT(*) FROM position_assessments").fetchone()[0] == 3
             assert db.execute("SELECT COUNT(*) FROM analysis_alternatives").fetchone()[0] == 0
@@ -296,7 +296,7 @@ def test_v9_migration_failure_rolls_back_new_ddl_and_keeps_backup_and_facts(
         assert db.execute("SELECT name FROM sqlite_master WHERE name='analysis_events'").fetchone() is None
         assert db.execute("SELECT name FROM sqlite_master WHERE name='event_tags'").fetchone() is None
         assert db.execute("PRAGMA integrity_check").fetchone()[0] == "ok"
-    backup = path.with_name(path.name + ".pre-m3-v18.bak")
+    backup = path.with_name(path.name + ".pre-m3-v19.bak")
     with sqlite3.connect(backup) as db:
         assert db.execute("PRAGMA integrity_check").fetchone()[0] == "ok"
 
@@ -305,7 +305,7 @@ def test_v9_migration_failure_rolls_back_new_ddl_and_keeps_backup_and_facts(
     try:
         assert len(recovered.list_games()) == 1
         with recovered._connection() as db:
-            assert db.execute("PRAGMA user_version").fetchone()[0] == 18
+            assert db.execute("PRAGMA user_version").fetchone()[0] == 19
             assert db.execute("SELECT COUNT(*) FROM analysis_jobs").fetchone()[0] == 0
     finally:
         recovered.shutdown()
@@ -371,7 +371,9 @@ def test_lichess_archive_move_metrics_drive_summary_without_legacy_classificatio
                '1. e4 { [%eval 0.50,12] } e5 { [%eval 0.50,12] } '
                '2. Nf3 { [%eval -1.00,12] } Nc6 { [%eval -1.00,12] } 1-0\n')
         repository.import_archive_record("Me", {"id": "lichess-metrics", "pgn": pgn,
-                "accuracy": {"white": 76, "black": 81}}, checkpoint_ms=1, backfill=True)
+                "players": {"white": {"analysis": {"accuracy": 76}},
+                            "black": {"analysis": {"accuracy": 81}}}},
+                checkpoint_ms=1, backfill=True)
         account_id = repository.ensure_archive_account("Me")
         run = repository.list_analyses("lichess-metrics")[0]
         with repository._connection() as db:

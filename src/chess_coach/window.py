@@ -64,7 +64,7 @@ from .lichess.service import LichessService
 from .lichess.session import LichessGameSession, classify_lichess_opponent
 from .lichess.statistics import StatisticsService
 from .diagnostics import anonymized_report, log_event, logs_directory
-from .ui.theme import stylesheet as desktop_stylesheet
+from .ui.theme import TOKENS, stylesheet as desktop_stylesheet
 from .ui.dashboard import dashboard_options, dashboard_snapshot, game_card_text
 from .ui.game_review import GameReviewWorkspace
 from .ui.move_table import MoveTable
@@ -692,7 +692,7 @@ class StatisticsDialog(QDialog):
         self.analysis_source = QComboBox()
         self._fill_combo(self.analysis_source, (("Любой источник оценки", ""),
                                                  ("Stockfish", "stockfish"),
-                                                 ("Lichess PGN", "lichess-pgn")))
+                                                 ("Lichess", "lichess-pgn")))
         fields = (("Аккаунт", self.account), ("Период", self.period),
                   ("Контроль", self.clock), ("Цвет", self.side),
                   ("Результат", self.result_filter), ("Источник партии", self.game_source),
@@ -2314,12 +2314,26 @@ class MainWindow(QMainWindow):
             force_retry=force_retry)
         self.lichess_analysis_status.setText("Lichess · проверяем до 10 завершённых партий…")
 
-    def _lichess_analysis_backfill_progress(self, done: int, total: int, _game: dict) -> None:
+    def _lichess_analysis_backfill_progress(self, generation: int, username: str,
+                                           done: int, total: int, _game: dict) -> None:
+        if not self._accept_backfill_status(generation, username):
+            return
         self.lichess_analysis_status.setText(f"Lichess · фоновая аналитика: {done}/{total} партий")
 
-    def _lichess_analysis_backfill_finished(self, checked: int, total: int, accuracy: int,
+    def _accept_backfill_status(self, generation: int, username: str) -> bool:
+        return bool(self._current_lichess_generation(generation) and self.lichess
+                    and str(self.lichess.username or "").casefold() == username.casefold())
+
+    def _reset_backfill_status(self, text: str = "Lichess · нет текущей фоновой операции") -> None:
+        self.lichess_analysis_status.setText(text)
+        self.lichess_analysis_status.setToolTip("")
+
+    def _lichess_analysis_backfill_finished(self, generation: int, username: str,
+                                            checked: int, total: int, accuracy: int,
                                             evals: int, no_data: int, errors: int,
                                             state: str) -> None:
+        if not self._accept_backfill_status(generation, username):
+            return
         self.lichess_analysis_status.setText(
             f"Lichess · проверено {checked}/{total} · точность {accuracy} · оценки {evals} · "
             f"без анализа {no_data} · ошибки {errors}")
@@ -5304,6 +5318,7 @@ class MainWindow(QMainWindow):
     def _select_lichess_auth_method(self, method: str) -> None:
         self._invalidate_analysis_preflight()
         self._lichess_connected = False
+        self._reset_backfill_status("Lichess · способ подключения изменён; ожидаем аккаунт")
         self.settings.setValue("lichess/selected_auth_method", method)
         self.settings.sync()
         if self.lichess is None:
@@ -5331,6 +5346,7 @@ class MainWindow(QMainWindow):
             return
         self._invalidate_analysis_preflight()
         self._lichess_connected = False
+        self._reset_backfill_status("Lichess · ожидаем OAuth-подключение")
         self.settings.setValue("lichess/selected_auth_method", "oauth")
         self.settings.sync()
         self.lichess.set_auth_method("oauth")
@@ -5341,6 +5357,7 @@ class MainWindow(QMainWindow):
             return
         self._invalidate_analysis_preflight()
         self._lichess_connected = False
+        self._reset_backfill_status("Lichess · проверяем новое подключение")
         self.settings.setValue("lichess/selected_auth_method", "personal_token")
         self.settings.sync()
         self.lichess.set_auth_method("personal_token")
@@ -5388,6 +5405,7 @@ class MainWindow(QMainWindow):
     def disconnect_lichess(self) -> None:
         self._invalidate_analysis_preflight()
         self._lichess_connected = False
+        self._reset_backfill_status("Lichess · отключено")
         self._pause_batch_analysis()
         if self.lichess:
             self.lichess.disconnect_account()
@@ -5641,6 +5659,9 @@ class MainWindow(QMainWindow):
         self._invalidate_analysis_preflight()
         self._lichess_connected = True
         self._event_stream_recovery_pending = False
+        self.lichess_analysis_status.setText(
+            "Lichess · подключено; фоновая аналитика будет проверена для этого аккаунта")
+        self.lichess_analysis_status.setToolTip("")
         self.settings.setValue("workspace/selected_account", f"lichess:{username.strip().lower()}")
         self.connection.setText(f"●  Подключено: {username}")
         if self._connection_dialog is not None:
@@ -6253,8 +6274,10 @@ class MainWindow(QMainWindow):
             self.you_clock_detail.setText(
                 f"+{owner_increment} с после подтверждённого хода" if owner_increment else "")
             self.clock_label.setText(session.clock_control if waiting else "Без часов")
-            self.opponent_clock_label.setStyleSheet("font-size: 20px; font-weight: 600; padding: 2px 8px;")
-            self.you_clock_label.setStyleSheet("font-size: 20px; font-weight: 600; padding: 2px 8px;")
+            self.opponent_clock_label.setStyleSheet(
+                f"font-size: 28px; font-weight: 600; padding: 2px 8px; color: {TOKENS.secondary};")
+            self.you_clock_label.setStyleSheet(
+                f"font-size: 28px; font-weight: 600; padding: 2px 8px; color: {TOKENS.secondary};")
             return
         history_view = self._screen_mode != "online" or self.online_view_ply is not None
         terminal_statuses = {"mate", "resign", "draw", "stalemate", "repetition", "50moves",
@@ -6292,13 +6315,13 @@ class MainWindow(QMainWindow):
         self.you_clock_label.setText(own_text + owner_marker)
         self.opponent_clock_label.setText(opponent_text + opponent_marker)
         self.you_clock_label.setStyleSheet(
-            "font-size: 28px; font-weight: 800; padding: 2px 8px; color: #b04432;" if own_warning else
-            "font-size: 28px; font-weight: 800; padding: 2px 8px; color: #262b33;" if owner_active else
-            "font-size: 26px; font-weight: 600; padding: 2px 8px; color: #77766f;")
+            f"font-size: 28px; font-weight: 800; padding: 2px 8px; color: #F3C969;" if own_warning else
+            f"font-size: 28px; font-weight: 800; padding: 2px 8px; color: {TOKENS.text};" if owner_active else
+            f"font-size: 28px; font-weight: 600; padding: 2px 8px; color: {TOKENS.secondary};")
         self.opponent_clock_label.setStyleSheet(
-            "font-size: 28px; font-weight: 800; padding: 2px 8px; color: #b04432;" if opponent_warning else
-            "font-size: 28px; font-weight: 800; padding: 2px 8px; color: #262b33;" if opponent_active else
-            "font-size: 26px; font-weight: 600; padding: 2px 8px; color: #77766f;")
+            f"font-size: 28px; font-weight: 800; padding: 2px 8px; color: #F3C969;" if opponent_warning else
+            f"font-size: 28px; font-weight: 800; padding: 2px 8px; color: {TOKENS.text};" if opponent_active else
+            f"font-size: 28px; font-weight: 600; padding: 2px 8px; color: {TOKENS.secondary};")
         self.clock_label.setText(f"Контроль {format_clock_control(session.clock_control)} · часы Lichess")
 
     def resign_online(self) -> None:

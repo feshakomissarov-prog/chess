@@ -1399,12 +1399,14 @@ def test_archive_import_keeps_lichess_pgn_evaluations_as_separate_source(tmp_pat
         "id": "eval-game",
         "pgn": '[Event "Archive"]\n[White "Me"]\n[Black "Friend"]\n[Result "1/2-1/2"]\n\n'
                '1. e4 { [%eval 0.25] } e5 1/2-1/2\n',
-        "lastMoveAt": 1000, "accuracy": {"white": 91.2, "black": 88.0},
+        "lastMoveAt": 1000,
+        "players": {"white": {"analysis": {"accuracy": 91}},
+                    "black": {"analysis": {"accuracy": 88}}},
         "division": {"middle": {"begin": 1}, "end": {"begin": 2}},
     }, checkpoint_ms=1000, backfill=True)
     game = repo.get_game("eval-game")
     assert game["raw_pgn"].find("[%eval 0.25]") >= 0
-    assert game["lichess_accuracy_white"] == 91.2
+    assert game["lichess_accuracy_white"] == 91
     runs = repo.list_analyses("eval-game")
     assert len(runs) == 1 and runs[0]["source"] == "lichess-pgn"
     cached = repo.find_analysis_cache("eval-game", 1, runs[0]["line_hash"],
