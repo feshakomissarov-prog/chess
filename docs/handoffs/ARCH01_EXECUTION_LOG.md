@@ -102,3 +102,13 @@ Working branch: `codex/arch-01-modular-refactor` from `main` SHA `3e7f2cd48b1676
 - Потоковые запросы всё ещё используют транспортный 35-секундный timeout и отмену через stop event; следующий короткий интерактивный запрос не ждёт весь поток. UI-initiated operations, которые синхронно выполняют SQL/HTTP, остаются предметом W7/W8 audit.
 
 **Next:** W6 вынести владение UCI process/analysis cancellation в `StockfishManager`, сохранив существующий Fair Play lease и настройки анализа.
+
+## W6 — Stockfish process manager (завершён)
+
+- `engine_manager.StockfishManager` теперь централизует запуск через скрытый python-chess UCI transport, регистрацию процессов, повторное использование процесса локальной оценки позиции, безопасный release и запрет новых процессов после shutdown.
+- `ApplicationRuntime` владеет одним менеджером и закрывает его только после остановки зарегистрированных фоновых Lichess workers и до закрытия SQLite. `MainWindow` передаёт тот же manager в анализ позиции, одиночный послепартийный анализ и обе ветки создания массового runner.
+- Поиск/отмена поиска по-прежнему выполняются существующими python-chess analysis contexts и stop events; управление параметрами nodes/depth/time, hash/threads/MultiPV осталось в прежних компонентах. Исправления Fair Play не обходились и не ослаблялись: connected review продолжает создавать анализатор только после текущего live preflight; batch runner делает fail-closed check до каждого job и периодически во время запуска.
+- Добавлены fake engine tests на открытие/однократный release, reuse позиционного процесса, close-all и запрет запуска после shutdown. Адаптированы только test injection points к явному manager dependency; проверяемые assertions отмены, stale-result, safety revocation и порядка `engine.quit` перед SQLite сохранены.
+- Проверки: целевой lifecycle/Fair Play/position/MultiPV набор — **29 passed in 4.19 s**; расширенный engine + batch + event detectors + architecture + window набор повторно завершён без падений; `compileall -q src tests scripts`: PASS; `git diff --check`: PASS. Fake движки и временные файлы; настоящий Stockfish не запускался.
+
+**Next:** W7 выделить dialog/page classes из `window.py` в тематические UI модули, сохранив совместимые imports/signals и текущее визуальное поведение.

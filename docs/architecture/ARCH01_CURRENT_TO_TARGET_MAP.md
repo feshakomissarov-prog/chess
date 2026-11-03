@@ -113,3 +113,10 @@ No benchmark, new product feature, Rust toolchain, data migration, WAL behavior 
 - Retry-After is guarded independently from request admission so streams and short requests observe the same cooldown without a stream blocking a board move.
 - Runtime shutdown waits for registered service work before repository shutdown; if work remains alive the close attempt is retried rather than closing its SQLite dependency.
 - Structured diagnostics accept the random operation id, but not account identity or secret-bearing execution context.
+
+### W6 — Stockfish process ownership
+
+- `engine_manager.StockfishManager` owns python-chess UCI subprocess registration, creation refusal during application shutdown, one cached process for local position evaluation, release and close-all.
+- `ApplicationRuntime` owns one manager; completed-game, batch and position evaluators receive its factory/position lease. Existing analyzer/batch APIs remain compatible and continue to own search settings/results.
+- Search interruption remains on python-chess `Analysis.stop()` plus the existing stop events. No global running-engine queue was added.
+- The manager is a lifecycle boundary; it is not an authorization bypass. Connected post-game analysis remains gated by the existing live Lichess Fair Play preflight and current session/account checks, and batch analysis retains its per-job fail-closed safety check.

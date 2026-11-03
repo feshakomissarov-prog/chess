@@ -2084,6 +2084,7 @@ class MainWindow(QMainWindow):
             settings=settings, offline_mode=offline_mode,
             manual_connect_mode=manual_connect_mode,
             asynchronous_storage=asynchronous_storage)
+        self.stockfish_manager = self.runtime.stockfish_manager
         self._offline_data_dir = self.runtime.offline_data_dir
         self.settings = self.runtime.settings
         self.workspace_state = WorkspaceStateStore(self.settings)
@@ -3793,7 +3794,9 @@ class MainWindow(QMainWindow):
             return
         try:
             options = FastPassOptions(nodes=nodes, hash_mb=hash_mb)
-            runner = BatchAnalysisRunner(self.game_repository, engine_path, options=options)
+            runner = BatchAnalysisRunner(
+                self.game_repository, engine_path, options=options,
+                engine_factory=self.stockfish_manager.engine_factory)
             resumed_original_budget = False
             if resume:
                 saved_parameters = self.game_repository.pending_fast_analysis_parameters(
@@ -3804,7 +3807,8 @@ class MainWindow(QMainWindow):
                     if (saved_nodes, saved_hash) != (runner.options.nodes, runner.options.hash_mb):
                         runner = BatchAnalysisRunner(
                             self.game_repository, engine_path,
-                            options=FastPassOptions(nodes=saved_nodes, hash_mb=saved_hash))
+                            options=FastPassOptions(nodes=saved_nodes, hash_mb=saved_hash),
+                            engine_factory=self.stockfish_manager.engine_factory)
                         nodes, hash_mb = saved_nodes, saved_hash
                         dialog.nodes.setValue(saved_nodes)
                         dialog.hash_mb.setValue(saved_hash)
@@ -4886,7 +4890,8 @@ class MainWindow(QMainWindow):
 
         def work() -> None:
             try:
-                payload = evaluate_position(engine_path, board, stop_event, active)
+                payload = evaluate_position(engine_path, board, stop_event, active,
+                                            engine_manager=self.stockfish_manager)
             except Exception as exc:
                 payload = {"error": str(exc)}
             self.position_eval_finished.emit(generation, payload, threading.current_thread())
@@ -6718,7 +6723,9 @@ class MainWindow(QMainWindow):
 
         def work():
             try:
-                result = CompletedGameAnalyzer(self.game_repository).analyze(
+                result = CompletedGameAnalyzer(
+                    self.game_repository,
+                    engine_factory=self.stockfish_manager.engine_factory).analyze(
                     game_id, engine_path, options,
                     active_human_game_ids=active_human_ids,
                     progress=lambda done, total: self.analysis_progress.emit(game_id, done, total),

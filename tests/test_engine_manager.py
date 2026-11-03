@@ -246,6 +246,53 @@ def test_uci_launch_options_hide_console_on_windows():
         assert options == {}
 
 
+def test_stockfish_manager_owns_engine_release_and_refuses_creation_after_shutdown(tmp_path):
+    import chess_coach.engine_manager as manager_module
+    executable = tmp_path / "stockfish.exe"
+    executable.write_bytes(b"synthetic executable")
+    calls = []
+
+    class FakeEngine:
+        id = {"name": "Synthetic UCI"}
+        def quit(self):
+            calls.append("quit")
+
+    manager = manager_module.StockfishManager(
+        engine_factory=lambda command, **kwargs: (
+            calls.append((command, kwargs["timeout"], kwargs["cwd"])) or FakeEngine()))
+    engine = manager.open_engine(executable)
+    assert engine.id["name"] == "Synthetic UCI"
+    assert manager.active_process_count == 1
+    engine.quit()
+    engine.quit()
+    assert calls.count("quit") == 1
+    assert manager.active_process_count == 0
+    manager.close_all()
+    with pytest.raises(RuntimeError, match="shutting down"):
+        manager.open_engine(executable)
+
+
+def test_stockfish_manager_reuses_position_engine_and_closes_it_on_shutdown(tmp_path):
+    import chess_coach.engine_manager as manager_module
+    executable = tmp_path / "stockfish.exe"
+    executable.write_bytes(b"synthetic executable")
+    started, stopped = [], []
+
+    class FakeEngine:
+        def quit(self):
+            stopped.append(True)
+
+    manager = manager_module.StockfishManager(
+        engine_factory=lambda command, **_kwargs: (started.append(command) or FakeEngine()))
+    first = manager.position_engine(executable)
+    second = manager.position_engine(executable)
+    assert first is second
+    assert len(started) == manager.active_process_count == 1
+    manager.close_all()
+    assert stopped == [True]
+    assert manager.active_process_count == 0
+
+
 def test_position_evaluator_reuses_one_engine_for_a_local_session(monkeypatch, tmp_path):
     import chess_coach.position_analysis as position_module
     position_module.close_position_engines()

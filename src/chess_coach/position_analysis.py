@@ -41,9 +41,10 @@ atexit.register(close_position_engines)
 
 
 def evaluate_position(engine_path: str, board: chess.Board, stop_event: threading.Event,
-                      active_result: dict, on_update=None) -> dict:
+                      active_result: dict, on_update=None, *, engine_manager=None) -> dict:
     """Evaluate one copied position; ``active_result`` lets the UI stop stale UCI work."""
-    engine = _engine_for_path(engine_path)
+    engine = (engine_manager.position_engine(engine_path) if engine_manager is not None
+              else _engine_for_path(engine_path))
     on_update = on_update or active_result.get("on_update")
     try:
         if stop_event.is_set():

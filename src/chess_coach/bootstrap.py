@@ -9,6 +9,7 @@ import tempfile
 from PySide6.QtCore import QSettings, QStandardPaths
 
 from .application.background_work import BackgroundWorkCoordinator
+from .engine_manager import StockfishManager
 from .lichess.repository import GameRepository
 
 
@@ -20,6 +21,7 @@ class ApplicationRuntime:
     offline_mode: bool
     manual_connect_mode: bool
     work_coordinator: BackgroundWorkCoordinator = field(default_factory=BackgroundWorkCoordinator)
+    stockfish_manager: StockfishManager = field(default_factory=StockfishManager)
     offline_data_dir: tempfile.TemporaryDirectory | None = None
     _lichess_service: object | None = None
     _closed: bool = False
@@ -68,6 +70,7 @@ class ApplicationRuntime:
             return True
         if not self.work_coordinator.close(timeout=0.5):
             return False
+        self.stockfish_manager.close_all()
         self._closed = True
         self.repository.shutdown()
         if self.offline_data_dir is not None:
