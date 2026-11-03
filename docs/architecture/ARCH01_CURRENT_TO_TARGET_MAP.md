@@ -135,3 +135,8 @@ No benchmark, new product feature, Rust toolchain, data migration, WAL behavior 
 - Diagnostic context only accepts a strict random operation id. Structured event fields remain allowlisted; exceptions contribute type/code and bounded function/line trace, not message or payload. Tests cover secret-like error text, email, filesystem path, invalid IDs and reason-code redaction.
 - Remaining direct threads are intentionally local owners: OAuth helper/service workers under their service lifecycle, statistics/opening-index workers owned by the modal statistics dialog, and short-lived UCI probe/process monitoring. They are not placed behind archive/engine work; W9 must validate application close and preservation of their existing lifecycle contracts.
 - Current W8 audit does not add empty future plugins. Competency/educational model and repertoire tree remain documented future contracts; no GPT, ML, Rust, database schema or settings-key change is included.
+
+### W9 — delivery gate
+
+- Full local Windows Python 3.12 run: **589 passed**; compileall, isolated offline `QApplication`/`MainWindow` init-close, and diff-check passed.
+- Hosted Windows CI must be linked from the exact published head SHA before this architecture task is considered complete. Physical GUI acceptance remains with the owner after independent review.

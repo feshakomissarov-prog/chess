@@ -124,12 +124,22 @@ Working branch: `codex/arch-01-modular-refactor` from `main` SHA `3e7f2cd48b1676
 
 **Next:** W8 расширить structured operation correlation/redaction, архитектурные import checks и fault-path regression; закрыть обнаруженные UI→worker и lifecycle coupling.
 
-## W8 — diagnostics, operation correlation и границы (выполняется)
+## W8 — diagnostics, operation correlation и границы (завершён)
 
 - Начата регистрация долгих операций, запущенных из `MainWindow`: чтение карточек главной, batch Stockfish, оценка позиции, установка движка и анализ завершённой партии теперь стартуют через `ApplicationRuntime.work_coordinator`. Координатор регистрирует их в отдельных потоках и не объединяет сетевые и engine lanes в блокирующую очередь. Совместимый thread-shaped handle сохраняет существующие проверки `is_alive()`/`join()` и остановку по событиям.
 - На рабочем потоке операции задаётся random 32-hex `operation_id` диагностического контекста; события начала/завершения получают один correlation id. Arbitrary cancellation text сводится к безопасному статическому коду, а диагностический allowlist не сериализует exception message, токены, email, пути и игровые данные.
 - Регрессии проверяют отмену с безопасным reason code, корреляцию в событиях операции, исключение произвольного текста, allowlist operation id и редактирование поддельных секретов/пути/email в диагностическом файле. Добавлено Qt-подтверждение, что анализ партии действительно зарегистрирован в engine lane.
 - Первый узкий прогон выявил только ошибочное ожидание теста: контекст `run_id` безопасно очищал распознаваемый шаблон `token=...`, а не произвольный текст. Исправлен fixture; повтор целевых diagnostic/background/Lichess/Qt сценариев: **18 passed**.
-- На момент записи W8 ещё не закрыт: необходимы статический аудит оставшихся thread owners и полный итоговый suite в W9. Отдельные dialog-owned workers статистики/индекса дебютов и engine probe сохраняют прежние владельцы; приёмка должна подтвердить, что их shutdown/ownership корректны. Физическая Windows-визуальная проверка и сетевые/секретные сценарии не выполнялись.
+- Остальные потоки проверены: OAuth/service-owned workers закрываются `LichessService`, статистика и opening-index — владельцем модального диалога, engine probe — `QProcess` registry. Они не сериализованы за долгими задачами. Проверки MainWindow-close и dialog lifecycle оставлены в существующих Qt-тестах; прямые потоки не переносились без необходимости изменения владельца ресурсов.
+- Физическая Windows-визуальная проверка и сетевые/секретные сценарии не выполнялись.
 
-**Next:** завершить W8 audit и обновить карту/PROJECT_STATUS; затем W9 exact-head полный Windows CI, compileall, diff-check и isolated offline window smoke.
+**Gate W8:** целевые диагностика/background/Lichess/Qt сценарии — **18 passed**; полный window/background/diagnostics regression set — **179 passed in 38.20 s**; `compileall` и `git diff --check`: PASS.
+
+## W9 — финальная приёмка PR (локальная часть выполнена; hosted CI ожидается)
+
+- Полный локальный Windows Python 3.12 suite на рабочей ветке: **589 passed in 147.23 s**. PySide6 tests использовали offscreen platform; сетевые/OAuth/engine integrations оставались fake/synthetic.
+- `python -m compileall -q src tests scripts`: PASS.
+- Изолированный `QApplication` + `MainWindow(offline_mode=True)`, `lichess is None`, close и event processing: PASS. Режим использует собственные временные settings/SQLite; пользовательская БД не открывалась.
+- `git diff --check`: PASS. Личная `.venv312/` сохранена и не добавлялась в Git.
+- Windows hosted CI для exact final SHA и обновление PR body — следующий обязательный gate после публикации документационного W9 commit. PR #44 остаётся draft; merge не выполнялся.
+- Ручная визуальная проверка на физическом компьютере владельца, реальный Lichess/OAuth, Stockfish и пользовательские данные не проверялись и остаются владельцу после независимого review.
