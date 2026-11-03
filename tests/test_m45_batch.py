@@ -93,7 +93,7 @@ def test_batch_queue_is_idempotent_recent_first_and_reuses_one_fake_engine(tmp_p
         _save_game(repository, "newer", "2026-10-01T00:00:00+00:00")
         runner = _runner(repository, tmp_path, engines,
                          options=FastPassOptions(nodes=99_000, hash_mb=512, threads=7))
-        assert runner.options.nodes == 30_000
+        assert runner.options.nodes == 99_000
         assert runner.options.hash_mb == 128
         assert runner.options.threads == 1
         assert runner.enqueue_missing(limit=10) == {"queued": 2, "already_present": 0}
@@ -119,6 +119,37 @@ def test_batch_queue_is_idempotent_recent_first_and_reuses_one_fake_engine(tmp_p
         with repository._connection() as db:
             result_links = db.execute("SELECT COUNT(*) FROM analysis_jobs WHERE result_run_id IS NOT NULL").fetchone()[0]
         assert result_links == 2
+    finally:
+        repository.shutdown()
+
+
+def test_batch_options_preserve_one_million_nodes_and_reject_out_of_bounds():
+    import chess.engine
+    import pytest
+    from chess_coach.lichess.analysis import AnalysisOptions
+
+    options = FastPassOptions(nodes=1_000_000).normalized()
+    assert options.nodes == 1_000_000
+    assert options.analysis_options().limit_value == 1_000_000
+    assert chess.engine.Limit(nodes=options.analysis_options().limit_value).nodes == 1_000_000
+    assert FastPassOptions(nodes=1_000_000).parameters()["budget_profile"] == "custom_high"
+    assert "budget_profile" not in FastPassOptions(nodes=20_000).parameters()
+    with pytest.raises(ValueError, match="от 1 000 до 10 000 000"):
+        FastPassOptions(nodes=20_000_000).normalized()
+    assert AnalysisOptions(limit_kind="nodes", limit_value=1_000_000).normalized().limit_value == 1_000_000
+
+
+def test_resumable_queue_exposes_original_node_budget(tmp_path):
+    repository = GameRepository(tmp_path / "resume-original-budget.sqlite3")
+    engines = []
+    try:
+        _save_game(repository, "resumable", "2026-10-01T00:00:00+00:00")
+        original = _runner(repository, tmp_path, engines,
+                           options=FastPassOptions(nodes=1_000_000, hash_mb=96))
+        original.enqueue_missing(limit=1)
+        assert repository.pending_fast_analysis_parameters(original.engine_key) == original.parameters
+        changed = _runner(repository, tmp_path, [], options=FastPassOptions(nodes=20_000))
+        assert repository.pending_fast_analysis_parameters(changed.engine_key) == original.parameters
     finally:
         repository.shutdown()
 

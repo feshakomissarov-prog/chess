@@ -319,6 +319,21 @@ class LichessClient:
         except UnicodeDecodeError as exc:
             raise LichessError("Lichess returned a PGN that is not valid UTF-8.") from exc
 
+    def export_game_json(self, token: str, game_id: str) -> dict:
+        """Fetch documented finished-game JSON, including only ready server metadata."""
+        if not game_id or any(char not in "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-" for char in game_id):
+            raise ValueError("Invalid Lichess game ID")
+        response = self._call(
+            "GET", f"/game/export/{quote(game_id, safe='')}", token=token,
+            query={"accuracy": "true", "evals": "true", "pgnInJson": "true",
+                   "opening": "true", "division": "true"},
+            accept="application/json",
+        )
+        payload = response.json()
+        if not isinstance(payload, dict):
+            raise LichessError("Lichess вернул неожиданный JSON партии.")
+        return payload
+
     def stream_user_games(self, token: str, username: str, stop_event: threading.Event,
                           *, since: int | None = None, until_ms: int | None = None,
                           max_games: int = 1000) -> Iterator[dict]:

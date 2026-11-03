@@ -151,7 +151,8 @@ class ReviewGraph(QWidget):
     def _continuous_segments(values):
         ordered = sorted(values, key=lambda row: int(row[0]))
         return [(first, second) for first, second in zip(ordered, ordered[1:])
-                if int(second[0]) == int(first[0]) + 1]
+                if int(second[0]) == int(first[0]) + 1
+                and first[2] is None and second[2] is None]
 
     def paintEvent(self, _event):
         painter = QPainter(self)
@@ -232,6 +233,19 @@ class ReviewGraph(QWidget):
                 for first, second in self._continuous_segments(values):
                     a, b = coordinate_by_ply[first[0]], coordinate_by_ply[second[0]]
                     painter.drawLine(a[0], a[1], b[0], b[1])
+            mate_label_plies: set[int] = set()
+            mate_group: list[tuple[int, int]] = []
+            mate_gap = max(4, int(math.ceil(max_ply / 80)))
+            for _x, _y, ply, mate, _score, _clipped in coords + [(0, 0, -1, None, 0, False)]:
+                if mate is not None and (not mate_group or
+                        (ply - mate_group[-1][0] <= mate_gap and (mate > 0) == (mate_group[-1][1] > 0))):
+                    mate_group.append((ply, mate))
+                    continue
+                if mate_group:
+                    mate_label_plies.add(mate_group[-1][0])
+                    mate_group = []
+                if mate is not None:
+                    mate_group.append((ply, mate))
             for x, y, ply, mate, score, clipped in coords:
                 marker = self.markers.get(ply, {}) if self.markers_visible else {}
                 severity = marker.get("severity")
@@ -259,7 +273,7 @@ class ReviewGraph(QWidget):
                     painter.drawRect(x - 4, y - 4, 8, 8)
                 else:
                     painter.drawEllipse(x - 3, y - 3, 6, 6)
-                if mate is not None:
+                if mate is not None and ply in mate_label_plies:
                     mate_text = ("Мат в позиции" if mate == 0 else
                                  f"M{mate}" if mate > 0 else f"−M{abs(mate)}")
                     painter.drawText(x + 5, max(rect.top() + 12, y - 5), mate_text)
@@ -369,6 +383,7 @@ class GameReviewWorkspace(QWidget):
     export_requested = Signal(str)
     safety_requested = Signal(str)
     analysis_requested = Signal(str)
+    open_lichess_game_requested = Signal(str)
 
     def __init__(self, repository, *, training_allowed: bool = False,
                  training_block_reason: str = "", settings=None, parent=None):
@@ -627,8 +642,15 @@ class GameReviewWorkspace(QWidget):
             "Явно запускает сохранённый послепартийный анализ после проверки Fair Play.")
         self.analysis_button.clicked.connect(
             lambda: self.review and self.analysis_requested.emit(str(self.review["game"]["game_id"])))
+        self.open_lichess_button = QPushButton("Открыть партию на Lichess для запроса анализа")
+        self.open_lichess_button.setToolTip(
+            "Откроет подтверждённую страницу партии; запрос анализа остаётся только действием пользователя на сайте.")
+        self.open_lichess_button.clicked.connect(
+            lambda: self.review and self.open_lichess_game_requested.emit(
+                str(self.review["game"].get("source_game_id") or "")))
         for button in (self.previous_error_button, self.next_error_button,
-                       self.analysis_button, self.training_button, self.training_safety_button,
+                       self.analysis_button, self.open_lichess_button,
+                       self.training_button, self.training_safety_button,
                        self.check_button, self.hint_button,
                        self.skip_button, self.continue_button, self.return_review_button):
             actions.addWidget(button)
@@ -732,9 +754,22 @@ class GameReviewWorkspace(QWidget):
             show_severity=self.evaluation_allowed)
         metrics = self.review["per_side"]
         accuracy = self.review["official_accuracy"]
-        accuracy_text = (f"Точность Lichess: белые {accuracy['white'] if accuracy['white'] is not None else '—'}, "
-                         f"чёрные {accuracy['black'] if accuracy['black'] is not None else 'н/д'}"
-                         if accuracy["source"] else "Официальная точность Lichess: нет источника")
+        def percent(value):
+            return f"{float(value):.1f}%" if value is not None else "нет данных"
+        accuracy_text = (f"Точность Lichess · сервер: белые {percent(accuracy['white'])}, "
+                         f"чёрные {percent(accuracy['black'])}"
+                         if accuracy["source"] else "Точность Lichess · сервер: нет источника")
+        backfill = self.review.get("lichess_backfill_state") or {}
+        if game.get("source_game_id"):
+            if (backfill.get("accuracy_status") == "no_server_data"
+                    and backfill.get("evals_status") == "no_server_data"):
+                server_analysis_text = "На Lichess анализ не запрошен или недоступен."
+            elif backfill:
+                server_analysis_text = "Готовые данные Lichess проверяются или доступны частично."
+            else:
+                server_analysis_text = "Готовая аналитика Lichess ещё не проверена."
+        else:
+            server_analysis_text = "Это локальная партия; Lichess-аналитика не связана."
         def side_counts(color: str) -> str:
             side = metrics[color]
             color_label = "Белые" if color == "white" else "Чёрные"
@@ -754,11 +789,22 @@ class GameReviewWorkspace(QWidget):
                     f"сильные {strong_label} · "
                     f"охват {side['assessed']}/{side['total']} оценённых ходов{suffix}")
         if self.evaluation_allowed:
+            decision = (analysis or {}).get("decision_coverage") or {}
+            mate_positions = sum(item.get("mate_white") is not None
+                                 for item in analysis.get("assessments", []))
             metrics_text = (
             f"Источник оценки: {source_short(source)[1]}\n"
-            f"Оценено позиций: {self.review['coverage']['scored']}/{self.review['coverage']['total']}\n"
+            f"Точность Chess Coach (эксп.): н/д · формула не валидирована\n"
+            f"Позиции оценены: {self.review['coverage']['scored']}/{self.review['coverage']['total']}\n"
+            f"Решения с сопоставимым качеством: белые {self.review['per_side']['white']['assessed']}/{self.review['per_side']['white']['total']}, "
+            f"чёрные {self.review['per_side']['black']['assessed']}/{self.review['per_side']['black']['total']}\n"
+            f"Хорошие среди оценённых: белые {self.review['per_side']['white']['good']}/{self.review['per_side']['white']['assessed'] or 'н/д'}, "
+            f"чёрные {self.review['per_side']['black']['good']}/{self.review['per_side']['black']['assessed'] or 'н/д'}\n"
+            f"Совпадение с лучшим ходом Stockfish: белые {self.review['per_side']['white']['best_matches']}/{self.review['per_side']['white']['best_known'] or 'н/д'}, "
+            f"чёрные {self.review['per_side']['black']['best_matches']}/{self.review['per_side']['black']['best_known'] or 'н/д'}\n"
+            f"Матовые оценки позиций: {mate_positions}\n"
             f"{side_counts('white')}\n{side_counts('black')}\n"
-            f"{accuracy_text}")
+            f"{accuracy_text}\n{server_analysis_text}")
         else:
             metrics_text = (self.training_block_reason or
                             "Оценки, варианты и подсказки скрыты до проверки Fair Play.")
@@ -796,6 +842,22 @@ class GameReviewWorkspace(QWidget):
                                for move in self.review["moves"]}
                               if self.evaluation_allowed else {})
         self.graph.set_safety_gate(self.evaluation_allowed, self.training_block_reason)
+        if self.evaluation_allowed:
+            self.graph_legend.setText(
+                "● хороший ход   ◆ неточность   ■ ошибка   ▲ зевок   · неизвестно — источник не классифицировал ход")
+            self.graph_legend.setToolTip("Источник и покрытие указаны в сводке. Маты показаны отдельными маркерами.")
+            self.graph_legend.setAccessibleDescription(
+                "Условные обозначения сохранённой аналитики после действующей проверки Fair Play.")
+            self.graph.setAccessibleDescription(
+                f"{source_short(source)[1]}; оценено позиций "
+                f"{self.review['coverage']['scored']} из {self.review['coverage']['total']}. "
+                "Матовые позиции показаны отдельными маркерами, без перевода в пешки.")
+        else:
+            self.graph_legend.setText("Оценки и классификация скрыты правилами Fair Play.")
+            self.graph_legend.setToolTip("")
+            self.graph_legend.setAccessibleDescription("Аналитика скрыта до свежей проверки Fair Play.")
+            self.graph.setAccessibleDescription("Оценки и классификация скрыты правилами Fair Play.")
+        self.open_lichess_button.setVisible(bool(game.get("source_game_id")))
         self.graph.select_ply(0)
         self._refresh_selected_ply_events()
         eligible = eligible_error_moves(self.review) if self.evaluation_allowed else []
@@ -1258,7 +1320,8 @@ class GameReviewWorkspace(QWidget):
             button.setVisible(True)
         self.training_button.setVisible(False)
         for button in (self.previous_error_button, self.next_error_button,
-                       self.analysis_button, self.training_safety_button):
+                       self.analysis_button, self.open_lichess_button,
+                       self.training_safety_button):
             button.hide()
         self.tabs.hide()
         self.left_metrics.hide()

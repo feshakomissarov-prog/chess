@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 import inspect
+import io
 import threading
 import time
 from typing import Callable
@@ -220,6 +221,162 @@ class ArchiveSync:
         return {"selected": len(candidates), "checked": checked,
                 "gained_scored_pairs": gained, "unchanged": unchanged, "failed": failed,
                 "refreshed": refreshed, "cancelled": stop_event.is_set()}
+
+    def refresh_ready_analytics(self, username: str, token: str,
+                                stop_event: threading.Event, *, limit: int = 10,
+                                daily_limit: int = 25,
+                                force_retry: bool = False,
+                                generation_is_current: Callable[[], bool] | None = None,
+                                progress: Callable[[int, int, dict], None] | None = None
+                                ) -> dict[str, int | bool | str | None]:
+        """Fetch only existing documented per-game JSON analytics, in resumable pages."""
+        if not 1 <= int(limit) <= 10:
+            raise ValueError("Одна фоновая порция ограничена десятью партиями.")
+        account_id = self.repository.ensure_archive_account(username)
+        self.repository.enqueue_lichess_analysis_backfill(account_id)
+        if self.repository.lichess_analysis_backfill_paused(account_id):
+            return {"selected": 0, "checked": 0, "accuracy": 0, "evals": 0,
+                    "no_data": 0, "errors": 0, "paused": True, "limited": False}
+        retry_after_at = self.repository.lichess_analysis_retry_after(account_id)
+        if retry_after_at and retry_after_at > datetime.now(timezone.utc).isoformat():
+            return {"selected": 0, "checked": 0, "accuracy": 0, "evals": 0,
+                    "no_data": 0, "errors": 0, "paused": False, "limited": True,
+                    "retry_after_at": retry_after_at}
+        candidates = self.repository.list_lichess_analysis_backfill(
+            account_id, limit=limit, force_retry=force_retry)
+        checked = accuracy_count = eval_count = no_data = errors = 0
+        limited = False
+        fatal_status: int | None = None
+
+        def current() -> bool:
+            return (not stop_event.is_set() and
+                    (generation_is_current is None or generation_is_current()))
+
+        for item in candidates:
+            if not current():
+                break
+            if getattr(self.client, "rate_limit_remaining", 0) > 0:
+                limited = True
+                break
+            game_id = str(item["game_id"])
+            if not self.repository.reserve_lichess_analysis_request(
+                    account_id, daily_limit=daily_limit):
+                limited = True
+                break
+            self.repository.mark_lichess_analysis_backfill_running(account_id, game_id)
+            try:
+                payload = self.client.export_game_json(token, str(item["source_game_id"]))
+                if not current():
+                    # The response belongs to a previous auth/session generation.
+                    break
+                self._validate_backfill_export(username, item, payload)
+                previous_revision = int(item["line_revision"])
+                previous_hash = str(item["line_hash"])
+                # The normal archive importer already knows how to preserve typed
+                # Lichess PGN evals and COALESCE missing accuracy metadata without
+                # deleting local Stockfish runs. Refuse line changes before calling it.
+                self.repository.import_archive_record(
+                    username, payload, checkpoint_ms=None, backfill=False)
+                latest = self.repository.get_game(game_id)
+                if (not latest or int(latest.get("line_revision") or 0) != previous_revision):
+                    raise ValueError("Экспорт Lichess изменил сохранённую линию; данные не объединены.")
+                eval_positions = self.repository.lichess_eval_score_count(game_id, previous_revision)
+                # Every completed decision has one post-move position. A position
+                # zero baseline improves comparability but is optional in Lichess PGN.
+                position_count = max(1, self.repository.game_move_count(game_id, previous_revision))
+                accuracy_values = self._official_accuracy_values(payload)
+                has_accuracy = any(value is not None for value in accuracy_values.values())
+                complete_accuracy = all(value is not None for value in accuracy_values.values())
+                has_evals = eval_positions > 0
+                accuracy_status = ("has_data" if complete_accuracy else
+                                   "partial" if has_accuracy else "no_server_data")
+                evals_status = ("has_data" if eval_positions >= position_count else
+                                "partial" if has_evals else "no_server_data")
+                retry_seconds = (7 * 24 * 60 * 60 if "no_server_data" in
+                                 {accuracy_status, evals_status} or "partial" in
+                                 {accuracy_status, evals_status} else 0)
+                self.repository.record_lichess_analysis_backfill(
+                    account_id, game_id, accuracy_status=accuracy_status,
+                    evals_status=evals_status, retry_after_seconds=retry_seconds)
+                checked += 1
+                accuracy_count += int(has_accuracy)
+                eval_count += int(has_evals)
+                no_data += int(not has_accuracy and not has_evals)
+            except Exception as exc:
+                errors += 1
+                retry_after = max(60, int(getattr(exc, "retry_after", 60)))
+                status = "rate_limited" if getattr(exc, "status", None) == 429 else "error"
+                http_status = getattr(exc, "status", None)
+                backoff = (max(retry_after, 86_400) if http_status in {401, 403}
+                           else max(retry_after, 3_600) if status == "error" else retry_after)
+                self.repository.record_lichess_analysis_backfill(
+                    account_id, game_id, accuracy_status=status, evals_status=status,
+                    retry_after_seconds=backoff,
+                    error=f"{type(exc).__name__}" + (f" HTTP {http_status}" if http_status else ""))
+                if http_status in {401, 403, 429}:
+                    fatal_status = int(http_status)
+                    if http_status == 429:
+                        self.repository.set_lichess_analysis_retry_after(account_id, backoff)
+                    break
+            if progress:
+                progress(checked + errors, len(candidates), item)
+        return {"selected": len(candidates), "checked": checked,
+                "accuracy": accuracy_count, "evals": eval_count,
+                "no_data": no_data, "errors": errors,
+                "paused": stop_event.is_set(), "limited": limited,
+                "fatal_status": fatal_status}
+
+    @staticmethod
+    def _official_accuracy_values(payload: dict) -> dict[str, float | None]:
+        accuracy = payload.get("accuracy")
+        if not isinstance(accuracy, dict):
+            accuracy = {}
+        values = {}
+        for color in ("white", "black"):
+            value = accuracy.get(color)
+            values[color] = (float(value) if isinstance(value, (int, float))
+                             and not isinstance(value, bool) and 0 <= float(value) <= 100 else None)
+        return values
+
+    @staticmethod
+    def _validate_backfill_export(username: str, item: dict, payload: dict) -> None:
+        import chess
+        import chess.pgn
+
+        game_id = str(item["game_id"])
+        if payload.get("id") != str(item.get("source_game_id") or game_id):
+            raise ValueError("Lichess вернул другую партию; экспорт отклонён.")
+        status = str(payload.get("status") or "").casefold()
+        if status not in {"mate", "resign", "stalemate", "draw", "outoftime", "timeout",
+                          "cheat", "nostart", "variantend", "unknownfinish", "finished"}:
+            raise ValueError("Lichess export не подтверждает известный завершённый статус партии.")
+        raw_pgn = payload.get("pgn")
+        if not isinstance(raw_pgn, str) or not raw_pgn.strip():
+            raise ValueError("В JSON-экспорте нет PGN для проверки линии.")
+        parsed = chess.pgn.read_game(io.StringIO(raw_pgn))
+        if parsed is None or parsed.errors:
+            raise ValueError("Некорректный PGN в JSON-экспорте Lichess.")
+        if parsed.headers.get("Result", "*") == "*":
+            raise ValueError("PGN Lichess не содержит подтверждённого результата партии.")
+        exported_moves = " ".join(move.uci() for move in parsed.mainline_moves())
+        if exported_moves != str(item["moves"]):
+            raise ValueError("Линия JSON-экспорта отличается от сохранённой партии.")
+        link_color = item.get("account_color")
+        expected_header = parsed.headers.get("White" if link_color == "white" else "Black", "")
+        if not expected_header or expected_header.casefold() != username.casefold():
+            raise ValueError("В JSON-экспорте не подтверждается владелец связанной партии.")
+        players = payload.get("players")
+        if players is not None:
+            if not isinstance(players, dict):
+                raise ValueError("Некорректные данные игроков в JSON-экспорте.")
+            own = players.get(str(link_color))
+            if own is not None:
+                if not isinstance(own, dict):
+                    raise ValueError("Некорректная запись игрока владельца.")
+                user_data = own.get("user") if isinstance(own.get("user"), dict) else own
+                remote_name = user_data.get("name") or user_data.get("username")
+                if remote_name and str(remote_name).casefold() != username.casefold():
+                    raise ValueError("Идентификатор аккаунта не совпадает; ответ отклонён.")
 
     def _backfill(self, username: str, token: str, account_id: str, until_ms: int,
                   stop_event: threading.Event, page_size: int,

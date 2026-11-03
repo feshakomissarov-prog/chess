@@ -24,8 +24,11 @@ class FastPassOptions:
     threads: int = 1
 
     def normalized(self) -> "FastPassOptions":
+        nodes = int(self.nodes)
+        if not 1_000 <= nodes <= 10_000_000:
+            raise ValueError("Бюджет Stockfish должен быть от 1 000 до 10 000 000 узлов.")
         return FastPassOptions(
-            nodes=max(1_000, min(30_000, int(self.nodes))),
+            nodes=nodes,
             hash_mb=max(16, min(128, int(self.hash_mb))),
             threads=1,
         )
@@ -37,9 +40,12 @@ class FastPassOptions:
 
     def parameters(self) -> dict:
         options = self.analysis_options().normalized()
-        return {"limit_kind": "nodes", "limit_value": options.limit_value,
-                "threads": 1, "hash_mb": options.hash_mb, "multipv": 1,
-                "classifier_version": CLASSIFIER_VERSION, "analysis_pass": "fast"}
+        parameters = {"limit_kind": "nodes", "limit_value": options.limit_value,
+                      "threads": 1, "hash_mb": options.hash_mb, "multipv": 1,
+                      "classifier_version": CLASSIFIER_VERSION, "analysis_pass": "fast"}
+        if options.limit_value > 30_000:
+            parameters["budget_profile"] = "custom_high"
+        return parameters
 
 
 class BatchAnalysisRunner:
@@ -111,8 +117,9 @@ class BatchAnalysisRunner:
         run_id = uuid.uuid4().hex
         run_started = time.monotonic()
         run_context = set_context(run_id=run_id)
+        fast_mode = ("custom_high" if self.options.nodes > 30_000 else "fast")
         log_event("batch_run_started", "batch_analysis", run_id=run_id,
-                  mode="selective" if include_selective_review else "fast")
+                  mode="selective" if include_selective_review else fast_mode)
 
         def check_active_safety(job: dict) -> bool:
             try:
@@ -184,7 +191,8 @@ class BatchAnalysisRunner:
                 if job is None:
                     break
                 log_event("batch_job_claimed", "batch_analysis", run_id=run_id,
-                          job_id=job.get("job_id"), mode=str(job.get("analysis_pass", "fast")))
+                          job_id=job.get("job_id"), mode=(fast_mode if analysis_pass == "fast"
+                                                          else "review"))
                 if analysis_pass == "fast":
                     attempted_fast += 1
                 safety_failure.clear()

@@ -96,24 +96,46 @@ def load_game_review(repository, game: dict[str, Any]) -> dict[str, Any]:
             white_cp=assessment.get("white_cp"), mate_white=assessment.get("mate_white"),
             depth=assessment.get("depth"), nodes=assessment.get("nodes")))
 
+    source_is_lichess = bool(game.get("source") in {"lichess", "lichess_archive"}
+                             or game.get("source_game_id"))
     per_side = {}
+    best_lines = {int(item.get("ply", -1)): item for item in
+                  ((analysis or {}).get("alternatives") or [])
+                  if int(item.get("multipv_rank") or 0) == 1}
     for color in ("white", "black"):
         side_moves = [move for move in moves if move.mover == color]
         assessed = [move for move in side_moves if move.cp_loss is not None]
+        best_known = best_matches = 0
+        if source_is_lichess or (analysis or {}).get("source") == "stockfish":
+            for move in side_moves:
+                row = best_lines.get(move.ply - 1)
+                raw_pv = str((row or {}).get("pv_uci") or "").split()
+                if not raw_pv:
+                    continue
+                try:
+                    best = chess.Move.from_uci(raw_pv[0])
+                    before = positions[move.ply - 1]
+                    if best not in before.legal_moves or len(list(before.legal_moves)) <= 1:
+                        continue
+                except (ValueError, IndexError):
+                    continue
+                best_known += 1
+                best_matches += int(best == chess.Move.from_uci(move.uci))
         per_side[color] = {
             "total": len(side_moves), "assessed": len(assessed),
+            "best_known": best_known, "best_matches": best_matches,
             "good": sum(move.severity == "good" for move in assessed),
             "inaccuracy": sum(move.severity == "inaccuracy" for move in assessed),
             "mistake": sum(move.severity == "mistake" for move in assessed),
             "blunder": sum(move.severity == "blunder" for move in assessed),
         }
-    source_is_lichess = bool(game.get("source") in {"lichess", "lichess_archive"}
-                             or game.get("source_game_id"))
     official_accuracy = {
         "white": game.get("lichess_accuracy_white") if source_is_lichess else None,
         "black": game.get("lichess_accuracy_black") if source_is_lichess else None,
         "source": "Lichess" if source_is_lichess else None,
     }
+    server_backfill = (repository.lichess_analysis_backfill_state(
+        str(account_id), game_id) if account_id and source_is_lichess else None)
     coverage = (analysis or {}).get("coverage") or {}
     return {
         "game": dict(game), "line": dict(line), "revision": revision, "moves": moves,
@@ -123,6 +145,7 @@ def load_game_review(repository, game: dict[str, Any]) -> dict[str, Any]:
                      "total": int(coverage.get("total_positions") or (len(moves) + 1))},
         "owner_color": owner_color if owner_color in {"white", "black"} else None,
         "per_side": per_side, "official_accuracy": official_accuracy,
+        "lichess_backfill_state": server_backfill,
         "notes": repository.list_notes(game_id, line_revision=revision),
     }
 

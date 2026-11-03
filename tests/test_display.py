@@ -2,7 +2,8 @@ import csv
 from pathlib import Path
 
 from chess_coach.ui.display import (
-    evaluation_label, format_clock_control, format_game_date, russian_opening_name,
+    evaluation_label, format_clock_control, format_game_date, format_remaining_clock,
+    russian_opening_name,
     source_short,
 )
 
@@ -22,6 +23,16 @@ def test_clock_labels_preserve_units_for_base_and_increment():
     assert format_clock_control("0+1") == "0 с + 1 с"
     assert format_clock_control("daily:86400") == "1 день на ход"
     assert format_clock_control("unknown") == "unknown"
+
+
+def test_remaining_clock_formatting_ticks_only_active_snapshot_and_marks_low_time():
+    assert format_remaining_clock(180_000) == ("03:00", False)
+    assert format_remaining_clock(180_000, elapsed_ms=1_200, active=True) == ("02:58", False)
+    assert format_remaining_clock(29_000) == ("00:29", True)
+    assert format_remaining_clock(9_900, active=True, elapsed_ms=100) == ("0:09.8", True)
+    assert format_remaining_clock(3_661_000) == ("1:01:01", False)
+    assert format_remaining_clock(90_000, elapsed_ms=9_000, active=True, syncing=True) == (
+        "—:— · синхронизация", False)
 
 
 def test_opening_families_translate_deterministically_and_keep_eco():

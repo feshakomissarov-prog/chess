@@ -969,6 +969,10 @@ def test_batch_analysis_controls_are_explicit_and_resume_after_pause(qtbot, tmp_
     assert paused == [True]
     dialog.worker_finished.emit(True, "Пауза")
     assert dialog.resume_button.isEnabled()
+    dialog.nodes.setValue(1_000_000)
+    assert dialog.nodes.value() == 1_000_000
+    assert "основного прохода" in dialog.selective_review.text()
+    assert "не времени исполнения" in dialog.budget_note.text()
     dialog.selective_review.setChecked(True)
     qtbot.mouseClick(dialog.resume_button, Qt.MouseButton.LeftButton)
     assert started[-1] == (2, 20_000, 64, True, False, True)
@@ -2834,6 +2838,11 @@ def test_m46_home_has_play_review_context_and_collapsed_secondary_actions(qtbot,
     assert window.dashboard_clock.count() >= 1
     assert window.home_friend_button.parentWidget() is not None
     assert window.home_ai_button.parentWidget() is not None
+    assert window.home_review_button.parentWidget() is window.home_play_card
+    assert window.resume_review_button.parentWidget() is window.home_play_card
+    assert window.home_review_button not in window.home_more_content.findChildren(QPushButton)
+    assert window.resume_review_button not in window.home_more_content.findChildren(QPushButton)
+    assert not window.home_review_button.isHidden()
     assert window.home_batch_analysis_button.parentWidget() is window.home_more_content
     window.home_more_toggle.setChecked(True)
     assert not window.home_more_content.isHidden()
@@ -2872,6 +2881,9 @@ def test_home_has_two_columns_and_three_recent_game_cards(qtbot, tmp_path):
     window.setFixedSize(1360, 860)
     window.show()
     qtbot.wait(20)
+    assert window.home_review_button.isVisible()
+    assert window.home_review_button.parentWidget() is window.home_play_card
+    assert window.home_review_button.geometry().bottom() <= window.home_play_card.rect().bottom()
     assert window.home_page.horizontalScrollBar().maximum() == 0
     # The page can keep a small vertical safety margin at this logical size;
     # the three cards remain compact and do not introduce horizontal scrolling.
@@ -3350,6 +3362,87 @@ def test_online_history_refresh_is_incremental_and_handles_takeback(qtbot, tmp_p
     })
     assert removed
     assert window.moves.count() == 4
+
+
+def test_online_clocks_use_authoritative_snapshot_and_pause_in_history_or_unknown_state(
+        qtbot, tmp_path, monkeypatch):
+    import chess_coach.window as window_module
+    window = MainWindow(QSettings(str(tmp_path / "clock-ui.ini"), QSettings.Format.IniFormat),
+                        offline_mode=True)
+    qtbot.addWidget(window)
+    session = LichessGameSession("synthetic-clock", window.game_repository)
+    session.color = chess.BLACK
+    session.status = "playing"
+    session.awaiting_authoritative_snapshot = False
+    session.white_ms = 180_000
+    session.black_ms = 30_000
+    session.white_inc = 2
+    session.black_inc = 3
+    session._last_clock_at = 10.0
+    window.online_session = session
+    window.online_sessions[session.game_id] = session
+    window._screen_mode = "online"
+    monkeypatch.setattr(window_module.time, "monotonic", lambda: 11.2)
+
+    window._update_clock()
+    assert window.opponent_clock_label.text().startswith("02:58")
+    assert "◀ ХОД" in window.opponent_clock_label.text()
+    assert window.you_clock_label.text().startswith("00:30")
+    assert window.opponent_clock_detail.text() == "+2 с после подтверждённого хода"
+    assert window.you_clock_detail.text() == "+3 с после подтверждённого хода"
+
+    window.online_view_ply = 0
+    window._update_clock()
+    assert "синхронизация" in window.opponent_clock_label.text()
+    window.online_view_ply = None
+    session.status = "unknown"
+    window._update_clock()
+    assert "синхронизация" in window.opponent_clock_label.text()
+    session.status = "mate"
+    window._update_clock()
+    assert window.opponent_clock_label.text() == "03:00"
+
+
+def test_ready_event_stream_automatically_starts_bounded_old_game_analytics(qtbot, tmp_path):
+    window = MainWindow(QSettings(str(tmp_path / "automatic-analytics.ini"), QSettings.Format.IniFormat),
+                        offline_mode=True)
+    qtbot.addWidget(window)
+
+    class ConnectedService:
+        username = "Me"
+        auth_generation = 7
+        def __init__(self): self.calls = []
+        def is_auth_generation_current(self, generation): return generation == self.auth_generation
+        def refresh_lichess_analysis_background(self, **kwargs): self.calls.append(kwargs)
+
+    service = ConnectedService()
+    window.lichess = service
+    window.offline_mode = False
+    window._lichess_connected = True
+    window._lichess_event_stream_ready(7, "Me")
+    qtbot.waitUntil(lambda: bool(service.calls), timeout=2500)
+    assert service.calls == [{"generation": 7, "limit": 10, "daily_limit": 25,
+                              "force_retry": False}]
+    assert "проверяем до 10" in window.lichess_analysis_status.text()
+
+
+def test_analytics_stream_ready_is_ignored_for_offline_or_stale_auth(qtbot, tmp_path):
+    window = MainWindow(QSettings(str(tmp_path / "offline-analytics.ini"), QSettings.Format.IniFormat),
+                        offline_mode=True)
+    qtbot.addWidget(window)
+    class ConnectedService:
+        username = "Me"
+        auth_generation = 8
+        def __init__(self): self.calls = []
+        def is_auth_generation_current(self, generation): return generation == self.auth_generation
+        def refresh_lichess_analysis_background(self, **kwargs): self.calls.append(kwargs)
+    service = ConnectedService()
+    window.lichess = service
+    window._lichess_connected = True
+    window._lichess_event_stream_ready(8, "Me")
+    window._lichess_event_stream_ready(7, "Me")
+    qtbot.wait(1250)
+    assert service.calls == []
 
 
 def test_fifty_clock_events_on_200_ply_history_keep_history_rows_and_refresh_under_budget(qtbot, tmp_path):

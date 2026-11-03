@@ -64,6 +64,35 @@ def test_read_model_is_current_revision_source_aware_and_contains_two_sided_coun
         repo.shutdown()
 
 
+def test_linked_game_without_server_analysis_explains_status_and_offers_user_open(qtbot, tmp_path):
+    repo = GameRepository(tmp_path / "review-no-server-analysis.sqlite3")
+    try:
+        pgn = ('[Event "Synthetic"]\n[White "Me"]\n[Black "Opponent"]\n'
+               '[Result "1-0"]\n\n1. e4 e5 1-0\n')
+        repo.import_archive_record("Me", {"id": "synthetic-no-analysis", "pgn": pgn},
+                                   checkpoint_ms=None, backfill=False)
+        account_id = repo.ensure_archive_account("Me")
+        repo.enqueue_lichess_analysis_backfill(account_id)
+        repo.record_lichess_analysis_backfill(
+            account_id, "synthetic-no-analysis", accuracy_status="no_server_data",
+            evals_status="no_server_data", retry_after_seconds=7 * 86400)
+        game = repo.get_game("synthetic-no-analysis")
+        game["account_id"] = account_id
+        workspace = GameReviewWorkspace(repo, training_allowed=True)
+        qtbot.addWidget(workspace)
+        workspace.load_game(game)
+        workspace.show()
+        qtbot.wait(20)
+        assert "На Lichess анализ не запрошен или недоступен" in workspace.metrics_label.text()
+        assert workspace.open_lichess_button.isVisible()
+        requested = []
+        workspace.open_lichess_game_requested.connect(requested.append)
+        workspace.open_lichess_button.click()
+        assert requested == ["synthetic-no-analysis"]
+    finally:
+        repo.shutdown()
+
+
 def test_saved_stockfish_pv_is_accepted_only_when_legal_same_run_and_better(tmp_path):
     repo, game = _review_repo(tmp_path / "review-pv.sqlite3")
     try:

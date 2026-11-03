@@ -70,6 +70,24 @@ def format_clock_control(value: Any) -> str:
     return raw
 
 
+def format_remaining_clock(milliseconds: int, *, elapsed_ms: int = 0,
+                           active: bool = False, syncing: bool = False) -> tuple[str, bool]:
+    """Format one authoritative clock snapshot plus a display-only monotonic tick."""
+    if syncing:
+        return "—:— · синхронизация", False
+    remaining = max(0, int(milliseconds) - (max(0, int(elapsed_ms)) if active else 0))
+    warning = remaining < 30_000
+    if remaining <= 10_000:
+        value = f"{remaining // 60_000}:{remaining // 1000 % 60:02}.{remaining % 1000 // 100}"
+    elif remaining >= 3_600_000:
+        hours, rest = divmod(remaining // 1000, 3600)
+        minutes, seconds = divmod(rest, 60)
+        value = f"{hours}:{minutes:02}:{seconds:02}"
+    else:
+        value = f"{remaining // 60_000:02}:{remaining // 1000 % 60:02}"
+    return value, warning
+
+
 _OPENING_FAMILIES = (
     (("queen's pawn", "queens pawn"), "Дебют ферзевой пешки"),
     (("elephant gambit",), "Слоновий гамбит"),

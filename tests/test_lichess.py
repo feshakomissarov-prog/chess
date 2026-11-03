@@ -299,6 +299,31 @@ def test_analysis_safety_snapshot_is_one_explicit_fail_closed_request(monkeypatc
     assert failures and failures[0][0] == "req-429" and "90" in failures[0][1]
 
 
+def test_ready_analytics_worker_does_not_poll_playing_when_durable_queue_has_no_due_work(
+        monkeypatch, tmp_path):
+    class TokenStore:
+        def get(self):
+            return "fake-token"
+
+    class Client:
+        def get_playing_games(self, _token):
+            raise AssertionError("No safety request is needed when the local queue is empty")
+
+    repository = GameRepository(tmp_path / "empty-backfill.sqlite3")
+    service = LichessService(client=Client(), token_store=TokenStore(), repository=repository)
+    service.username = "Me"
+    service._auth_generation = 1
+    service.is_auth_generation_current = lambda generation: generation == 1
+    monkeypatch.setattr(service, "_thread", lambda target, _name: target())
+    results = []
+    service.lichess_analysis_backfill_finished.connect(lambda *args: results.append(args))
+
+    service.refresh_lichess_analysis_background(generation=1)
+
+    assert results and results[0][-1] == "очередь готовой аналитики пуста"
+    repository.shutdown()
+
+
 def test_retry_after_header_is_honored_and_stream_429_blocks_regular_requests():
     fake = FakeTransport([HttpResponse(429, {"Retry-After": "125"}, b"{}")])
     client = LichessClient(fake)
