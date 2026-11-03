@@ -112,3 +112,14 @@ Working branch: `codex/arch-01-modular-refactor` from `main` SHA `3e7f2cd48b1676
 - Проверки: целевой lifecycle/Fair Play/position/MultiPV набор — **29 passed in 4.19 s**; расширенный engine + batch + event detectors + architecture + window набор повторно завершён без падений; `compileall -q src tests scripts`: PASS; `git diff --check`: PASS. Fake движки и временные файлы; настоящий Stockfish не запускался.
 
 **Next:** W7 выделить dialog/page classes из `window.py` в тематические UI модули, сохранив совместимые imports/signals и текущее визуальное поведение.
+
+## W7 — UI views and dialogs (основные views извлечены)
+
+- Отдельные модули `ui/dialogs.py` и `ui/analytics_dialogs.py` теперь содержат настройки, онлайн-игру, пакетный анализ, активные партии, подключение Lichess, статистику, детальную карточку партии и графики. `chess_coach.window` повторно экспортирует прежние классы для текущих entrypoints/tests.
+- Созданы `ui/pages.HomePage`, `PlayPage`, `ResultPage`, `LibraryPage` и `PuzzleHistoryPage`. Home/Play/Result используют внешние callbacks; Library получает строки и отдаёт выбранные действия; PuzzleHistory получает список локальных аккаунтов, а SQLite/сеть остаются за application shell. `GameReviewWorkspace`, `MoveTable`, `BoardView`, theme/dashboard components повторно используются без второй реализации доски.
+- Домашние фильтры/метрики, Play layout, страницы результата, библиотека и история задач сохраняют прежнее содержание и сигналы. Открытые Library/PuzzleHistory представления остаются в существующей модальной оболочке, чтобы не менять подтверждённую навигацию в рамках архитектурного этапа.
+- Добавлены UI regressions на callbacks, adaptive card placement, result actions, library selection/paging, compatibility imports и отсутствие импорта `window` из извлечённых компонентов. Тесты запускались offscreen.
+- Итоговый W7 регрессионный набор: `test_window.py`, credential dialogs, diagnostics, UI pages и engine manager — **217 passed in 39.78 s**. `compileall` после перестройки модулей: PASS; `git diff --check`: PASS.
+- Текущее ограничение: `MainWindow` всё ещё содержит application workflow/callback orchestration (в частности puzzle replay, online event dispatch и некоторые async result handlers); компоненты больше не содержат владельца состояния приложения. W8/W9 boundary audit и оставшаяся декомпозиция use cases проверят, что этот shell постепенно сводится к маршрутизации, не переписывая бизнес-логику или экран.
+
+**Next:** W8 расширить structured operation correlation/redaction, архитектурные import checks и fault-path regression; закрыть обнаруженные UI→worker и lifecycle coupling.

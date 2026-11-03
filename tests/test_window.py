@@ -2358,7 +2358,7 @@ def test_stockfish_uci_probe_uses_hidden_worker_and_reports_timeout(qtbot, tmp_p
         id = {"name": "FakeFish"}
         def ping(self): raise TimeoutError("UCI не ответил за 3 секунды")
         def quit(self): calls.append("quit")
-    monkeypatch.setattr(window_module, "popen_uci_hidden",
+    monkeypatch.setattr("chess_coach.ui.dialogs.popen_uci_hidden",
                         lambda *args, **kwargs: (calls.append((args, kwargs)) or FakeEngine()))
     dialog = SettingsDialog(QSettings(str(tmp_path / "probe-timeout.ini"), QSettings.Format.IniFormat))
     qtbot.addWidget(dialog)
@@ -2386,7 +2386,8 @@ def test_stockfish_uci_probe_cancel_closes_hidden_engine_worker(qtbot, tmp_path,
             stopped.wait(2)
             raise RuntimeError("cancelled")
         def quit(self): stopped.set()
-    monkeypatch.setattr(window_module, "popen_uci_hidden", lambda *args, **kwargs: FakeEngine())
+    monkeypatch.setattr("chess_coach.ui.dialogs.popen_uci_hidden",
+                        lambda *args, **kwargs: FakeEngine())
     dialog = SettingsDialog(QSettings(str(tmp_path / "probe-close.ini"), QSettings.Format.IniFormat))
     qtbot.addWidget(dialog)
     dialog.engine_path.setText(str(engine_path))
@@ -2408,7 +2409,8 @@ def test_stockfish_uci_probe_marks_only_tested_path_verified(qtbot, tmp_path, mo
         id = {"name": "FakeFish"}
         def ping(self): return None
         def quit(self): return None
-    monkeypatch.setattr(window_module, "popen_uci_hidden", lambda *args, **kwargs: FakeEngine())
+    monkeypatch.setattr("chess_coach.ui.dialogs.popen_uci_hidden",
+                        lambda *args, **kwargs: FakeEngine())
     dialog = SettingsDialog(QSettings(str(tmp_path / "probe-success.ini"), QSettings.Format.IniFormat))
     qtbot.addWidget(dialog)
     dialog.engine_path.setText(str(engine_path))

@@ -120,3 +120,10 @@ No benchmark, new product feature, Rust toolchain, data migration, WAL behavior 
 - `ApplicationRuntime` owns one manager; completed-game, batch and position evaluators receive its factory/position lease. Existing analyzer/batch APIs remain compatible and continue to own search settings/results.
 - Search interruption remains on python-chess `Analysis.stop()` plus the existing stop events. No global running-engine queue was added.
 - The manager is a lifecycle boundary; it is not an authorization bypass. Connected post-game analysis remains gated by the existing live Lichess Fair Play preflight and current session/account checks, and batch analysis retains its per-job fail-closed safety check.
+
+### W7 — extracted UI views and dialogs
+
+- `ui.dialogs` contains the Settings, online-game, batch-analysis, active-games, and OAuth/PAT dialogs. `ui.analytics_dialogs` contains statistics/detail dialogs and evaluation/rating graphs. The previous `chess_coach.window` import names are compatibility re-exports.
+- `ui.pages` contains Home, Play, Result, Library, and Puzzle History views. Home/Play/Result take callbacks from MainWindow; Library emits selection/actions; Puzzle History renders local account/attempt data and offline practice. The existing `GameReviewWorkspace`, `BoardView`, `MoveTable`, dashboard formatters, and theme components are reused.
+- The modal Library and Puzzle History presentation remains in its prior dialog shell, preserving current routing and behavior; these views no longer build their internal widget trees inside `MainWindow`.
+- `MainWindow` still owns application-level async routing, live session state and some workflow callbacks. It no longer defines the extracted view classes or home/play/result/library/puzzle view markup; remaining shell/workflow boundary review continues in W8.
