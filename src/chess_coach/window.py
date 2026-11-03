@@ -61,6 +61,8 @@ from .lichess.batch_analysis import BatchAnalysisRunner, FastPassOptions
 from .lichess.repository import GameRepository, SCHEMA_VERSION
 from .lichess.service import LichessService
 from .bootstrap import ApplicationRuntime, create_runtime
+from .application.app_state import ReviewResumeTarget, WorkspaceSnapshot, WorkspaceStateStore
+from .application.game_sessions import GameSessionCoordinator
 from .lichess.session import LichessGameSession, classify_lichess_opponent
 from .lichess.statistics import StatisticsService
 from .diagnostics import anonymized_report, log_event, logs_directory
@@ -2043,6 +2045,22 @@ class MainWindow(QMainWindow):
     position_eval_update = Signal(int, object)
     dashboard_finished = Signal(int, object, object, object)
 
+    @property
+    def _selected_live_game_id(self) -> str | None:
+        """Compatibility access to selection now owned by GameSessionCoordinator."""
+        coordinator = getattr(self, "game_sessions", None)
+        return coordinator.selected_game_id if coordinator is not None else None
+
+    @_selected_live_game_id.setter
+    def _selected_live_game_id(self, game_id: str | None) -> None:
+        coordinator = getattr(self, "game_sessions", None)
+        if coordinator is None:
+            return
+        if game_id is None:
+            coordinator.clear_selection()
+        else:
+            coordinator.select(game_id)
+
     def __init__(
         self,
         settings: QSettings | None = None,
@@ -2068,6 +2086,7 @@ class MainWindow(QMainWindow):
             asynchronous_storage=asynchronous_storage)
         self._offline_data_dir = self.runtime.offline_data_dir
         self.settings = self.runtime.settings
+        self.workspace_state = WorkspaceStateStore(self.settings)
         self.offline_mode = self.runtime.offline_mode
         self.manual_connect_mode = self.runtime.manual_connect_mode
         selected_auth_method = self.settings.value("lichess/selected_auth_method", "oauth", type=str)
@@ -2082,7 +2101,8 @@ class MainWindow(QMainWindow):
         self._online_history_moves: tuple[chess.Move, ...] = ()
         self._online_history_position: chess.Board | None = None
         self.lichess = self.runtime.create_lichess_service(self)
-        self.online_sessions: dict[str, LichessGameSession] = {}
+        self.game_sessions: GameSessionCoordinator[LichessGameSession] = GameSessionCoordinator()
+        self.online_sessions = self.game_sessions.sessions
         self.online_session: LichessGameSession | None = None
         self._local_board_mode = "free"
         self._local_sound_game_id = uuid.uuid4().hex
@@ -2139,7 +2159,7 @@ class MainWindow(QMainWindow):
         self._shutdown_read_only = False
         self._analysis_shutdown_deadline: float | None = None
         self._workspace_state_restoring = True
-        self._active_route = str(self.settings.value("workspace/last_route", "home", type=str))
+        self._active_route = self.workspace_state.last_route()
         self._board_focus_mode = self.settings.value("workspace/board_focus_mode", False, type=bool)
         self._workspace_save_timer = QTimer(self)
         self._workspace_save_timer.setSingleShot(True)
@@ -2880,22 +2900,25 @@ class MainWindow(QMainWindow):
     def _persist_workspace_state(self) -> None:
         if self._workspace_state_restoring:
             return
-        self.settings.setValue("workspace/window_geometry", self.saveGeometry())
-        self.settings.setValue("workspace/theme", "dark-v1")
-        self.settings.setValue("workspace/last_route", self._active_route)
-        self.settings.setValue("workspace/sidebar_collapsed", self.sidebar.width() <= 60)
-        self.settings.setValue("workspace/sidebar_explicit", self._sidebar_explicit_override)
-        self.settings.setValue("workspace/board_target_size",
-                               int(self.settings.value("board_target_size", 480, type=int)))
+        resume_target = None
         review = getattr(self, "review_workspace", None)
         if review is not None and review.review:
             line = review.review["line"]
-            self.settings.setValue("workspace/review_game_id", str(review.review["game"]["game_id"]))
-            self.settings.setValue("workspace/review_line_revision", int(line["line_revision"]))
-            self.settings.setValue("workspace/review_line_hash", str(line["line_hash"]))
-            self.settings.setValue("workspace/review_viewed_ply", int(review.selected_ply))
-            self.settings.setValue("workspace/review_inspector_tab", int(review.tabs.currentIndex()))
-        self.settings.sync()
+            resume_target = ReviewResumeTarget(
+                game_id=str(review.review["game"]["game_id"]),
+                line_revision=int(line["line_revision"]),
+                line_hash=str(line["line_hash"]),
+                viewed_ply=int(review.selected_ply),
+                inspector_tab=int(review.tabs.currentIndex()),
+            )
+        self.workspace_state.save(WorkspaceSnapshot(
+            route=self._active_route,
+            geometry=self.saveGeometry(),
+            sidebar_collapsed=self.sidebar.width() <= 60,
+            sidebar_explicit=self._sidebar_explicit_override,
+            board_target_size=int(self.settings.value("board_target_size", 480, type=int)),
+            review=resume_target,
+        ))
 
     def _review_position_selected(self, _game_id: str, _ply: int) -> None:
         self._schedule_workspace_save()
@@ -2903,7 +2926,7 @@ class MainWindow(QMainWindow):
     def _restore_workspace_after_startup(self) -> None:
         if self.offline_mode or self._shutdown_requested:
             return
-        route = str(self.settings.value("workspace/last_route", "home", type=str))
+        route = self.workspace_state.last_route()
         if route != "games":
             return
         if self.screen_stack.currentWidget() is not self.home_page:
@@ -2915,34 +2938,32 @@ class MainWindow(QMainWindow):
         self.show_home()
 
     def resume_saved_review(self, *, show_message: bool = True) -> bool:
-        game_id = str(self.settings.value("workspace/review_game_id", "", type=str)).strip()
-        if not game_id:
+        target = self.workspace_state.load_review_target()
+        if target is None:
             if show_message:
                 self._notify_inline("Нет сохранённого разбора для продолжения.")
             return False
+        game_id = target.game_id
         game = self.game_repository.get_game(game_id)
         line = self.game_repository.current_line(game_id) if game else None
         if (not game or not line or not self._is_standard_board_game(game)
                 or game.get("status") in {"created", "started", "started_soon", "playing"}):
             self._active_route = "home"
-            self.settings.remove("workspace/review_game_id")
+            self.workspace_state.remove_review_target()
             self._schedule_workspace_save()
             if show_message:
                 self._notify_inline("Сохранённый разбор недоступен; проверьте библиотеку партий.")
             return False
-        saved_revision = self.settings.value("workspace/review_line_revision", -1, type=int)
-        saved_hash = str(self.settings.value("workspace/review_line_hash", "", type=str))
-        same_line = (int(line["line_revision"]) == saved_revision
-                     and str(line["line_hash"]) == saved_hash)
+        same_line = (int(line["line_revision"]) == target.line_revision
+                     and str(line["line_hash"]) == target.line_hash)
         self._workspace_state_restoring = True
         try:
             if not self._open_saved_game(game):
                 return False
-            ply = int(self.settings.value("workspace/review_viewed_ply", 0, type=int)) if same_line else 0
+            ply = target.viewed_ply if same_line else 0
             self.review_workspace.select_ply(max(0, min(len(self.review_workspace.review["moves"]), ply)))
-            tab = self.settings.value("workspace/review_inspector_tab", 0, type=int)
-            self.review_workspace.tabs.setCurrentIndex(
-                max(0, min(self.review_workspace.tabs.count() - 1, tab)))
+            self.review_workspace.tabs.setCurrentIndex(max(
+                0, min(self.review_workspace.tabs.count() - 1, target.inspector_tab)))
             if not same_line:
                 self.screen_title.setText("Разбор продолжен с начала · сохранённая линия изменилась")
                 self._notify_inline("Линия партии изменилась; разбор открыт с начальной позиции.")
@@ -5478,7 +5499,7 @@ class MainWindow(QMainWindow):
             session = LichessGameSession(str(game_id), self.game_repository)
             session.status = "started"
             session.clock_control = str(game.get("speed") or "-")
-            self.online_sessions[session.game_id] = session
+            self.game_sessions.register(session)
         color = game.get("color")
         if color in {"white", "black"}:
             session.color = chess.WHITE if color == "white" else chess.BLACK
@@ -5697,7 +5718,7 @@ class MainWindow(QMainWindow):
                 session.started_at = row["started_at"]
                 session.final_sync_pending = True
                 session._rebuild_board()
-                self.online_sessions[game_id] = session
+                self.game_sessions.register(session)
             self.lichess.mark_game_finished(game_id)
             self.lichess.start_game(game_id)
 
@@ -5904,7 +5925,7 @@ class MainWindow(QMainWindow):
                 session.color = chess.WHITE if color == "white" else chess.BLACK
             session.status = "started"
             session.set_server_game_identity(game)
-            self.online_sessions[game_id] = session
+            self.game_sessions.register(session)
             if not session.is_ai_opponent:
                 self._revoke_review_safety(
                     "Заблокировано: началась человеческая/непроверенная онлайн-партия.")
@@ -5972,7 +5993,7 @@ class MainWindow(QMainWindow):
         session = self.online_sessions.get(game_id)
         if session is None:
             session = LichessGameSession(game_id, self.game_repository)
-            self.online_sessions[game_id] = session
+            self.game_sessions.register(session)
         # Finish is terminal. A buffered or reordered active state must never
         # reopen the session or overwrite the saved result.
         if (session.status not in {"created", "started", "playing"}

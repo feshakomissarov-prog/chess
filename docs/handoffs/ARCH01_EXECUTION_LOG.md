@@ -27,3 +27,21 @@ Working branch: `codex/arch-01-modular-refactor` from `main` SHA `3e7f2cd48b1676
 - Никаких новых библиотек, схемных изменений, реального Lichess/OAuth, Stockfish или пользовательских данных.
 
 **Next:** повторить полный suite и isolated offline GUI smoke; зафиксировать W1, затем начать W2 use-case coordinators с тестами поведения до переноса orchestration.
+
+## W1 gate — завершён
+
+- Повтор полного offscreen suite после адаптации инфраструктурных patch points: **560 passed in 146.46 s**.
+- `compileall -q src tests scripts`: PASS.
+- Изолированный offline `QApplication` + `MainWindow(offline_mode=True)`, `lichess is None`, close и удаление только временного каталога: PASS.
+- `git diff --check`: PASS (CRLF нормализация предупреждала о замене переводов строк, ошибок whitespace нет).
+- Commit: `6f64f88e95dd21382d9977136caff61ea4a5499c`, опубликован в ветке PR #44.
+
+## W2 — application state and game-session ownership (в работе)
+
+- Выделен `application.app_state.WorkspaceStateStore`: чтение/запись resumable route, review target, geometry/sidebar/board preferences. Он использует минимальный Settings Protocol и immutable snapshot, без зависимости от Qt widgets.
+- Выделен `application.game_sessions.GameSessionCoordinator`: owns registry and explicit selected game id. `MainWindow` передаёт создание сессий через `register` и совместимо читает существующий mapping/property; фоновая регистрация не выбирает партию.
+- Сохранены ключи QSettings и semantics восстановления review: stale line открывается с ply 0; сохранённый review target не стирается при записи другого route; удаление resume target удаляет только game-id key, как ранее.
+- Тесты `test_application_state.py`, `test_game_sessions.py`, `test_architecture_w1.py`, `test_window.py`: целевой Qt набор PASS; проверены offline restore/workspace and game selection regressions.
+- W2 ещё не завершён: анализ, archive/backfill и dashboard coordinators пока остаются в старых owners. Не объявлять их вынесенными до отдельного тестируемого переноса.
+
+**Next:** закончить W2 там, где перенос явно снижает ответственность без смены UX; затем W3 начать с одной SQLite transaction/connection policy и тематических store adapters, не менять схему.

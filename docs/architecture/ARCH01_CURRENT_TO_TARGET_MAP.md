@@ -58,6 +58,8 @@ ui shell/pages/dialogs → app commands/read models         infrastructure adapt
 - `chess_coach.bootstrap` стал явной точкой создания runtime, настроек и ровно одного `GameRepository`. `MainWindow` принимает готовый `ApplicationRuntime`; прямое конструирование окна и `python -m chess_coach` сохранены.
 - Runtime сохраняет режимы профиля: `--offline` создаёт временные настройки/SQLite; `--manual-connect` откладывает создание LichessService до пользовательского намерения; обычный запуск создаёт сервис для прежнего auto-restore. Runtime кеширует экземпляр сервиса, чтобы повторное действие не создавало второй.
 - `tests/test_architecture_w1.py` защищает типовые инварианты, import boundaries, временную изоляцию offline и создание ручного Lichess-клиента только по запросу. Существующие тесты launcher перенастроены на новый composition seam, без ослабления assertions.
+- `application.app_state.WorkspaceStateStore` сериализует route/geometry/sidebar/board и immutable target сохранённого разбора; UI передаёт snapshot, store не импортирует Qt и не решает визуальную навигацию.
+- `application.game_sessions.GameSessionCoordinator` владеет реестром server sessions и выбранным game id. Новая регистрация фоновой партии не переключает selection; `MainWindow` сохраняет прежние имена полей как совместимые точки доступа, а создание/выбор сессий идёт через coordinator.
 
 **Осталось в W1:** typed boundary conversions и no-import-side-effects proof расширить по мере появления application coordinators и инфраструктурных адаптеров; W1 commit фиксирует минимальные реально используемые контракты, без пустых plugin-слоёв.
 
@@ -65,7 +67,7 @@ ui shell/pages/dialogs → app commands/read models         infrastructure adapt
 | --- | --- | --- |
 | W0 | `window.py`, `repository.py`, `service.py`, entrypoints, tests | Этот baseline/map, imports/routes/threads inventory |
 | W1 | package root, DTOs/contracts, entrypoints | `domain` types/ports, explicit bootstrap, architecture import tests |
-| W2 | `window.py`, `session.py`, `analysis.py`, `archive.py` | game/app-state/analysis/dashboard coordinators; Qt handlers forward only |
+| W2 | `window.py`, `session.py`, `analysis.py`, `archive.py` | app-state and session registry extracted; remaining analysis/archive/dashboard workflows migrate incrementally |
 | W3 | `repository.py`, `statistics.py` | one connection/transaction policy + responsibility stores + compatibility facade; same schema |
 | W4 | `service.py`, `api.py`, `auth.py`, streams/sync modules | stable signals/methods, adapter ownership and request boundaries |
 | W5 | service background threads, archive/backfill/puzzles, `batch_analysis.py` | coordinator registry + independent resource lanes; no global blocking queue |
