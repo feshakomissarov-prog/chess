@@ -139,4 +139,5 @@ No benchmark, new product feature, Rust toolchain, data migration, WAL behavior 
 ### W9 — delivery gate
 
 - Full local Windows Python 3.12 run: **589 passed**; compileall, isolated offline `QApplication`/`MainWindow` init-close, and diff-check passed.
-- Hosted Windows CI must be linked from the exact published head SHA before this architecture task is considered complete. Physical GUI acceptance remains with the owner after independent review.
+- Hosted Windows CI [run #168](https://github.com/feshakomissarov-prog/chess/actions/runs/41702411423): **SUCCESS, 589 passed**, compileall and isolated offline-window initialization passed on Windows Server 2025 / Python 3.12.10 / Qt 6.12.0. It checked PR merge-ref `d37a073414104406ce27a7cc0b701fa7504af512` with branch head `27cdb87f6ddf27e5aa84ebffa0ca0acb291e5c9a`; final documentation-only commit will be rechecked by its PR workflow.
+- Physical GUI acceptance remains with the owner after independent review.

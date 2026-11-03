@@ -141,5 +141,6 @@ Working branch: `codex/arch-01-modular-refactor` from `main` SHA `3e7f2cd48b1676
 - `python -m compileall -q src tests scripts`: PASS.
 - Изолированный `QApplication` + `MainWindow(offline_mode=True)`, `lichess is None`, close и event processing: PASS. Режим использует собственные временные settings/SQLite; пользовательская БД не открывалась.
 - `git diff --check`: PASS. Личная `.venv312/` сохранена и не добавлялась в Git.
-- Windows hosted CI для exact final SHA и обновление PR body — следующий обязательный gate после публикации документационного W9 commit. PR #44 остаётся draft; merge не выполнялся.
+- Windows hosted CI [run #168](https://github.com/feshakomissarov-prog/chess/actions/runs/41702411423) — **SUCCESS, 589 passed**, compileall и isolated offline window PASS на Windows Server 2025 / CPython 3.12.10 / Qt 6.12.0. GitHub pull-request workflow checkout был merge-ref `d37a073414104406ce27a7cc0b701fa7504af512`, содержащий exact branch head `27cdb87f6ddf27e5aa84ebffa0ca0acb291e5c9a`. Следующий W9 документационный commit не меняет runtime code; его PR check будет просмотрен перед выдачей итогового SHA.
+- PR #44 остаётся draft; merge не выполнялся.
 - Ручная визуальная проверка на физическом компьютере владельца, реальный Lichess/OAuth, Stockfish и пользовательские данные не проверялись и остаются владельцу после независимого review.
