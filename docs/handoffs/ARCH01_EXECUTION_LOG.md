@@ -44,4 +44,11 @@ Working branch: `codex/arch-01-modular-refactor` from `main` SHA `3e7f2cd48b1676
 - Тесты `test_application_state.py`, `test_game_sessions.py`, `test_architecture_w1.py`, `test_window.py`: целевой Qt набор PASS; проверены offline restore/workspace and game selection regressions.
 - W2 ещё не завершён: анализ, archive/backfill и dashboard coordinators пока остаются в старых owners. Не объявлять их вынесенными до отдельного тестируемого переноса.
 
+### W2 checkpoint 1
+
+- Изменённые файлы: `application/app_state.py`, `application/game_sessions.py`, `window.py`, новые unit tests, архитектурная карта.
+- Целевые проверки `test_application_state.py`, `test_game_sessions.py`, `test_architecture_w1.py` и весь `test_window.py`: PASS. `compileall` и `git diff --check`: PASS.
+- Commit: `e849ac43c81b9d05e17b4555e180fbe114b05ebe`, опубликован в той же ветке / PR #44.
+- Поведение online callbacks не переписано: сохранённые handlers остаются authoritative, но registry/session selection теперь имеет явного application owner. Полные use-case flows ещё не извлечены.
+
 **Next:** закончить W2 там, где перенос явно снижает ответственность без смены UX; затем W3 начать с одной SQLite transaction/connection policy и тематических store adapters, не менять схему.
