@@ -2259,6 +2259,14 @@ def test_visual_preferences_persist_in_qsettings(tmp_path) -> None:
     dialog.sound_notifications.setChecked(False)
     dialog.sound_history.setChecked(True)
     dialog.sound_volume.setValue(73)
+    assert dialog.sound_selectors["game_start"].count() == 1
+    assert dialog.sound_selectors["move"].count() == 5
+    assert dialog.sound_selectors["capture"].count() == 1
+    assert dialog.sound_selection("game_start") == "start_board_start"
+    assert dialog.sound_selection("move") == "move_06_queen_on_wood"
+    assert dialog.sound_selection("capture") == "capture_09_chess_pieces_drop"
+    dialog.sound_selectors["move"].setCurrentIndex(
+        dialog.sound_selectors["move"].findData("move_02_wooden_tap"))
     preview = []
     dialog.sound_preview_requested.connect(preview.append)
     dialog.sound_preview.click()
@@ -2277,6 +2285,9 @@ def test_visual_preferences_persist_in_qsettings(tmp_path) -> None:
     assert loaded.value("sound_notifications_enabled", type=bool) is False
     assert loaded.value("sound_history_enabled", type=bool) is True
     assert loaded.value("sound_volume", type=int) == 73
+    assert loaded.value("sound_selection_game_start") == "start_board_start"
+    assert loaded.value("sound_selection_move") == "move_02_wooden_tap"
+    assert loaded.value("sound_selection_capture") == "capture_09_chess_pieces_drop"
     preset = SettingsDialog(loaded)
     preset.sound_moves.setChecked(False)
     preset.sound_volume.setValue(0)

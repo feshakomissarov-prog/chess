@@ -23,7 +23,7 @@ where = ["src"]
 [tool.setuptools.package-data]
 chess_coach = [
     "opening_data/*.tsv", "opening_data/NOTICE.md", "resources/*.ico",
-    "assets/sounds/*.wav", "assets/sounds/NOTICE.md",
+    "assets/sounds/*.wav", "assets/sounds/catalog.json", "assets/sounds/NOTICE.md",
 ]
 
 [tool.pytest.ini_options]

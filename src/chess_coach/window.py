@@ -68,7 +68,12 @@ from .ui.theme import stylesheet as desktop_stylesheet
 from .ui.dashboard import dashboard_options, dashboard_snapshot, game_card_text
 from .ui.game_review import GameReviewWorkspace
 from .ui.move_table import MoveTable
-from .ui.sounds import ChessSoundPlayer
+from .ui.sounds import (
+    DEFAULT_SOUND_SELECTIONS,
+    SOUND_CATALOG,
+    ChessSoundPlayer,
+    selected_sound_ids,
+)
 from .ui.workspace_state import reposition_visible_frame
 from .ui.display import (format_clock_control, format_game_date,
                          opening_tooltip, russian_opening_name, source_short)
@@ -1268,6 +1273,25 @@ class SettingsDialog(QDialog):
         self.sound_history = QCheckBox("Звуки при просмотре истории")
         self.sound_history.setChecked(settings.value("sound_history_enabled", False, type=bool))
         layout.addWidget(self.sound_history)
+        self.sound_selectors: dict[str, QComboBox] = {}
+        stored_sound_choices = {
+            cue: settings.value(f"sound_selection_{cue}", default_id, type=str)
+            for cue, default_id in DEFAULT_SOUND_SELECTIONS.items()
+        }
+        sound_choices = selected_sound_ids(stored_sound_choices)
+        for cue, definition in SOUND_CATALOG["cues"].items():
+            row = QHBoxLayout()
+            row.addWidget(QLabel(definition["label"]))
+            selector = QComboBox()
+            selector.setObjectName(f"sound_selection_{cue}")
+            selector.setAccessibleName(f"Звук: {definition['label']}")
+            for option in definition["options"]:
+                selector.addItem(option["label"], option["id"])
+            selector.setCurrentIndex(max(0, selector.findData(sound_choices[cue])))
+            selector.setToolTip("Выберите запись из встроенной библиотеки звуков.")
+            row.addWidget(selector, 1)
+            layout.addLayout(row)
+            self.sound_selectors[cue] = selector
         self.sound_volume = QSlider(Qt.Orientation.Horizontal)
         self.sound_volume.setRange(0, 100)
         self.sound_volume.setValue(settings.value("sound_volume", 45, type=int))
@@ -1292,7 +1316,8 @@ class SettingsDialog(QDialog):
             lambda: self.sound_preview_requested.emit("capture"))
         layout.addWidget(self.sound_capture_preview)
         self.sound_availability_note = QLabel(
-            "Если звуки не слышны, проверьте устройство вывода Windows; игра продолжит работать.")
+            "Выбор звуков хранится локально и применяется после сохранения настроек. "
+            "Библиотека встроена в приложение; если звук не слышен, проверьте вывод Windows.")
         self.sound_availability_note.setWordWrap(True)
         layout.addWidget(self.sound_availability_note)
         self.sound_classic_preset = QPushButton("Пресет «Классический» · 45%")
@@ -1412,6 +1437,10 @@ class SettingsDialog(QDialog):
         self.sound_moves.setChecked(True)
         self.sound_volume.setValue(45)
 
+    def sound_selection(self, cue: str) -> str:
+        selector = self.sound_selectors.get(cue)
+        return str(selector.currentData()) if selector is not None else DEFAULT_SOUND_SELECTIONS[cue]
+
     def save(self, settings: QSettings) -> None:
         settings.setValue("player_color", self.color.currentData())
         settings.setValue("board_flipped", self.flipped.isChecked())
@@ -1423,6 +1452,8 @@ class SettingsDialog(QDialog):
         settings.setValue("sound_notifications_enabled", self.sound_notifications.isChecked())
         settings.setValue("sound_history_enabled", self.sound_history.isChecked())
         settings.setValue("sound_volume", self.sound_volume.value())
+        for cue in DEFAULT_SOUND_SELECTIONS:
+            settings.setValue(f"sound_selection_{cue}", self.sound_selection(cue))
         settings.setValue("stockfish_path", self.engine_path.text().strip())
         settings.setValue("stockfish_verified_path", self._engine_verified_path)
         settings.setValue("analysis_preset", self.analysis_preset.currentData())
@@ -1941,7 +1972,11 @@ class MainWindow(QMainWindow):
             moves_enabled=self.settings.value("sound_moves_enabled", True, type=bool),
             notifications_enabled=self.settings.value("sound_notifications_enabled", True, type=bool),
             history_enabled=self.settings.value("sound_history_enabled", False, type=bool),
-            volume=self.settings.value("sound_volume", 45, type=int), parent=self)
+            volume=self.settings.value("sound_volume", 45, type=int),
+            selections={
+                cue: self.settings.value(f"sound_selection_{cue}", default_id, type=str)
+                for cue, default_id in DEFAULT_SOUND_SELECTIONS.items()
+            }, parent=self)
         self._online_history_game_id: str | None = None
         self._online_history_moves: tuple[chess.Move, ...] = ()
         self._online_history_position: chess.Board | None = None
@@ -4795,7 +4830,8 @@ class MainWindow(QMainWindow):
 
     def open_settings(self) -> None:
         dialog = SettingsDialog(self.settings, self, repository=self.game_repository)
-        dialog.sound_preview_requested.connect(self.sound_player.preview)
+        dialog.sound_preview_requested.connect(
+            lambda cue: self.sound_player.preview(cue, dialog.sound_selection(cue)))
         dialog.install_requested.connect(
             lambda current=dialog: self._install_official_stockfish(current))
         dialog.finished.connect(lambda _result: self._cancel_stockfish_install())
@@ -4805,7 +4841,11 @@ class MainWindow(QMainWindow):
                 moves_enabled=self.settings.value("sound_moves_enabled", True, type=bool),
                 notifications_enabled=self.settings.value("sound_notifications_enabled", True, type=bool),
                 history_enabled=self.settings.value("sound_history_enabled", False, type=bool),
-                volume=self.settings.value("sound_volume", 45, type=int))
+                volume=self.settings.value("sound_volume", 45, type=int),
+                selections={
+                    cue: self.settings.value(f"sound_selection_{cue}", default_id, type=str)
+                    for cue, default_id in DEFAULT_SOUND_SELECTIONS.items()
+                })
             new_color = chess.Color(int(self.settings.value("player_color", chess.WHITE)))
             self.controller.player_color = new_color
             if not self.settings.value("allow_premoves", True, type=bool):

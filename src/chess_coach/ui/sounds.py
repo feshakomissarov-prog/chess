@@ -1,7 +1,8 @@
-"""Packaged natural chess recordings and deduplicated event routing."""
+"""Licensed, selectable chess sound recordings and deduplicated event routing."""
 
 from __future__ import annotations
 
+import json
 from collections import OrderedDict
 from pathlib import Path
 from typing import Callable
@@ -14,19 +15,70 @@ try:
 except ImportError:  # Audio is an optional runtime facility; the board remains usable.
     QSoundEffect = None
 
-SOUND_IDS = ("game_start", "move", "capture")
-_SOUND_FILES = {
-    "game_start": "game-start-cc0-v1.wav",
-    "move": "move-cc0-v1.wav",
-    "capture": "capture-cc0-v1.wav",
+
+_ASSET_DIR = Path(__file__).resolve().parents[1] / "assets" / "sounds"
+_CATALOG_PATH = _ASSET_DIR / "catalog.json"
+
+
+def _load_catalog() -> dict:
+    with _CATALOG_PATH.open("r", encoding="utf-8") as stream:
+        catalog = json.load(stream)
+    cues = catalog.get("cues")
+    if not isinstance(cues, dict) or set(cues) != {"game_start", "move", "capture"}:
+        raise ValueError("Некорректный каталог звуков Chess Coach.")
+    for cue, definition in cues.items():
+        options = definition.get("options")
+        if not isinstance(options, list) or not options:
+            raise ValueError(f"Для сигнала {cue} нет вариантов звука.")
+        ids = {item.get("id") for item in options}
+        if len(ids) != len(options) or definition.get("default") not in ids:
+            raise ValueError(f"Некорректные варианты или умолчание для сигнала {cue}.")
+        for item in options:
+            filename = item.get("file")
+            if not isinstance(filename, str) or Path(filename).name != filename:
+                raise ValueError(f"Некорректный файл в каталоге звуков {cue}.")
+    return catalog
+
+
+SOUND_CATALOG = _load_catalog()
+SOUND_IDS = tuple(SOUND_CATALOG["cues"])
+DEFAULT_SOUND_SELECTIONS = {
+    cue: definition["default"]
+    for cue, definition in SOUND_CATALOG["cues"].items()
 }
 
 
-def ensure_sound_assets(directory: Path) -> dict[str, Path]:
-    """Return the packaged CC0 recordings; never synthesize at runtime."""
-    del directory  # retained for source compatibility; assets ship with the package
-    asset_dir = Path(__file__).resolve().parents[1] / "assets" / "sounds"
-    output = {cue: asset_dir / filename for cue, filename in _SOUND_FILES.items()}
+def _options_by_id(cue: str) -> dict[str, dict]:
+    return {option["id"]: option
+            for option in SOUND_CATALOG["cues"][cue]["options"]}
+
+
+def selected_sound_ids(selections: dict[str, str] | None = None) -> dict[str, str]:
+    """Return valid selections, falling back safely for missing/old QSettings values."""
+    selections = selections or {}
+    result = {}
+    for cue, default_id in DEFAULT_SOUND_SELECTIONS.items():
+        choice = str(selections.get(cue, default_id))
+        result[cue] = choice if choice in _options_by_id(cue) else default_id
+    return result
+
+
+def sound_asset_path(sound_id: str) -> Path | None:
+    for cue in SOUND_IDS:
+        option = _options_by_id(cue).get(sound_id)
+        if option is not None:
+            return _ASSET_DIR / option["file"]
+    return None
+
+
+def ensure_sound_assets(directory: Path, selections: dict[str, str] | None = None) -> dict[str, Path]:
+    """Return selected bundled recordings; ``directory`` remains for API compatibility."""
+    del directory
+    choices = selected_sound_ids(selections)
+    output = {
+        cue: _ASSET_DIR / _options_by_id(cue)[sound_id]["file"]
+        for cue, sound_id in choices.items()
+    }
     missing = [str(path) for path in output.values() if not path.is_file()]
     if missing:
         raise FileNotFoundError("Не найдены аудиоресурсы: " + ", ".join(missing))
@@ -64,36 +116,56 @@ class SoundEventDeduplicator:
 class ChessSoundPlayer(QObject):
     def __init__(self, directory: Path, *, moves_enabled: bool = True,
                  notifications_enabled: bool = True, history_enabled: bool = False,
-                 volume: int = 45, effect_factory: Callable | None = None, parent=None):
+                 volume: int = 45, selections: dict[str, str] | None = None,
+                 effect_factory: Callable | None = None, parent=None):
         super().__init__(parent)
         self.moves_enabled = bool(moves_enabled)
         self.notifications_enabled = bool(notifications_enabled)
         self.history_enabled = bool(history_enabled)
         self.volume = max(0, min(100, int(volume)))
+        self.selections = selected_sound_ids(selections)
         self.deduplicator = SoundEventDeduplicator()
         self.effect_factory = effect_factory or QSoundEffect
-        self.effects = {}
+        self.effects: dict[str, object] = {}
+        self._effects_by_id: dict[str, object] = {}
         self.available = self.effect_factory is not None
         if not self.available:
             return
         try:
-            for cue, path in ensure_sound_assets(Path(directory)).items():
-                effect = self.effect_factory(self)
-                effect.setSource(QUrl.fromLocalFile(str(path)))
-                effect.setLoopCount(1)
-                effect.setVolume(self.volume / 100)
-                self.effects[cue] = effect
+            for cue in SOUND_IDS:
+                for option in SOUND_CATALOG["cues"][cue]["options"]:
+                    path = sound_asset_path(option["id"])
+                    if path is None or not path.is_file():
+                        raise FileNotFoundError(f"Не найден звук {option['id']}.")
+                    effect = self.effect_factory(self)
+                    effect.setSource(QUrl.fromLocalFile(str(path)))
+                    effect.setLoopCount(1)
+                    effect.setVolume(self.volume / 100)
+                    self._effects_by_id[option["id"]] = effect
+            self._select_effects()
         except (OSError, RuntimeError, ValueError):
             self.effects.clear()
+            self._effects_by_id.clear()
             self.available = False
 
+    def _select_effects(self) -> None:
+        self.effects = {
+            cue: self._effects_by_id[sound_id]
+            for cue, sound_id in self.selections.items()
+            if sound_id in self._effects_by_id
+        }
+
     def configure(self, *, moves_enabled: bool, notifications_enabled: bool,
-                  history_enabled: bool, volume: int):
+                  history_enabled: bool, volume: int,
+                  selections: dict[str, str] | None = None):
         self.moves_enabled = bool(moves_enabled)
         self.notifications_enabled = bool(notifications_enabled)
         self.history_enabled = bool(history_enabled)
         self.volume = max(0, min(100, int(volume)))
-        for effect in self.effects.values():
+        if selections is not None:
+            self.selections = selected_sound_ids(selections)
+            self._select_effects()
+        for effect in self._effects_by_id.values():
             effect.setVolume(self.volume / 100)
 
     def play_move(self, game_id: str, ply: int, before: chess.Board, move: chess.Move,
@@ -104,9 +176,6 @@ class ChessSoundPlayer(QObject):
         if source not in {"confirmed", "optimistic", "history"}:
             return False
         if source == "history":
-            # History sound is only requested by an explicit move-row click;
-            # scrolling and render refreshes never call this path. Replaying
-            # that row is intentional and independent of live-event dedupe.
             if not self.history_enabled:
                 return False
         elif not self.deduplicator.claim(game_id, ply):
@@ -131,15 +200,20 @@ class ChessSoundPlayer(QObject):
             return False
         return self._play("notification")
 
-    def preview(self, cue: str = "move") -> bool:
-        """Preview one of the three actual recordings without live-event dedupe."""
-        if cue not in _SOUND_FILES:
+    def preview(self, cue: str = "move", sound_id: str | None = None) -> bool:
+        """Preview the selected or explicitly highlighted library option."""
+        if cue not in SOUND_CATALOG["cues"] or not self.moves_enabled:
             return False
-        return bool(self.moves_enabled and self._play(cue))
+        selected_id = sound_id or self.selections[cue]
+        if selected_id not in _options_by_id(cue):
+            return False
+        effect = self._effects_by_id.get(selected_id)
+        if effect is None:
+            return False
+        effect.play()
+        return True
 
     def _play(self, cue: str) -> bool:
-        # Special move states use the ordinary move recording; queued premoves
-        # do not sound like a move before they are confirmed.
         if cue == "premove":
             return False
         if cue not in self.effects:

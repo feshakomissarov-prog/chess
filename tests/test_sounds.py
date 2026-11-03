@@ -3,7 +3,8 @@ import wave
 import chess
 
 from chess_coach.ui.sounds import (
-    ChessSoundPlayer, classify_move_sound, ensure_sound_assets,
+    DEFAULT_SOUND_SELECTIONS, SOUND_CATALOG, ChessSoundPlayer,
+    classify_move_sound, ensure_sound_assets, selected_sound_ids, sound_asset_path,
 )
 
 
@@ -25,19 +26,44 @@ def _player(tmp_path, **options):
 def test_versioned_recording_assets_are_packaged_mono_pcm_wav(tmp_path):
     assets = ensure_sound_assets(tmp_path / "sounds")
     assert set(assets) == {"game_start", "move", "capture"}
-    durations = {"game_start": (0.60, 0.63), "move": (0.32, 0.36),
-                 "capture": (0.22, 0.25)}
+    assert selected_sound_ids() == DEFAULT_SOUND_SELECTIONS
+    assert DEFAULT_SOUND_SELECTIONS == {
+        "game_start": "start_board_start",
+        "move": "move_06_queen_on_wood",
+        "capture": "capture_09_chess_pieces_drop",
+    }
+    durations = {"game_start": (0.60, 0.63), "move": (0.32, 0.34),
+                 "capture": (0.85, 0.90)}
     for cue, path in assets.items():
         assert path.is_file()
         with wave.open(str(path), "rb") as wav:
             assert wav.getnchannels() == 1
             assert wav.getsampwidth() == 2
-            assert wav.getframerate() == 44_100
+            assert wav.getframerate() in {8_000, 24_000, 44_100, 48_000}
             lower, upper = durations[cue]
             assert lower <= wav.getnframes() / wav.getframerate() <= upper
             assert wav.getnframes() > 100
     assert assets["move"] != assets["capture"]
     assert assets["game_start"] not in {assets["move"], assets["capture"]}
+    for cue, definition in SOUND_CATALOG["cues"].items():
+        assert len(definition["options"]) == (1 if cue != "move" else 5)
+        for option in definition["options"]:
+            path = sound_asset_path(option["id"])
+            assert path is not None and path.is_file()
+            assert option["license"] == "CC0-1.0"
+            with wave.open(str(path), "rb") as wav:
+                assert wav.getnchannels() == 1
+                assert wav.getsampwidth() == 2
+                assert wav.getframerate() in {8_000, 24_000, 44_100, 48_000}
+
+
+def test_selected_recording_and_invalid_selection_fallback(tmp_path):
+    sounds = ensure_sound_assets(tmp_path / "sounds", {
+        "move": "move_02_wooden_tap",
+        "capture": "not-a-capture-option",
+    })
+    assert sounds["move"].name == "move-wooden-tap-v1.wav"
+    assert sounds["capture"].name == "capture-chess-pieces-drop-v1.wav"
 
 
 def test_move_sound_classification_obeys_result_and_move_priority():
@@ -143,11 +169,12 @@ def test_recording_sources_are_preloaded_once_and_reused_for_later_games(tmp_pat
         return effect
     player = ChessSoundPlayer(tmp_path / "sounds", effect_factory=factory)
     assert set(player.effects) == {"game_start", "move", "capture"}
-    assert len(created) == 3
+    assert len(created) == 7
     assert all(effect.source.isLocalFile() for effect in player.effects.values())
     assert player.effects["game_start"].source.toLocalFile().endswith("game-start-cc0-v1.wav")
-    assert player.effects["move"].source.toLocalFile().endswith("move-cc0-v1.wav")
-    assert player.effects["capture"].source.toLocalFile().endswith("capture-cc0-v1.wav")
+    assert player.effects["move"].source.toLocalFile().endswith("move-queen-on-wood-v1.wav")
+    assert player.effects["capture"].source.toLocalFile().endswith(
+        "capture-chess-pieces-drop-v1.wav")
     board = chess.Board()
     e4 = chess.Move.from_uci("e2e4")
     for game_id in ("game-1", "game-2", "game-3"):
@@ -155,7 +182,25 @@ def test_recording_sources_are_preloaded_once_and_reused_for_later_games(tmp_pat
         assert player.play_game_start(game_id)
     assert player.effects["move"].play_count == 3
     assert player.effects["game_start"].play_count == 3
-    assert len(created) == 3
+    assert len(created) == 7
+
+
+def test_sound_library_selection_changes_live_cue_and_preview(tmp_path):
+    player = _player(tmp_path)
+    selected = "move_02_wooden_tap"
+    selected_effect = player._effects_by_id[selected]
+    default_effect = player.effects["move"]
+    assert selected_effect.play_count == default_effect.play_count == 0
+    assert player.preview("move", selected)
+    assert selected_effect.play_count == 1
+    assert default_effect.play_count == 0
+    player.configure(moves_enabled=True, notifications_enabled=True,
+                     history_enabled=False, volume=45, selections={"move": selected})
+    assert player.effects["move"] is selected_effect
+    assert player.play_move("selected-sound-game", 1, chess.Board(),
+                            chess.Move.from_uci("e2e4"))
+    assert selected_effect.play_count == 2
+    assert default_effect.play_count == 0
 
 
 def test_new_game_signal_is_once_per_game_identity_and_muted_with_move_audio(tmp_path):
