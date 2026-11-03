@@ -2992,8 +2992,6 @@ def test_disconnect_cancels_archive_and_puzzle_background_workers(monkeypatch):
 
 
 def test_automatic_puzzle_sync_never_opens_oauth_without_saved_token(monkeypatch):
-    import chess_coach.lichess.service as service_module
-
     class EmptyCredentialStore:
         def __init__(self, **kwargs):
             pass
@@ -3005,7 +3003,8 @@ def test_automatic_puzzle_sync_never_opens_oauth_without_saved_token(monkeypatch
         def get_account(self, token):
             raise AssertionError("No account requests without an existing puzzle token")
 
-    monkeypatch.setattr(service_module, "WindowsCredentialStore", EmptyCredentialStore)
+    monkeypatch.setattr("chess_coach.lichess.service_sync.WindowsCredentialStore",
+                        EmptyCredentialStore)
     service = LichessService(client=NoNetworkClient(), token_store=object())
     service.username = "Owner"
     monkeypatch.setattr(service, "_thread", lambda target, name: target())

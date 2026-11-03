@@ -64,3 +64,22 @@ Working branch: `codex/arch-01-modular-refactor` from `main` SHA `3e7f2cd48b1676
 - Новых зависимостей и schema migrations нет; тесты используют только временные SQLite и fake data.
 
 **Next:** повторить единый регрессионный SQLite set после всех извлечений; затем перенести LichessService responsibilities, сохранив его сигналы/методы фасада.
+
+## W3 checkpoint — завершённая часть
+
+- Фасад `GameRepository` теперь 412 строк и делегирует themed stores/migrations через compatibility inheritance; прежние imports/methods остаются доступны.
+- Expanded combined suite до последнего missing-import fix: `287 passed, 2 failed`; после исправления `chess` binding расширенный migration subset и обе конкретные regressions: `18 passed`. Независимо подтверждены `272 passed` на game/archive/analysis/dashboard suites до самого последнего archive/snapshot extraction, `179 passed` archive+migration suite и `29 passed` snapshot/revision suite.
+- `compileall`, architecture/UOW subset: **18 passed**; `git diff --check`: PASS.
+- Schema и миграции не менялись: версия 19, backing up old database прежде чем schema apply — existing tests.
+- W3 код и тесты опубликованы commit `1819339a99ee19d179d98773bb3a7ffdef4e5206`.
+- Перед итоговой приёмкой W9 требуется единый полный test suite, который заново покроет все переносы на точном final SHA.
+
+## W4 — Lichess service decomposition (в работе)
+
+- `LichessService` оставлен `QObject` фасадом с прежними сигналами, constructor/import path; основные обязанности вынесены в `service_auth.py`, `service_sync.py`, `service_games.py`.
+- Auth adapter владеет token selection, account/session generation, callbacks, event stream/recovery. Sync adapter владеет архивом, puzzle activity и ready-analysis backfill. Games adapter владеет active games, challenges, move/takeback and lifecycle-close methods.
+- Все методы продолжают работать через тот же `self.client`, `self.repository`, callbacks и generation; не создан новый сервис, storage slot, token flow или network client.
+- Тесты API/OAuth/puzzles/backfill/stream plus facade/interface checks: **166 passed**; только fake transport/stores. Первый тестовый прогон выявил mock patch path, перенаправленный на фактический `service_sync` boundary; product path не менялся.
+- CI/physical Windows Lichess/OAuth не запускались; integration tests используют fakes.
+
+**Next:** W4 gate complete после full Lichess regressions; затем W5 вводит operation registry and independent resource lanes без единой блокирующей очереди.

@@ -73,6 +73,13 @@ ui shell/pages/dialogs → app commands/read models         infrastructure adapt
 - Единый одинарный SQLite writer executor, очередь, CAS/ревизии и транзакционные границы сохранены в фасаде до отдельной безопасной миграции writer-lane coordination. WAL/pool/schema/backup behavior не изменён.
 - Storage-specific AST checks запрещают инфраструктуре импортировать UI.
 
+### W4 — Lichess service façade and responsibility split
+
+- `LichessService` остаётся единственным `QObject` владельцем прежних Qt signals, клиентской зависимости и lifecycle state; публичный import path и методы сохраняются.
+- Auth/session generation/callback/event stream находятся в `service_auth.py`; archive, Puzzle Activity и ready-analysis orchestration — в `service_sync.py`; active games/challenges/moves/takeback/actions/close — в `service_games.py`.
+- `LichessService` наследует эти mixins, его файл оставлен около 140 строк (сигналы + constructor/façade), без второго client/service и без новой OAuth flow.
+- Existing fake API/OAuth/stream/backfill suites и facade/interface tests проверяют auth switch, reconnect/429, pending moves/takeback и signal signatures; реальный API не используется.
+
 | Этап | Исходные точки | Проверяемое изменение |
 | --- | --- | --- |
 | W0 | `window.py`, `repository.py`, `service.py`, entrypoints, tests | Этот baseline/map, imports/routes/threads inventory |
