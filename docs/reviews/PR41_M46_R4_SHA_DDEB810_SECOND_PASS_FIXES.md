@@ -1,0 +1,50 @@
+# PR #41 — независимое повторное ревью R4 (Windows 537 PASS), SHA ddeb810
+
+**Дата:** 2026-11-03. **Проверен точно:** `ddeb810895f7260ee1466a1a6ebdec4f081b186a`. **CI:** [run #41613838332](https://github.com/feshakomissarov-prog/chess/actions/runs/41613838332) — SUCCESS, 537 PASS, compileall, isolated offline window PASS. PR #41 остаётся draft/unmerged, base `main`. Относительно `30d89103e2899e6b384e55ae53740571d11297ab` — 2 коммита, 21 изменённый файл.
+
+## Вердикт
+
+**NO-GO для полной ручной приёмки R4-05/05A и часов; NO-GO для merge.** Можно продолжать ограниченный безопасный smoke других локальных экранов, но текущая сборка содержит два подтверждённых P1; они непосредственно затрагивают два главных запроса пользователя. **P0 утечки Fair Play в просмотренных изменениях не выявлено.** Не исправлять всё заново: сделать **точечный фикс в существующем PR #41** с регрессиями и exact-SHA Windows CI.
+
+## R4-R1 / P1 — формат *реального* Lichess JSON analytics прочитан неправильно
+
+**Документированная схема API:**
+- [GamePlayerUser.yaml](https://github.com/lichess-org/api/blob/master/doc/specs/schemas/GamePlayerUser.yaml): официальный процент находится в **`players.white.analysis.accuracy`** / **`players.black.analysis.accuracy`**; там же `inaccuracy`, `mistake`, `blunder`, `acpl`, `phases` (опционально).
+- [GamePlayerAi.yaml](https://github.com/lichess-org/api/blob/master/doc/specs/schemas/GamePlayerAi.yaml): AI имеет `aiLevel` + отдельный `analysis` с `accuracy` и количествами.
+- [GameJson.yaml](https://github.com/lichess-org/api/blob/master/doc/specs/schemas/GameJson.yaml) и [GameMoveAnalysis.yaml](https://github.com/lichess-org/api/blob/master/doc/specs/schemas/GameMoveAnalysis.yaml): оценки после полуходов располагаются в **`analysis: [{eval: <cp>}, {mate: <N>}, ...]`**, причем `best`/ `variation`/ `judgment` возможны не для каждой позиции; могут отсутствовать/быть неполными.
+- [GET /game/export/{gameId} contract](https://github.com/lichess-org/api/blob/master/doc/specs/tags/games/game-export-gameId.yaml): с `evals=true` оценки приходят либо как PGN-комментарии, либо как поле `analysis` в JSON (в зависимости от формата). `accuracy=true` — для JSON.
+
+**Что делает наша реализация:** `src/chess_coach/lichess/archive.py:330–340` `_official_accuracy_values(payload)` читает только `payload.get("accuracy")` (несуществующее в указанной основной схеме плоское поле), и `src/chess_coach/lichess/repository.py:1661–1669` `import_archive_record()` сохраняет только `record["accuracy"]["white/black"]`. Оба полностью обходят `players.<color>.analysis.accuracy`. `ArchiveSync.refresh_ready_analytics:268–285` передаёт JSON в `import_archive_record`, но репозиторий `1551–1650` строит `lichess_assessments` **только из `parsed.eval()` и PGN комментариев**; JSON `analysis[]` не читается, если PGN не содержит `[%eval]`. Следовательно официальная точность и ходы, присутствующие только в JSON, не попадут в БД; очередь ошибочно запишет `no_server_data` и отложит повтор на семь дней.
+
+**Почему 537 PASS не опровергают баг:** `tests/test_m46_lichess_analytics_backfill.py::_export` использует упрощённый тестовый `{"accuracy":{"white":91.5,"black":87.25}}` и дополняет PGN искусственными `[%eval]`. То есть фикстуры покрывают именно неверные предположения кода, а не документированную схему.
+
+**Нужно исправить:**
+1. Сделать единый типизированный, валидационный нормализатор документированной схемы finished-game JSON **перед** сохранением: `players.<color>.analysis.accuracy` (0–100, включая AI), `analysis[ply-1]` (cp/mate; score from white perspective), `players.*.analysis.{inaccuracy,mistake,blunder,acpl,phases}` опционально, с корректным provenance и version. Можно для обратной совместимости принимать *действительно подтверждённый* legacy shape, но приоритет — официальная схема. Не путать `analysis` игрока и `analysis[]` по ходам.
+2. Интегрировать оценки `analysis[]` в существующий `lichess-pgn` saved run **с правильным ply mapping**, без сдвига из-за пустых элементов и с честными пропусками; `eval=0` — допустимая нулевая оценка, `mate=0` — специальный терминал, не подставлять ±1000 cp; несовпадающие массивы / лишние элементы / конфликтующие оценки отправлять на карантин/отмечать неполными, не молча сдвигать. Сохранённые verified `[%eval]` сравнивать по source/depth и не стирать их без доказательства лучшего источника.
+3. Официальную accuracy/счётчики Lichess сохранять отдельно от Stockfish и локального классификатора; самостоятельный просмотр/обзор должен показывать правильные source and coverage, не дублировать `n/d` при наличии L-данных. Не заявлять проценты, если в JSON поля нет.
+4. **Обязательные тесты с официальной структурой**, а не только с legacy fixture: a) `players.white.analysis.accuracy=91`, `players.black.analysis.accuracy=87`, `analysis=[{"eval":35},{"eval":0},{"mate":-3}]`, PGN без `[%eval]`; b) `players.black.aiLevel` и `players.black.analysis.accuracy`; c) partial JSON/no fields; d) PGN с уже сохранёнными подтверждёнными scores; e) false zeros/NaN/bad types; f) repeated export / after restart / no-data TTL; g) source L / S unmerged.
+5. **Regression acceptance:** mock JSON, точно соответствующий `GameJson.yaml`, после одного `refresh_ready_analytics()` даёт заполненные `games.lichess_accuracy_white/black`, `position_assessments` с соответствующими plies и `lichess_analysis_backfill_state` = `has_data/partial`, **не** `no_server_data`. Повторный fetch идемпотентен. Нет реальных запросов Lichess.
+
+## R4-R2 / P1 — активные часы почти невидимы в тёмной теме
+
+**Подтверждено кодом:** `src/chess_coach/window.py::_update_clock():6292–6300` задаёт для часов **того, чей ход**, цвет текста `#262b33`. Основная Qt-тема `src/chess_coach/ui/theme.py::Theme.app` — `#14171C`, применена через `desktop_stylesheet()` в `window.py:2717`. Контраст цвета активных часов с фоном **около 1.26:1**; предупреждение `#b04432` ≈ **3.18:1**; обе ветки существенно хуже читаемости обычного текста `#F0EBE3` (~15.1:1). Индикация времени пользователя визуально почти пропадает как раз на активном ходе.
+
+**Нужно исправить:** применять контрастные токены темы для active/inactive/low-time, не хардкодить чёрный текст без светлого фонового бейджа. Активный таймер в тёмном интерфейсе должен быть ярче; inactive различим, warning заметен **цветом + символом**. Часы владельца внизу доски, соперника сверху; 28px или больше по доступному DPI. Контраст цифрового текста не ниже 4.5:1 на реальном background при обычном и warning. Тест на стили **после `show()/processEvents()`**, Qt palette/render + контрастная проверка, 3+2 с обоими цветами, 1360×860/DPI. Не считать `.text()` проверкой видимости.
+
+## R4-R3 / P1 — защищать архив от изменения линии в момент фоновой дозагрузки (data integrity)
+
+**Потенциальная гонка в исходниках:** `ArchiveSync.refresh_ready_analytics():266–284` до импорта проверяет `current()` и `_validate_backfill_export` с сохранённым `item["moves"]`, затем **без expected revision/hash guard внутри SQLite-транзакции** вызывает `repository.import_archive_record(username, payload)`. Далее `latest.line_revision != previous_revision` проверяется уже **ПОСЛЕ записи**, и raise не отменяет ранее завершённый commit. Если параллельная синхронизация (или замена current line) произойдёт между выборкой и записью, старый PGN способен создать/вернуть другую текущую линию. В том же импортере `repository.py:1660` меняет `raw_pgn/raw_checksum` — metadata refresh не должен бесследно перезаписывать предыдущий PGN.
+
+**Исправить точечно:** metadata-only merge в транзакции с `WHERE current line_revision=? AND line_hash=?` / optimistic compare-and-swap и account_id check *внутри transaction*. При несовпадении — rollback всего импорта, состояние `stale_line`/pending retry, без выданного `has_data`. Исходный `raw_pgn` сохранять либо версионировать; Lichess server annotations сохранять отдельно от пользовательского/предыдущего оригинала. No DB mutation при canceled/auth-stale generation до commit. В тесте барьер между получением JSON и транзакцией, затем concurrent replacement of current line, assert исходная новая линия не откатана и данные не приклеены к ней. Отдельный тест на сохранение исходного PGN/сырого снапшота.
+
+## Не блокирующее, но зафиксировать
+
+- `_lichess_analysis_backfill_progress` и `_lichess_analysis_backfill_finished` передают сигналы **без account/generation**; после смены аккаунта старые поставленные в Qt queue события могут заменить статус в шапке. Scoped signal или проверка owner context у потребителя; это P2 UI, не свидетельство cross-account DB leakage.
+- Положительные результаты остальных изменений подтверждены чтением кода: `FastPassOptions` отказывается молча обрезать >10м узлов; в `window.py` `_run_background_sync` действительно периодически запускает маленький backfill после stream-ready, а не только по кнопке; `ReviewGraph._continuous_segments` теперь исключает mate-пары; кнопки главной больше не перемещаются в hidden More. Осталось проверить физически серверный clock и аудио.
+- Сохранять fail-closed и не выполнять онлайн Fair Play unsafe analysis. Нельзя путать получение готовой серверной аналитики с запуском нового серверного анализа. Клиент уже использует корректный JSON GET с `accuracy/evals/pgnInJson`, но парсер нуждается в доработке.
+
+## Порядок и приёмка
+
+1. Исправить R4-R1 **в первую очередь**, ибо она делает всю R4-05A бессмысленной для части реальных игр. Одновременно устранить R4-R3 атомарность/неизменность line и metadata. Затем R4-R2 контраст часов. P2 scoped progress — минимально, без редизайна.
+2. Модифицировать тестовые фикстуры под **официальный** API contract, а не оставлять legacy top-level accuracy. Запустить targeted tests + полный Windows CI на точном новом SHA. Не подключать реальные токены, личные данные, сеть Lichess; использовать временную SQLite и fake HTTP.
+3. PR #41 оставить draft / NO MERGE. Только после повторной независимой проверки и CI допустить полноценную физическую Windows-приёмку: AI 3+2 (реальные часы), фоновая дозагрузка старых игр (точность/оценки) и звуки. Факт наличия этих данных на конкретном Lichess-аккаунте не гарантируется.
