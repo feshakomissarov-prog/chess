@@ -390,14 +390,14 @@ class MainWindow(QMainWindow):
         if self.lichess:
             self._attach_lichess_service(self.lichess)
             self.lichess.restore()
-        elif manual_connect_mode:
+        elif self.manual_connect_mode:
             self.connection.setText("●  Ручной режим · запросов нет")
             self.connect_button.setText("Подключиться вручную")
             self.connect_button.setToolTip(
                 "Профиль и локальные партии доступны. Выбор OAuth/PAT и сетевые запросы "
                 "к Lichess начнутся только после нажатия этой кнопки."
             )
-        elif offline_mode:
+        elif self.offline_mode:
             self._disable_online_controls()
         self.refresh()
         if not self.offline_mode:
@@ -963,7 +963,11 @@ class MainWindow(QMainWindow):
         if not hasattr(self, "settings_button"):
             return
         compact = self.width() < 820
-        self.connect_button.setText("Подключить" if compact else "Подключить Lichess")
+        if self.manual_connect_mode and not self.lichess:
+            connect_text = "Подключиться вручную"
+        else:
+            connect_text = "Подключить" if compact else "Подключить Lichess"
+        self.connect_button.setText(connect_text)
         self.disconnect_button.setText("Отключить" if compact else "Отключить сеанс")
         self.settings_button.setText("⚙" if compact else "Настройки")
         self.settings_button.setToolTip("Настройки")
