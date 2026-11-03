@@ -39,6 +39,9 @@ class ArchiveSync:
              full: bool, page_size: int,
              progress: Callable[[int, str], None] | None) -> int:
         """Import/resume a backfill, then incrementally update only newer/changed games."""
+        # Keep a finite NDJSON response short enough that other finite work can
+        # receive the next slot. The caller still resumes at durable page cursors.
+        page_size = min(max(1, int(page_size)), LichessClient.MAX_FINITE_STREAM_PAGE)
         account_id = self.repository.ensure_archive_account(username)
         state = self.repository.archive_sync_state(account_id)
         if full or not state.get("backfill_complete"):
@@ -113,6 +116,12 @@ class ArchiveSync:
             if count == 0 and boundary_count == 0:
                 raise RuntimeError("Lichess archive incremental page made no progress; cursor unchanged.")
             since = max_seen + 1
+            if not stop_event.is_set():
+                checkpoint = self.repository.finish_archive_incremental
+                if len(inspect.signature(checkpoint).parameters) >= 3:
+                    checkpoint(account_id, since, imported)
+                else:  # Compatibility with repository test doubles and older callers.
+                    checkpoint(account_id, since)
         if not stop_event.is_set():
             finish_incremental = self.repository.finish_archive_incremental
             if len(inspect.signature(finish_incremental).parameters) >= 3:

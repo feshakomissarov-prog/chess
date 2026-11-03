@@ -144,3 +144,17 @@ Working branch: `codex/arch-01-modular-refactor` from `main` SHA `3e7f2cd48b1676
 - Windows hosted CI [run #168](https://github.com/feshakomissarov-prog/chess/actions/runs/41702411423) — **SUCCESS, 589 passed**, compileall и isolated offline window PASS на Windows Server 2025 / CPython 3.12.10 / Qt 6.12.0. GitHub pull-request workflow checkout был merge-ref `d37a073414104406ce27a7cc0b701fa7504af512`, содержащий exact branch head `27cdb87f6ddf27e5aa84ebffa0ca0acb291e5c9a`. Следующий W9 документационный commit не меняет runtime code; его PR check будет просмотрен перед выдачей итогового SHA.
 - PR #44 остаётся draft; merge не выполнялся.
 - Ручная визуальная проверка на физическом компьютере владельца, реальный Lichess/OAuth, Stockfish и пользовательские данные не проверялись и остаются владельцу после независимого review.
+
+## ARCH-FIX-02 — конечные NDJSON-загрузки и приоритет запросов
+
+- Архив партий и Puzzle Activity помечены как конечные выгрузки и получают общий ограниченный слот (одна активная выгрузка). Постоянные event/game streams не удерживают этот слот.
+- Короткий gate Lichess сериализует только получение stream response; после подключения конечного потока игровой запрос может пройти независимо от длительности выгрузки. Gate ожидания учитывает cancellation, приоритеты и FIFO внутри приоритета.
+- Retry-After проверяется до и после admission; 429 конечного потока устанавливает общий cooldown. Размер обычной страницы архива/задач ограничен 250 записями с durable checkpoint между страницами; boundary окна сохранены.
+- Регрессии используют fake transport: два одновременных постоянных потока, конечная выгрузка, отложенная вторая выгрузка, интерактивный ход, отмена ожидающего запроса и finite-stream 429/cooldown. Целевые `test_lichess_background_lanes.py` + `test_lichess.py`: **87 passed**.
+- Реальные Lichess-запросы не выполнялись; схема SQLite и личные данные не менялись.
+
+## ARCH-FIX-03 — общий допуск Stockfish (в работе)
+
+- Первые изменения `StockfishManager` вводят отменяемый общий слот для single/batch/position use cases, повторную проверку Fair Play после ожидания, и освобождение slot отдельной позиционной lease при сохранении одного кешированного процесса.
+- Первые fake-engine регрессии подтверждают запрет UCI при отмене до admission/создания, fail-closed safety check и общий слот между process analysis и position lease. Целевые engine manager: **21 passed**; batch + analysis-store + Lichess lanes: **87 passed**.
+- Дальше проверяются все потребители manager, очереди и реальные lifecycle/Qt границы; пока не считать ARCH-FIX-03 завершённым.

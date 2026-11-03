@@ -6,7 +6,7 @@ import json
 import threading
 import time
 import uuid
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
 from dataclasses import dataclass
@@ -45,17 +45,28 @@ class _PriorityRequestGate:
         self._active = False
 
     @contextmanager
-    def request(self, priority: int):
+    def request(self, priority: int, stop_event: threading.Event | None = None):
         with self._condition:
             ticket = self._next_ticket
             self._next_ticket += 1
             waiter = (max(0, int(priority)), ticket)
             self._waiters.append(waiter)
             self._condition.notify_all()
-            while (self._active or waiter != max(self._waiters, key=lambda item: (item[0], -item[1]))):
-                self._condition.wait()
-            self._waiters.remove(waiter)
-            self._active = True
+            try:
+                while True:
+                    if stop_event is not None and stop_event.is_set():
+                        raise InterruptedError("Запрос Lichess отменён до допуска.")
+                    if (not self._active and waiter == max(
+                            self._waiters, key=lambda item: (item[0], -item[1]))):
+                        self._waiters.remove(waiter)
+                        self._active = True
+                        break
+                    self._condition.wait(timeout=0.05)
+            except BaseException:
+                if waiter in self._waiters:
+                    self._waiters.remove(waiter)
+                    self._condition.notify_all()
+                raise
         try:
             yield
         finally:
@@ -67,6 +78,50 @@ class _PriorityRequestGate:
     def waiting_count(self) -> int:
         with self._condition:
             return len(self._waiters)
+
+
+class _FiniteStreamGate:
+    """Bound concurrent archive/puzzle exports without holding the HTTP gate."""
+
+    def __init__(self, limit: int = 1) -> None:
+        self._condition = threading.Condition()
+        self._limit = max(1, int(limit))
+        self._active = 0
+        self._waiters = 0
+
+    @contextmanager
+    def admit(self, stop_event: threading.Event):
+        acquired = False
+        with self._condition:
+            self._waiters += 1
+            try:
+                while self._active >= self._limit:
+                    if stop_event.is_set():
+                        raise InterruptedError("Фоновая выгрузка отменена до допуска.")
+                    self._condition.wait(timeout=0.05)
+                if stop_event.is_set():
+                    raise InterruptedError("Фоновая выгрузка отменена до допуска.")
+                self._active += 1
+                acquired = True
+            finally:
+                self._waiters -= 1
+        try:
+            yield
+        finally:
+            if acquired:
+                with self._condition:
+                    self._active -= 1
+                    self._condition.notify_all()
+
+    @property
+    def active_count(self) -> int:
+        with self._condition:
+            return self._active
+
+    @property
+    def waiting_count(self) -> int:
+        with self._condition:
+            return self._waiters
 
 
 @dataclass(frozen=True)
@@ -206,6 +261,7 @@ def _retry_after_seconds(value: str | None) -> int:
 
 class LichessClient:
     BASE_URL = "https://lichess.org"
+    MAX_FINITE_STREAM_PAGE = 250
 
     def __init__(
         self,
@@ -219,6 +275,7 @@ class LichessClient:
         # Serialize one transport request and shared Retry-After state only.
         # Workflow-level scans must yield between requests and never own this lock.
         self._request_gate = _PriorityRequestGate()
+        self._finite_stream_gate = _FiniteStreamGate(limit=1)
         self._cooldown_lock = threading.Lock()
         self._rate_limited_until = 0.0
 
@@ -391,7 +448,7 @@ class LichessClient:
         if until_ms is not None:
             query["until"] = until_ms
         path = f"/api/games/user/{quote(username, safe='')}?{urlencode(query)}"
-        yield from self.stream_ndjson(path, token, stop_event)
+        yield from self.stream_ndjson(path, token, stop_event, stream_kind="finite")
 
     def stream_puzzle_activity(self, token: str, stop_event: threading.Event, *,
                                since: int | None = None, before: int | None = None,
@@ -403,7 +460,8 @@ class LichessClient:
             query["since"] = since
         if before is not None:
             query["before"] = before
-        yield from self.stream_ndjson("/api/puzzle/activity?" + urlencode(query), token, stop_event)
+        yield from self.stream_ndjson("/api/puzzle/activity?" + urlencode(query), token, stop_event,
+                                      stream_kind="finite")
 
     def get_puzzle_dashboard(self, token: str, days: int = 30) -> dict:
         if not 1 <= int(days) <= 365:
@@ -490,7 +548,8 @@ class LichessClient:
             if color not in {"white", "black", "random"}:
                 raise ValueError("Цвет должен быть white, black или random.")
         yield from self.stream_ndjson(
-            f"/api/challenge/{quote(username, safe='')}", token, stop_event, method="POST", form=form
+            f"/api/challenge/{quote(username, safe='')}", token, stop_event,
+            method="POST", form=form, stream_kind="persistent"
         )
 
     def create_ai_challenge(
@@ -555,9 +614,14 @@ class LichessClient:
         method: str = "GET",
         form: Mapping[str, object] | None = None,
         on_connected: Callable[[], None] | None = None,
+        stream_kind: str = "persistent",
     ) -> Iterator[dict]:
+        if stream_kind not in {"persistent", "finite"}:
+            raise ValueError("Unknown NDJSON stream kind")
         route = path.split("?", 1)[0]
-        diagnostic_mode = "puzzle_activity" if route == "/api/puzzle/activity" else "stream"
+        diagnostic_mode = ("puzzle_activity" if route == "/api/puzzle/activity"
+                           else "archive" if route.startswith("/api/games/user/")
+                           else "persistent_stream" if stream_kind == "persistent" else "finite_stream")
         url = f"{self.base_url}{path}"
         headers = {
             "Authorization": f"Bearer {token}",
@@ -568,33 +632,63 @@ class LichessClient:
         if form is not None:
             body = urlencode(form).encode("utf-8")
             headers["Content-Type"] = "application/x-www-form-urlencoded"
-        # Long-lived event streams do not reserve the bounded-request gate.
-        with self._cooldown_lock:
-            self._check_cooldown_locked()
         started = time.monotonic()
         byte_count = record_count = 0
-        log_event("puzzle_sync_request_started", "lichess_api", mode=diagnostic_mode)
+        log_event("ndjson_stream_started", "lichess_api", mode=diagnostic_mode)
+        finite_admission = (self._finite_stream_gate.admit(stop_event)
+                            if stream_kind == "finite" else nullcontext())
         try:
-            response = self.transport.stream(
-                method, url, headers, body, 35.0, stop_event,
-                on_connected=on_connected,
-            )
-            for raw in response:
-                byte_count += len(raw)
-                if stop_event.is_set():
-                    break
-                line = raw.decode("utf-8", "replace").strip()
-                if not line:
-                    continue
+            with finite_admission:
+                with self._cooldown_lock:
+                    self._check_cooldown_locked()
+                # The gate orders only connection establishment. Once a response is
+                # open, regular short requests can proceed beside the bounded stream.
+                priority = (current_work_priority() if stream_kind == "finite"
+                            else max(80, current_work_priority()))
+                request_admission = self._request_gate.request(priority, stop_event)
+                request_admission.__enter__()
+                gate_lock = threading.Lock()
+                gate_held = True
+
+                def release_request_admission() -> None:
+                    nonlocal gate_held
+                    with gate_lock:
+                        if gate_held:
+                            gate_held = False
+                            request_admission.__exit__(None, None, None)
+
+                def connected() -> None:
+                    release_request_admission()
+                    if on_connected is not None:
+                        on_connected()
+
                 try:
-                    value = json.loads(line)
-                except json.JSONDecodeError as exc:
-                    raise LichessError("Поток Lichess прислал некорректную строку NDJSON.") from exc
-                if isinstance(value, dict):
-                    record_count += 1
-                    yield value
+                    with self._cooldown_lock:
+                        self._check_cooldown_locked()
+                    response = self.transport.stream(
+                        method, url, headers, body, 35.0, stop_event,
+                        on_connected=connected,
+                    )
+                    for raw in response:
+                        # Simple fake transports may not implement on_connected.
+                        release_request_admission()
+                        byte_count += len(raw)
+                        if stop_event.is_set():
+                            break
+                        line = raw.decode("utf-8", "replace").strip()
+                        if not line:
+                            continue
+                        try:
+                            value = json.loads(line)
+                        except json.JSONDecodeError as exc:
+                            raise LichessError("Поток Lichess прислал некорректную строку NDJSON.") from exc
+                        if isinstance(value, dict):
+                            record_count += 1
+                            yield value
+                finally:
+                    release_request_admission()
             log_event("puzzle_sync_cancelled" if stop_event.is_set()
-                      else "puzzle_sync_request_completed", "lichess_api",
+                      else "ndjson_stream_completed", "lichess_api",
                       duration_ms=(time.monotonic() - started) * 1000,
                       bytes=byte_count, records=record_count, mode=diagnostic_mode)
         except RateLimitError as exc:
@@ -608,7 +702,7 @@ class LichessClient:
                       http_status=429, error=exc)
             raise RateLimitError(retry_after) from exc
         except Exception as exc:
-            log_event("puzzle_sync_request_failed", "lichess_api",
+            log_event("ndjson_stream_failed", "lichess_api",
                       duration_ms=(time.monotonic() - started) * 1000,
                       bytes=byte_count, records=record_count, error=exc)
             raise
@@ -616,10 +710,11 @@ class LichessClient:
     def stream_events(self, token: str, stop_event: threading.Event,
                       on_connected: Callable[[], None] | None = None) -> Iterator[dict]:
         yield from self.stream_ndjson("/api/stream/event", token, stop_event,
-                                      on_connected=on_connected)
+                                      on_connected=on_connected, stream_kind="persistent")
 
     def stream_game(self, token: str, game_id: str, stop_event: threading.Event) -> Iterator[dict]:
-        yield from self.stream_ndjson(f"/api/board/game/stream/{game_id}", token, stop_event)
+        yield from self.stream_ndjson(f"/api/board/game/stream/{game_id}", token, stop_event,
+                                      stream_kind="persistent")
 
 
 def _classify_error_response(headers: Mapping[str, str], body: bytes) -> str:

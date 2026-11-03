@@ -2088,7 +2088,7 @@ def test_puzzle_incremental_imports_1501_records_in_durable_pages(tmp_path):
         "PageAccount", "fake", threading.Event(), page_size=1000)
     assert count == 1501
     assert repo.puzzle_statistics(account_id)["attempts"] == 1502
-    assert len([call for call in client.calls if call[2] == 1000]) == 2
+    assert len([call for call in client.calls if call[2] == 250]) == 7
     client.calls.clear()
     assert PuzzleActivitySync(client, repo).run(
         "PageAccount", "fake", threading.Event(), page_size=1000) == 0
@@ -2161,7 +2161,7 @@ def test_archive_2501_games_paginates_three_pages_and_keeps_raw_pgn(tmp_path):
                                               full=True, page_size=1000)
     assert imported == total
     assert len(repo.list_games(completed_only=False)) == total
-    assert len([p for p in client.page_sizes if p[2] == 1000 and p[1] is not None]) == 3
+    assert len([p for p in client.page_sizes if p[2] == 250 and p[1] is not None]) == 11
     assert repo.export_pgn("g1").find("[%clk 0:05:00]") >= 0
     assert repo.export_pgn("g1").find("[%eval 0.25]") >= 0
     assert len(repo.items) == total
@@ -2297,7 +2297,7 @@ def test_puzzle_sync_handles_2501_descending_attempts_and_restarts_after_page_tw
         def __init__(self): self.full_pages = 0; self.cancel_page_two = True
         def stream_puzzle_activity(self, token, stop, *, since=None, before=None, max_items=1000):
             if before is None: return iter(())
-            if max_items == 1000:
+            if max_items == 250:
                 self.full_pages += 1
                 if self.cancel_page_two and self.full_pages == 2:
                     stop.set()
@@ -2336,12 +2336,12 @@ def test_puzzle_sync_handles_2501_descending_attempts_and_restarts_after_page_tw
     client = Client()
     sync = PuzzleActivitySync(client, repo)
     stop = threading.Event()
-    assert sync.run("Me", "fake", stop, page_size=1000) == 1000
+    assert sync.run("Me", "fake", stop, page_size=1000) == 250
     account = repo.ensure_archive_account("Me")
     assert repo.puzzle_sync_state(account)["backfill_complete"] == 0
-    assert repo.puzzle_statistics(account)["attempts"] == 1000
+    assert repo.puzzle_statistics(account)["attempts"] == 250
     stop.clear(); client.cancel_page_two = False
-    assert sync.run("Me", "fake", stop, page_size=1000) == 1501
+    assert sync.run("Me", "fake", stop, page_size=1000) == 2251
     assert repo.puzzle_statistics(account)["attempts"] == 2501
     assert len(repo.puzzle_history(account, limit=500)) == 500
     assert repo.puzzle_sync_state(account)["backfill_complete"] == 1
