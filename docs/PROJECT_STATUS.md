@@ -1,3 +1,10 @@
+## 03.11.2026 — M4.6 объединена с main; утверждённая модель Chess Coach
+
+**Код M4.6:** [PR #41](https://github.com/feshakomissarov-prog/chess/pull/41) объединён по разрешению владельца после ручной проверки. Проверенный head `2c3ccbd99c0c33526fb2bd996ab777a0ec5c8d31`, [Windows CI #41625429734](https://github.com/feshakomissarov-prog/chess/actions/runs/41625429734) — SUCCESS, 553 PASS; merge commit `27b42d3dc482efeff3c64ad3399f96bc74fcb041`. Физическую ручную проверку выполнил владелец; автоматическое тестирование не заменяет проверку настоящего Lichess, устройства звука и DPI.
+
+**Продукт:** утверждена [модель A × (B1+B2) → C → D → E](research/CHESS_COACH_APPROVED_COMPETENCY_MODEL.md), [девять исследовательских направлений](research/CHESS_COACH_NINE_FOLLOWUP_DIRECTIONS.md), рабочая карта [17 семейств / 263 подтем](research/CHESS_COMPETENCY_MODEL_STRESS_TEST.md). Шахматные диагнозы — только на проверенных фактах с явным покрытием; голос после полноценного интерактивного обучающего тренера. ROADMAP намеренно не обновлён. Следующий отдельный этап — архитектурный рефакторинг без изменения пользовательских функций, после которого развиваются новые образовательные модули.
+
+---
 ## 02.11.2026 — M4.6 в разработке
 
 Начата отдельная ветка `codex/m46-desktop-experience` от актуального main (`3387dd38643eaa4ea2fac17fa17ba08cfc43e47f`); draft PR M4.6 будет отдельным от слитого PR #30. Обязательный первый этап — закрытие race #40 по S0–S2; далее A–H по [ТЗ M4.6 v1.1](specs/M4_6_DESKTOP_EXPERIENCE.md). Актуальный поэтапный handoff: [M4_6_EXECUTION_LOG.md](handoffs/M4_6_EXECUTION_LOG.md). Реальные секреты/Lichess, личная SQLite/архив и Stockfish не используются в тестах.
