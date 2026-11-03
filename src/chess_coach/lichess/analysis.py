@@ -14,6 +14,7 @@ import chess
 import chess.engine
 
 from ..diagnostics import log_event
+from ..uci import popen_uci_hidden
 from .repository import GameRepository
 
 
@@ -58,7 +59,7 @@ class CompletedGameAnalyzer:
     def __init__(self, repository: GameRepository,
                  engine_factory: Callable[[str], chess.engine.SimpleEngine] | None = None) -> None:
         self.repository = repository
-        self.engine_factory = engine_factory or chess.engine.SimpleEngine.popen_uci
+        self.engine_factory = engine_factory or popen_uci_hidden
 
     def analyze(self, game_id: str, engine_path: str | Path,
                 options: AnalysisOptions = AnalysisOptions(), *,
@@ -67,6 +68,8 @@ class CompletedGameAnalyzer:
                 stop_event: threading.Event | None = None,
                 analysis_pass: str = "standard",
                 engine: chess.engine.SimpleEngine | None = None) -> dict:
+        if stop_event is not None and stop_event.is_set():
+            raise InterruptedError("Анализ отменён до запуска движка.")
         if analysis_pass not in {"standard", "fast", "review"}:
             raise ValueError("Unknown analysis pass")
         if active_human_game_ids:
@@ -98,6 +101,8 @@ class CompletedGameAnalyzer:
         engine_instance = engine
         owns_engine = engine_instance is None
         if engine_instance is None:
+            if stop_event is not None and stop_event.is_set():
+                raise InterruptedError("Анализ отменён до создания процесса движка.")
             engine_instance = self.engine_factory(str(path))
         try:
             if stop_event is not None and stop_event.is_set():
@@ -114,6 +119,8 @@ class CompletedGameAnalyzer:
                 game_id, int(revision["line_revision"]), revision["line_hash"],
                 "stockfish", engine_version, parameters)
             if cache:
+                if stop_event is not None and stop_event.is_set():
+                    raise InterruptedError("Анализ отменён.")
                 cache["cached"] = True
                 return cache
             # MultiPV is marked as a managed UCI option by python-chess. For a
@@ -161,12 +168,15 @@ class CompletedGameAnalyzer:
                                         "phase": self.repository.phase_for_ply(
                                             game_id, int(revision["line_revision"]), ply),
                                         "algorithm_version": CLASSIFIER_VERSION})
+            if stop_event is not None and stop_event.is_set():
+                raise InterruptedError("Анализ отменён до сохранения результата.")
             run_id = self.repository.save_analysis(
                 game_id, line_revision=int(revision["line_revision"]),
                 line_hash=revision["line_hash"], source="stockfish",
                 engine_name=engine_name,
                 engine_version=engine_version, parameters=parameters,
-                assessments=assessments, classifications=classifications)
+                assessments=assessments, classifications=classifications,
+                cancel_check=(lambda: stop_event is not None and stop_event.is_set()))
             return {"run_id": run_id, "assessments": assessments,
                     "classifications": classifications, "cached": False}
         finally:
@@ -187,6 +197,8 @@ class CompletedGameAnalyzer:
         """
         if safety_check is None or safety_check() is not True:
             raise ValueError("Selective review requires a positive current fair-play safety check.")
+        if stop_event is not None and stop_event.is_set():
+            raise InterruptedError("Selective review cancelled before engine startup.")
         game = self.repository.get_game(game_id)
         if not game:
             raise KeyError(game_id)
@@ -234,6 +246,8 @@ class CompletedGameAnalyzer:
         engine_instance = engine
         owns_engine = engine_instance is None
         if engine_instance is None:
+            if stop_event is not None and stop_event.is_set():
+                raise InterruptedError("Selective review cancelled before engine process creation.")
             engine_instance = self.engine_factory(str(path))
         try:
             identity = dict(engine_instance.id)
@@ -280,12 +294,17 @@ class CompletedGameAnalyzer:
                     })
                 if progress:
                     progress(index + 1, len(position_plies))
+            if ((stop_event is not None and stop_event.is_set())
+                    or safety_check() is not True):
+                raise InterruptedError("Fair-play safety changed before review commit.")
             run_id = self.repository.save_analysis(
                 game_id, line_revision=int(revision["line_revision"]),
                 line_hash=revision["line_hash"], source="stockfish",
                 engine_name=engine_name, engine_version=engine_version,
                 parameters=parameters, assessments=assessments, classifications=[],
-                alternatives=alternatives, status="partial")
+                alternatives=alternatives, status="partial",
+                cancel_check=(lambda: ((stop_event is not None and stop_event.is_set())
+                                       or safety_check() is not True)))
             return {"run_id": run_id, "assessments": assessments,
                     "alternatives": alternatives, "review_move_plies": selected,
                     "review_position_plies": position_plies, "cached": False}

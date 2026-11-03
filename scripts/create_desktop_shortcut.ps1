@@ -1,9 +1,14 @@
 $ErrorActionPreference = "Stop"
 
 $repoRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
-$venv = Join-Path $repoRoot ".venv\Scripts"
+$venv = Join-Path $repoRoot ".venv312\Scripts"
 $pythonw = Join-Path $venv "pythonw.exe"
 $python = Join-Path $venv "python.exe"
+if (-not (Test-Path -LiteralPath $pythonw -PathType Leaf)) {
+    $venv = Join-Path $repoRoot ".venv\Scripts"
+    $pythonw = Join-Path $venv "pythonw.exe"
+    $python = Join-Path $venv "python.exe"
+}
 
 if (-not (Test-Path -LiteralPath $pythonw -PathType Leaf) -or
     -not (Test-Path -LiteralPath $python -PathType Leaf)) {
@@ -43,8 +48,13 @@ $shortcut.TargetPath = $pythonw
 $shortcut.Arguments = "-m chess_coach"
 $shortcut.WorkingDirectory = $repoRoot
 $shortcut.Description = "Chess Coach — локальная шахматная доска и Lichess-клиент"
-$shortcut.IconLocation = "$pythonw,0"
+$iconPath = Join-Path $repoRoot "src\chess_coach\resources\chess_coach.ico"
+if (Test-Path -LiteralPath $iconPath -PathType Leaf) {
+    $shortcut.IconLocation = "$iconPath,0"
+} else {
+    $shortcut.IconLocation = "$pythonw,0"
+}
 $shortcut.Save()
 
 Write-Host "Создан ярлык: $shortcutPath"
-Write-Host "Запуск: pythonw.exe -m chess_coach; рабочая папка: $repoRoot"
+Write-Host "Запуск: pythonw.exe -m chess_coach; при наличии сохранённого Lichess-подключения приложение проверит его асинхронно. Рабочая папка: $repoRoot"

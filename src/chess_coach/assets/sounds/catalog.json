@@ -1,0 +1,73 @@
+{
+  "version": 1,
+  "cues": {
+    "game_start": {
+      "label": "Начало партии",
+      "default": "start_board_start",
+      "options": [
+        {
+          "id": "start_board_start",
+          "label": "Начало партии · Board Start",
+          "file": "game-start-cc0-v1.wav",
+          "source": "https://freesound.org/people/el_boss/sounds/546121/",
+          "license": "CC0-1.0"
+        }
+      ]
+    },
+    "move": {
+      "label": "Обычный ход",
+      "default": "move_06_queen_on_wood",
+      "options": [
+        {
+          "id": "move_02_wooden_tap",
+          "label": "02 · Wooden tap",
+          "file": "move-wooden-tap-v1.wav",
+          "source": "https://kenney.nl/assets/impact-sounds",
+          "license": "CC0-1.0"
+        },
+        {
+          "id": "move_05_alabaster_board",
+          "label": "05 · Alabaster board",
+          "file": "move-alabaster-board-v1.wav",
+          "source": "https://freesound.org/people/mh2o/sounds/351518/",
+          "license": "CC0-1.0"
+        },
+        {
+          "id": "move_06_queen_on_wood",
+          "label": "06 · Queen on wood · очищенный",
+          "file": "move-queen-on-wood-v1.wav",
+          "source": "https://freesound.org/people/Alnotreally/sounds/801349/",
+          "license": "CC0-1.0",
+          "processing": "Вырезан исходный участок 0.100–0.430 с; усиление 2.10× до пика 84%; плавные края по 3 мс."
+        },
+        {
+          "id": "move_12_wooden_desk_tap",
+          "label": "12 · Wooden desk tap",
+          "file": "move-wooden-desk-tap-v1.wav",
+          "source": "https://freesound.org/people/AidanSounds/sounds/704935/",
+          "license": "CC0-1.0"
+        },
+        {
+          "id": "move_25_chess_placement",
+          "label": "25 · Wooden chess placement",
+          "file": "move-chess-placement-v1.wav",
+          "source": "https://licensing.routenote.com/sound-effect/board-game-wood-piece-placement",
+          "license": "CC0-1.0"
+        }
+      ]
+    },
+    "capture": {
+      "label": "Взятие",
+      "default": "capture_09_chess_pieces_drop",
+      "options": [
+        {
+          "id": "capture_09_chess_pieces_drop",
+          "label": "09 · Falling chess pieces",
+          "file": "capture-chess-pieces-drop-v1.wav",
+          "source": "https://freesound.org/people/IENBA/sounds/755250/",
+          "license": "CC0-1.0"
+        }
+      ]
+    }
+  }
+}

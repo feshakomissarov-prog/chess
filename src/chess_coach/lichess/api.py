@@ -9,7 +9,7 @@ import uuid
 from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
 from dataclasses import dataclass
-from typing import Iterator, Mapping, Protocol
+from typing import Callable, Iterator, Mapping, Protocol
 from urllib.error import HTTPError, URLError
 from urllib.parse import quote, urlencode
 from urllib.request import Request, urlopen
@@ -64,6 +64,7 @@ class HttpTransport(Protocol):
         body: bytes | None,
         timeout: float,
         stop_event: threading.Event,
+        on_connected: Callable[[], None] | None = None,
     ) -> Iterator[bytes]: ...
 
 
@@ -103,11 +104,14 @@ class UrlLibTransport:
         body: bytes | None,
         timeout: float,
         stop_event: threading.Event,
+        on_connected: Callable[[], None] | None = None,
     ) -> Iterator[bytes]:
         request = Request(url, data=body, headers=dict(headers), method=method)
         response = None
         try:
             response = urlopen(request, timeout=timeout)
+            if on_connected is not None:
+                on_connected()
             while not stop_event.is_set():
                 line = response.readline()
                 if not line:
@@ -315,6 +319,21 @@ class LichessClient:
         except UnicodeDecodeError as exc:
             raise LichessError("Lichess returned a PGN that is not valid UTF-8.") from exc
 
+    def export_game_json(self, token: str, game_id: str) -> dict:
+        """Fetch documented finished-game JSON, including only ready server metadata."""
+        if not game_id or any(char not in "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-" for char in game_id):
+            raise ValueError("Invalid Lichess game ID")
+        response = self._call(
+            "GET", f"/game/export/{quote(game_id, safe='')}", token=token,
+            query={"accuracy": "true", "evals": "true", "pgnInJson": "true",
+                   "opening": "true", "division": "true"},
+            accept="application/json",
+        )
+        payload = response.json()
+        if not isinstance(payload, dict):
+            raise LichessError("Lichess вернул неожиданный JSON партии.")
+        return payload
+
     def stream_user_games(self, token: str, username: str, stop_event: threading.Event,
                           *, since: int | None = None, until_ms: int | None = None,
                           max_games: int = 1000) -> Iterator[dict]:
@@ -495,6 +514,7 @@ class LichessClient:
         stop_event: threading.Event,
         method: str = "GET",
         form: Mapping[str, object] | None = None,
+        on_connected: Callable[[], None] | None = None,
     ) -> Iterator[dict]:
         route = path.split("?", 1)[0]
         diagnostic_mode = "puzzle_activity" if route == "/api/puzzle/activity" else "stream"
@@ -515,7 +535,8 @@ class LichessClient:
         log_event("puzzle_sync_request_started", "lichess_api", mode=diagnostic_mode)
         try:
             response = self.transport.stream(
-                method, url, headers, body, 35.0, stop_event
+                method, url, headers, body, 35.0, stop_event,
+                on_connected=on_connected,
             )
             for raw in response:
                 byte_count += len(raw)
@@ -551,8 +572,10 @@ class LichessClient:
                       bytes=byte_count, records=record_count, error=exc)
             raise
 
-    def stream_events(self, token: str, stop_event: threading.Event) -> Iterator[dict]:
-        yield from self.stream_ndjson("/api/stream/event", token, stop_event)
+    def stream_events(self, token: str, stop_event: threading.Event,
+                      on_connected: Callable[[], None] | None = None) -> Iterator[dict]:
+        yield from self.stream_ndjson("/api/stream/event", token, stop_event,
+                                      on_connected=on_connected)
 
     def stream_game(self, token: str, game_id: str, stop_event: threading.Event) -> Iterator[dict]:
         yield from self.stream_ndjson(f"/api/board/game/stream/{game_id}", token, stop_event)

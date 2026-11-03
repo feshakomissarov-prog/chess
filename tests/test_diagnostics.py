@@ -69,9 +69,11 @@ def test_puzzle_api_diagnostics_never_include_request_url_or_token(tmp_path, mon
     assert diagnostics.configure_logging(tmp_path)
 
     class Transport:
-        def stream(self, method, url, headers, body, timeout, stop_event):
+        def stream(self, method, url, headers, body, timeout, stop_event, on_connected=None):
             assert "secret-token" in headers["Authorization"]
             assert "/api/puzzle/activity" in url
+            if on_connected is not None:
+                on_connected()
             yield b'{"date":1,"puzzle":{"id":"private-puzzle"}}\n'
 
     client = LichessClient(Transport(), base_url="https://lichess.test")
@@ -103,5 +105,5 @@ def test_settings_diagnostic_report_requires_explicit_opt_in(qtbot, tmp_path):
     dialog.share_report.setChecked(True)
     dialog._copy_diagnostic_report()
     report = json.loads(clipboard.text())
-    assert report["schema_version"] == 17
+    assert report["schema_version"] == 19
     assert "recent_batch_counts" in report

@@ -6,6 +6,7 @@ import chess
 import json
 import os
 import time
+import re
 import threading
 import platform
 from datetime import datetime, timedelta, timezone
@@ -15,10 +16,11 @@ import uuid
 import weakref
 import PySide6
 import shiboken6
-from PySide6.QtCore import QProcess, QSettings, Qt, QStandardPaths, QTimer, Signal, qVersion, QUrl
-from PySide6.QtGui import QKeySequence, QShortcut, QColor, QPainter, QPen, QDesktopServices
+from PySide6.QtCore import QEvent, QProcess, QSettings, Qt, QStandardPaths, QTimer, Signal, qVersion, QUrl
+from PySide6.QtGui import QKeySequence, QShortcut, QColor, QPainter, QPen, QDesktopServices, QGuiApplication
 from PySide6.QtWidgets import (
     QCheckBox,
+    QButtonGroup,
     QApplication,
     QComboBox,
     QDialog,
@@ -38,8 +40,10 @@ from PySide6.QtWidgets import (
     QPushButton,
     QProgressDialog,
     QRadioButton,
+    QScrollArea,
     QTabWidget,
     QSpinBox,
+    QSlider,
     QSplitter,
     QStackedWidget,
     QTextEdit,
@@ -50,6 +54,7 @@ from PySide6.QtWidgets import (
 from .board_view import BoardView
 from .controller import GameController
 from .engine_manager import discover_stockfish, install_official_stockfish
+from .uci import popen_uci_hidden
 from .position_analysis import evaluate_position
 from .lichess.auth import CredentialStorageError, WindowsCredentialStore
 from .lichess.analysis import AnalysisOptions, CLASSIFIER_VERSION, CompletedGameAnalyzer
@@ -59,6 +64,20 @@ from .lichess.service import LichessService
 from .lichess.session import LichessGameSession, classify_lichess_opponent
 from .lichess.statistics import StatisticsService
 from .diagnostics import anonymized_report, log_event, logs_directory
+from .ui.theme import TOKENS, stylesheet as desktop_stylesheet
+from .ui.dashboard import dashboard_options, dashboard_snapshot, game_card_text
+from .ui.game_review import GameReviewWorkspace
+from .ui.move_table import MoveTable
+from .ui.sounds import (
+    DEFAULT_SOUND_SELECTIONS,
+    SOUND_CATALOG,
+    ChessSoundPlayer,
+    selected_sound_ids,
+)
+from .ui.workspace_state import reposition_visible_frame
+from .ui.display import (format_clock_control, format_game_date,
+                         format_remaining_clock, opening_tooltip, russian_opening_name,
+                         source_short)
 
 
 def _puzzle_attempt_summary(attempts: list[dict]) -> str:
@@ -88,13 +107,62 @@ def _puzzle_attempt_summary(attempts: list[dict]) -> str:
             "Повторные попытки одной задачи учитываются отдельно.")
 
 
+_PUZZLE_THEME_LABELS = {
+    "mateIn1": "мат в 1", "mateIn2": "мат в 2", "mateIn3": "мат в 3",
+    "fork": "вилка", "pin": "связка", "skewer": "рентген", "hangingPiece": "незащищённая фигура",
+    "discoveredAttack": "вскрытое нападение", "defensiveMove": "защитный ход",
+    "sacrifice": "жертва", "endgame": "эндшпиль", "opening": "дебют",
+    "middlegame": "миттельшпиль", "promotion": "превращение пешки",
+}
+
+
+def _puzzle_themes_label(value: object) -> str:
+    try:
+        themes = json.loads(value or "[]") if isinstance(value, str) else value
+    except (TypeError, json.JSONDecodeError):
+        themes = []
+    if not isinstance(themes, list):
+        return "нет данных"
+    return ", ".join(_PUZZLE_THEME_LABELS.get(str(theme), str(theme)) for theme in themes) or "нет данных"
+
+
 def _game_date_label(game: dict) -> str:
-    started = game.get("started_at")
-    if not started:
-        return "дата неизвестна"
-    if game.get("game_time_precision") == "date_only":
-        return f"{str(started)[:10]} (точность до дня)"
-    return str(started)
+    return format_game_date(game.get("started_at"),
+                            precision=game.get("game_time_precision"))
+
+
+def _clock_filter_sort_key(value: object) -> tuple:
+    """Sort raw controls by base time/increment, retaining raw values for SQL."""
+    raw = str(value or "").strip()
+    match = re.fullmatch(r"(\d+)\s*\+\s*(\d+)", raw)
+    if match:
+        base, increment = map(int, match.groups())
+        return (0, base, increment, raw.casefold())
+    daily = re.fullmatch(r"(?:daily:)?(\d{4,6})", raw.casefold())
+    if daily:
+        return (1, int(daily.group(1)), 0, raw.casefold())
+    return (2, 0, 0, raw.casefold())
+
+
+def _archive_row_presentation(game: dict) -> tuple[str, str]:
+    statuses = {
+        "mate": "Мат", "resign": "Сдался", "draw": "Ничья",
+        "stalemate": "Пат", "timeout": "Время вышло", "outoftime": "Время вышло",
+        "aborted": "Прервана", "noStart": "Не началась", "cheat": "Завершена сервером",
+        "variantEnd": "Завершена", "unknownFinish": "Завершена", "finished": "Завершена",
+    }
+    status = statuses.get(str(game.get("status")), "Завершена")
+    source = str(game.get("source") or "")
+    source_label = ("Локальная" if source == "local" else
+                    "Lichess AI" if game.get("opponent_type") == "official_ai" else "Lichess")
+    date_label = format_game_date(game.get("started_at") or game.get("updated_at"),
+                                  precision=game.get("game_time_precision"))
+    opponent = game.get("account_opponent") or game.get("opponent") or "Соперник неизвестен"
+    text = (f"{date_label} · {opponent} · {status} · {source_label}\n"
+            f"{game.get('white_player') or 'Белые'} — {game.get('black_player') or 'Чёрные'}")
+    if game.get("import_error") or game.get("variant", "standard") != "standard":
+        text += f" · просмотр недоступен ({game.get('variant') or 'вариант'})"
+    return text, source_label
 
 
 def _batch_safety_from_games(games: object) -> bool | None:
@@ -105,9 +173,11 @@ def _batch_safety_from_games(games: object) -> bool | None:
 
 
 class OnlineGameDialog(QDialog):
-    def __init__(self, title: str, include_level: bool = False, parent=None) -> None:
+    def __init__(self, title: str, include_level: bool = False, parent=None,
+                 defaults: dict | None = None) -> None:
         super().__init__(parent)
         self.setWindowTitle(title)
+        self.setMinimumWidth(450 if include_level else 400)
         form = QVBoxLayout(self)
         self.color = QComboBox()
         self.color.addItem("Случайный", "random")
@@ -120,6 +190,15 @@ class OnlineGameDialog(QDialog):
         self.clock.addItem("3 + 2", (180, 2))
         self.clock.addItem("10 + 0", (600, 0))
         self.clock.addItem("15 + 10", (900, 10))
+        defaults = defaults or {}
+        color_index = self.color.findData(defaults.get("color"))
+        if color_index >= 0:
+            self.color.setCurrentIndex(color_index)
+        clock_value = (defaults.get("clock_limit"), int(defaults.get("clock_increment") or 0))
+        clock_index = next((index for index in range(self.clock.count())
+                            if self.clock.itemData(index) == clock_value), -1)
+        if clock_index >= 0:
+            self.clock.setCurrentIndex(clock_index)
         form.addWidget(QLabel("Контроль времени"))
         form.addWidget(self.clock)
         self.rated = QCheckBox("Рейтинговая партия (изменит рейтинг)")
@@ -127,16 +206,68 @@ class OnlineGameDialog(QDialog):
             form.addWidget(self.rated)
         self.level = QComboBox()
         for level in range(1, 9):
-            self.level.addItem(f"Lichess AI · уровень {level}", level)
+            self.level.addItem(f"Уровень {level}", level)
         if include_level:
-            form.addWidget(self.level)
+            form.addWidget(QLabel("Сила Lichess AI"))
+            self.level_buttons = QButtonGroup(self)
+            self.level_buttons.setExclusive(True)
+            levels = QGridLayout()
+            levels.setHorizontalSpacing(8)
+            levels.setVerticalSpacing(6)
+            for level in range(1, 9):
+                button = QRadioButton(str(level))
+                button.setAccessibleName(f"Уровень Lichess AI {level}")
+                button.setStyleSheet("QRadioButton { border: 1px solid #46505c; border-radius: 6px; "
+                                     "padding: 9px 18px; font-size: 14px; font-weight: 700; } "
+                                     "QRadioButton:checked { background: #174e41; border-color: #55b894; }")
+                self.level_buttons.addButton(button, level)
+                levels.addWidget(button, (level - 1) // 4, (level - 1) % 4)
+                button.toggled.connect(lambda checked, value=level:
+                                       self.level.setCurrentIndex(value - 1) if checked else None)
+            self.level_buttons.button(1).setChecked(True)
+            level_index = self.level.findData(defaults.get("level", 1))
+            if level_index >= 0:
+                self.level_buttons.button(int(defaults.get("level", 1))).setChecked(True)
+            form.addLayout(levels)
+            self.level.setVisible(False)
+        else:
+            self.level_buttons = None
         buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
+        buttons.button(QDialogButtonBox.StandardButton.Ok).setText("Начать")
+        buttons.button(QDialogButtonBox.StandardButton.Cancel).setText("Отмена")
         buttons.accepted.connect(self.accept)
         buttons.rejected.connect(self.reject)
         form.addWidget(buttons)
 
     def selection(self):
         return self.color.currentData(), *self.clock.currentData(), self.level.currentData(), self.rated.isChecked()
+
+
+class _DashboardGameCard(QFrame):
+    activated = Signal()
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+
+    def watch_children(self):
+        for child in self.findChildren(QWidget):
+            child.installEventFilter(self)
+
+    def eventFilter(self, watched, event):
+        if event.type() == QEvent.Type.MouseButtonRelease and event.button() == Qt.MouseButton.LeftButton:
+            self.setFocus(Qt.FocusReason.MouseFocusReason)
+            self.activated.emit()
+            return True
+        return super().eventFilter(watched, event)
+
+    def keyPressEvent(self, event):
+        if event.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter, Qt.Key.Key_Space):
+            self.activated.emit()
+            event.accept()
+            return
+        super().keyPressEvent(event)
 
 
 class EvaluationGraph(QWidget):
@@ -305,11 +436,12 @@ class StatisticsGameDialog(QDialog):
         accuracy_text = (f"Официальная Lichess accuracy игрока ({color}): "
                          f"{owner_accuracy if owner_accuracy is not None else 'нет данных'}"
                          if lichess_origin else "Официальная Lichess accuracy: нет данных от Lichess")
-        opening_text = (f"Справочник: {opening['eco']} {opening['name']} · совпадение до ply {opening['matched_ply']}"
+        opening_text = (f"Справочник: {russian_opening_name(opening['eco'], opening['name'])} · "
+                        f"совпадение до ply {opening['matched_ply']}"
                         if opening else "Справочник дебютов: совпадения пока нет")
         if opening and opening.get("lichess_conflict"):
-            opening_text += (f" · конфликт с Lichess: {game.get('opening_eco') or 'ECO —'} "
-                             f"{game.get('opening_name') or ''}")
+            opening_text += (f" · название Lichess отличается: "
+                             f"{russian_opening_name(game.get('opening_eco'), game.get('opening_name'))}")
         phase_text = (f"Фазы: {phases['source']} / {phases['method_version']} · "
                       f"middlegame={phases['middle_start_ply']}, endgame={phases['end_start_ply']}"
                       if phases else "Границы фаз неизвестны")
@@ -317,9 +449,14 @@ class StatisticsGameDialog(QDialog):
             f"{_game_date_label(game)} · "
             f"{game.get('white_player') or 'Белые'} — {game.get('black_player') or 'Чёрные'}\n"
             f"Ваш цвет: {color}; соперник: {opponent}; результат: {result}\n"
-            f"Источник оценки: {source}; дебют: {game.get('opening_eco') or ''} "
-            f"{game.get('opening_name') or 'не указан'}\n{opening_text}\n{accuracy_text}\n{phase_text}")
+            f"Источник оценки: {source}; дебют: "
+            f"{russian_opening_name(game.get('opening_eco'), game.get('opening_name'))}\n"
+            f"{opening_text}\n{accuracy_text}\n{phase_text}")
         header.setWordWrap(True)
+        source_opening = opening_tooltip(opening.get("name") if opening else game.get("opening_name"))
+        if opening and opening.get("lichess_conflict"):
+            source_opening += "\nНазвание Lichess: " + str(game.get("opening_name") or "не указано")
+        header.setToolTip(source_opening)
         layout.addWidget(header)
         details = QGridLayout()
         self.moves = QListWidget()
@@ -349,7 +486,7 @@ class StatisticsGameDialog(QDialog):
             review_coverage = analysis.get("review_coverage") or {}
             review_text = (f"Selective review: {review_coverage.get('reviewed_moves', 0)} "
                            f"оценённых критических ходов из {review_coverage.get('selected_moves', 0)} "
-                           f"выбранных (не заменяет полный fast охват)" if review_coverage else
+                           f"выбранных (не заменяет основной охват)" if review_coverage else
                            "Selective review: ещё не запускался")
             self.graph = EvaluationGraph(analysis["assessments"], self, phases)
             self.graph.selected_ply.connect(self._request_position)
@@ -469,13 +606,16 @@ class StatisticsDialog(QDialog):
     opening_loaded = Signal(object)
     opening_finished = Signal(object)
     position_requested = Signal(str, int)
+    game_requested = Signal(str)
+    batch_requested = Signal()
 
-    def __init__(self, repository: GameRepository, parent=None) -> None:
+    def __init__(self, repository: GameRepository, parent=None,
+                 saved_filters: dict | None = None) -> None:
         super().__init__(parent)
         self.repository = repository
         self.service = StatisticsService(repository)
         self.setWindowTitle("Статистика и анализ")
-        self.setMinimumSize(760, 560)
+        self.setMinimumSize(480, 360)
         self.resize(1040, 820)
         self._generation = 0
         self._query_thread: threading.Thread | None = None
@@ -494,13 +634,21 @@ class StatisticsDialog(QDialog):
         openings_layout = QVBoxLayout(openings_page)
         critical_page = QWidget(self)
         critical_layout = QVBoxLayout(critical_page)
-        self.tabs.addTab(overview_page, "Обзор")
-        self.tabs.addTab(games_page, "Партии")
-        self.tabs.addTab(openings_page, "Дебюты/фазы")
-        self.tabs.addTab(critical_page, "Критические моменты")
+        self.tabs.addTab(self._scroll_tab(overview_page), "Обзор")
+        self.tabs.addTab(self._scroll_tab(games_page), "Партии")
+        self.tabs.addTab(self._scroll_tab(openings_page), "Дебюты/фазы")
+        self.tabs.addTab(self._scroll_tab(critical_page), "Критические моменты")
         close_button = QPushButton("Закрыть")
         close_button.clicked.connect(self.accept)
-        root.addWidget(close_button, 0, Qt.AlignmentFlag.AlignRight)
+        footer = QHBoxLayout()
+        self.batch_button = QPushButton("Массовый анализ Stockfish…")
+        self.batch_button.setToolTip(
+            "Явно запускает анализ выбранных завершённых партий после проверки безопасности.")
+        self.batch_button.clicked.connect(self.batch_requested.emit)
+        footer.addWidget(self.batch_button)
+        footer.addStretch(1)
+        footer.addWidget(close_button)
+        root.addLayout(footer)
         filters = QGridLayout()
         self.account = QComboBox()
         self.account.addItem("Все локальные партии (смешанный срез)", None)
@@ -515,8 +663,13 @@ class StatisticsDialog(QDialog):
         self.period.setCurrentIndex(self.period.findData(90))
         self.clock = QComboBox()
         self.clock.addItem("Любой контроль", "")
-        for value in options["clocks"]:
-            self.clock.addItem(value, value)
+        seen_clock_labels: set[str] = set()
+        for value in sorted(set(options["clocks"]), key=_clock_filter_sort_key):
+            label = format_clock_control(value)
+            if label in seen_clock_labels:
+                label = f"{label} ({value})"
+            seen_clock_labels.add(label)
+            self.clock.addItem(label, value)
         self.clock.setEditable(True)
         self.clock.lineEdit().setPlaceholderText("Любой контроль")
         self.side = QComboBox()
@@ -539,7 +692,7 @@ class StatisticsDialog(QDialog):
         self.analysis_source = QComboBox()
         self._fill_combo(self.analysis_source, (("Любой источник оценки", ""),
                                                  ("Stockfish", "stockfish"),
-                                                 ("Lichess PGN", "lichess-pgn")))
+                                                 ("Lichess", "lichess-pgn")))
         fields = (("Аккаунт", self.account), ("Период", self.period),
                   ("Контроль", self.clock), ("Цвет", self.side),
                   ("Результат", self.result_filter), ("Источник партии", self.game_source),
@@ -570,8 +723,9 @@ class StatisticsDialog(QDialog):
         advanced.toggled.connect(advanced_content.setVisible)
         self.advanced_filters_group = advanced
         self.advanced_filters_content = advanced_content
-        overview_layout.addLayout(basic_filters)
-        overview_layout.addWidget(advanced)
+        self.restore_filter_state(saved_filters or {})
+        root.insertLayout(0, basic_filters)
+        root.insertWidget(1, advanced)
         all_time = QPushButton("Всё время")
         all_time.clicked.connect(lambda: self.period.setCurrentIndex(self.period.findData(0)))
         overview_layout.addWidget(all_time)
@@ -579,11 +733,16 @@ class StatisticsDialog(QDialog):
             "Все локальные данные: цвета/стороны из разных аккаунтов могут смешиваться.")
         self.mixed_warning.setWordWrap(True)
         overview_layout.addWidget(self.mixed_warning)
+        overview_note = QLabel("Что показывает: результаты и личный профиль. Источник — локальная SQLite; официальная точность берётся только из данных Lichess.")
+        self.overview_description = overview_note
+        overview_note.setWordWrap(True)
+        overview_note.setObjectName("secondary")
+        overview_layout.addWidget(overview_note)
         self.summary_label = QLabel("Загружаем статистику…")
         self.summary_label.setWordWrap(True)
         overview_layout.addWidget(self.summary_label)
         opening_actions = QHBoxLayout()
-        self.opening_refresh_button = QPushButton("Сопоставить дебюты и фазы для 25 партий")
+        self.opening_refresh_button = QPushButton("Обновить локальную классификацию 25 партий")
         self.opening_refresh_button.setToolTip(
             "Явный локальный пакет: только 25 новых партий, без сети и движка.")
         self.opening_refresh_button.clicked.connect(self._start_opening_refresh)
@@ -592,6 +751,11 @@ class StatisticsDialog(QDialog):
         self.opening_summary.setWordWrap(True)
         opening_actions.addWidget(self.opening_summary, 1)
         openings_layout.addLayout(opening_actions)
+        openings_note = QLabel("Дебюты и фазы строятся из сохранённых партий и локальной классификации; без данных показатели остаются пустыми.")
+        self.openings_description = openings_note
+        openings_note.setWordWrap(True)
+        openings_note.setObjectName("secondary")
+        openings_layout.addWidget(openings_note)
         self.opening_table = QListWidget()
         self.opening_table.itemDoubleClicked.connect(self._drill_down_opening)
         openings_layout.addWidget(self.opening_table, 1)
@@ -599,10 +763,27 @@ class StatisticsDialog(QDialog):
                                        " Критические позиции появятся после локального анализа.")
         self.critical_summary.setWordWrap(True)
         critical_layout.addWidget(self.critical_summary)
+        self.critical_select_account = QPushButton("Выбрать аккаунт")
+        self.critical_select_account.setEnabled(len(options["accounts"]) > 0)
+        self.critical_select_account.clicked.connect(self._select_personal_analytics_account)
+        critical_layout.addWidget(self.critical_select_account, 0, Qt.AlignmentFlag.AlignLeft)
+        self.critical_description = QLabel("Показываются только подтверждённые события и позиции из выбранной выборки.")
+        self.critical_description.setObjectName("secondary")
+        self.critical_description.setWordWrap(True)
+        critical_layout.addWidget(self.critical_description)
         self.trend = RatingTrendGraph([])
         self.trend.game_selected.connect(self._select_game_id)
         overview_layout.addWidget(self.trend)
         self.games = QListWidget()
+        self.games_description = QLabel("Партии соответствуют активным фильтрам. Двойной щелчок открывает карточку и переход к позиции.")
+        self.games_description.setObjectName("secondary")
+        self.games_description.setWordWrap(True)
+        games_layout.addWidget(self.games_description)
+        self.games_empty = QLabel("В этой выборке партий нет. Измените фильтры или выберите другой аккаунт.")
+        self.games_empty.setObjectName("secondary")
+        self.games_empty.setWordWrap(True)
+        self.games_empty.setVisible(False)
+        games_layout.addWidget(self.games_empty)
         games_layout.addWidget(self.games, 1)
         self.page_label = QLabel()
         self.details_button = QPushButton("Открыть карточку партии")
@@ -641,9 +822,58 @@ class StatisticsDialog(QDialog):
         self._schedule_refresh()
 
     @staticmethod
+    def _scroll_tab(page: QWidget) -> QScrollArea:
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+        scroll.setWidget(page)
+        return scroll
+
+    def restore_filter_state(self, state: dict) -> None:
+        """Restore only small filter values; never restore query/result payloads."""
+        combos = {
+            "account_id": self.account, "period_days": self.period, "side": self.side,
+            "result": self.result_filter, "game_source": self.game_source,
+            "analyzed": self.analyzed, "analysis_source": self.analysis_source,
+        }
+        for key, combo in combos.items():
+            if key not in state:
+                continue
+            index = combo.findData(state[key])
+            if index >= 0:
+                combo.setCurrentIndex(index)
+        if state.get("clock"):
+            index = self.clock.findData(str(state["clock"]))
+            if index >= 0:
+                self.clock.setCurrentIndex(index)
+            else:
+                self.clock.setCurrentText(format_clock_control(state["clock"]))
+        self.opponent.setText(str(state.get("opponent") or ""))
+        self.opening.setText(str(state.get("opening") or ""))
+        self.advanced_filters_group.setChecked(bool(state.get("advanced", False)))
+        self.tabs.setCurrentIndex(max(0, min(self.tabs.count() - 1,
+                                            int(state.get("tab", 0) or 0))))
+
+    def persisted_filter_state(self) -> dict:
+        return {
+            "account_id": self.account.currentData(), "period_days": self.period.currentData(),
+            "clock": self._clock_filter_value() or "", "side": self.side.currentData(),
+            "result": self.result_filter.currentData(), "game_source": self.game_source.currentData(),
+            "opponent": self.opponent.text().strip(), "opening": self.opening.text().strip(),
+            "analyzed": self.analyzed.currentData(), "analysis_source": self.analysis_source.currentData(),
+            "advanced": self.advanced_filters_group.isChecked(), "tab": self.tabs.currentIndex(),
+        }
+
+    @staticmethod
     def _fill_combo(combo: QComboBox, items: tuple[tuple[str, str], ...]) -> None:
         for label, value in items:
             combo.addItem(label, value)
+
+    def _select_personal_analytics_account(self) -> None:
+        if self.account.count() > 1 and self.account.currentData() is None:
+            self.account.setCurrentIndex(1)
+        self.tabs.setCurrentIndex(0)
+        self.account.setFocus()
 
     def _filters(self) -> dict:
         days = int(self.period.currentData() or 0)
@@ -653,8 +883,7 @@ class StatisticsDialog(QDialog):
             "since": (now - timedelta(days=days)).isoformat() if days else None,
             "until": (now + timedelta(milliseconds=1)).isoformat() if days else None,
             "opponent": self.opponent.text().strip() or None,
-            "clock": (None if self.clock.currentData() == "" else
-                      self.clock.currentText().strip() or None),
+            "clock": self._clock_filter_value(),
             "game_source": self.game_source.currentData() or None,
             "analysis_source": self.analysis_source.currentData() or None,
             "side": self.side.currentData() or None,
@@ -662,6 +891,15 @@ class StatisticsDialog(QDialog):
             "result": self.result_filter.currentData() or None,
             "analyzed": self.analyzed.currentData() or None,
         }
+
+    def _clock_filter_value(self) -> str | None:
+        if self.clock.currentIndex() >= 0:
+            current = self.clock.currentText().strip()
+            item_text = self.clock.itemText(self.clock.currentIndex())
+            if current == item_text:
+                return self.clock.currentData() or None
+        raw = self.clock.currentText().strip()
+        return raw or None
 
     def _schedule_refresh(self, *_args) -> None:
         if self._close_when_idle:
@@ -774,6 +1012,7 @@ class StatisticsDialog(QDialog):
         elif generation == self._generation and isinstance(summary, dict) and isinstance(parties, dict):
             self._rows = parties["items"]
             self.games.clear()
+            self.games_empty.setVisible(not self._rows)
             for game in self._rows:
                 me_color = game.get("account_color") or game.get("color")
                 outcome = _result_label(chess.WHITE if me_color == "white" else chess.BLACK,
@@ -781,37 +1020,42 @@ class StatisticsDialog(QDialog):
                 player = game.get("account_player_name") or "Вы"
                 opponent = game.get("account_opponent") or game.get("opponent") or "соперник"
                 eco = game.get("matched_opening_eco") or game.get("opening_eco") or "ECO —"
-                opening_name = game.get("matched_opening_name") or game.get("opening_name") or "дебют неизвестен"
+                opening_original = game.get("matched_opening_name") or game.get("opening_name")
+                opening_name = russian_opening_name(eco, opening_original)
                 assessed = game.get("own_assessed_moves")
                 total_own = game.get("total_own_moves")
                 scored = game.get("scored_positions")
                 total_positions = game.get("total_positions")
-                coverage = (f"{scored if scored is not None else '—'}/"
-                            f"{total_positions if total_positions is not None else '—'} поз. "
-                            f"· сравнимые свои ходы {assessed if assessed is not None else '—'}/"
-                            f"{total_own if total_own is not None else '—'} "
-                            f"({game.get('analysis_status')})"
-                            if game.get("analysis_status") else "анализ не запускался")
+                coverage = (f"Оценено позиций: {scored if scored is not None else '—'}/"
+                            f"{total_positions if total_positions is not None else '—'} · "
+                            f"моих ходов: {assessed if assessed is not None else '—'}/"
+                            f"{total_own if total_own is not None else '—'}"
+                            if game.get("analysis_status") else "Оценки пока нет")
                 if assessed is None:
-                    error_counts = "свои н/о/з — (охват неизвестен)"
+                    error_counts = "Ошибки по моим ходам: нет данных"
                 elif assessed == 0:
-                    error_counts = (f"свои н/о/з н/д (0/{total_own if total_own is not None else '—'} "
-                                    "сравнимых ходов)")
+                    error_counts = (f"Нет оценённых моих ходов (0/{total_own if total_own is not None else '—'}).")
                 else:
                     counts = (game.get("own_inaccuracies"), game.get("own_mistakes"),
                               game.get("own_blunders"))
-                    error_counts = ("свои н/о/з " + "/".join(
-                        str(value) if value is not None else "—" for value in counts)
-                        + f" (N={assessed})")
+                    error_counts = (f"Неточности {counts[0] if counts[0] is not None else '—'} · "
+                                    f"ошибки {counts[1] if counts[1] is not None else '—'} · "
+                                    f"зевки {counts[2] if counts[2] is not None else '—'} · "
+                                    f"оценено ходов {assessed}")
                 accuracy = game.get("owner_lichess_accuracy")
-                accuracy_label = (f"Lichess accuracy {accuracy:.1f}%" if accuracy is not None else
-                                  "Lichess accuracy: данных нет")
+                accuracy_label = (f"Точность Lichess {accuracy:.1f}%" if accuracy is not None else
+                                  "Точность Lichess —")
                 conflict = " · конфликт названия" if game.get("opening_conflict") else ""
+                short_source, source_detail = source_short(game.get("selected_analysis_source"))
                 item = QListWidgetItem(
                     f"{_game_date_label(game)} · {outcome} · "
-                    f"{player} vs {opponent} · {eco} {opening_name}{conflict}\n"
-                    f"{accuracy_label} · {error_counts} · {coverage} · "
-                    f"{game.get('selected_analysis_source') or 'источник оценки отсутствует'}")
+                    f"{player} — {opponent} · {opening_name}{conflict}\n"
+                    f"{format_clock_control(game.get('clock'))} · {accuracy_label} · "
+                    f"{error_counts} · {coverage} · источник {short_source}")
+                item.setToolTip(f"Дебют в источнике: {opening_original or 'не указан'}\n{source_detail}")
+                item.setData(Qt.ItemDataRole.AccessibleDescriptionRole,
+                             f"Партия. {outcome}. {player} против {opponent}. {opening_name}. "
+                             f"Источник оценки: {source_detail}.")
                 item.setData(Qt.ItemDataRole.UserRole, game["game_id"])
                 self.games.addItem(item)
             total = summary["games"]
@@ -825,24 +1069,25 @@ class StatisticsDialog(QDialog):
                                     for phase in errors.values()
                                     for side_counts in phase.values())
                           for kind in ("inaccuracy", "mistake", "blunder")}
+            classified_text = (
+                f"Мои неточности / ошибки / зевки: {classified['inaccuracy']} / "
+                f"{classified['mistake']} / {classified['blunder']}"
+                if int(summary.get("own_assessed_moves") or 0) > 0 else
+                "Классификация собственных ходов: нет данных")
             accuracy = summary["lichess_accuracy"]
             scope = ("Смешанные локальные аккаунты; результаты по цвету в профиле партии."
                      if not self.account.currentData() else
                      f"Аккаунт: {self.account.currentText()}")
             self.mixed_warning.setText(scope)
             self.summary_label.setText(
-                f"Партии: {total} · победы/ничьи/поражения: {summary['wins']}/"
-                f"{summary['draws']}/{summary['losses']} · неизвестно/прерваны: {summary['unknown_or_aborted']}\n"
-                f"С локальной оценкой: {summary['analysis_games']}/{total} · покрытие ходов: {coverage_text}\n"
-                f"Классификации обоих цветов по версии {CLASSIFIER_VERSION} "
-                f"(локальные оценённые ходы; не персональный диагноз): "
-                f"{classified['mistake']} / {classified['inaccuracy']} / {classified['blunder']} · "
-                f"личные ошибки на 100 сравнимых своих ходов: "
+                f"Партии: {total} · победы {summary['wins']} · ничьи {summary['draws']} · "
+                f"поражения {summary['losses']}\n"
+                f"Анализ есть у {summary['analysis_games']}/{total} партий · {coverage_text}\n"
+                f"{classified_text} · ошибки на 100 оценённых моих ходов: "
                 f"{summary['own_error_rate_per_100'] if summary['own_error_rate_per_100'] is not None else 'нет данных'}\n"
-                f"Средняя потеря CP: {summary['avg_cpl_cp'] if summary['avg_cpl_cp'] is not None else 'нет данных'} · "
-                f"колебания ≥200 CP: {summary['swings_200cp']} · "
-                f"Lichess accuracy (официально): белые {accuracy['white'] if accuracy['white'] is not None else 'нет данных'}, "
-                f"чёрные {accuracy['black'] if accuracy['black'] is not None else 'нет данных'}")
+                f"Официальная точность Lichess: белые {accuracy['white'] if accuracy['white'] is not None else 'нет данных'}, "
+                f"чёрные {accuracy['black'] if accuracy['black'] is not None else 'нет данных'}. "
+                "Н/д означает отсутствие подходящего источника или знаменателя, а не нулевой результат.")
             profile = summary.get("personal_profile")
             if isinstance(profile, dict):
                 sections = []
@@ -957,9 +1202,7 @@ class StatisticsDialog(QDialog):
         index = self.games.currentRow()
         if not 0 <= index < len(self._rows):
             return
-        detail = StatisticsGameDialog(self.repository, self._rows[index], self)
-        detail.position_requested.connect(self.position_requested.emit)
-        detail.exec()
+        self.game_requested.emit(str(self._rows[index]["game_id"]))
 
     def reset_filters(self) -> None:
         for combo in (self.account, self.clock, self.side, self.result_filter,
@@ -989,12 +1232,31 @@ class StatisticsDialog(QDialog):
 
 class SettingsDialog(QDialog):
     install_requested = Signal()
+    sound_preview_requested = Signal(str)
+    connection_settings_requested = Signal()
+    engine_probe_result = Signal(int, bool, str)
 
     def __init__(self, settings: QSettings, parent=None, repository: GameRepository | None = None) -> None:
         super().__init__(parent)
         self.setWindowTitle("Настройки")
         self.setModal(True)
-        layout = QVBoxLayout(self)
+        root_layout = QVBoxLayout(self)
+        self.settings_tabs = QTabWidget(self)
+        root_layout.addWidget(self.settings_tabs, 1)
+
+        def add_settings_tab(title: str) -> QVBoxLayout:
+            page = QWidget()
+            page_layout = QVBoxLayout(page)
+            page_layout.setContentsMargins(12, 12, 12, 12)
+            page_layout.setSpacing(8)
+            scroll = QScrollArea()
+            scroll.setWidgetResizable(True)
+            scroll.setFrameShape(QFrame.Shape.NoFrame)
+            scroll.setWidget(page)
+            self.settings_tabs.addTab(scroll, title)
+            return page_layout
+
+        layout = add_settings_tab("Общие / доска")
         self.color = QComboBox()
         self.color.addItem("Белыми", chess.WHITE)
         self.color.addItem("Чёрными", chess.BLACK)
@@ -1017,6 +1279,72 @@ class SettingsDialog(QDialog):
         self.allow_premoves = QCheckBox("Разрешить предходы")
         self.allow_premoves.setChecked(settings.value("allow_premoves", True, type=bool))
         layout.addWidget(self.allow_premoves)
+
+        layout = add_settings_tab("Звуки")
+        sounds_header = QLabel("Звуки приложения")
+        sounds_header.setStyleSheet("font-size: 15px; font-weight: 700;")
+        layout.addWidget(sounds_header)
+        self.sound_moves = QCheckBox("Звуки ходов")
+        self.sound_moves.setChecked(settings.value("sound_moves_enabled", True, type=bool))
+        layout.addWidget(self.sound_moves)
+        self.sound_notifications = QCheckBox("Звуки уведомлений")
+        self.sound_notifications.setChecked(settings.value("sound_notifications_enabled", True, type=bool))
+        layout.addWidget(self.sound_notifications)
+        self.sound_history = QCheckBox("Звуки при просмотре истории")
+        self.sound_history.setChecked(settings.value("sound_history_enabled", False, type=bool))
+        layout.addWidget(self.sound_history)
+        self.sound_selectors: dict[str, QComboBox] = {}
+        stored_sound_choices = {
+            cue: settings.value(f"sound_selection_{cue}", default_id, type=str)
+            for cue, default_id in DEFAULT_SOUND_SELECTIONS.items()
+        }
+        sound_choices = selected_sound_ids(stored_sound_choices)
+        for cue, definition in SOUND_CATALOG["cues"].items():
+            row = QHBoxLayout()
+            row.addWidget(QLabel(definition["label"]))
+            selector = QComboBox()
+            selector.setObjectName(f"sound_selection_{cue}")
+            selector.setAccessibleName(f"Звук: {definition['label']}")
+            for option in definition["options"]:
+                selector.addItem(option["label"], option["id"])
+            selector.setCurrentIndex(max(0, selector.findData(sound_choices[cue])))
+            selector.setToolTip("Выберите запись из встроенной библиотеки звуков.")
+            row.addWidget(selector, 1)
+            layout.addLayout(row)
+            self.sound_selectors[cue] = selector
+        self.sound_volume = QSlider(Qt.Orientation.Horizontal)
+        self.sound_volume.setRange(0, 100)
+        self.sound_volume.setValue(settings.value("sound_volume", 45, type=int))
+        self.sound_volume.setAccessibleName("Громкость звуков")
+        self.sound_volume_label = QLabel(f"Громкость · {self.sound_volume.value()}%")
+        self.sound_volume.valueChanged.connect(
+            lambda value: self.sound_volume_label.setText(f"Громкость · {value}%"))
+        layout.addWidget(self.sound_volume_label)
+        layout.addWidget(self.sound_volume)
+        self.sound_start_preview = QPushButton("Прослушать начало партии")
+        self.sound_start_preview.setToolTip("Прослушать отдельный сигнал начала новой партии.")
+        self.sound_start_preview.clicked.connect(
+            lambda: self.sound_preview_requested.emit("game_start"))
+        layout.addWidget(self.sound_start_preview)
+        self.sound_preview = QPushButton("Послушать ход")
+        self.sound_preview.setToolTip("Прослушать натуральную запись обычного хода.")
+        self.sound_preview.clicked.connect(lambda: self.sound_preview_requested.emit("move"))
+        layout.addWidget(self.sound_preview)
+        self.sound_capture_preview = QPushButton("Послушать взятие")
+        self.sound_capture_preview.setToolTip("Прослушать отдельную запись взятия фигуры.")
+        self.sound_capture_preview.clicked.connect(
+            lambda: self.sound_preview_requested.emit("capture"))
+        layout.addWidget(self.sound_capture_preview)
+        self.sound_availability_note = QLabel(
+            "Выбор звуков хранится локально и применяется после сохранения настроек. "
+            "Библиотека встроена в приложение; если звук не слышен, проверьте вывод Windows.")
+        self.sound_availability_note.setWordWrap(True)
+        layout.addWidget(self.sound_availability_note)
+        self.sound_classic_preset = QPushButton("Пресет «Классический» · 45%")
+        self.sound_classic_preset.clicked.connect(self._set_classic_sound_preset)
+        layout.addWidget(self.sound_classic_preset)
+
+        layout = add_settings_tab("Stockfish и анализ")
         layout.addWidget(QLabel("Stockfish для завершённых партий и свободной доски"))
         engine_row = QHBoxLayout()
         configured_path = settings.value("stockfish_path", "", type=str)
@@ -1068,10 +1396,29 @@ class SettingsDialog(QDialog):
         layout.addWidget(self.analysis_limit)
         self.analysis_limit_value = QSpinBox()
         self.analysis_limit_value.setRange(1, 1_000_000)
+        self.analysis_limit_value.setGroupSeparatorShown(True)
+        self.analysis_limit_value.setMinimumWidth(150)
         self.analysis_limit_value.setValue(settings.value("analysis_limit_value", 100_000, type=int))
         layout.addWidget(self.analysis_limit_value)
         self.analysis_limit.currentIndexChanged.connect(self._update_limit_range)
         self._update_limit_range()
+        self.batch_analysis_nodes = QSpinBox()
+        self.batch_analysis_nodes.setRange(1_000, 10_000_000)
+        self.batch_analysis_nodes.setSingleStep(10_000)
+        self.batch_analysis_nodes.setGroupSeparatorShown(True)
+        self.batch_analysis_nodes.setMinimumWidth(170)
+        self.batch_analysis_nodes.setSuffix(" узлов на позицию")
+        self.batch_analysis_nodes.setValue(settings.value("batch_analysis_nodes", 20_000, type=int))
+        layout.addWidget(QLabel("Бюджет нового массового анализа"))
+        layout.addWidget(self.batch_analysis_nodes)
+        self.batch_analysis_cost = QLabel()
+        self.batch_analysis_cost.setWordWrap(True)
+        self.batch_analysis_nodes.valueChanged.connect(
+            lambda _value: self.batch_analysis_cost.setText(
+                f"Оценка вычислительной работы для примера 20 партий × 120 позиций: "
+                f"{self.batch_analysis_nodes.value():,} × 120 × 20 узлов. Это не прогноз времени.".replace(",", " ")))
+        self.batch_analysis_nodes.valueChanged.emit(self.batch_analysis_nodes.value())
+        layout.addWidget(self.batch_analysis_cost)
         self.engine_threads = QSpinBox()
         self.engine_threads.setRange(1, 8)
         self.engine_threads.setValue(settings.value("stockfish_threads", 1, type=int))
@@ -1083,6 +1430,37 @@ class SettingsDialog(QDialog):
         self.engine_hash.setValue(settings.value("stockfish_hash_mb", 128, type=int))
         layout.addWidget(QLabel("Память Hash (16–512 МБ)"))
         layout.addWidget(self.engine_hash)
+
+        layout = add_settings_tab("Lichess / подключение")
+        self.auto_lichess_analytics = QCheckBox(
+            "Автоматически дозагружать готовую аналитику завершённых партий")
+        self.auto_lichess_analytics.setChecked(
+            settings.value("lichess/auto_ready_analytics", True, type=bool))
+        self.auto_lichess_analytics.setToolTip(
+            "Только готовые данные из документированного JSON export Lichess; серверный анализ не заказывается.")
+        layout.addWidget(self.auto_lichess_analytics)
+        self.pause_lichess_analytics = QCheckBox("Приостановить фоновую проверку партий")
+        self.pause_lichess_analytics.setChecked(
+            settings.value("lichess/ready_analytics_paused", False, type=bool))
+        layout.addWidget(self.pause_lichess_analytics)
+        self.lichess_analytics_daily_limit = QSpinBox()
+        self.lichess_analytics_daily_limit.setRange(1, 100)
+        self.lichess_analytics_daily_limit.setSuffix(" запросов в день")
+        self.lichess_analytics_daily_limit.setValue(
+            settings.value("lichess/ready_analytics_daily_limit", 25, type=int))
+        self.lichess_analytics_daily_limit.setToolTip(
+            "Ограничивает отдельные запросы завершённых партий; обычный предел — 25 в день.")
+        layout.addWidget(self.lichess_analytics_daily_limit)
+        connection_note = QLabel(
+            "Автоматическая проверка запускается только после обычного успешного подключения и рабочего потока событий. "
+            "Режимы --offline и --manual-connect без явной авторизации не читают учётные данные и не запрашивают сеть.")
+        connection_note.setWordWrap(True)
+        layout.addWidget(connection_note)
+        self.connection_settings_button = QPushButton("Настроить способ подключения Lichess…")
+        self.connection_settings_button.clicked.connect(self.connection_settings_requested.emit)
+        layout.addWidget(self.connection_settings_button)
+
+        layout = add_settings_tab("Диагностика")
         diagnostics_box = QGroupBox("Диагностика")
         diagnostics_layout = QVBoxLayout(diagnostics_box)
         self.open_logs_button = QPushButton("Открыть папку логов")
@@ -1096,22 +1474,30 @@ class SettingsDialog(QDialog):
         diagnostics_layout.addWidget(self.share_report)
         layout.addWidget(diagnostics_box)
         self._diagnostics_repository = repository
+        # Kept as a compatibility/status field; engine probing now uses the
+        # shared hidden UCI launcher rather than QProcess.
         self._engine_process: QProcess | None = None
-        self._engine_probe_timer: QTimer | None = None
-        self._engine_probe_shutdown_timer: QTimer | None = None
-        self._engine_probe_buffer = bytearray()
-        self._engine_probe_stage = "uci"
-        self._engine_probe_name = "UCI engine"
-        self._engine_probe_finishing = False
-        self._engine_probe_finish_message: str | None = None
-        self._engine_probe_owner = None
+        self._engine_probe_thread: threading.Thread | None = None
+        self._engine_probe_generation = 0
+        self._engine_probe_cancel = threading.Event()
+        self._engine_probe_lock = threading.Lock()
+        self._engine_probe_engine = None
+        self.engine_probe_result.connect(self._engine_probe_finished)
         self.finished.connect(lambda _result: self._stop_engine_probe())
         buttons = QDialogButtonBox(
             QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
         )
         buttons.accepted.connect(self.accept)
         buttons.rejected.connect(self.reject)
-        layout.addWidget(buttons)
+        root_layout.addWidget(buttons)
+        screen = QGuiApplication.primaryScreen()
+        if screen is not None:
+            available = screen.availableGeometry()
+            maximum_width, maximum_height = max(640, available.width()), max(480, available.height())
+            self.setMaximumSize(maximum_width, maximum_height)
+            self.resize(min(900, maximum_width), min(650, maximum_height))
+        else:
+            self.resize(840, 600)
 
     def _copy_diagnostic_report(self) -> None:
         if not self.share_report.isChecked():
@@ -1127,6 +1513,14 @@ class SettingsDialog(QDialog):
         self.engine_test_status.setText("Обезличенный диагностический отчёт скопирован.")
 
 
+    def _set_classic_sound_preset(self) -> None:
+        self.sound_moves.setChecked(True)
+        self.sound_volume.setValue(45)
+
+    def sound_selection(self, cue: str) -> str:
+        selector = self.sound_selectors.get(cue)
+        return str(selector.currentData()) if selector is not None else DEFAULT_SOUND_SELECTIONS[cue]
+
     def save(self, settings: QSettings) -> None:
         settings.setValue("player_color", self.color.currentData())
         settings.setValue("board_flipped", self.flipped.isChecked())
@@ -1134,13 +1528,23 @@ class SettingsDialog(QDialog):
         settings.setValue("show_last_move", self.last.isChecked())
         settings.setValue("annotations_enabled", self.annotations.isChecked())
         settings.setValue("allow_premoves", self.allow_premoves.isChecked())
+        settings.setValue("sound_moves_enabled", self.sound_moves.isChecked())
+        settings.setValue("sound_notifications_enabled", self.sound_notifications.isChecked())
+        settings.setValue("sound_history_enabled", self.sound_history.isChecked())
+        settings.setValue("sound_volume", self.sound_volume.value())
+        for cue in DEFAULT_SOUND_SELECTIONS:
+            settings.setValue(f"sound_selection_{cue}", self.sound_selection(cue))
         settings.setValue("stockfish_path", self.engine_path.text().strip())
         settings.setValue("stockfish_verified_path", self._engine_verified_path)
         settings.setValue("analysis_preset", self.analysis_preset.currentData())
         settings.setValue("analysis_limit_kind", self.analysis_limit.currentData())
         settings.setValue("analysis_limit_value", self.analysis_limit_value.value())
+        settings.setValue("batch_analysis_nodes", self.batch_analysis_nodes.value())
         settings.setValue("stockfish_threads", self.engine_threads.value())
         settings.setValue("stockfish_hash_mb", self.engine_hash.value())
+        settings.setValue("lichess/auto_ready_analytics", self.auto_lichess_analytics.isChecked())
+        settings.setValue("lichess/ready_analytics_paused", self.pause_lichess_analytics.isChecked())
+        settings.setValue("lichess/ready_analytics_daily_limit", self.lichess_analytics_daily_limit.value())
         settings.sync()
 
     def _browse_engine(self) -> None:
@@ -1161,6 +1565,7 @@ class SettingsDialog(QDialog):
                 "В известных пользовательских путях и PATH Stockfish не найден.")
 
     def _engine_path_changed(self, value: str) -> None:
+        self._engine_probe_generation += 1
         if value.strip() != self._engine_verified_path:
             self._engine_verified_path = ""
 
@@ -1194,165 +1599,76 @@ class SettingsDialog(QDialog):
         if not path:
             self.engine_test_status.setText("Сначала выберите локальный executable.")
             return
-        if self._engine_process is not None:
+        if self._engine_probe_thread is not None and self._engine_probe_thread.is_alive():
             return
-        process_parent = self.parent() or QApplication.instance()
-        self._engine_probe_owner = process_parent
-        process = QProcess(process_parent)
-        self._engine_process = process
-        self._engine_probe_finishing = False
-        self._engine_probe_finish_message = None
-        self._engine_probe_buffer.clear()
-        self._engine_probe_stage = "uci"
-        self._engine_probe_name = "UCI engine"
+        self._engine_probe_cancel = threading.Event()
+        self._engine_probe_generation += 1
+        generation = self._engine_probe_generation
         self.engine_test.setEnabled(False)
-        self.engine_test_status.setText("Запущена ограниченная UCI-проверка…")
-        if hasattr(process_parent, "_track_engine_probe"):
-            process_parent._track_engine_probe(process)
-        dialog_ref = weakref.ref(self)
-        owner_ref = weakref.ref(process_parent)
-        def dispatch(method: str, *args) -> None:
-            dialog = dialog_ref()
-            if dialog is not None and shiboken6.isValid(dialog):
-                getattr(dialog, method)(*args)
-            elif method == "_engine_probe_finished":
-                current = args[0]
-                if current.state() == QProcess.ProcessState.NotRunning:
-                    owner = owner_ref()
-                    if (owner is not None and shiboken6.isValid(owner)
-                            and hasattr(owner, "_untrack_engine_probe")):
-                        owner._untrack_engine_probe(current)
-                    current.deleteLater()
-        process.started.connect(lambda current=process: dispatch("_engine_probe_started", current))
-        process.readyReadStandardOutput.connect(lambda current=process: dispatch("_read_engine_probe", current))
-        process.errorOccurred.connect(lambda error, current=process:
-                                      dispatch("_engine_probe_error", current, error))
-        process.finished.connect(lambda code, status, current=process:
-                                  dispatch("_engine_probe_finished", current, code, status))
-        timer = QTimer(self)
-        timer.setSingleShot(True)
-        timer.timeout.connect(lambda current=process: dispatch("_engine_probe_timeout", current))
-        self._engine_probe_timer = timer
-        timer.start(5_000)
-        process.start(path, [])
+        self.engine_test_status.setText("UCI-проверка идёт в фоне; консольное окно не создаётся…")
+        self._engine_verified_path = ""
 
-    def _engine_probe_started(self, process: QProcess) -> None:
-        if process is self._engine_process and not self._engine_probe_finishing:
-            process.write(b"uci\n")
+        def work() -> None:
+            engine = None
+            try:
+                resolved = str(Path(path).expanduser().resolve(strict=True))
+                engine = popen_uci_hidden(
+                    resolved, timeout=3.0, cwd=str(Path(resolved).parent))
+                with self._engine_probe_lock:
+                    self._engine_probe_engine = engine
+                if self._engine_probe_cancel.is_set():
+                    raise RuntimeError("Проверка остановлена.")
+                engine.ping()
+                if self._engine_probe_cancel.is_set():
+                    raise RuntimeError("Проверка остановлена.")
+                if shiboken6.isValid(self):
+                    self.engine_probe_result.emit(
+                        generation, True, str(engine.id.get("name") or "UCI engine"))
+            except Exception as exc:
+                if shiboken6.isValid(self):
+                    self.engine_probe_result.emit(generation, False, str(exc))
+            finally:
+                if engine is not None:
+                    try:
+                        engine.quit()
+                    except Exception:
+                        pass
+                with self._engine_probe_lock:
+                    if self._engine_probe_engine is engine:
+                        self._engine_probe_engine = None
 
-    def _read_engine_probe(self, process: QProcess) -> None:
-        if process is not self._engine_process or self._engine_probe_finishing:
-            return
-        self._engine_probe_buffer.extend(bytes(process.readAllStandardOutput()))
-        output = self._engine_probe_buffer.decode("utf-8", errors="replace")
-        if self._engine_probe_stage == "uci" and "uciok" in output:
-            self._engine_probe_name = next((line.removeprefix("id name ")
-                                            for line in output.splitlines()
-                                            if line.startswith("id name ")), "UCI engine")
-            self._engine_probe_stage = "ready"
-            process.write(b"isready\n")
-        if self._engine_probe_stage == "ready" and "readyok" in output:
-            self._finish_engine_probe(f"UCI готов: {self._engine_probe_name}", graceful=True)
+        self._engine_probe_thread = threading.Thread(
+            target=work, name="chess-coach-engine-probe", daemon=True)
+        self._engine_probe_thread.start()
 
-    def _engine_probe_error(self, process: QProcess, _error) -> None:
-        if (process is self._engine_process and not self._engine_probe_finishing
-                and process.state() == QProcess.ProcessState.NotRunning):
-            self._finish_engine_probe(f"Не удалось запустить движок: {process.errorString()}")
-
-    def _engine_probe_finished(self, process: QProcess, _code, _status) -> None:
-        if process is not self._engine_process:
-            process.deleteLater()
-            return
-        if not self._engine_probe_finishing and "readyok" not in self._engine_probe_buffer.decode(
-                "utf-8", errors="replace"):
-            self._engine_probe_finish_message = "Процесс завершился до ответа readyok."
-        self._finalize_engine_probe(process)
-
-    def _engine_probe_timeout(self, process: QProcess | None = None) -> None:
-        process = process or self._engine_process
-        if process is None:
-            return
-        if process is self._engine_process and not self._engine_probe_finishing:
-            self._finish_engine_probe("UCI не ответил за 5 секунд; останавливаем процесс.")
-
-    def _finish_engine_probe(self, message: str | None = None, *, graceful: bool = False) -> None:
-        process = self._engine_process
-        if process is None or self._engine_probe_finishing:
-            return
-        self._engine_probe_finishing = True
-        if message is not None:
-            self._engine_probe_finish_message = message
-        if self._engine_probe_timer is not None:
-            self._engine_probe_timer.stop()
-            self._engine_probe_timer.deleteLater()
-            self._engine_probe_timer = None
-        if process.state() == QProcess.ProcessState.NotRunning:
-            self._finalize_engine_probe(process)
-            return
-        if graceful:
-            process.write(b"quit\n")
-        else:
-            process.kill()
-        # The bounded kill timer must outlive SettingsDialog if it is closed while
-        # the child is still shutting down.
-        owner = self._engine_probe_owner or QApplication.instance()
-        timer = QTimer(owner)
-        timer.setSingleShot(True)
-        dialog_ref = weakref.ref(self)
-        def kill_or_delegate(current=process) -> None:
-            dialog = dialog_ref()
-            if dialog is not None and shiboken6.isValid(dialog):
-                dialog._kill_engine_probe(current)
-            elif current.state() != QProcess.ProcessState.NotRunning:
-                current.kill()
-        timer.timeout.connect(kill_or_delegate)
-        self._engine_probe_shutdown_timer = timer
-        timer.start(1_000 if graceful else 2_000)
-
-    def _kill_engine_probe(self, process: QProcess) -> None:
-        if process is not self._engine_process:
-            return
-        if process.state() == QProcess.ProcessState.NotRunning:
-            self._finalize_engine_probe(process)
-            return
-        process.kill()
-        # Keep the QProcess alive until its finished signal confirms OS exit.
-        if self._engine_probe_shutdown_timer is not None:
-            self._engine_probe_shutdown_timer.start(2_000)
-
-    def _finalize_engine_probe(self, process: QProcess) -> None:
-        if process is not self._engine_process:
-            return
-        if process.state() != QProcess.ProcessState.NotRunning:
-            return
-        for timer_name in ("_engine_probe_timer", "_engine_probe_shutdown_timer"):
-            timer = getattr(self, timer_name)
-            if timer is not None:
-                timer.stop()
-                timer.deleteLater()
-                setattr(self, timer_name, None)
-        self._engine_process = None
-        owner = self._engine_probe_owner
-        if owner is not None and hasattr(owner, "_untrack_engine_probe"):
-            owner._untrack_engine_probe(process)
-        self._engine_probe_owner = None
-        self._engine_probe_finishing = False
-        if self._engine_probe_finish_message:
-            self.engine_test_status.setText(self._engine_probe_finish_message)
-            if self._engine_probe_finish_message.startswith("UCI готов:"):
-                self._engine_verified_path = str(Path(self.engine_path.text().strip()).resolve())
-            else:
-                self._engine_verified_path = ""
-        self._engine_probe_finish_message = None
-        process.deleteLater()
+    def _engine_probe_finished(self, generation: int, success: bool, detail: str) -> None:
+        current = generation == self._engine_probe_generation
+        if current and success:
+            self._engine_verified_path = str(Path(self.engine_path.text().strip()).resolve())
+            self.engine_test_status.setText(f"UCI готов: {detail}")
+        elif current:
+            self._engine_verified_path = ""
+            self.engine_test_status.setText(f"UCI-проверка не пройдена: {detail}")
         self.engine_test.setEnabled(True)
 
     def _stop_engine_probe(self) -> None:
-        self._finish_engine_probe("Проверка движка остановлена.")
+        thread = self._engine_probe_thread
+        if thread is None or not thread.is_alive():
+            return
+        self._engine_probe_generation += 1
+        self._engine_probe_cancel.set()
+        with self._engine_probe_lock:
+            engine = self._engine_probe_engine
+        if engine is not None:
+            try:
+                engine.quit()
+            except Exception:
+                pass
+        thread.join(timeout=0.25)
 
 
 class BatchAnalysisDialog(QDialog):
-    """Explicit controls for the bounded recent-first fast-analysis queue."""
+    """Explicit controls for the bounded recent-first Stockfish queue."""
 
     run_requested = Signal(int, int, int, bool, bool, bool)
     pause_requested = Signal()
@@ -1370,6 +1686,7 @@ class BatchAnalysisDialog(QDialog):
         self._readiness = False
         self._running = False
         self._paused = False
+        self._active_queue_parameters: tuple[int, int] | None = None
         layout = QVBoxLayout(self)
         layout.addWidget(QLabel(
             "Анализ запускается только по кнопке и только для завершённых стандартных партий. "
@@ -1388,10 +1705,27 @@ class BatchAnalysisDialog(QDialog):
             "Партии с готовой Lichess-оценкой, уже завершённым заданием или неподдерживаемым PGN пропускаются."))
         form = QGridLayout()
         self.limit = QSpinBox(); self.limit.setRange(1, 10_000); self.limit.setValue(2)
-        self.nodes = QSpinBox(); self.nodes.setRange(1000, 30_000); self.nodes.setSingleStep(1000); self.nodes.setValue(20_000)
+        self.nodes = QSpinBox(); self.nodes.setRange(1000, 10_000_000); self.nodes.setSingleStep(10_000); self.nodes.setGroupSeparatorShown(True); self.nodes.setValue(20_000)
+        self.nodes.setSuffix(" узлов / позицию")
         self.hash_mb = QSpinBox(); self.hash_mb.setRange(16, 128); self.hash_mb.setSingleStep(16); self.hash_mb.setValue(64)
         self.retry_failed = QCheckBox("Повторить ранее завершившиеся ошибкой/отменённые задания")
-        self.selective_review = QCheckBox("После быстрого прохода выборочно перепроверить критические позиции (до 12 на игру / 100 всего)")
+        self.selective_review = QCheckBox()
+        self.budget_note = QLabel()
+        self.budget_note.setWordWrap(True)
+        def update_budget_note(value: int) -> None:
+            high_budget = value > 30_000
+            description = ("Пользовательский высокий бюджет; анализ начнётся только по кнопке. "
+                           if high_budget else "Ограниченный бюджет одного локального прохода. ")
+            description += (f"Пример 20 партий × 120 позиций: {value:,} × 120 × 20 узлов; "
+                            "это оценка вычислительной работы, не времени исполнения.").replace(",", " ")
+            self.budget_note.setText(description)
+            prefix = "основного" if high_budget else "быстрого"
+            self.selective_review.setText(
+                f"После {prefix} прохода выборочно перепроверить критические позиции "
+                "(до 12 на игру / 100 всего)")
+        self.nodes.valueChanged.connect(update_budget_note)
+        self.nodes.valueChanged.emit(self.nodes.value())
+        layout.addWidget(self.budget_note)
         form.addWidget(QLabel("Максимум партий за один запуск"), 0, 0); form.addWidget(self.limit, 0, 1)
         form.addWidget(QLabel("Узлов на позицию"), 1, 0); form.addWidget(self.nodes, 1, 1)
         form.addWidget(QLabel("Hash (МБ)"), 2, 0); form.addWidget(self.hash_mb, 2, 1)
@@ -1409,9 +1743,7 @@ class BatchAnalysisDialog(QDialog):
         layout.addWidget(self.progress_label)
         controls = QHBoxLayout()
         self.start_button = QPushButton("Проанализировать 2 последние недостающие")
-        self.start_button.clicked.connect(lambda: self.run_requested.emit(
-            self.limit.value(), self.nodes.value(), self.hash_mb.value(), False,
-            self.retry_failed.isChecked(), self.selective_review.isChecked()))
+        self.start_button.clicked.connect(self._emit_start_request)
         self.resume_button = QPushButton("Продолжить очередь")
         # A persistent queue may have been paused by a previous application run,
         # but no queue may start before engine/account readiness is visible.
@@ -1419,9 +1751,7 @@ class BatchAnalysisDialog(QDialog):
         self.resume_button.setEnabled(False)
         self.limit.valueChanged.connect(lambda count: self.start_button.setText(
             f"Проанализировать {count} последние недостающие"))
-        self.resume_button.clicked.connect(lambda: self.run_requested.emit(
-            self.limit.value(), self.nodes.value(), self.hash_mb.value(), True, False,
-            self.selective_review.isChecked()))
+        self.resume_button.clicked.connect(self._emit_resume_request)
         self.pause_button = QPushButton("Пауза")
         self.pause_button.setEnabled(False)
         self.pause_button.clicked.connect(self.pause_requested.emit)
@@ -1442,6 +1772,19 @@ class BatchAnalysisDialog(QDialog):
         self.diagnostics_button.clicked.connect(
             lambda: QDesktopServices.openUrl(QUrl.fromLocalFile(str(logs_directory()))))
         layout.addWidget(self.diagnostics_button)
+
+    def _emit_start_request(self) -> None:
+        self._active_queue_parameters = (self.nodes.value(), self.hash_mb.value())
+        self.run_requested.emit(self.limit.value(), self.nodes.value(), self.hash_mb.value(), False,
+                                self.retry_failed.isChecked(), self.selective_review.isChecked())
+
+    def _emit_resume_request(self) -> None:
+        if self._active_queue_parameters is not None:
+            nodes, hash_mb = self._active_queue_parameters
+            self.nodes.setValue(nodes)
+            self.hash_mb.setValue(hash_mb)
+        self.run_requested.emit(self.limit.value(), self.nodes.value(), self.hash_mb.value(), True,
+                                False, self.selective_review.isChecked())
 
     def set_readiness(self, engine_path: str, engine_verified: bool, account_connected: bool,
                       account_reason: str | None = None) -> None:
@@ -1577,6 +1920,7 @@ class LichessConnectionDialog(QDialog):
     oauth_requested = Signal()
     personal_token_requested = Signal(str)
     delete_personal_token_requested = Signal()
+    revoke_oauth_requested = Signal()
     diagnostics_requested = Signal()
 
     def __init__(self, method: str = "oauth", *, oauth_saved: bool = False,
@@ -1620,8 +1964,11 @@ class LichessConnectionDialog(QDialog):
         oauth_layout.addWidget(self.oauth_saved_badge)
         self.restore_button = QPushButton("Проверить сохранённое подключение")
         self.oauth_button = QPushButton("Подключить через браузер")
+        self.oauth_revoke_button = QPushButton("Отозвать и удалить OAuth-токен")
+        self.oauth_revoke_button.setEnabled(oauth_saved)
         oauth_layout.addWidget(self.restore_button)
         oauth_layout.addWidget(self.oauth_button)
+        oauth_layout.addWidget(self.oauth_revoke_button)
         self.pages.addWidget(oauth_page)
 
         token_page = QWidget()
@@ -1668,6 +2015,7 @@ class LichessConnectionDialog(QDialog):
         self.oauth_button.clicked.connect(self.oauth_requested.emit)
         self.personal_check_button.clicked.connect(self._submit_personal_token)
         self.personal_delete_button.clicked.connect(self.delete_personal_token_requested.emit)
+        self.oauth_revoke_button.clicked.connect(self.revoke_oauth_requested.emit)
 
     def _on_mode_toggled(self, checked: bool) -> None:
         if not checked:
@@ -1692,6 +2040,8 @@ class MainWindow(QMainWindow):
     engine_install_progress = Signal(str)
     engine_install_finished = Signal(object)
     position_eval_finished = Signal(int, object, object)
+    position_eval_update = Signal(int, object)
+    dashboard_finished = Signal(int, object, object, object)
 
     def __init__(
         self,
@@ -1728,6 +2078,16 @@ class MainWindow(QMainWindow):
         color = self.settings.value("player_color", chess.WHITE, type=int)
         self.controller = GameController(chess.Color(color))
         self.game_repository = GameRepository(data_root / "games.sqlite3", async_writes=asynchronous_storage)
+        self.sound_player = ChessSoundPlayer(
+            data_root / "sounds",
+            moves_enabled=self.settings.value("sound_moves_enabled", True, type=bool),
+            notifications_enabled=self.settings.value("sound_notifications_enabled", True, type=bool),
+            history_enabled=self.settings.value("sound_history_enabled", False, type=bool),
+            volume=self.settings.value("sound_volume", 45, type=int),
+            selections={
+                cue: self.settings.value(f"sound_selection_{cue}", default_id, type=str)
+                for cue, default_id in DEFAULT_SOUND_SELECTIONS.items()
+            }, parent=self)
         self._online_history_game_id: str | None = None
         self._online_history_moves: tuple[chess.Move, ...] = ()
         self._online_history_position: chess.Board | None = None
@@ -1740,6 +2100,7 @@ class MainWindow(QMainWindow):
         self.online_sessions: dict[str, LichessGameSession] = {}
         self.online_session: LichessGameSession | None = None
         self._local_board_mode = "free"
+        self._local_sound_game_id = uuid.uuid4().hex
         self._orientation_overrides: dict[str, bool] = {}
         self.online_view_ply: int | None = None
         self._screen_mode = "home"
@@ -1747,6 +2108,8 @@ class MainWindow(QMainWindow):
         self._selected_live_game_id: str | None = None
         self._review_session: LichessGameSession | None = None
         self._lichess_connected = False
+        self._event_stream_recovery_pending = False
+        self._lichess_stream_ready_generation: int | None = None
         self._archive_progress_dialog: QProgressDialog | None = None
         self._puzzle_progress_dialog: QProgressDialog | None = None
         self._close_retry_scheduled = False
@@ -1759,6 +2122,9 @@ class MainWindow(QMainWindow):
         self._batch_engine_key: str | None = None
         self._batch_config: tuple[str, int, int] | None = None
         self._statistics_workers: set[threading.Thread] = set()
+        self._dashboard_generation = 0
+        self._dashboard_thread: threading.Thread | None = None
+        self._dashboard_pending: tuple[int, str | None, str | None] | None = None
         self._position_eval_generation = 0
         self._position_eval_thread: threading.Thread | None = None
         self._position_eval_stop: threading.Event | None = None
@@ -1776,6 +2142,9 @@ class MainWindow(QMainWindow):
         self._analysis_safety_request_id: str | None = None
         self._analysis_safety_context: tuple | None = None
         self._analysis_safety_phase: str | None = None
+        self._analysis_worker_context: tuple | None = None
+        self._review_safety_request_id: str | None = None
+        self._review_safety_context: tuple | None = None
         self._analysis_session_generation = 0
         self._engine_probe_processes: set[QProcess] = set()
         self._engine_install_stop: threading.Event | None = None
@@ -1784,14 +2153,24 @@ class MainWindow(QMainWindow):
         self._shutdown_requested = False
         self._shutdown_read_only = False
         self._analysis_shutdown_deadline: float | None = None
+        self._workspace_state_restoring = True
+        self._active_route = str(self.settings.value("workspace/last_route", "home", type=str))
+        self._board_focus_mode = self.settings.value("workspace/board_focus_mode", False, type=bool)
+        self._workspace_save_timer = QTimer(self)
+        self._workspace_save_timer.setSingleShot(True)
+        self._workspace_save_timer.setInterval(500)
+        self._workspace_save_timer.timeout.connect(self._persist_workspace_state)
         self.analysis_progress.connect(self._analysis_progress)
         self.analysis_finished.connect(self._analysis_finished)
         self.engine_install_progress.connect(self._engine_install_progress_changed)
         self.engine_install_finished.connect(self._engine_install_finished)
         self.position_eval_finished.connect(self._position_eval_finished)
+        self.position_eval_update.connect(self._position_eval_update)
+        self.dashboard_finished.connect(self._dashboard_result_ready)
         self.setWindowTitle("Chess Coach")
-        self.setMinimumSize(1040, 680)
+        self.setMinimumSize(500, 360)
         self.resize(1360, 860)
+        self._restore_window_frame()
         self.setStyleSheet(
             "QMainWindow, QWidget { background: #f4f1ea; color: #292a2b; }"
             "QPushButton { background: #ffffff; border: 1px solid #d9d5cb;"
@@ -1804,6 +2183,11 @@ class MainWindow(QMainWindow):
             " border-radius: 6px; padding: 5px; }"
         )
         self._build_ui()
+        self.focus_mode_button.setChecked(self._board_focus_mode)
+        self._set_sidebar_collapsed(
+            self.settings.value("workspace/sidebar_collapsed", self.width() < 1160, type=bool),
+            explicit=self.settings.value("workspace/sidebar_explicit", False, type=bool))
+        self._workspace_state_restoring = False
         self.show_home()
         self.clock_timer = QTimer(self)
         self.clock_timer.timeout.connect(self._update_clock)
@@ -1831,6 +2215,8 @@ class MainWindow(QMainWindow):
         elif offline_mode:
             self._disable_online_controls()
         self.refresh()
+        if not self.offline_mode:
+            QTimer.singleShot(75, self._restore_workspace_after_startup)
 
     def _create_lichess_service(self):
         try:
@@ -1844,13 +2230,14 @@ class MainWindow(QMainWindow):
             return None
 
     def _attach_lichess_service(self, service) -> None:
-        service.status_changed.connect(self._lichess_status)
-        service.authenticated.connect(self._lichess_authenticated)
-        service.error.connect(self._lichess_error)
+        service.session_status_changed.connect(self._lichess_session_status)
+        service.session_authenticated.connect(self._lichess_session_authenticated)
+        service.session_event_stream_ready.connect(self._lichess_event_stream_ready)
+        service.session_error.connect(self._lichess_session_error)
         service.move_failed.connect(self._lichess_move_failed)
         service.takeback_action_completed.connect(self._lichess_takeback_completed)
-        service.event_received.connect(self._lichess_event)
-        service.game_event_received.connect(self._lichess_game_event)
+        service.session_event_received.connect(self._lichess_session_event)
+        service.session_game_event_received.connect(self._lichess_session_game_event)
         service.challenge_ready.connect(self._challenge_ready)
         service.challenge_status_changed.connect(self._challenge_status)
         service.invitation_cancelled.connect(self._invitation_cancelled)
@@ -1867,9 +2254,178 @@ class MainWindow(QMainWindow):
         service.puzzles_scanned.connect(self._puzzles_scanned)
         service.puzzles_started.connect(self._puzzles_started)
         service.background_sync_finished.connect(self._background_sync_finished)
+        service.lichess_analysis_backfill_finished.connect(
+            self._lichess_analysis_backfill_finished)
+        service.lichess_analysis_backfill_progress.connect(
+            self._lichess_analysis_backfill_progress)
         service.puzzles_finished.connect(self._puzzles_finished)
         service.puzzle_pilot_progress.connect(self._puzzle_pilot_progress)
         service.puzzle_pilot_finished.connect(self._puzzle_pilot_finished)
+
+    def _current_lichess_generation(self, generation: int) -> bool:
+        return bool(self.lichess and self.lichess.is_auth_generation_current(generation))
+
+    def _lichess_session_status(self, generation: int, status: str) -> None:
+        if self._current_lichess_generation(generation):
+            self._lichess_status(status)
+
+    def _lichess_session_authenticated(self, generation: int, username: str) -> None:
+        if self._current_lichess_generation(generation):
+            self._lichess_authenticated(username)
+
+    def _lichess_event_stream_ready(self, generation: int, username: str) -> None:
+        if (not self._current_lichess_generation(generation) or self.offline_mode
+                or not self._lichess_connected or not username
+                or username.casefold() != str(self.lichess.username or "").casefold()):
+            return
+        self._lichess_stream_ready_generation = generation
+        account_id = self.game_repository.ensure_archive_account(username)
+        self.game_repository.set_lichess_analysis_backfill_paused(
+            account_id, self.settings.value("lichess/ready_analytics_paused", False, type=bool))
+        if not self.settings.value("lichess/auto_ready_analytics", True, type=bool):
+            self.lichess_analysis_status.setText("Lichess · фоновая аналитика выключена")
+            return
+        if self.settings.value("lichess/ready_analytics_paused", False, type=bool):
+            self.lichess_analysis_status.setText("Lichess · фоновая аналитика приостановлена")
+            return
+        if any(session.status in {"started", "playing"} and not session.is_ai_opponent
+               for session in self.online_sessions.values()):
+            self.lichess_analysis_status.setText(
+                "Lichess · проверка отложена до завершения партии с человеком")
+            return
+        self.lichess_analysis_status.setText("Lichess · готовим дозагрузку готовых данных…")
+        QTimer.singleShot(1200, lambda: self._start_lichess_analysis_backfill(generation))
+
+    def _start_lichess_analysis_backfill(self, generation: int, *, manual: bool = False,
+                                         force_retry: bool = False) -> None:
+        if (self._shutdown_requested or self.offline_mode
+                or not self._current_lichess_generation(generation)
+                or self._lichess_stream_ready_generation != generation
+                or not self._lichess_connected or not self.lichess
+                or (not manual and not self.settings.value(
+                    "lichess/auto_ready_analytics", True, type=bool))
+                or self.settings.value("lichess/ready_analytics_paused", False, type=bool)
+                or any(session.status in {"started", "playing"} and not session.is_ai_opponent
+                       for session in self.online_sessions.values())):
+            return
+        self.lichess.refresh_lichess_analysis_background(
+            generation=generation, limit=10,
+            daily_limit=self.settings.value("lichess/ready_analytics_daily_limit", 25, type=int),
+            force_retry=force_retry)
+        self.lichess_analysis_status.setText("Lichess · проверяем до 10 завершённых партий…")
+
+    def _lichess_analysis_backfill_progress(self, generation: int, username: str,
+                                           done: int, total: int, _game: dict) -> None:
+        if not self._accept_backfill_status(generation, username):
+            return
+        self.lichess_analysis_status.setText(f"Lichess · фоновая аналитика: {done}/{total} партий")
+
+    def _accept_backfill_status(self, generation: int, username: str) -> bool:
+        return bool(self._current_lichess_generation(generation) and self.lichess
+                    and str(self.lichess.username or "").casefold() == username.casefold())
+
+    def _reset_backfill_status(self, text: str = "Lichess · нет текущей фоновой операции") -> None:
+        self.lichess_analysis_status.setText(text)
+        self.lichess_analysis_status.setToolTip("")
+
+    def _lichess_analysis_backfill_finished(self, generation: int, username: str,
+                                            checked: int, total: int, accuracy: int,
+                                            evals: int, no_data: int, errors: int,
+                                            state: str) -> None:
+        if not self._accept_backfill_status(generation, username):
+            return
+        self.lichess_analysis_status.setText(
+            f"Lichess · проверено {checked}/{total} · точность {accuracy} · оценки {evals} · "
+            f"без анализа {no_data} · ошибки {errors}")
+        self.lichess_analysis_status.setToolTip(
+            f"Источник: документированный JSON export Lichess. {state}. "
+            "Локальные оценки Stockfish хранятся отдельно.")
+        if not self._shutdown_requested and self._screen_mode == "home":
+            self.refresh()
+
+    def show_background_analytics(self) -> None:
+        username = str(getattr(self.lichess, "username", "") or "").strip()
+        account_id = f"lichess:{username.casefold()}" if username else None
+        summary = (self.game_repository.lichess_analysis_backfill_summary(account_id)
+                   if account_id else {})
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Фоновые операции Lichess")
+        dialog.setMinimumWidth(440)
+        layout = QVBoxLayout(dialog)
+        layout.addWidget(QLabel("Источник: Lichess · документированный JSON export"))
+        layout.addWidget(QLabel("Задача: получить только уже готовые оценки и официальную точность. "
+                                "Chess Coach не заказывает серверный анализ."))
+        summary_label = QLabel(
+            f"Сохранённых партий в очереди: {summary.get('total', 0)}\n"
+            f"Проверено: {summary.get('checked', 0)} · с точностью: {summary.get('accuracy', 0)} · "
+            f"с оценками ходов: {summary.get('evals', 0)}\n"
+            f"Нет готовых данных: {summary.get('no_data', 0)} · ошибок/ограничений: {summary.get('errors', 0)} · "
+            f"ожидают: {summary.get('pending', 0)}")
+        summary_label.setWordWrap(True)
+        layout.addWidget(summary_label)
+        if summary.get("retry_at"):
+            layout.addWidget(QLabel(f"Следующая проверка партий без данных: {summary['retry_at']}"))
+        controls = QHBoxLayout()
+        self.backfill_pause_button = QPushButton("Приостановить")
+        is_paused = bool(account_id and
+                         self.game_repository.lichess_analysis_backfill_paused(account_id))
+        self.backfill_pause_button.setText("Возобновить" if is_paused else "Приостановить")
+        self.backfill_pause_button.setEnabled(bool(account_id))
+        self.backfill_pause_button.clicked.connect(lambda: self._toggle_lichess_analytics_pause(
+            account_id, not is_paused, dialog))
+        self.backfill_now_button = QPushButton("Проверить сейчас")
+        self.backfill_now_button.setEnabled(bool(
+            self.lichess and self._lichess_connected and
+            self._lichess_stream_ready_generation == getattr(self.lichess, "auth_generation", None)
+            and not is_paused))
+        self.backfill_now_button.setToolTip(
+            "Одна порция до 10 партий; действует общий 429 и суточный лимит.")
+        self.backfill_now_button.clicked.connect(lambda: self._manual_lichess_analytics_check(dialog))
+        controls.addWidget(self.backfill_pause_button)
+        controls.addWidget(self.backfill_now_button)
+        layout.addLayout(controls)
+        close = QPushButton("Закрыть")
+        close.clicked.connect(dialog.accept)
+        layout.addWidget(close)
+        dialog.exec()
+
+    def _toggle_lichess_analytics_pause(self, account_id: str | None, paused: bool,
+                                       dialog: QDialog) -> None:
+        if not account_id:
+            return
+        self.settings.setValue("lichess/ready_analytics_paused", bool(paused))
+        self.game_repository.set_lichess_analysis_backfill_paused(account_id, paused)
+        if paused and self.lichess:
+            self.lichess.cancel_lichess_analysis_backfill()
+            self.lichess_analysis_status.setText("Lichess · фоновая аналитика приостановлена")
+        elif self.lichess and self._lichess_stream_ready_generation == self.lichess.auth_generation:
+            self._start_lichess_analysis_backfill(self.lichess.auth_generation)
+        dialog.accept()
+
+    def _manual_lichess_analytics_check(self, dialog: QDialog) -> None:
+        if (not self.lichess or self.offline_mode or not self._lichess_connected
+                or self._lichess_stream_ready_generation != self.lichess.auth_generation):
+            return
+        dialog.accept()
+        self._start_lichess_analysis_backfill(
+            self.lichess.auth_generation, manual=True, force_retry=True)
+
+    def _open_lichess_game_page(self, game_id: str) -> None:
+        if not game_id or not re.fullmatch(r"[A-Za-z0-9_-]+", game_id):
+            return
+        QDesktopServices.openUrl(QUrl(f"https://lichess.org/{game_id}"))
+
+    def _lichess_session_error(self, generation: int, message: str) -> None:
+        if self._current_lichess_generation(generation):
+            self._lichess_error(message)
+
+    def _lichess_session_event(self, generation: int, event: dict) -> None:
+        if self._current_lichess_generation(generation):
+            self._lichess_event(event)
+
+    def _lichess_session_game_event(self, generation: int, game_id: str, event: dict) -> None:
+        if self._current_lichess_generation(generation):
+            self._lichess_game_event(game_id, event)
 
     def _disable_online_controls(self) -> None:
         self.connection.setText("●  Офлайн-режим · Lichess отключён")
@@ -1878,49 +2434,61 @@ class MainWindow(QMainWindow):
         self.disconnect_button.setVisible(False)
         for button in (
             self.friend_link_button, self.username_button, self.ai_button,
-            self.home_ai_button, self.home_friend_button, self.home_username_button,
-            self.cancel_challenge_button, self.active_games_button, self.home_pilot_import_button,
+            self.cancel_challenge_button, self.home_pilot_import_button,
             self.home_puzzles_pilot_button,
         ):
             button.setEnabled(False)
             button.setVisible(False)
+        self._update_home_game_actions()
 
     def _build_ui(self) -> None:
         root = QWidget()
-        outer = QVBoxLayout(root)
-        outer.setContentsMargins(18, 14, 18, 18)
+        shell = QHBoxLayout(root)
+        shell.setContentsMargins(0, 0, 0, 0)
+        shell.setSpacing(0)
+        self.sidebar = self._build_sidebar()
+        shell.addWidget(self.sidebar)
+        content = QWidget()
+        shell.addWidget(content, 1)
+        outer = QVBoxLayout(content)
+        outer.setContentsMargins(24, 0, 24, 20)
         outer.setSpacing(12)
         header = QHBoxLayout()
-        brand = QLabel("♟  Chess Coach")
-        brand.setStyleSheet("font-size: 22px; font-weight: 700;")
-        header.addWidget(brand)
-        header.addSpacing(24)
-        for label in ("Играть", "Мои партии", "Анализ", "Тренировки"):
-            button = QPushButton(label)
-            if label == "Играть":
-                button.clicked.connect(self.show_home)
-            elif label == "Мои партии":
-                button.clicked.connect(self.show_saved_games)
-            elif label == "Анализ":
-                button.clicked.connect(self.show_batch_analysis)
-            else:
-                button.clicked.connect(self.open_puzzle_history_local)
-            header.addWidget(button)
+        header.setContentsMargins(0, 0, 0, 0)
+        header_widget = QWidget()
+        header_widget.setFixedHeight(64)
+        header_widget.setLayout(header)
+        self.header_brand = QLabel("♟  Chess Coach")
+        self.header_brand.setStyleSheet("font-size: 20px; font-weight: 700;")
+        header.addWidget(self.header_brand)
         header.addStretch(1)
         self.connection = QLabel("●  Не подключено")
+        self.connection.setObjectName("connectionStatus")
         self.connection.setStyleSheet("color: #77766f;")
         header.addWidget(self.connection)
+        self.lichess_analysis_status = QLabel("Lichess · фоновая аналитика: не запущена")
+        self.lichess_analysis_status.setObjectName("lichessAnalyticsStatus")
+        self.lichess_analysis_status.setStyleSheet("font-size: 11px; color: #77766f;")
+        self.lichess_analysis_status.setMaximumWidth(210)
+        self.lichess_analysis_status.setWordWrap(True)
+        header.addWidget(self.lichess_analysis_status)
+        self.background_operations_button = QPushButton("Фоновые операции")
+        self.background_operations_button.clicked.connect(self.show_background_analytics)
+        header.addWidget(self.background_operations_button)
         self.connect_button = QPushButton("Подключить Lichess")
         self.connect_button.clicked.connect(self.connect_lichess)
         header.addWidget(self.connect_button)
-        self.disconnect_button = QPushButton("Отключить")
+        self.disconnect_button = QPushButton("Отключить сеанс")
+        self.disconnect_button.setToolTip(
+            "Остановить текущую Lichess-сессию, сохранив выбранные учётные данные локально.")
         self.disconnect_button.setEnabled(False)
         self.disconnect_button.clicked.connect(self.disconnect_lichess)
         header.addWidget(self.disconnect_button)
         self.settings_button = QPushButton("Настройки")
+        self.settings_button.setAccessibleName("Настройки")
         self.settings_button.clicked.connect(self.open_settings)
         header.addWidget(self.settings_button)
-        outer.addLayout(header)
+        outer.addWidget(header_widget)
 
         self.screen_title = QLabel("Главная")
         self.screen_title.setStyleSheet("font-size: 18px; font-weight: 700; padding: 2px 4px;")
@@ -1928,6 +2496,8 @@ class MainWindow(QMainWindow):
         self.screen_stack = QStackedWidget()
         self.home_page = self._build_home_page()
         self.screen_stack.addWidget(self.home_page)
+        self.play_page = self._build_play_page()
+        self.screen_stack.addWidget(self.play_page)
 
         splitter = QSplitter(Qt.Orientation.Horizontal)
         splitter.setChildrenCollapsible(False)
@@ -1938,8 +2508,22 @@ class MainWindow(QMainWindow):
         self.opponent_label = QLabel("Соперник  ·  локальная партия")
         self.opponent_label.setStyleSheet("font-size: 15px; font-weight: 600; padding: 2px 4px;")
         board_layout.addWidget(self.opponent_label)
+        self.opponent_clock_label = QLabel("Без часов")
+        self.opponent_clock_label.setObjectName("opponentClock")
+        self.opponent_clock_label.setAccessibleName("Часы соперника")
+        self.opponent_clock_label.setStyleSheet("font-size: 28px; font-weight: 700; padding: 2px 8px;")
+        board_layout.addWidget(self.opponent_clock_label)
+        self.opponent_clock_detail = QLabel("")
+        self.opponent_clock_detail.setObjectName("opponentClockDetail")
+        self.opponent_clock_detail.setStyleSheet("font-size: 11px; color: #77766f; padding-left: 10px;")
+        board_layout.addWidget(self.opponent_clock_detail)
+        self.focus_mode_button = QPushButton("Режим фокуса")
+        self.focus_mode_button.setCheckable(True)
+        self.focus_mode_button.setAccessibleName("Переключить режим фокуса доски")
+        self.focus_mode_button.toggled.connect(self._set_focus_mode)
+        board_layout.addWidget(self.focus_mode_button)
         self.board = BoardView(self.controller.board)
-        self.board.setMinimumSize(440, 440)
+        self.board.setMinimumSize(320, 320)
         self.board.set_premove(self.controller.premove, self.controller.player_color)
         self.board.move_intent.connect(self.on_move_intent)
         self.board.wheel_navigate.connect(self.navigate_by)
@@ -1949,6 +2533,15 @@ class MainWindow(QMainWindow):
         self.you_label = QLabel("Вы  ·  офлайн")
         self.you_label.setStyleSheet("font-size: 15px; font-weight: 600; padding: 2px 4px;")
         board_layout.addWidget(self.you_label)
+        self.you_clock_label = QLabel("Без часов")
+        self.you_clock_label.setObjectName("ownerClock")
+        self.you_clock_label.setAccessibleName("Ваши часы")
+        self.you_clock_label.setStyleSheet("font-size: 28px; font-weight: 700; padding: 2px 8px;")
+        board_layout.addWidget(self.you_clock_label)
+        self.you_clock_detail = QLabel("")
+        self.you_clock_detail.setObjectName("ownerClockDetail")
+        self.you_clock_detail.setStyleSheet("font-size: 11px; color: #77766f; padding-left: 10px;")
+        board_layout.addWidget(self.you_clock_detail)
         splitter.addWidget(board_column)
 
         side = QWidget()
@@ -1975,6 +2568,19 @@ class MainWindow(QMainWindow):
         side_layout.addWidget(self.local_mode_combo)
         self.local_mode_label.setVisible(False)
         self.local_mode_combo.setVisible(False)
+        self.board_size_label = QLabel("Размер доски")
+        side_layout.addWidget(self.board_size_label)
+        self.board_size_combo = QComboBox()
+        for label, size in (("Компактная · 400", 400), ("Стандартная · 480", 480),
+                            ("Большая · 560", 560), ("Очень большая · 720", 720),
+                            ("На всю доступную область", -1)):
+            self.board_size_combo.addItem(label, size)
+        stored_size = self.settings.value("board_target_size", 480, type=int)
+        index = self.board_size_combo.findData(stored_size)
+        self.board_size_combo.setCurrentIndex(index if index >= 0 else 1)
+        self.settings.setValue("board_target_size", int(self.board_size_combo.currentData()))
+        self.board_size_combo.currentIndexChanged.connect(self._board_size_changed)
+        side_layout.addWidget(self.board_size_combo)
         self.clock_label = QLabel("Без часов")
         self.clock_label.setStyleSheet("font-size: 18px; font-weight: 700;")
         side_layout.addWidget(self.clock_label)
@@ -2043,8 +2649,8 @@ class MainWindow(QMainWindow):
         moves_title = QLabel("ХОДЫ")
         moves_title.setStyleSheet("font-size: 11px; font-weight: 700; color: #77766f;")
         side_layout.addWidget(moves_title)
-        self.moves = QListWidget()
-        self.moves.itemClicked.connect(self.on_move_selected)
+        self.moves = MoveTable()
+        self.moves.ply_selected.connect(self.on_move_selected_ply)
         side_layout.addWidget(self.moves, 1)
         history_controls = QHBoxLayout()
         for label, action in (
@@ -2094,23 +2700,422 @@ class MainWindow(QMainWindow):
         splitter.setStretchFactor(0, 13)
         splitter.setStretchFactor(1, 7)
         splitter.setSizes([850, 450])
-        self.game_page = splitter
+        self.game_splitter = splitter
+        splitter.setOrientation(
+            Qt.Orientation.Vertical if self.width() < 1120 else Qt.Orientation.Horizontal)
+        game_scroll = QScrollArea()
+        game_scroll.setWidgetResizable(True)
+        game_scroll.setFrameShape(QFrame.Shape.NoFrame)
+        game_scroll.setWidget(splitter)
+        self.game_page = game_scroll
         self.screen_stack.addWidget(self.game_page)
         self.result_page = self._build_result_page()
         self.screen_stack.addWidget(self.result_page)
+        self.review_workspace = GameReviewWorkspace(self.game_repository, settings=self.settings,
+                                                    parent=self)
+        self.review_workspace.return_requested.connect(self.show_home)
+        self.review_workspace.export_requested.connect(self._export_review_pgn)
+        self.review_workspace.analysis_requested.connect(self._request_saved_game_analysis)
+        self.review_workspace.open_lichess_game_requested.connect(self._open_lichess_game_page)
+        self.review_workspace.safety_requested.connect(self._request_review_training_safety)
+        self.review_workspace.position_selected.connect(self._review_position_selected)
+        self.review_workspace.tabs.currentChanged.connect(self._schedule_workspace_save)
+        self.screen_stack.addWidget(self.review_workspace)
         self.screen_stack.setCurrentWidget(self.home_page)
+        self.screen_stack.currentChanged.connect(self._shell_screen_changed)
         outer.addWidget(self.screen_stack, 1)
         self.setCentralWidget(root)
+        status_bar = self.statusBar()
+        status_bar.setObjectName("inlineNoticeBar")
+        status_bar.setAccessibleName("Уведомления Chess Coach")
+        self.setStyleSheet(desktop_stylesheet())
+        self._apply_board_size()
+        self._set_sidebar_collapsed(self.width() < 1160)
+        self._apply_header_responsive()
+        self._set_active_route("home")
+
+    def _board_size_changed(self, _index: int) -> None:
+        if not hasattr(self, "board_size_combo"):
+            return
+        size = int(self.board_size_combo.currentData() or 480)
+        self.settings.setValue("board_target_size", size)
+        self._apply_board_size()
+
+    def _apply_board_size(self) -> None:
+        if not hasattr(self, "board"):
+            return
+        target = int(self.settings.value("board_target_size", 480, type=int))
+        sidebar_width = self.sidebar.width() if hasattr(self, "sidebar") else 212
+        focus = bool(getattr(self, "_board_focus_mode", False))
+        inspector_width = 0 if focus else 340
+        available_width = max(320, self.width() - sidebar_width - inspector_width - 96)
+        available_height = max(320, self.height() - 64 - 210)
+        requested = min(available_width, available_height) if target <= 0 else target
+        actual = max(320, min(requested, available_width, available_height))
+        self.board.setFixedSize(actual, actual)
+        if hasattr(self, "review_workspace"):
+            review_width = max(320, self.width() - sidebar_width - inspector_width - 96)
+            review_height = max(320, self.height() - 64 - 210)
+            review_size = max(320, min(requested, review_width, review_height))
+            self.review_workspace.review_board.setFixedSize(review_size, review_size)
+
+    def _set_focus_mode(self, enabled: bool) -> None:
+        self._board_focus_mode = bool(enabled)
+        if hasattr(self, "game_splitter"):
+            self.game_splitter.widget(1).setVisible(not enabled)
+        self.focus_mode_button.setText("Вернуть панель" if enabled else "Режим фокуса")
+        self.settings.setValue("workspace/board_focus_mode", bool(enabled))
+        self._apply_board_size()
+
+    def resizeEvent(self, event) -> None:
+        super().resizeEvent(event)
+        if (hasattr(self, "sidebar") and not self._sidebar_explicit_override
+                and self.width() < 1160):
+            self._set_sidebar_collapsed(True)
+        self._apply_board_size()
+        if hasattr(self, "game_splitter"):
+            self.game_splitter.setOrientation(
+                Qt.Orientation.Vertical if self.width() < 1120 else Qt.Orientation.Horizontal)
+        self._apply_header_responsive()
+        self._layout_dashboard_metrics()
+        self._layout_play_mode_cards()
+        self._schedule_workspace_save()
+
+    def _apply_header_responsive(self) -> None:
+        if not hasattr(self, "settings_button"):
+            return
+        compact = self.width() < 820
+        self.connect_button.setText("Подключить" if compact else "Подключить Lichess")
+        self.disconnect_button.setText("Отключить" if compact else "Отключить сеанс")
+        self.settings_button.setText("⚙" if compact else "Настройки")
+        self.settings_button.setToolTip("Настройки")
+        self.header_brand.setVisible(self.sidebar.width() <= 60 and self.width() >= 800)
+
+    def moveEvent(self, event) -> None:
+        super().moveEvent(event)
+        self._schedule_workspace_save()
+
+    def _build_sidebar(self) -> QWidget:
+        sidebar = QFrame()
+        sidebar.setObjectName("appSidebar")
+        sidebar.setFixedWidth(212)
+        layout = QVBoxLayout(sidebar)
+        layout.setContentsMargins(12, 16, 12, 12)
+        layout.setSpacing(8)
+        self.sidebar_toggle = QPushButton("☰")
+        self.sidebar_toggle.setObjectName("navItem")
+        self.sidebar_toggle.setToolTip("Свернуть или развернуть меню")
+        self.sidebar_toggle.setAccessibleName("Свернуть или развернуть боковое меню")
+        self.sidebar_toggle.clicked.connect(lambda: self._set_sidebar_collapsed(
+            self.sidebar.width() > 60, explicit=True))
+        layout.addWidget(self.sidebar_toggle)
+        self.sidebar_brand = QLabel("♟  Chess Coach")
+        self.sidebar_brand.setStyleSheet("font-size: 18px; font-weight: 700; padding: 4px;")
+        layout.addWidget(self.sidebar_brand)
+        self._nav_buttons: dict[str, QPushButton] = {}
+        items = (("home", "⌂", "Главная", self.show_home),
+                 ("play", "♟", "Играть", self.show_play),
+                 ("games", "▤", "Мои партии", self.show_saved_games),
+                 ("analytics", "⌁", "Аналитика", self.show_statistics),
+                 ("puzzles", "♞", "Задачи", self.open_puzzle_history_local))
+        for key, icon, label, callback in items:
+            button = QPushButton(f"{icon}   {label}")
+            button.setObjectName("navItem")
+            button.setProperty("route", key)
+            button.setProperty("route_label", label)
+            button.setMinimumHeight(44)
+            button.setAccessibleName(label)
+            button.clicked.connect(callback)
+            self._nav_buttons[key] = button
+            layout.addWidget(button)
+        layout.addStretch(1)
+        divider = QFrame()
+        divider.setFrameShape(QFrame.Shape.HLine)
+        layout.addWidget(divider)
+        self.sidebar_settings = QPushButton("⚙   Настройки")
+        self.sidebar_settings.setObjectName("navItem")
+        self.sidebar_settings.setAccessibleName("Настройки")
+        self.sidebar_settings.clicked.connect(self.open_settings)
+        layout.addWidget(self.sidebar_settings)
+        self._sidebar_explicit_override = False
+        return sidebar
+
+    def _set_sidebar_collapsed(self, collapsed: bool, *, explicit: bool = False) -> None:
+        if explicit:
+            self._sidebar_explicit_override = True
+        collapsed = bool(collapsed)
+        self.sidebar.setFixedWidth(60 if collapsed else 212)
+        self.sidebar_brand.setVisible(not collapsed)
+        self.sidebar_settings.setText("⚙" if collapsed else "⚙   Настройки")
+        icons = {"home": "⌂", "play": "♟", "games": "▤", "analytics": "⌁", "puzzles": "♞"}
+        for key, button in self._nav_buttons.items():
+            label = button.property("route_label")
+            button.setText(icons[key] if collapsed else f"{icons[key]}   {label}")
+            button.setToolTip(label if collapsed else "")
+        self.header_brand.setVisible(collapsed)
+        self._apply_board_size()
+        self._apply_header_responsive()
+        self._schedule_workspace_save()
+
+    def _shell_screen_changed(self, _index: int) -> None:
+        if not hasattr(self, "sidebar"):
+            return
+        if (self.screen_stack.currentWidget() is not self.review_workspace
+                and self._review_safety_request_id is not None):
+            self._review_safety_request_id = None
+            self._review_safety_context = None
+            self.review_workspace.revoke_safety(
+                "Проверка отменена: вы перешли с экрана разбора. Запросите новую проверку.")
+        is_board = self.screen_stack.currentWidget() in (
+            self.game_page, self.result_page, getattr(self, "review_workspace", None))
+        current = self.screen_stack.currentWidget()
+        self.screen_title.setVisible(current is not self.review_workspace)
+        route = ("games" if current is getattr(self, "review_workspace", None) else
+                 "play" if is_board or current is getattr(self, "play_page", None) else "home")
+        self._active_route = route
+        self._set_active_route(route)
+        if not self._sidebar_explicit_override:
+            self._set_sidebar_collapsed(is_board or self.width() < 1160)
+        self._schedule_workspace_save()
+
+    def _restore_window_frame(self) -> None:
+        saved = self.settings.value("workspace/window_geometry")
+        if saved:
+            try:
+                self.restoreGeometry(saved)
+            except (TypeError, ValueError):
+                pass
+        screens = [screen.availableGeometry() for screen in QGuiApplication.screens()]
+        frame = self.frameGeometry()
+        if screens:
+            corrected = reposition_visible_frame(frame, screens)
+            if corrected.size() != frame.size():
+                self.resize(corrected.size())
+            if corrected.topLeft() != frame.topLeft():
+                self.move(corrected.topLeft())
+
+    def _schedule_workspace_save(self, *_args) -> None:
+        timer = getattr(self, "_workspace_save_timer", None)
+        if timer is not None and not self._workspace_state_restoring:
+            timer.start()
+
+    def _persist_workspace_state(self) -> None:
+        if self._workspace_state_restoring:
+            return
+        self.settings.setValue("workspace/window_geometry", self.saveGeometry())
+        self.settings.setValue("workspace/theme", "dark-v1")
+        self.settings.setValue("workspace/last_route", self._active_route)
+        self.settings.setValue("workspace/sidebar_collapsed", self.sidebar.width() <= 60)
+        self.settings.setValue("workspace/sidebar_explicit", self._sidebar_explicit_override)
+        self.settings.setValue("workspace/board_target_size",
+                               int(self.settings.value("board_target_size", 480, type=int)))
+        review = getattr(self, "review_workspace", None)
+        if review is not None and review.review:
+            line = review.review["line"]
+            self.settings.setValue("workspace/review_game_id", str(review.review["game"]["game_id"]))
+            self.settings.setValue("workspace/review_line_revision", int(line["line_revision"]))
+            self.settings.setValue("workspace/review_line_hash", str(line["line_hash"]))
+            self.settings.setValue("workspace/review_viewed_ply", int(review.selected_ply))
+            self.settings.setValue("workspace/review_inspector_tab", int(review.tabs.currentIndex()))
+        self.settings.sync()
+
+    def _review_position_selected(self, _game_id: str, _ply: int) -> None:
+        self._schedule_workspace_save()
+
+    def _restore_workspace_after_startup(self) -> None:
+        if self.offline_mode or self._shutdown_requested:
+            return
+        route = str(self.settings.value("workspace/last_route", "home", type=str))
+        if route != "games":
+            return
+        if self.screen_stack.currentWidget() is not self.home_page:
+            return
+        if self.resume_saved_review(show_message=False):
+            return
+        self._active_route = "home"
+        self._set_active_route("home")
+        self.show_home()
+
+    def resume_saved_review(self, *, show_message: bool = True) -> bool:
+        game_id = str(self.settings.value("workspace/review_game_id", "", type=str)).strip()
+        if not game_id:
+            if show_message:
+                self._notify_inline("Нет сохранённого разбора для продолжения.")
+            return False
+        game = self.game_repository.get_game(game_id)
+        line = self.game_repository.current_line(game_id) if game else None
+        if (not game or not line or not self._is_standard_board_game(game)
+                or game.get("status") in {"created", "started", "started_soon", "playing"}):
+            self._active_route = "home"
+            self.settings.remove("workspace/review_game_id")
+            self._schedule_workspace_save()
+            if show_message:
+                self._notify_inline("Сохранённый разбор недоступен; проверьте библиотеку партий.")
+            return False
+        saved_revision = self.settings.value("workspace/review_line_revision", -1, type=int)
+        saved_hash = str(self.settings.value("workspace/review_line_hash", "", type=str))
+        same_line = (int(line["line_revision"]) == saved_revision
+                     and str(line["line_hash"]) == saved_hash)
+        self._workspace_state_restoring = True
+        try:
+            if not self._open_saved_game(game):
+                return False
+            ply = int(self.settings.value("workspace/review_viewed_ply", 0, type=int)) if same_line else 0
+            self.review_workspace.select_ply(max(0, min(len(self.review_workspace.review["moves"]), ply)))
+            tab = self.settings.value("workspace/review_inspector_tab", 0, type=int)
+            self.review_workspace.tabs.setCurrentIndex(
+                max(0, min(self.review_workspace.tabs.count() - 1, tab)))
+            if not same_line:
+                self.screen_title.setText("Разбор продолжен с начала · сохранённая линия изменилась")
+                self._notify_inline("Линия партии изменилась; разбор открыт с начальной позиции.")
+            else:
+                self.screen_title.setText("Продолжение разбора")
+            return True
+        finally:
+            self._workspace_state_restoring = False
+            self._schedule_workspace_save()
+
+    def _notify_inline(self, message: str, timeout_ms: int = 9000) -> None:
+        status = self.statusBar()
+        status.setAccessibleName("Уведомление: " + str(message)[:120])
+        status.showMessage(str(message), max(1000, int(timeout_ms)))
+
+    def _set_active_route(self, route: str) -> None:
+        for key, button in self._nav_buttons.items():
+            button.setProperty("active", key == route)
+            button.style().unpolish(button)
+            button.style().polish(button)
 
     def _build_home_page(self) -> QWidget:
         page = QWidget()
         layout = QVBoxLayout(page)
-        layout.addWidget(QLabel("Создать или открыть партию"))
-        self.home_status = QLabel("Выберите режим игры. Анализ и тренировки появятся позже.")
+        title = QLabel("Ваша шахматная практика")
+        title.setObjectName("pageTitle")
+        title.setVisible(False)
+        layout.addWidget(title)
+        self.home_status = QLabel(
+            "Начните локальную партию или подключите Lichess. Сводка и последние партии — ниже.")
         self.home_status.setWordWrap(True)
+        self.home_status.setObjectName("secondary")
+        self.home_status.setVisible(False)
         layout.addWidget(self.home_status)
+        scope_row = QHBoxLayout()
+        self.dashboard_account = QComboBox()
+        self.dashboard_account.setAccessibleName("Аккаунт сводки")
+        self.dashboard_account.addItem("Все локальные партии", None)
+        self.dashboard_clock = QComboBox()
+        self.dashboard_clock.setAccessibleName("Контроль времени сводки")
+        self.dashboard_clock.addItem("Любой контроль", "")
+        options = dashboard_options(self.game_repository)
+        for account in options["accounts"]:
+            self.dashboard_account.addItem(account["username"], account["account_id"])
+        for clock in options["clocks"]:
+            self.dashboard_clock.addItem(format_clock_control(clock), clock)
+        preferred_account = str(self.settings.value("workspace/selected_account", "", type=str))
+        if self.lichess and self.lichess.username:
+            preferred_account = f"lichess:{self.lichess.username.strip().lower()}"
+        preferred_index = self.dashboard_account.findData(preferred_account)
+        if preferred_index >= 0:
+            self.dashboard_account.setCurrentIndex(preferred_index)
+        preferred_clock = str(self.settings.value("workspace/dashboard_clock", "", type=str))
+        clock_index = self.dashboard_clock.findData(preferred_clock)
+        if clock_index >= 0:
+            self.dashboard_clock.setCurrentIndex(clock_index)
+        scope_row.addWidget(QLabel("Аккаунт"))
+        scope_row.addWidget(self.dashboard_account, 1)
+        scope_row.addWidget(QLabel("Контроль"))
+        scope_row.addWidget(self.dashboard_clock, 1)
+        layout.addLayout(scope_row)
+        self.dashboard_account.currentIndexChanged.connect(self._dashboard_filter_changed)
+        self.dashboard_clock.currentIndexChanged.connect(self._dashboard_filter_changed)
+        self.dashboard_metrics = {}
+        metrics_grid = QGridLayout()
+        self.dashboard_metrics_grid = metrics_grid
+        metrics_grid.setHorizontalSpacing(12)
+        metrics_grid.setVerticalSpacing(12)
+        self._dashboard_metric_values = {}
+        self._dashboard_metric_details = {}
+        for index, (key, label) in enumerate((
+                ("games", "Завершённые партии"), ("accuracy", "Точность Lichess"),
+                ("analysis", "Анализ моих ходов"),
+                ("errors", "Ошибки на 100 оценённых ходов"))):
+            card = QFrame()
+            card.setObjectName("metricCard")
+            card_layout = QVBoxLayout(card)
+            card_layout.setContentsMargins(10, 8, 10, 8)
+            card_layout.setSpacing(4)
+            caption = QLabel(label)
+            caption.setObjectName("secondary")
+            caption.setWordWrap(True)
+            caption.setMaximumHeight(34)
+            value = QLabel("—")
+            value.setStyleSheet("font-size: 22px; font-weight: 700;")
+            detail = QLabel("Локальные данные")
+            detail.setObjectName("muted")
+            detail.setWordWrap(True)
+            card_layout.addWidget(caption)
+            card_layout.addWidget(value)
+            card_layout.addWidget(detail)
+            self._dashboard_metric_values[key] = value
+            self._dashboard_metric_details[key] = detail
+            self.dashboard_metrics[key] = card
+        self._layout_dashboard_metrics()
+        layout.addLayout(metrics_grid)
+        recent_card = QFrame()
+        self.home_recent_card = recent_card
+        recent_card.setObjectName("metricCard")
+        recent_layout = QVBoxLayout(recent_card)
+        recent_layout.setContentsMargins(12, 10, 12, 10)
+        recent_title = QLabel("Последние партии")
+        recent_title.setStyleSheet("font-size: 18px; font-weight: 700;")
+        recent_layout.addWidget(recent_title)
+        self._recent_games_layout = QVBoxLayout()
+        self._recent_games_layout.setSpacing(8)
+        recent_layout.addLayout(self._recent_games_layout, 1)
+        primary_actions = QHBoxLayout()
+        self.home_primary_actions = primary_actions
+        play_card = QFrame()
+        self.home_play_card = play_card
+        play_card.setObjectName("metricCard")
+        play_card.setMaximumHeight(230)
+        play_layout = QVBoxLayout(play_card)
+        play_layout.setContentsMargins(12, 10, 12, 10)
+        play_layout.setSpacing(7)
+        play_title = QLabel("Играть")
+        play_title.setStyleSheet("font-size: 20px; font-weight: 700;")
+        play_layout.addWidget(play_title)
+        play_hint = QLabel("Локальная доска или нерейтинговая партия Lichess AI")
+        play_hint.setObjectName("secondary")
+        play_hint.setWordWrap(True)
+        play_layout.addWidget(play_hint)
+        play_buttons = QVBoxLayout()
         self.home_ai_button = QPushButton("Играть против Lichess AI")
+        self.home_ai_button.setObjectName("primaryAction")
         self.home_ai_button.clicked.connect(self.play_ai)
+        self.home_local_button = QPushButton("Свободная доска")
+        self.home_local_button.clicked.connect(self.start_local_game)
+        self.resume_game_button = QPushButton("Вернуться в текущую партию")
+        self.resume_game_button.clicked.connect(self.resume_current_game)
+        self.resume_game_button.setVisible(False)
+        play_buttons.addWidget(self.home_ai_button)
+        play_buttons.addWidget(self.home_local_button)
+        play_buttons.addWidget(self.resume_game_button)
+        play_layout.addLayout(play_buttons)
+        primary_actions.addWidget(play_card, 0, Qt.AlignmentFlag.AlignTop)
+        primary_actions.addWidget(recent_card, 3)
+        review_buttons = QHBoxLayout()
+        self.home_review_button = QPushButton("Выбрать партию")
+        self.home_review_button.clicked.connect(self.show_saved_games)
+        review_buttons.addWidget(self.home_review_button)
+        self.resume_review_button = QPushButton("Продолжить последний разбор")
+        self.resume_review_button.setObjectName("primaryAction")
+        self.resume_review_button.setAccessibleName("Продолжить разбор последней партии")
+        self.resume_review_button.clicked.connect(self.resume_saved_review)
+        self.resume_review_button.setVisible(False)
+        review_buttons.addWidget(self.resume_review_button)
+        play_layout.addLayout(review_buttons)
+        layout.addLayout(primary_actions)
+
         self.home_friend_button = QPushButton("Играть с другом по ссылке")
         self.home_friend_button.clicked.connect(self.open_friend_game)
         self.home_username_button = QPushButton("Вызвать игрока Lichess")
@@ -2118,8 +3123,6 @@ class MainWindow(QMainWindow):
         self.active_games_button = QPushButton("Активные партии Lichess")
         self.active_games_button.clicked.connect(self.show_active_games)
         self.active_games_button.setEnabled(False)
-        self.home_local_button = QPushButton("Локальная доска")
-        self.home_local_button.clicked.connect(self.start_local_game)
         self.home_games_button = QPushButton("Завершённые партии")
         self.home_games_button.clicked.connect(self.show_saved_games)
         self.home_archive_status_button = QPushButton("Хранилище и статус архива")
@@ -2143,20 +3146,263 @@ class MainWindow(QMainWindow):
         self.home_puzzles_pilot_button.setEnabled(False)
         self.home_settings_button = QPushButton("Настройки")
         self.home_settings_button.clicked.connect(self.open_settings)
-        self.resume_game_button = QPushButton("Вернуться в текущую партию")
-        self.resume_game_button.clicked.connect(self.resume_current_game)
-        for button in (self.home_ai_button, self.home_friend_button,
-                       self.home_username_button, self.active_games_button,
-                       self.home_local_button,
-                       self.home_games_button, self.home_archive_status_button,
-                       self.home_stats_button,
-                       self.home_batch_analysis_button,
-                       self.home_puzzles_button,
-                       self.home_settings_button,
-                       self.resume_game_button):
-            layout.addWidget(button)
+        self.home_more_toggle = QPushButton("Другие разделы и синхронизация  ▸")
+        self.home_more_toggle.setCheckable(True)
+        self.home_more_toggle.setAccessibleName("Показать другие разделы и синхронизацию")
+        layout.addWidget(self.home_more_toggle)
+        self.home_more = QGroupBox("Дополнительные разделы и синхронизация")
+        more_layout = QVBoxLayout(self.home_more)
+        for button in (self.home_friend_button, self.home_username_button,
+                       self.active_games_button,
+                       self.home_games_button, self.home_stats_button,
+                       self.home_batch_analysis_button, self.home_puzzles_button,
+                       self.home_settings_button, self.home_archive_status_button,
+                       self.home_pilot_import_button, self.home_archive_button):
+            more_layout.addWidget(button)
+        more_layout_widget = QWidget()
+        more_content = QVBoxLayout(more_layout_widget)
+        more_content.setContentsMargins(0, 0, 0, 0)
+        for index in range(more_layout.count()):
+            item = more_layout.takeAt(0)
+            if item.widget():
+                more_content.addWidget(item.widget())
+        self.home_more_content = more_layout_widget
+        more_layout_widget.setVisible(False)
+        more_layout.addWidget(more_layout_widget)
+        self.home_more.setVisible(False)
+        self.home_more_toggle.toggled.connect(self.home_more.setVisible)
+        self.home_more_toggle.toggled.connect(more_layout_widget.setVisible)
+        self.home_more_toggle.toggled.connect(lambda checked: self.home_more_toggle.setText(
+            "Другие разделы и синхронизация  ▾" if checked else
+            "Другие разделы и синхронизация  ▸"))
+        layout.addWidget(self.home_more)
+        layout.addStretch(1)
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+        scroll.setWidget(page)
+        return scroll
+
+    def _build_play_page(self) -> QWidget:
+        page = QWidget()
+        layout = QVBoxLayout(page)
+        title = QLabel("Выберите режим игры")
+        title.setObjectName("pageTitle")
+        layout.addWidget(title)
+        note = QLabel("Выберите локальную доску или сетевую партию. Текущая партия не сбрасывается.")
+        note.setObjectName("secondary")
+        layout.addWidget(note)
+        modes = (
+            ("Локально", "Свободная доска для двух сторон.", "Свободная доска", "play_local_button", self.start_local_game, True),
+            ("Lichess AI", "Нерейтинговая партия против встроенного AI.", "Играть против AI", "play_ai_button", self.play_ai, False),
+            ("Друг", "Создать ссылку-приглашение или открыть игру.", "Играть с другом", "play_friend_button", self.open_friend_game, False),
+            ("Соперник Lichess", "Вызвать игрока по имени аккаунта.", "Вызвать игрока", "play_challenge_button", self.challenge_username, False),
+            ("Активные партии", "Открыть и продолжить текущую сетевую игру.", "Показать партии", "play_active_button", self.show_active_games, False),
+        )
+        grid = QGridLayout()
+        grid.setHorizontalSpacing(12)
+        grid.setVerticalSpacing(12)
+        for index, (heading, description, button_text, attr, callback, primary) in enumerate(modes):
+            card = QFrame()
+            card.setObjectName("metricCard")
+            card_layout = QVBoxLayout(card)
+            card_layout.setContentsMargins(14, 12, 14, 12)
+            title_label = QLabel(heading)
+            title_label.setStyleSheet("font-size: 16px; font-weight: 700;")
+            card_layout.addWidget(title_label)
+            description_label = QLabel(description)
+            description_label.setObjectName("secondary")
+            description_label.setWordWrap(True)
+            card_layout.addWidget(description_label)
+            button = QPushButton(button_text)
+            if primary:
+                button.setObjectName("primaryAction")
+            button.clicked.connect(callback)
+            setattr(self, attr, button)
+            card_layout.addWidget(button)
+            grid.addWidget(card, index // 2, index % 2)
+        self._play_mode_grid = grid
+        self._play_mode_card_widgets = [grid.itemAt(index).widget() for index in range(grid.count())]
+        self._play_mode_columns = 2
+        layout.addLayout(grid)
         layout.addStretch(1)
         return page
+
+    def _layout_play_mode_cards(self) -> None:
+        grid = getattr(self, "_play_mode_grid", None)
+        cards = getattr(self, "_play_mode_card_widgets", None)
+        if grid is None or not cards:
+            return
+        columns = 1 if self.width() < 1100 else 2
+        if columns == self._play_mode_columns:
+            return
+        self._play_mode_columns = columns
+        for card in cards:
+            grid.removeWidget(card)
+        for index, card in enumerate(cards):
+            grid.addWidget(card, index // columns, index % columns)
+
+    def show_play(self) -> None:
+        """Show mode selection without resetting the controller or online game."""
+        self.screen_title.setText("Играть")
+        self.screen_stack.setCurrentWidget(self.play_page)
+        self._update_play_mode_availability()
+
+    def _update_play_mode_availability(self) -> None:
+        if not hasattr(self, "play_ai_button"):
+            return
+        online = self._online_actions_allowed()
+        for button in (self.play_ai_button, self.play_friend_button,
+                       self.play_challenge_button, self.play_active_button):
+            button.setEnabled(online)
+            button.setToolTip("Подключите Lichess; запросы остаются отключены до готовности соединения."
+                              if not online else "Доступно при активном соединении Lichess.")
+        self._update_home_game_actions()
+
+    def _update_home_game_actions(self) -> None:
+        if not hasattr(self, "home_ai_button"):
+            return
+        online = self._online_actions_allowed()
+        reason = ("Подключите Lichess и дождитесь готовности соединения; свободная доска доступна без сети."
+                  if not online else "Доступно при активном соединении Lichess.")
+        for button in (self.home_ai_button, self.home_friend_button,
+                       self.home_username_button, self.active_games_button):
+            button.setEnabled(online)
+            button.setToolTip(reason)
+
+    def _refresh_home_dashboard(self) -> None:
+        if not hasattr(self, "_dashboard_metric_values"):
+            return
+        account_id = self.dashboard_account.currentData() if hasattr(self, "dashboard_account") else None
+        clock = (self.dashboard_clock.currentData() if hasattr(self, "dashboard_clock") else "") or None
+        self._dashboard_generation += 1
+        generation = self._dashboard_generation
+        for detail in self._dashboard_metric_details.values():
+            if detail.text() in {"Локальные данные", "Обновляем локальную сводку…"}:
+                detail.setText("Обновляем локальную сводку…")
+        if self._dashboard_thread is not None and self._dashboard_thread.is_alive():
+            self._dashboard_pending = (generation, account_id, clock)
+            return
+        self._launch_dashboard_snapshot(generation, account_id, clock)
+
+    def _launch_dashboard_snapshot(self, generation: int, account_id: str | None,
+                                   clock: str | None) -> None:
+        def work():
+            try:
+                result = dashboard_snapshot(self.game_repository, account_id=account_id,
+                                            clock=clock)
+                error = None
+            except Exception as exc:
+                result, error = None, exc
+            self.dashboard_finished.emit(generation, result, error, threading.current_thread())
+        thread = threading.Thread(target=work, name="chess-coach-dashboard-read", daemon=True)
+        self._dashboard_thread = thread
+        thread.start()
+
+    def _dashboard_result_ready(self, generation: int, snapshot: object, error: object,
+                                thread: object) -> None:
+        if isinstance(thread, threading.Thread):
+            thread.join(timeout=0.01)
+            if self._dashboard_thread is thread:
+                self._dashboard_thread = None
+        if self._shutdown_requested:
+            self._dashboard_pending = None
+            return
+        if generation == self._dashboard_generation:
+            if error is not None:
+                for value in self._dashboard_metric_values.values():
+                    value.setText("н/д")
+                for detail in self._dashboard_metric_details.values():
+                    detail.setText("Не удалось прочитать локальные данные. Повторите обновление.")
+            elif isinstance(snapshot, dict):
+                self._render_dashboard_snapshot(snapshot)
+        pending, self._dashboard_pending = self._dashboard_pending, None
+        if pending is not None and not self._shutdown_requested:
+            self._launch_dashboard_snapshot(*pending)
+
+    def _render_dashboard_snapshot(self, snapshot: dict) -> None:
+        for metric in snapshot["metrics"]:
+            self._dashboard_metric_values[metric["key"]].setText(metric["value"])
+            self._dashboard_metric_details[metric["key"]].setText(
+                metric["detail"])
+            self._dashboard_metric_values[metric["key"]].setToolTip(metric["source"])
+            self._dashboard_metric_details[metric["key"]].setToolTip(metric["source"])
+        while self._recent_games_layout.count():
+            item = self._recent_games_layout.takeAt(0)
+            widget = item.widget()
+            if widget is not None:
+                widget.deleteLater()
+        games = snapshot["recent_games"]
+        if not games:
+            empty = QLabel("Пока нет сохранённых завершённых партий. Импортируйте партии или сыграйте локально.")
+            empty.setWordWrap(True)
+            empty.setObjectName("secondary")
+            self._recent_games_layout.addWidget(empty)
+            return
+        for game in games:
+            heading, details = game_card_text(game)
+            metrics = game.get("review_metrics") or {}
+            card = _DashboardGameCard()
+            card.setObjectName("metricCard")
+            card.setAccessibleName(f"Открыть разбор партии: {heading}")
+            card.setAccessibleDescription("Нажмите Enter или пробел, чтобы открыть разбор.")
+            card.setToolTip("Открыть разбор партии")
+            card_layout = QVBoxLayout(card)
+            card_layout.setContentsMargins(10, 7, 10, 7)
+            card_layout.setSpacing(4)
+            heading_label = QLabel(f"♟  {heading}")
+            heading_label.setStyleSheet("font-size: 13px; font-weight: 700;")
+            heading_label.setWordWrap(False)
+            card_layout.addWidget(heading_label)
+            description = QLabel(details)
+            description.setObjectName("secondary")
+            description.setWordWrap(True)
+            description.setToolTip(opening_tooltip(game.get("opening_name")))
+            card_layout.addWidget(description)
+            source_code = source_short(metrics.get("source"))[0]
+            def count(key):
+                return str(metrics.get(key, "н/д"))
+            comparison = QLabel(
+                f"Я: неточн. {count('owner_inaccuracies')} · ошибки {count('owner_mistakes')} · "
+                f"зевки {count('owner_blunders')}     │     "
+                f"Соперник: {count('opponent_inaccuracies')} · {count('opponent_mistakes')} · "
+                f"{count('opponent_blunders')}")
+            comparison.setWordWrap(True)
+            comparison.setMaximumHeight(40)
+            comparison.setToolTip("Неточности · ошибки · зевки; подробности доступны в разборе.")
+            card_layout.addWidget(comparison)
+            coverage_text = ("анализа пока нет" if metrics.get("status") == "без анализа" else
+                             f"{metrics.get('coverage', 'н/д')} / {metrics.get('opponent_coverage', 'н/д')}")
+            coverage = QLabel(f"{source_code} · охват Я / соперник: {coverage_text}")
+            coverage.setToolTip(source_short(metrics.get("source"))[1])
+            coverage.setAccessibleName(f"Источник оценки: {source_short(metrics.get('source'))[1]}")
+            card_layout.addWidget(coverage)
+            card.activated.connect(lambda item=dict(game): self._open_saved_game(item))
+            card.watch_children()
+            self._recent_games_layout.addWidget(card)
+
+    def _dashboard_filter_changed(self, *_args) -> None:
+        if hasattr(self, "dashboard_account"):
+            selected = self.dashboard_account.currentData()
+            self.settings.setValue("workspace/selected_account", selected or "")
+        if hasattr(self, "dashboard_clock"):
+            self.settings.setValue("workspace/dashboard_clock",
+                                   self.dashboard_clock.currentData() or "")
+        self._refresh_home_dashboard()
+
+    def _layout_dashboard_metrics(self) -> None:
+        grid = getattr(self, "dashboard_metrics_grid", None)
+        cards = list(getattr(self, "dashboard_metrics", {}).values())
+        if grid is None or not cards:
+            return
+        columns = 2 if self.width() < 900 else 4
+        if getattr(self, "_dashboard_metric_columns", None) == columns:
+            return
+        self._dashboard_metric_columns = columns
+        while grid.count():
+            grid.takeAt(0)
+        for index, card in enumerate(cards):
+            grid.addWidget(card, index // columns, index % columns)
 
     def _build_result_page(self) -> QWidget:
         page = QWidget()
@@ -2266,7 +3512,7 @@ class MainWindow(QMainWindow):
             if self.controller.view_ply is None
             else self.controller.view_ply
         )
-        self._sync_online_history(self.controller.board, "__local__", viewed_ply)
+        self._sync_online_history(self.controller.board, self._local_sound_game_id, viewed_ply)
         if self.controller.view_ply == 0:
             self.history_label.setText("Начальная позиция")
         elif not snapshot.live:
@@ -2317,6 +3563,9 @@ class MainWindow(QMainWindow):
         self._screen_mode = "home"
         self.screen_title.setText("Главная")
         self.screen_stack.setCurrentWidget(self.home_page)
+        self._refresh_home_dashboard()
+        self.resume_review_button.setVisible(bool(
+            self.settings.value("workspace/review_game_id", "", type=str)))
         active_id = self._selected_live_game_id
         active = self.online_sessions.get(active_id) if active_id else None
         if active and active.status in {"started", "playing"}:
@@ -2330,10 +3579,8 @@ class MainWindow(QMainWindow):
             )
         else:
             self.resume_game_button.setVisible(False)
-            self.home_status.setText("Выберите режим игры. Анализ и тренировки появятся позже.")
-        for button in (self.home_ai_button, self.home_friend_button, self.home_username_button):
-            button.setEnabled(self._online_actions_allowed())
-        self.active_games_button.setEnabled(self._online_actions_allowed())
+            self.home_status.setText("Откройте завершённую партию или начните новую игру.")
+        self._update_home_game_actions()
         self.home_archive_button.setEnabled(self._online_actions_allowed())
         self.home_batch_analysis_button.setEnabled(True)
         self.home_pilot_import_button.setEnabled(self._online_actions_allowed())
@@ -2481,10 +3728,7 @@ class MainWindow(QMainWindow):
 
     @staticmethod
     def _format_sync_time(value: str) -> str:
-        try:
-            return datetime.fromisoformat(value.replace("Z", "+00:00")).astimezone().strftime("%Y-%m-%d %H:%M")
-        except (AttributeError, ValueError):
-            return str(value)
+        return format_game_date(value)
 
     def _archive_game_refresh_finished(self, game_id: str, message: str) -> None:
         if message.startswith("История этой партии обновлена"):
@@ -2493,19 +3737,36 @@ class MainWindow(QMainWindow):
             self.home_status.setText(f"Не удалось обновить партию {game_id}: {message}")
 
     def show_statistics(self) -> None:
-        dialog = StatisticsDialog(self.game_repository, self)
+        raw_filters = str(self.settings.value("workspace/statistics_filters", "", type=str))
+        try:
+            saved_filters = json.loads(raw_filters) if raw_filters else {}
+        except (TypeError, json.JSONDecodeError):
+            saved_filters = {}
+        dialog = StatisticsDialog(self.game_repository, self,
+                                  saved_filters=saved_filters if isinstance(saved_filters, dict) else {})
         self._statistics_dialog = dialog
         dialog.worker_started.connect(self._statistics_worker_started)
         dialog.worker_finished.connect(self._statistics_worker_finished)
         dialog.position_requested.connect(self._open_statistics_position)
+        dialog.game_requested.connect(lambda game_id: self._open_statistics_game(dialog, game_id))
+        dialog.batch_requested.connect(lambda: (
+            dialog.accept(), QTimer.singleShot(0, self.show_batch_analysis)))
         dialog.exec()
+        self.settings.setValue("workspace/statistics_filters",
+                               json.dumps(dialog.persisted_filter_state(), ensure_ascii=False))
+        self._schedule_workspace_save()
         self._statistics_dialog = None
+
+    def _open_statistics_game(self, dialog: StatisticsDialog, game_id: str) -> None:
+        dialog.accept()
+        self._open_analysis_position(game_id, 0)
 
     def show_batch_analysis(self) -> None:
         if self._batch_dialog is not None:
             self._batch_dialog.show(); self._batch_dialog.raise_(); self._batch_dialog.activateWindow()
             return
         dialog = BatchAnalysisDialog(self)
+        dialog.nodes.setValue(self.settings.value("batch_analysis_nodes", 20_000, type=int))
         self._batch_dialog = dialog
         self._refresh_batch_readiness()
         dialog.run_requested.connect(lambda limit, nodes, hash_mb, resume, retry_failed, selective_review:
@@ -2534,6 +3795,23 @@ class MainWindow(QMainWindow):
         try:
             options = FastPassOptions(nodes=nodes, hash_mb=hash_mb)
             runner = BatchAnalysisRunner(self.game_repository, engine_path, options=options)
+            resumed_original_budget = False
+            if resume:
+                saved_parameters = self.game_repository.pending_fast_analysis_parameters(
+                    runner.engine_key)
+                if saved_parameters:
+                    saved_nodes = int(saved_parameters.get("limit_value", nodes))
+                    saved_hash = int(saved_parameters.get("hash_mb", hash_mb))
+                    if (saved_nodes, saved_hash) != (runner.options.nodes, runner.options.hash_mb):
+                        runner = BatchAnalysisRunner(
+                            self.game_repository, engine_path,
+                            options=FastPassOptions(nodes=saved_nodes, hash_mb=saved_hash))
+                        nodes, hash_mb = saved_nodes, saved_hash
+                        dialog.nodes.setValue(saved_nodes)
+                        dialog.hash_mb.setValue(saved_hash)
+                        self.settings.setValue("batch_analysis_nodes", saved_nodes)
+                        resumed_original_budget = True
+            self.settings.setValue("batch_analysis_nodes", runner.options.nodes)
         except (OSError, ValueError) as exc:
             QMessageBox.warning(dialog, "Массовый анализ", str(exc))
             return
@@ -2546,7 +3824,10 @@ class MainWindow(QMainWindow):
         generation = self._analysis_session_generation
         account_id = self.game_repository.ensure_archive_account(username)
         dialog.set_running(True)
-        dialog.worker_progress.emit("Подготовка очереди; Stockfish ещё не запущен…")
+        dialog.worker_progress.emit(
+            "Продолжаем с исходным бюджетом сохранённой очереди; Stockfish ещё не запущен…"
+            if resumed_original_budget else
+            "Подготовка очереди; Stockfish ещё не запущен…")
 
         def work() -> None:
             try:
@@ -2905,13 +4186,14 @@ class MainWindow(QMainWindow):
         board.set_interaction_enabled(False)
         solution = QLabel("Выберите попытку для локального просмотра.")
         solution.setWordWrap(True)
-        replay = QPushButton("Решить снова офлайн")
+        replay = QPushButton("Решить повторно")
         replay.setEnabled(False)
         reveal = QPushButton("Показать решение…")
         reveal.setEnabled(False)
         reset_replay = QPushButton("Сбросить упражнение")
         reset_replay.setEnabled(False)
         right.addWidget(board, 1)
+        right.addWidget(QLabel("Практика по сохранённой попытке · ответ не отправляется на Lichess"))
         right.addWidget(solution)
         replay_row = QHBoxLayout()
         replay_row.addWidget(replay)
@@ -2938,20 +4220,19 @@ class MainWindow(QMainWindow):
             sync_state = self.game_repository.puzzle_sync_state(selected_account)
             top_themes = sorted(overall["themes"].items(),
                                 key=lambda item: (item[1]["attempts"], item[0]), reverse=True)[:8]
-            theme_summary = ", ".join(
-                f"{theme}: {stats['wins']}/{stats['attempts']} ({stats['success_percent']}%)"
-                for theme, stats in top_themes) or "нет данных"
-            trend_summary = ", ".join(
-                f"{row['month']}: {row['average_rating'] if row['average_rating'] is not None else 'н/д'} "
-                f"(N={row['attempts']})" for row in rating_trend) or "нет данных"
+            theme_summary = ", ".join(_PUZZLE_THEME_LABELS.get(theme, theme)
+                                        for theme, _stats in top_themes[:4]) or "нет данных"
+            trend_summary = (f"· средний рейтинг {rating_trend[-1]['average_rating']}"
+                             if rating_trend and rating_trend[-1].get("average_rating") is not None
+                             else "")
             summary.setText(
-                f"Аккаунт: {account_rows[selected_account]['username']}\n"
-                f"Локально сохранено: {overall['attempts']} попыток · решено {overall['wins']} · "
-                f"ошибок {overall['failures']} · успех {overall['success_percent'] if overall['success_percent'] is not None else 'н/д'}%\n"
-                f"Средний рейтинг задач: {overall['average_puzzle_rating'] if overall['average_puzzle_rating'] is not None else 'н/д'} · "
-                f"динамика по месяцам: {trend_summary}\nТемы (решено/попыток): {theme_summary}\n"
-                f"Последнее обновление: {self._format_sync_time(sync_state.get('last_success_at')) if sync_state.get('last_success_at') else 'неизвестно'}"
-                +(f" · ошибка синхронизации: {sync_state['last_error']}" if sync_state.get("last_error") else ""))
+                f"{account_rows[selected_account]['username']} · {overall['attempts']} попыток · "
+                f"решено {overall['wins']} ({overall['success_percent'] if overall['success_percent'] is not None else 'н/д'}%)"
+                f"{trend_summary}\nЧастые темы: {theme_summary} · история и даты сохранены локально.")
+            summary.setToolTip(
+                f"Последняя успешная синхронизация: "
+                f"{self._format_sync_time(sync_state.get('last_success_at')) if sync_state.get('last_success_at') else 'неизвестно'}"
+                +(f"\nОшибка синхронизации: {sync_state['last_error']}" if sync_state.get("last_error") else ""))
 
         def render_page() -> None:
             result = self.game_repository.puzzle_history_page(
@@ -2960,11 +4241,12 @@ class MainWindow(QMainWindow):
             state["items"] = result["items"]
             history.clear()
             for attempt in state["items"]:
-                date = datetime.fromtimestamp(attempt["attempt_date_ms"] / 1000).strftime("%Y-%m-%d %H:%M")
                 try:
-                    themes = ", ".join(json.loads(attempt.get("themes_json") or "[]"))
-                except (TypeError, json.JSONDecodeError):
-                    themes = ""
+                    date = datetime.fromtimestamp(
+                        attempt["attempt_date_ms"] / 1000).astimezone().strftime("%d.%m.%Y · %H:%M")
+                except (TypeError, ValueError, OverflowError, OSError):
+                    date = "Дата неизвестна"
+                themes = _puzzle_themes_label(attempt.get("themes_json"))
                 outcome = "Решено" if attempt["win"] else "Ошибка"
                 item = QListWidgetItem(
                     f"{date} · {outcome} · {attempt['puzzle_rating'] or 'без рейтинга'} · {themes}")
@@ -3150,6 +4432,7 @@ class MainWindow(QMainWindow):
         self._review_session = None
         self.board.clear_annotations()
         self.controller.new_game()
+        self._local_sound_game_id = uuid.uuid4().hex
         self._local_board_mode = "free"
         self.controller.set_premove_training(False)
         self.local_mode_combo.blockSignals(True)
@@ -3158,6 +4441,7 @@ class MainWindow(QMainWindow):
         self._screen_mode = "local"
         self.screen_title.setText("Локальная партия")
         self.screen_stack.setCurrentWidget(self.game_page)
+        self.sound_player.play_game_start(self._local_sound_game_id)
         self.refresh("Новая свободная партия. Можно ходить за обе стороны.")
 
     def _local_board_mode_changed(self, _index: int) -> None:
@@ -3245,13 +4529,141 @@ class MainWindow(QMainWindow):
         session = self.online_session
         if not session or session.status in {"started", "playing", "created"}:
             return
-        self._disable_position_evaluation("Открыта завершённая партия; выполните новую проверку безопасности.")
-        self._review_session = session
-        self._screen_mode = "review"
-        self.screen_title.setText("Просмотр завершённой партии")
-        self.online_view_ply = None
-        self.screen_stack.setCurrentWidget(self.game_page)
-        self.refresh("Просмотр сохранённой партии (только чтение).")
+        game = self.game_repository.get_game(session.game_id)
+        if game:
+            self._open_saved_game(game)
+
+    def _review_training_safety(self) -> tuple[bool, str]:
+        if self.offline_mode:
+            return True, ""
+        if any(session.status in {"started", "playing"} and not session.is_ai_opponent
+               for session in self.online_sessions.values()):
+            return False, "Заблокировано: у вас есть активная партия с человеком."
+        if self.lichess and self._lichess_connected:
+            return False, "Проверьте активные партии Lichess перед упражнением."
+        return False, "Заблокировано: безопасность аккаунта не подтверждена. Подключите Lichess."
+
+    def _review_workspace_identity(self) -> tuple[str, int, str] | None:
+        review = getattr(self, "review_workspace", None)
+        if not review or not review.review:
+            return None
+        game = review.review.get("game") or {}
+        line = review.review.get("line") or {}
+        try:
+            return (str(game["game_id"]), int(line["line_revision"]),
+                    str(line["line_hash"]))
+        except (KeyError, TypeError, ValueError):
+            return None
+
+    def _revoke_review_safety(self, reason: str, *, preserve_offline: bool = False) -> None:
+        self._review_safety_request_id = None
+        self._review_safety_context = None
+        if preserve_offline and self.offline_mode:
+            return
+        workspace = getattr(self, "review_workspace", None)
+        if workspace is not None:
+            workspace.revoke_safety(reason)
+
+    def _request_review_training_safety(self, game_id: str) -> None:
+        identity = self._review_workspace_identity()
+        if (identity is None or identity[0] != str(game_id)
+                or self.screen_stack.currentWidget() is not self.review_workspace
+                or self._screen_mode != "review"):
+            self._revoke_review_safety(
+                "Заблокировано: разбор изменился до проверки безопасности.")
+            return
+        service = self.lichess
+        username = str(getattr(service, "username", "") or "").strip()
+        if not service or not username or not self._online_actions_allowed():
+            self._revoke_review_safety(
+                "Заблокировано: не удалось проверить активные партии Lichess.")
+            return
+        active_human = any(
+            session.status in {"started", "playing"} and not session.is_ai_opponent
+            for session in self.online_sessions.values())
+        if active_human:
+            self._revoke_review_safety(
+                "Заблокировано: у вас есть активная партия с человеком.")
+            return
+        request_id = uuid.uuid4().hex
+        self._review_safety_request_id = request_id
+        self._review_safety_context = {
+            "generation": self._analysis_session_generation,
+            "account_id": f"lichess:{username.casefold()}",
+            "username": username.casefold(), "service": service,
+            "game_id": identity[0], "line_revision": identity[1],
+            "line_hash": identity[2],
+        }
+        self.review_workspace.set_safety_pending(
+            "Проверяем активные партии; оценки и варианты пока скрыты.")
+        try:
+            service.check_active_games_for_analysis(request_id)
+        except Exception as exc:
+            self._review_safety_error_received(request_id, str(exc))
+
+    def _review_safety_reply_is_current(self, request_id: str) -> bool:
+        context = self._review_safety_context
+        if request_id != self._review_safety_request_id or not context:
+            return False
+        identity = self._review_workspace_identity()
+        current_widget = self.screen_stack.currentWidget()
+        current_account = str(getattr(self.lichess, "username", "") or "").strip().casefold()
+        current_line = (self.game_repository.current_line(context["game_id"])
+                        if context.get("game_id") else None)
+        current_identity = ((str(context["game_id"]), int(current_line["line_revision"]),
+                            str(current_line["line_hash"])) if current_line else None)
+        if (context["service"] is not self.lichess
+                or context["generation"] != self._analysis_session_generation
+                or context["username"] != current_account
+                or context["account_id"] != f"lichess:{current_account}"
+                or not self._lichess_connected or not self._online_actions_allowed()
+                or current_widget is not self.review_workspace or self._screen_mode != "review"
+                or identity != (context["game_id"], context["line_revision"], context["line_hash"])
+                or current_identity != identity):
+            self._review_safety_request_id = None
+            self._review_safety_context = None
+            return False
+        return True
+
+    def _review_safety_games_received(self, request_id: str, games: object) -> bool:
+        if request_id != self._review_safety_request_id:
+            return False
+        if not self._review_safety_reply_is_current(request_id):
+            return True
+        if not isinstance(games, list) or len(games) >= 50:
+            reason = "Заблокировано: список активных партий неполный или некорректный."
+            safe = False
+        elif any(classify_lichess_opponent(game) != "official_ai" for game in games):
+            reason = "Заблокировано: обнаружена активная партия с человеком или неизвестным соперником."
+            safe = False
+        else:
+            safe, reason = True, "Безопасность подтверждена Lichess; упражнение использует только сохранённый анализ."
+        context = self._review_safety_context
+        self._review_safety_request_id = None
+        self._review_safety_context = None
+        if context and self._review_workspace_identity() == (
+                context["game_id"], context["line_revision"], context["line_hash"]):
+            self.review_workspace.set_training_safety_result(safe, reason)
+        return True
+
+    def _review_safety_error_received(self, request_id: str, message: str) -> bool:
+        if request_id != self._review_safety_request_id:
+            return False
+        if self._review_safety_reply_is_current(request_id):
+            self._review_safety_request_id = None
+            self._review_safety_context = None
+            self._revoke_review_safety(
+                f"Заблокировано: проверка Lichess не выполнена ({message}).")
+        return True
+
+    def _export_review_pgn(self, game_id: str) -> None:
+        game = self.game_repository.get_game(game_id)
+        if not game:
+            return
+        self.online_session = self.online_session or LichessGameSession(
+            game_id, self.game_repository)
+        self.online_session.game_id = game_id
+        self.export_current_pgn()
 
     def export_current_pgn(self) -> None:
         session = self.online_session
@@ -3288,6 +4700,7 @@ class MainWindow(QMainWindow):
             self.lichess.send_move(session.game_id, move.uci(), session.pending_request_id)
             self.refresh(f"Отправляем ход {move.uci()}; ожидаем подтверждения Lichess.")
             return
+        before_board = self.controller.board.copy(stack=True)
         previous = tuple(self.controller.board.move_stack)
         if self.controller.apply_move_intent(move):
             if self._position_eval_thread is not None:
@@ -3296,6 +4709,10 @@ class MainWindow(QMainWindow):
                 self.position_eval_label.setText("Позиция обновлена; ждём завершения ходов…")
                 self._position_eval_timer.start(300)
             if tuple(self.controller.board.move_stack) != previous:
+                accepted_move = self.controller.board.move_stack[-1]
+                self.sound_player.play_move(
+                    self._local_sound_game_id, len(self.controller.board.move_stack), before_board, accepted_move,
+                    game_finished=self.controller.board.is_game_over())
                 self.board.clear_annotations()
             self.refresh("Ход записан в локальную партию.")
         else:
@@ -3462,6 +4879,7 @@ class MainWindow(QMainWindow):
                  else self.controller.snapshot().board).copy(stack=False)
         stop_event = threading.Event()
         active: dict = {}
+        active["on_update"] = lambda info: self.position_eval_update.emit(generation, info)
         self._position_eval_stop = stop_event
         self._position_eval_handle = active
         self.position_eval_button.setEnabled(False)
@@ -3510,30 +4928,74 @@ class MainWindow(QMainWindow):
                 score = (f"мат {'белым' if payload['mate_white'] > 0 else 'чёрным'} через "
                          f"{abs(payload['mate_white'])}" if payload.get("mate_white") is not None
                          else (f"{cp / 100:+.2f} пешки за белых" if cp is not None else "оценка недоступна"))
+                shown_board = (self.online_session.render_board if self.online_session is not None
+                               else self.controller.snapshot().board).copy(stack=False)
+                pv_san = []
+                best = "не сохранён"
+                try:
+                    pv = payload.get("pv") or ([payload["best_move"]]
+                                                  if payload.get("best_move") else [])
+                    for raw in pv:
+                        candidate = chess.Move.from_uci(str(raw))
+                        if candidate not in shown_board.legal_moves:
+                            break
+                        if not pv_san:
+                            best = shown_board.san(candidate)
+                        pv_san.append(shown_board.san(candidate))
+                        shown_board.push(candidate)
+                except (ValueError, chess.InvalidMoveError):
+                    best, pv_san = "не удалось отобразить", []
                 self.position_eval_label.setText(
-                    f"Stockfish · {score} · лучший ход {payload.get('best_move') or 'н/д'} · "
-                    f"глубина {payload.get('depth') or 'н/д'} · PV "
-                    f"{' '.join(payload.get('pv') or [])[:80]}; оценка не является точностью Lichess.")
+                    f"Stockfish · {score} · лучший ход {best} · "
+                    f"глубина {payload.get('depth') or 'н/д'} · вариант "
+                    f"{' '.join(pv_san) or 'н/д'}; это оценка движка, не точность Lichess.")
+                live_board = (self.online_session.render_board if self.online_session is not None
+                              else self.controller.snapshot().board)
+                current_ply = len(live_board.move_stack)
+                self.moves.set_score(current_ply, white_cp=payload.get("score_white_cp"),
+                                     mate_white=payload.get("mate_white"), source="Stockfish",
+                                     depth=payload.get("depth"))
         if self._position_eval_queued and self._position_eval_mode:
             self._position_eval_queued = False
             self._position_eval_timer.start(0)
         self.refresh()
 
+    def _position_eval_update(self, generation: int, info: object) -> None:
+        if (generation != self._position_eval_generation or not isinstance(info, dict)
+                or self._position_eval_stop is None or self._position_eval_stop.is_set()):
+            return
+        score = info.get("score")
+        if score is None:
+            label = "оценка пока недоступна"
+        else:
+            cp = score.pov(chess.WHITE).score(mate_score=100000)
+            mate = score.pov(chess.WHITE).mate()
+            label = (f"мат за белых через {mate}" if mate is not None and mate > 0 else
+                     f"мат за чёрных через {abs(mate)}" if mate is not None else
+                     f"{cp / 100:+.2f} за белых" if cp is not None else "оценка недоступна")
+        self.position_eval_label.setText(
+            f"Stockfish · текущая позиция · {label} · глубина {info.get('depth') or '…'}")
+
     def on_premove_intent(self, move: chess.Move) -> None:
         if self.online_session is not None:
             if self.online_session.queue_premove(move):
+                self.sound_player.play_premove(uuid.uuid4().hex)
                 self.board.set_premove(move, self.online_session.color)
                 self.refresh("Предход записан и будет проверен после хода соперника.")
             else:
                 self.refresh("Предход не принят в текущей позиции.")
             return
         if self.controller.queue_premove(move):
+            self.sound_player.play_premove(uuid.uuid4().hex)
             self.refresh("Предход поставлен. Он будет проверен после хода соперника.")
         else:
             self.refresh("Предход не принят в текущем состоянии.")
 
     def cancel_premove(self) -> None:
         if self.online_session is not None:
+            if self.online_session.premove is None and self.online_session.pending_uci:
+                self._refresh_online("Этот ход уже отправлен Lichess; отменить его на сервере нельзя.")
+                return
             self.online_session.premove = None
             self.board.set_premove(None, self.online_session.color)
             self.refresh("Предход отменён.")
@@ -3557,20 +5019,44 @@ class MainWindow(QMainWindow):
         if not raw:
             return
         move = chess.Move.from_uci(raw)
+        before_board = self.controller.board.copy(stack=True)
         previous = tuple(self.controller.board.move_stack)
         _, message = self.controller.apply_test_opponent_move(move)
+        added = self.controller.board.move_stack[len(previous):]
+        sound_board = before_board
+        for ply, confirmed in enumerate(added, start=len(previous) + 1):
+            self.sound_player.play_move(
+                self._local_sound_game_id, ply, sound_board, confirmed,
+                game_finished=self.controller.board.is_game_over() and ply == len(self.controller.board.move_stack))
+            sound_board.push(confirmed)
         if tuple(self.controller.board.move_stack) != previous:
             self.board.clear_annotations()
         self.refresh(message)
 
     def on_move_selected(self, item: QListWidgetItem) -> None:
+        ply = int(item.data(Qt.ItemDataRole.UserRole))
+        self.on_move_selected_ply(ply)
+
+    def on_move_selected_ply(self, ply: int) -> None:
+        ply = int(ply)
         if self.online_session is not None:
-            ply = int(item.data(Qt.ItemDataRole.UserRole))
+            self._play_history_sound(self.online_session.game_id, self.online_session.board, ply)
             self.online_view_ply = None if ply >= len(self.online_session.board.move_stack) else ply
             self.refresh()
             return
-        self.controller.go_to(int(item.data(Qt.ItemDataRole.UserRole)))
+        self._play_history_sound(self._local_sound_game_id, self.controller.board, ply)
+        self.controller.go_to(ply)
         self.refresh()
+
+    def _play_history_sound(self, game_id: str, board: chess.Board, ply: int) -> None:
+        """Play history audio only for an explicit move-row click, never scrolling."""
+        if not 1 <= ply <= len(board.move_stack):
+            return
+        before = board.root()
+        for move in board.move_stack[:ply - 1]:
+            before.push(move)
+        move = board.move_stack[ply - 1]
+        self.sound_player.play_move(game_id, ply, before, move, source="history")
 
     def navigate_to(self, ply: int) -> None:
         if self.online_session is not None:
@@ -3643,16 +5129,49 @@ class MainWindow(QMainWindow):
             if answer != QMessageBox.StandardButton.Yes:
                 return
         self.controller.new_game()
+        self._local_sound_game_id = uuid.uuid4().hex
         self.board.clear_annotations()
+        self.sound_player.play_game_start(self._local_sound_game_id)
         self.refresh("Новая локальная партия.")
+        if self._position_eval_mode:
+            self._position_eval_timer.start(300)
 
     def open_settings(self) -> None:
+        auto_analytics_was_enabled = self.settings.value(
+            "lichess/auto_ready_analytics", True, type=bool)
         dialog = SettingsDialog(self.settings, self, repository=self.game_repository)
+        dialog.sound_preview_requested.connect(
+            lambda cue: self.sound_player.preview(cue, dialog.sound_selection(cue)))
         dialog.install_requested.connect(
             lambda current=dialog: self._install_official_stockfish(current))
         dialog.finished.connect(lambda _result: self._cancel_stockfish_install())
         if dialog.exec() == QDialog.DialogCode.Accepted:
             dialog.save(self.settings)
+            username = str(getattr(self.lichess, "username", "") or "").strip()
+            if username and not self.offline_mode:
+                account_id = self.game_repository.ensure_archive_account(username)
+                paused = self.settings.value("lichess/ready_analytics_paused", False, type=bool)
+                self.game_repository.set_lichess_analysis_backfill_paused(account_id, paused)
+                if not self.settings.value("lichess/auto_ready_analytics", True, type=bool):
+                    self.lichess.cancel_lichess_analysis_backfill()
+                    self.lichess_analysis_status.setText("Lichess · фоновая аналитика выключена")
+                elif paused:
+                    self.lichess.cancel_lichess_analysis_backfill()
+                    self.lichess_analysis_status.setText("Lichess · фоновая аналитика приостановлена")
+                elif (not auto_analytics_was_enabled and self._lichess_connected
+                      and self._lichess_stream_ready_generation == getattr(
+                          self.lichess, "auth_generation", None)):
+                    self._start_lichess_analysis_backfill(
+                        self.lichess.auth_generation, manual=False)
+            self.sound_player.configure(
+                moves_enabled=self.settings.value("sound_moves_enabled", True, type=bool),
+                notifications_enabled=self.settings.value("sound_notifications_enabled", True, type=bool),
+                history_enabled=self.settings.value("sound_history_enabled", False, type=bool),
+                volume=self.settings.value("sound_volume", 45, type=int),
+                selections={
+                    cue: self.settings.value(f"sound_selection_{cue}", default_id, type=str)
+                    for cue, default_id in DEFAULT_SOUND_SELECTIONS.items()
+                })
             new_color = chess.Color(int(self.settings.value("player_color", chess.WHITE)))
             self.controller.player_color = new_color
             if not self.settings.value("allow_premoves", True, type=bool):
@@ -3770,8 +5289,20 @@ class MainWindow(QMainWindow):
         dialog.personal_token_requested.connect(self._save_personal_lichess_token)
         dialog.delete_personal_token_requested.connect(self._delete_personal_lichess_token)
         dialog.diagnostics_requested.connect(self._show_lichess_diagnostic_report)
-        self.lichess.status_changed.connect(dialog.set_status)
-        dialog.finished.connect(lambda _result: setattr(self, "_connection_dialog", None))
+        def update_dialog_status(generation: int, status: str) -> None:
+            if (self._current_lichess_generation(generation)
+                    and shiboken6.isValid(dialog)):
+                dialog.set_status(status)
+        self.lichess.session_status_changed.connect(update_dialog_status)
+        dialog.revoke_oauth_requested.connect(self._revoke_oauth_lichess)
+        def close_dialog(_result: int) -> None:
+            try:
+                self.lichess.session_status_changed.disconnect(update_dialog_status)
+            except (RuntimeError, TypeError):
+                pass
+            if self._connection_dialog is dialog:
+                self._connection_dialog = None
+        dialog.finished.connect(close_dialog)
         dialog.open()
 
     def _show_lichess_diagnostic_report(self) -> None:
@@ -3787,6 +5318,7 @@ class MainWindow(QMainWindow):
     def _select_lichess_auth_method(self, method: str) -> None:
         self._invalidate_analysis_preflight()
         self._lichess_connected = False
+        self._reset_backfill_status("Lichess · способ подключения изменён; ожидаем аккаунт")
         self.settings.setValue("lichess/selected_auth_method", method)
         self.settings.sync()
         if self.lichess is None:
@@ -3814,6 +5346,7 @@ class MainWindow(QMainWindow):
             return
         self._invalidate_analysis_preflight()
         self._lichess_connected = False
+        self._reset_backfill_status("Lichess · ожидаем OAuth-подключение")
         self.settings.setValue("lichess/selected_auth_method", "oauth")
         self.settings.sync()
         self.lichess.set_auth_method("oauth")
@@ -3824,6 +5357,7 @@ class MainWindow(QMainWindow):
             return
         self._invalidate_analysis_preflight()
         self._lichess_connected = False
+        self._reset_backfill_status("Lichess · проверяем новое подключение")
         self.settings.setValue("lichess/selected_auth_method", "personal_token")
         self.settings.sync()
         self.lichess.set_auth_method("personal_token")
@@ -3851,21 +5385,50 @@ class MainWindow(QMainWindow):
         except CredentialStorageError as exc:
             QMessageBox.warning(self, "Lichess", str(exc))
 
+    def _revoke_oauth_lichess(self) -> None:
+        if not self.lichess:
+            return
+        answer = QMessageBox.question(
+            self, "Отозвать OAuth-токен",
+            "Lichess отзовёт сохранённый OAuth-токен. Это действие не затрагивает PAT. Продолжить?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel,
+            QMessageBox.StandardButton.Cancel)
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+        # Drop the review safety lease before starting asynchronous revocation.
+        # Neither a successful nor failed revoke can restore this authorization.
+        self._lichess_status("Отзываем сохранённый OAuth-токен…")
+        self.lichess.revoke_oauth_credential()
+        if self._connection_dialog and shiboken6.isValid(self._connection_dialog):
+            self._connection_dialog.oauth_revoke_button.setEnabled(False)
+
     def disconnect_lichess(self) -> None:
         self._invalidate_analysis_preflight()
         self._lichess_connected = False
+        self._reset_backfill_status("Lichess · отключено")
         self._pause_batch_analysis()
         if self.lichess:
             self.lichess.disconnect_account()
 
     def _invalidate_analysis_preflight(self) -> None:
-        """Invalidate a pending safety reply when the authenticated session changes."""
+        """Fail closed and stop pending/running post-game work on trust changes."""
         self._analysis_session_generation += 1
+        self._revoke_review_safety(
+            "Заблокировано: изменилось состояние подключения; проверьте безопасность повторно.",
+            preserve_offline=True)
         self._pause_batch_analysis()
         self._disable_position_evaluation(
             "Проверка Stockfish остановлена: изменилось состояние подключения Lichess.")
         if self._analysis_safety_phase == "preflight" and self._analysis_safety_request_id:
             self._cancel_analysis_action(self._analysis_safety_request_id)
+        elif self._analysis_safety_phase == "running" and self._analysis_stop is not None:
+            self._analysis_stop.set()
+            if self._analysis_dialog is not None:
+                self._analysis_dialog.setLabelText(
+                    "Остановлено: нужна повторная проверка безопасности.")
+                button = self._analysis_dialog.findChild(QPushButton)
+                if button is not None:
+                    button.setEnabled(False)
 
     def _refresh_batch_readiness(self) -> None:
         dialog = self._batch_dialog
@@ -3960,18 +5523,58 @@ class MainWindow(QMainWindow):
         self.refresh("Открываем выбранную активную партию; позицию подтвердит поток Lichess.")
         self.lichess.start_game(session.game_id)
 
+    @staticmethod
+    def _lichess_status_invalidates_safety(status: str) -> bool:
+        """Return whether a service status makes Lichess safety unknown."""
+        return status.startswith((
+            "Не подключено", "Ошибка", "Ограничение Lichess (429)",
+            "Переподключение", "Проверка аккаунта отклонена",
+            "Требуется повторное подключение", "Проверяем подключение",
+            "Проверяем аккаунт", "Отзываем сохранённый OAuth-токен",
+            "OAuth-токен отозван", "Сохранённый OAuth-токен не найден",
+            "Не удалось отозвать OAuth-токен", "Ожидание авторизации",
+            "Финальная синхронизация партии", "Потеряно соединение с партией",
+        ))
+
+    @staticmethod
+    def _lichess_status_clears_authenticated_identity(status: str) -> bool:
+        """Whether Lichess has rejected or explicitly ended this account session."""
+        return status.startswith((
+            "Не подключено", "Ошибка",
+            "Проверка аккаунта отклонена", "Требуется повторное подключение",
+            "Проверяем подключение", "Проверяем аккаунт",
+            "Отзываем сохранённый OAuth-токен", "OAuth-токен отозван",
+            "Сохранённый OAuth-токен не найден", "Не удалось отозвать OAuth-токен",
+            "Ожидание авторизации",
+        ))
+
     def _lichess_status(self, status: str) -> None:
-        self.connection.setText("●  " + status)
-        connected = bool(self._lichess_connected and not self.offline_mode)
-        if (status == "Не подключено" or status == "Ошибка подключения"
-                or status.startswith("Ограничение Lichess (429)")
-                or status.startswith("Переподключение")):
-            self._disable_position_evaluation(
-                "Оценка Stockfish остановлена: подключение или безопасность неизвестны.")
-            self._pause_batch_analysis()
-        if status == "Не подключено":
+        display_status = ("●  Не подключено — подключите Lichess"
+                          if status == "Не подключено" else "●  " + status)
+        self.connection.setText(display_status)
+        if not self.offline_mode and self._lichess_status_invalidates_safety(status):
+            # Revoke review leases/exercises as well as live engine and batch
+            # work. A recovered transport never grants a new review lease.
             self._invalidate_analysis_preflight()
-            self._lichess_connected = False
+            if self._lichess_status_clears_authenticated_identity(status):
+                self._lichess_connected = False
+                self._event_stream_recovery_pending = False
+            elif (status.startswith("Переподключение")
+                  or (status.startswith("Ограничение Lichess (429)")
+                      and "переподключение" in status.casefold())):
+                # The account identity remains authenticated, but live actions
+                # stay gated until the current generation confirms stream recovery.
+                self._lichess_connected = False
+                self._event_stream_recovery_pending = True
+        elif status.startswith("Поток восстановлен: ") and not self.offline_mode:
+            # This status arrives through _lichess_session_status, which rejects
+            # stale auth generations before reaching this method.
+            self._lichess_connected = True
+            self._event_stream_recovery_pending = False
+        connected = bool(self._lichess_connected and not self.offline_mode)
+        if status == "Не подключено":
+            self.home_status.setText(
+                "Не подключено к Lichess. Подключите аккаунт, если хотите играть онлайн.")
             for session in self.online_sessions.values():
                 session.clear_unconfirmed_move_intent()
             if self.online_session is not None:
@@ -4004,9 +5607,7 @@ class MainWindow(QMainWindow):
         online_allowed = connected and self._lichess_rate_limit_remaining() == 0
         for button in (self.friend_link_button, self.username_button, self.ai_button):
             button.setEnabled(online_allowed)
-        for button in (self.home_ai_button, self.home_friend_button, self.home_username_button):
-            button.setEnabled(online_allowed)
-        self.active_games_button.setEnabled(online_allowed)
+        self._update_home_game_actions()
         self.home_archive_button.setEnabled(online_allowed)
         self.home_batch_analysis_button.setEnabled(True)
         self.home_pilot_import_button.setEnabled(online_allowed)
@@ -4019,7 +5620,7 @@ class MainWindow(QMainWindow):
 
     def _enable_restore_retry(self) -> None:
         if (self.lichess and self.lichess.token and not self._lichess_connected
-                and not self.offline_mode):
+                and not self.offline_mode and not self._event_stream_recovery_pending):
             self._restore_retry_ready = True
             self.connect_button.setText("Повторить подключение")
             self.connect_button.setEnabled(True)
@@ -4027,13 +5628,15 @@ class MainWindow(QMainWindow):
     def _lichess_rate_limit_remaining(self) -> int:
         if not self.lichess:
             return 0
-        return max(0, int(getattr(self.lichess.client, "rate_limit_remaining", 0)))
+        client = getattr(self.lichess, "client", None)
+        return max(0, int(getattr(client, "rate_limit_remaining", 0)))
 
     def _online_actions_allowed(self) -> bool:
         return bool(self.lichess and not self.offline_mode and self._lichess_connected
                     and self._lichess_rate_limit_remaining() == 0)
 
     def _refresh_online_controls(self) -> None:
+        self._update_play_mode_availability()
         if (not self.lichess or self.offline_mode or not self._lichess_connected):
             return
         remaining = self._lichess_rate_limit_remaining()
@@ -4055,6 +5658,11 @@ class MainWindow(QMainWindow):
             return
         self._invalidate_analysis_preflight()
         self._lichess_connected = True
+        self._event_stream_recovery_pending = False
+        self.lichess_analysis_status.setText(
+            "Lichess · подключено; фоновая аналитика будет проверена для этого аккаунта")
+        self.lichess_analysis_status.setToolTip("")
+        self.settings.setValue("workspace/selected_account", f"lichess:{username.strip().lower()}")
         self.connection.setText(f"●  Подключено: {username}")
         if self._connection_dialog is not None:
             self._connection_dialog.accept()
@@ -4078,10 +5686,18 @@ class MainWindow(QMainWindow):
             return  # Prioritize live play over background network traffic.
         self.lichess.sync_archive(background=True)
         self.lichess.sync_puzzle_activity_background(self.game_repository)
+        generation = getattr(self.lichess, "auth_generation", None)
+        if generation is not None and self._lichess_stream_ready_generation == generation:
+            self._start_lichess_analysis_backfill(generation)
 
     def _background_sync_finished(self, kind: str, message: str) -> None:
         if not self._shutdown_requested:
             self.connection.setToolTip(f"Последнее фоновое обновление {kind}: {message}")
+            if "Ошибка" in message or "не совпадают" in message:
+                self._notify_inline(f"Синхронизация {kind}: {message}")
+            elif "новых партий: 0" not in message and "новых попыток: 0" not in message:
+                if "новых партий:" in message or "новых попыток:" in message:
+                    self._notify_inline(f"Синхронизация {kind}: {message}", timeout_ms=6000)
 
     def _resume_pending_final_syncs(self) -> None:
         """Resume persisted terminal games without taking over the visible screen."""
@@ -4117,9 +5733,9 @@ class MainWindow(QMainWindow):
         if self._connection_dialog is not None and shiboken6.isValid(self._connection_dialog):
             self._connection_dialog.set_status(message)
         elif "HTTP 403" in message or "HTTP 401" in message:
-            self.home_status.setText(message + " Локальная библиотека и история остаются доступны.")
+            self._notify_inline(message + " Локальная библиотека и история остаются доступны.")
         else:
-            QMessageBox.warning(self, "Lichess", message)
+            self._notify_inline(message)
         self.refresh(message)
 
     def _lichess_move_failed(self, game_id: str, uci: str, request_id: str, status: int) -> None:
@@ -4218,10 +5834,21 @@ class MainWindow(QMainWindow):
     def play_ai(self) -> None:
         if not self._online_actions_allowed():
             return
-        dialog = OnlineGameDialog("Игра против Lichess AI", include_level=True, parent=self)
+        saved_limit = self.settings.value("workspace/ai_clock_limit", 180, type=int)
+        dialog = OnlineGameDialog("Игра против Lichess AI", include_level=True, parent=self,
+                                  defaults={
+                                      "color": self.settings.value("workspace/ai_color", "random", type=str),
+                                      "clock_limit": None if saved_limit < 0 else saved_limit,
+                                      "clock_increment": self.settings.value("workspace/ai_clock_increment", 2, type=int),
+                                      "level": self.settings.value("workspace/ai_level", 3, type=int),
+                                  })
         if dialog.exec() != QDialog.DialogCode.Accepted:
             return
         color, limit, increment, level, _ = dialog.selection()
+        self.settings.setValue("workspace/ai_color", color)
+        self.settings.setValue("workspace/ai_clock_limit", -1 if limit is None else int(limit))
+        self.settings.setValue("workspace/ai_clock_increment", int(increment))
+        self.settings.setValue("workspace/ai_level", int(level))
         self._awaiting_game_start = True
         self.game_status.setText("Создаём партию против Lichess AI…")
         self.home_status.setText("Создаём партию против Lichess AI…")
@@ -4300,6 +5927,9 @@ class MainWindow(QMainWindow):
             session.status = "started"
             session.set_server_game_identity(game)
             self.online_sessions[game_id] = session
+            if not session.is_ai_opponent:
+                self._revoke_review_safety(
+                    "Заблокировано: началась человеческая/непроверенная онлайн-партия.")
             self._refresh_batch_readiness()
             if (not session.is_ai_opponent
                     and getattr(self, "_analysis_stop", None) is not None):
@@ -4312,6 +5942,7 @@ class MainWindow(QMainWindow):
                 self._pause_batch_analysis()
             if self._awaiting_game_start and previous is None:
                 self._awaiting_game_start = False
+                self.sound_player.play_game_start(game_id)
                 self.board.clear_annotations()
                 self._selected_live_game_id = game_id
                 self.online_session = session
@@ -4328,6 +5959,7 @@ class MainWindow(QMainWindow):
                 game_status = game.get("status", {})
                 status = game_status.get("name", "unknownFinish") if isinstance(game_status, dict) else str(game_status)
                 session = self.online_sessions[game_id]
+                was_active = session.status in {"started", "playing", "created"}
                 error = None
                 if session.status in {"started", "playing", "created"}:
                     try:
@@ -4339,6 +5971,8 @@ class MainWindow(QMainWindow):
                 if session.final_sync_pending:
                     self.lichess.mark_game_finished(game_id)
                     self.lichess.start_game(game_id)
+                if was_active and game_id == self._selected_live_game_id:
+                    self.sound_player.play_game_end(game_id, len(session.board.move_stack))
                 self._refresh_batch_readiness()
                 if (game_id == self._selected_live_game_id
                         and self.online_session is session
@@ -4351,6 +5985,8 @@ class MainWindow(QMainWindow):
                             f"Партия завершена, локальная запись не подтверждена: {error}"
                         )
         elif kind == "challenge":
+            challenge_id = str(event.get("challenge", {}).get("id") or uuid.uuid4().hex)
+            self.sound_player.play_notification(challenge_id)
             if self._screen_mode == "home":
                 self.home_status.setText("Получено или обновлено приглашение Lichess.")
 
@@ -4384,6 +6020,8 @@ class MainWindow(QMainWindow):
                 self.refresh("Соперник временно отключился; ждём переподключения.")
             return
         previous_moves = tuple(session.moves.split())
+        previous_board = session.board.copy(stack=True)
+        previous_status = session.status
         previous_view_ply = self.online_view_ply if (
             game_id == self._selected_live_game_id and self.online_session is session
         ) else None
@@ -4416,6 +6054,15 @@ class MainWindow(QMainWindow):
             # Only the selected game's authoritative line can clear current
             # marks. A duplicate/clock event or background game must not.
             self.board.clear_annotations()
+            if (len(current_moves) == len(previous_moves) + 1
+                    and current_moves[:-1] == previous_moves):
+                confirmed = chess.Move.from_uci(current_moves[-1])
+                self.sound_player.play_move(
+                    game_id, len(current_moves), previous_board, confirmed,
+                    game_finished=session.status not in {"started", "playing", "created"})
+            elif (session.status not in {"started", "playing", "created"}
+                  and previous_status in {"started", "playing", "created"}):
+                self.sound_player.play_game_end(game_id, len(current_moves))
         if is_selected_live:
             if previous_view_ply is not None:
                 self.online_view_ply = min(previous_view_ply, len(session.board.move_stack))
@@ -4554,7 +6201,7 @@ class MainWindow(QMainWindow):
             widget.setVisible(False)
 
     def _sync_online_history(self, board: chess.Board, game_id: str, selected_ply: int) -> None:
-        """Append SAN rows for new plies; rebuild only on a new/divergent line."""
+        """Append SAN cells for confirmed plies; show white/black in one fullmove row."""
         moves = tuple(board.move_stack)
         previous = self._online_history_moves
         incremental = (
@@ -4578,23 +6225,19 @@ class MainWindow(QMainWindow):
                 position = None
                 start_ply = len(moves)
             if position is not None:
+                rows = []
                 for index in range(start_ply, len(moves)):
                     move = moves[index]
                     ply = index + 1
-                    prefix = f"{(ply + 1) // 2}. " if ply % 2 else f"{(ply + 1) // 2}... "
-                    item = QListWidgetItem(prefix + position.san(move))
-                    item.setData(Qt.ItemDataRole.UserRole, ply)
-                    self.moves.addItem(item)
+                    rows.append({"ply": ply, "san": position.san(move),
+                                 "mover": "white" if position.turn == chess.WHITE else "black",
+                                 "before_fen": position.fen()})
                     position.push(move)
+                for row in rows:
+                    self.moves.append_move(row, enabled=self.online_session is None or
+                                           not self._is_live_online_session())
             desired_ply = min(selected_ply, len(moves))
-            current = self.moves.currentItem()
-            if current is None or current.data(Qt.ItemDataRole.UserRole) != desired_ply:
-                selected = next((self.moves.item(i) for i in range(self.moves.count())
-                                 if self.moves.item(i).data(Qt.ItemDataRole.UserRole) == desired_ply), None)
-                if selected:
-                    self.moves.setCurrentItem(selected)
-                elif desired_ply == 0:
-                    self.moves.setCurrentRow(-1)
+            self.moves.select_ply(desired_ply)
             self._online_history_game_id = game_id
             self._online_history_moves = moves
             if not unchanged:
@@ -4609,16 +6252,77 @@ class MainWindow(QMainWindow):
             write_error = self.game_repository.write_error(session.game_id)
             if write_error:
                 self.game_status.setText(f"Ошибка сохранения локальной партии: {write_error}")
-        if not session or session.white_ms is None or session.black_ms is None:
-            self.clock_label.setText(
-                f"Контроль {session.clock_control}" if session and session.clock_control != "-" else "Без часов"
-            )
+        if not session:
+            self.clock_label.setText("Без часов")
+            self.opponent_clock_label.setText("Без часов")
+            self.you_clock_label.setText("Без часов")
+            self.opponent_clock_detail.clear()
+            self.you_clock_detail.clear()
+            self.opponent_clock_label.setStyleSheet("font-size: 28px; font-weight: 700; padding: 2px 8px;")
+            self.you_clock_label.setStyleSheet("font-size: 28px; font-weight: 700; padding: 2px 8px;")
             return
+        if session.white_ms is None or session.black_ms is None:
+            waiting = self._screen_mode == "online" and session.clock_control != "-"
+            fallback = "—:— · ожидаем часы Lichess" if waiting else "Без часов"
+            self.opponent_clock_label.setText(fallback)
+            self.you_clock_label.setText(fallback)
+            owner_is_white = session.color == chess.WHITE
+            opponent_increment = session.black_inc if owner_is_white else session.white_inc
+            owner_increment = session.white_inc if owner_is_white else session.black_inc
+            self.opponent_clock_detail.setText(
+                f"+{opponent_increment} с после подтверждённого хода" if opponent_increment else "")
+            self.you_clock_detail.setText(
+                f"+{owner_increment} с после подтверждённого хода" if owner_increment else "")
+            self.clock_label.setText(session.clock_control if waiting else "Без часов")
+            self.opponent_clock_label.setStyleSheet(
+                f"font-size: 28px; font-weight: 600; padding: 2px 8px; color: {TOKENS.secondary};")
+            self.you_clock_label.setStyleSheet(
+                f"font-size: 28px; font-weight: 600; padding: 2px 8px; color: {TOKENS.secondary};")
+            return
+        history_view = self._screen_mode != "online" or self.online_view_ply is not None
+        terminal_statuses = {"mate", "resign", "draw", "stalemate", "repetition", "50moves",
+                             "insufficientMaterial", "timeout", "outoftime", "cheat",
+                             "noStart", "variantEnd", "finished", "aborted"}
+        status_unknown = session.status not in {"started", "playing", *terminal_statuses}
+        paused = bool(session.awaiting_authoritative_snapshot or history_view
+                      or session.status not in {"started", "playing"})
+        syncing = bool(session.awaiting_authoritative_snapshot or
+                       history_view or status_unknown or
+                       (self._screen_mode == "online" and self._event_stream_recovery_pending))
         elapsed = (max(0, int((time.monotonic() - session._last_clock_at) * 1000))
-                   if session.status in {"started", "playing"} else 0)
-        white = max(0, session.white_ms - (elapsed if session.board.turn == chess.WHITE else 0))
-        black = max(0, session.black_ms - (elapsed if session.board.turn == chess.BLACK else 0))
-        self.clock_label.setText(f"Белые {white // 60000:02}:{white // 1000 % 60:02}   Чёрные {black // 60000:02}:{black // 1000 % 60:02}")
+                   if not paused and not syncing else 0)
+        white_text, white_warning = format_remaining_clock(
+            session.white_ms, elapsed_ms=elapsed,
+            active=(session.board.turn == chess.WHITE and not paused and not syncing), syncing=syncing)
+        black_text, black_warning = format_remaining_clock(
+            session.black_ms, elapsed_ms=elapsed,
+            active=(session.board.turn == chess.BLACK and not paused and not syncing), syncing=syncing)
+        owner_is_white = session.color == chess.WHITE
+        own_text, own_warning = (white_text, white_warning) if owner_is_white else (black_text, black_warning)
+        opponent_text, opponent_warning = (black_text, black_warning) if owner_is_white else (white_text, white_warning)
+        opponent_increment = session.black_inc if owner_is_white else session.white_inc
+        owner_increment = session.white_inc if owner_is_white else session.black_inc
+        self.opponent_clock_detail.setText(
+            f"+{opponent_increment} с после подтверждённого хода" if opponent_increment else "")
+        self.you_clock_detail.setText(
+            f"+{owner_increment} с после подтверждённого хода" if owner_increment else "")
+        owner_active = session.board.turn == session.color and not paused and not syncing
+        opponent_active = session.board.turn != session.color and not paused and not syncing
+        owner_marker = (("  ⚠ МЕНЬШЕ 30 СЕК" if own_warning else "")
+                        + ("  ◀ ХОД" if owner_active else ""))
+        opponent_marker = (("  ⚠ МЕНЬШЕ 30 СЕК" if opponent_warning else "")
+                           + ("  ◀ ХОД" if opponent_active else ""))
+        self.you_clock_label.setText(own_text + owner_marker)
+        self.opponent_clock_label.setText(opponent_text + opponent_marker)
+        self.you_clock_label.setStyleSheet(
+            f"font-size: 28px; font-weight: 800; padding: 2px 8px; color: #F3C969;" if own_warning else
+            f"font-size: 28px; font-weight: 800; padding: 2px 8px; color: {TOKENS.text};" if owner_active else
+            f"font-size: 28px; font-weight: 600; padding: 2px 8px; color: {TOKENS.secondary};")
+        self.opponent_clock_label.setStyleSheet(
+            f"font-size: 28px; font-weight: 800; padding: 2px 8px; color: #F3C969;" if opponent_warning else
+            f"font-size: 28px; font-weight: 800; padding: 2px 8px; color: {TOKENS.text};" if opponent_active else
+            f"font-size: 28px; font-weight: 600; padding: 2px 8px; color: {TOKENS.secondary};")
+        self.clock_label.setText(f"Контроль {format_clock_control(session.clock_control)} · часы Lichess")
 
     def resign_online(self) -> None:
         session = self.online_session
@@ -4700,13 +6404,14 @@ class MainWindow(QMainWindow):
             state["items"] = result["items"]
             games_list.clear()
             for game in result["items"]:
-                view_state = (f" · просмотр/анализ недоступны ({game.get('variant') or 'variant'})"
-                              if game.get("import_error") or game.get("variant", "standard") != "standard"
-                              else "")
-                opponent_label = game.get("account_opponent") or game["opponent"]
-                games_list.addItem(f"{game['white_player']} – {game['black_player']}  ·  "
-                                   f"для вас: {opponent_label}  ·  "
-                                   f"{game['status']}  ·  {game['updated_at'][:10]}{view_state}")
+                row_text, source_label = _archive_row_presentation(game)
+                item = QListWidgetItem(
+                    row_text)
+                item.setToolTip(f"Источник: {source_label}")
+                item.setData(Qt.ItemDataRole.AccessibleDescriptionRole, row_text.replace("\n", ". "))
+                games_list.addItem(item)
+            if not result["items"]:
+                games_list.addItem("Завершённых партий в этой выборке нет.")
             page_label.setText(f"Страница {state['page'] + 1} из {max(1, result['pages'])}"
                                f"  ·  {result['total']} партий")
             previous.setEnabled(state["page"] > 0)
@@ -4795,18 +6500,39 @@ class MainWindow(QMainWindow):
             self.home_status.setText("Проверяется активность Lichess для анализа.")
             return
         options = self._analysis_options_from_settings()
-        if not (self.lichess and self._lichess_connected):
-            answer = QMessageBox.question(
-                self, "Проверка перед анализом",
-                "Подключённый аккаунт Lichess не может быть проверен. Подтвердите, что сейчас "
-                "не участвуете в онлайн-партии с человеком, прежде чем запускать Stockfish.",
-                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel,
-                QMessageBox.StandardButton.Cancel)
-            if answer != QMessageBox.StandardButton.Yes:
-                return
-            self._launch_game_analysis(game_id, engine_path, options)
+        isolated_offline = bool(self.offline_mode and self.lichess is None
+                                and not self._lichess_connected)
+        if isolated_offline:
+            request_id = uuid.uuid4().hex
+            self._analysis_safety_request_id = request_id
+            self._analysis_safety_phase = "running"
+            self._analysis_safety_context = (
+                "offline", request_id, game_id, engine_path,
+                self._analysis_session_generation, None, None)
+            self.home_status.setText("Изолированный офлайн-анализ завершённой партии.")
+            self._launch_game_analysis(game_id, engine_path, options,
+                                       request_id=request_id)
             return
-
+        if (not self.lichess or not self._lichess_connected
+                or self._lichess_rate_limit_remaining() > 0):
+            self.home_status.setText(
+                "Stockfish заблокирован: подключите Lichess и дождитесь новой проверки "
+                "активных партий. Подтверждение пользователя не заменяет проверку безопасности.")
+            QMessageBox.information(
+                self, "Проверка перед анализом",
+                "В обычном режиме Stockfish запускается только после успешной проверки "
+                "активных партий Lichess. Подключитесь и повторите анализ.")
+            return
+        if not self.lichess:
+            # Defensive branch: offline/manual mode must never become a user-confirmed bypass.
+            self.home_status.setText("Stockfish заблокирован: состояние Lichess неизвестно.")
+            return
+        if not self.lichess.username:
+            self.home_status.setText("Не удалось определить подключённый аккаунт; анализ не запущен.")
+            return
+        if not self._online_actions_allowed():
+            self.home_status.setText("Stockfish заблокирован: подключение или Retry-After не готовы.")
+            return
         request_id = uuid.uuid4().hex
         account_id = str(getattr(self.lichess, "username", "") or "").strip().casefold()
         if not account_id:
@@ -4827,6 +6553,25 @@ class MainWindow(QMainWindow):
         )
         dialog.canceled.connect(lambda request=request_id: self._cancel_analysis_action(request))
         self.lichess.check_active_games_for_analysis(request_id)
+
+    def _request_saved_game_analysis(self, game_id: str) -> None:
+        """Route the review CTA through the existing post-game safety preflight."""
+        review = self.review_workspace.review
+        if (not review or str(review["game"].get("game_id")) != str(game_id)
+                or review["game"].get("status") in {"created", "started", "started_soon", "playing"}):
+            return
+        game = self.game_repository.get_game(str(game_id))
+        if not game or not self._is_standard_board_game(game):
+            self._notify_inline("Эту запись нельзя анализировать как стандартную завершённую партию.")
+            return
+        engine_path = str(self.settings.value("stockfish_path", "", type=str)).strip()
+        verified_path = str(self.settings.value("stockfish_verified_path", "", type=str)).strip()
+        if not engine_path or engine_path != verified_path or not Path(engine_path).is_file():
+            QMessageBox.information(
+                self, "Stockfish не настроен",
+                "Укажите локальный Stockfish в настройках и проверьте его перед анализом.")
+            return
+        self._start_game_analysis(str(game_id), engine_path)
 
     def _cancel_analysis_action(self, request_id: str) -> None:
         """Cancel either the server preflight or the analysis using one dialog."""
@@ -4858,7 +6603,7 @@ class MainWindow(QMainWindow):
             return False
         _request, _game_id, _engine_path, _options, generation, account_id, service = context
         current_account = str(getattr(self.lichess, "username", "") or "").strip().casefold()
-        if (not self._lichess_connected or self.lichess is not service
+        if (not self._online_actions_allowed() or self.lichess is not service
                 or generation != self._analysis_session_generation
                 or not account_id or current_account != account_id):
             self._cancel_analysis_action(request_id)
@@ -4870,6 +6615,8 @@ class MainWindow(QMainWindow):
         return classify_lichess_opponent(game) != "official_ai"
 
     def _analysis_safety_games_received(self, request_id: str, games: list[dict]) -> None:
+        if self._review_safety_games_received(request_id, games):
+            return
         if request_id == self._position_eval_preflight_id:
             self._position_eval_preflight_received(request_id, games)
             return
@@ -4902,7 +6649,6 @@ class MainWindow(QMainWindow):
                 "У аккаунта есть активная партия с человеком. Анализ Stockfish не запущен.")
             return
         _request, game_id, engine_path, options, _generation, _account_id, _service = context
-        self._analysis_safety_context = None
         self._analysis_safety_phase = "running"
         if self._analysis_dialog is not None:
             self._analysis_dialog.setLabelText("Анализ партии Stockfish…")
@@ -4911,6 +6657,8 @@ class MainWindow(QMainWindow):
                                    request_id=request_id)
 
     def _analysis_safety_error(self, request_id: str, message: str) -> None:
+        if self._review_safety_error_received(request_id, message):
+            return
         if request_id == self._position_eval_preflight_id:
             self._position_eval_preflight_error(request_id, message)
             return
@@ -4933,20 +6681,42 @@ class MainWindow(QMainWindow):
                               *, stop: threading.Event | None = None,
                               dialog: QProgressDialog | None = None,
                               request_id: str | None = None) -> None:
-        stop = stop or threading.Event()
+        """Start UCI only from isolated offline or a current successful preflight."""
+        request_id = request_id or self._analysis_safety_request_id
+        context = self._analysis_safety_context
+        isolated_offline = bool(
+            self.offline_mode and self.lichess is None and not self._lichess_connected
+            and context and context[0] == "offline" and context[1] == request_id
+            and context[2] == game_id
+            and context[4] == self._analysis_session_generation)
+        connected_preflight = bool(
+            not self.offline_mode and self._online_actions_allowed()
+            and self._analysis_safety_phase == "running"
+            and request_id and request_id == self._analysis_safety_request_id
+            and context and context[0] == request_id and context[1] == game_id
+            and context[4] == self._analysis_session_generation
+            and context[5] == str(getattr(self.lichess, "username", "") or "").strip().casefold()
+            and context[6] is self.lichess)
+        if not (isolated_offline or connected_preflight):
+            self.home_status.setText("Stockfish заблокирован: требуется актуальная проверка Fair Play.")
+            if dialog is not None:
+                dialog.close()
+            return
+        stop = stop or self._analysis_stop or threading.Event()
         if dialog is None:
             dialog = QProgressDialog("Запуск Stockfish…", "Отменить", 0, 0, self)
             dialog.setWindowTitle("Послепартийный анализ")
             dialog.setMinimumDuration(0)
             dialog.show()
             self._analysis_dialog = dialog
-            request_id = request_id or uuid.uuid4().hex
-            self._analysis_safety_request_id = request_id
-            self._analysis_safety_phase = "running"
             dialog.canceled.connect(lambda request=request_id: self._cancel_analysis_action(request))
         self._analysis_stop = stop
+        self._analysis_worker_context = (
+            request_id, game_id, self._analysis_session_generation, self.lichess,
+            isolated_offline, stop)
         active_human_ids = {session.game_id for session in self.online_sessions.values()
                             if session.status in {"started", "playing"} and not session.is_ai_opponent}
+
         def work():
             try:
                 result = CompletedGameAnalyzer(self.game_repository).analyze(
@@ -4957,10 +6727,10 @@ class MainWindow(QMainWindow):
                 self.analysis_finished.emit(game_id, result)
             except Exception as exc:
                 self.analysis_finished.emit(game_id, {"error": str(exc)})
+
         thread = threading.Thread(target=work, name="chess-coach-analysis", daemon=True)
         self._analysis_thread = thread
         thread.start()
-
     def _analysis_options_from_settings(self) -> AnalysisOptions:
         kind = self.settings.value("analysis_limit_kind", "nodes", type=str)
         value = self.settings.value("analysis_limit_value", 100_000, type=int)
@@ -4991,44 +6761,57 @@ class MainWindow(QMainWindow):
             self._analysis_dialog.setValue(done)
 
     def _analysis_finished(self, game_id: str, result: object) -> None:
-        self._analysis_stop = None
-        self._analysis_safety_request_id = None
-        self._analysis_safety_context = None
-        self._analysis_safety_phase = None
+        context = self._analysis_worker_context
+        stale_or_cancelled = bool(context and (
+            context[1] != game_id
+            or context[2] != self._analysis_session_generation
+            or context[5].is_set()
+            or (not context[4] and (context[3] is not self.lichess
+                                    or not self._online_actions_allowed()))))
+        if context is None and self._analysis_safety_phase == "running":
+            # Defensive fail-closed handling for any worker signal that lost its
+            # immutable launch context.
+            stale_or_cancelled = True
+        if context is None or context[0] == self._analysis_safety_request_id:
+            self._analysis_stop = None
+            self._analysis_safety_request_id = None
+            self._analysis_safety_context = None
+            self._analysis_safety_phase = None
+            self._analysis_worker_context = None
         if getattr(self, "_analysis_dialog", None):
             self._analysis_dialog.close()
             self._analysis_dialog = None
         if self._shutdown_requested:
             return
+        if stale_or_cancelled:
+            self.home_status.setText("Анализ остановлен: требуется новая проверка Fair Play.")
+            self._notify_inline("Анализ остановлен: изменилось состояние безопасности Lichess.")
+            return
         if isinstance(result, dict) and result.get("error"):
-            QMessageBox.warning(self, "Stockfish", result["error"])
+            self._notify_inline(f"Stockfish: {result['error']}")
         else:
             count = len(result.get("assessments", [])) if isinstance(result, dict) else 0
             if count:
-                dialog = QDialog(self)
-                dialog.setWindowTitle("Оценка партии · белые сверху положительны")
-                layout = QVBoxLayout(dialog)
-                layout.addWidget(QLabel(f"Оценено позиций: {count}. Источник: "
-                                        f"{result.get('source', 'Stockfish')}. Клик по графику открывает позицию."))
-                graph = EvaluationGraph(result["assessments"], dialog)
-                graph.selected_ply.connect(lambda ply: self._open_analysis_position(game_id, ply))
-                layout.addWidget(graph)
-                close = QPushButton("Закрыть")
-                close.clicked.connect(dialog.accept)
-                layout.addWidget(close)
-                dialog.resize(720, 320)
-                dialog.exec()
+                selected_ply = (self.review_workspace.selected_ply
+                                if self.review_workspace.review
+                                and self.review_workspace.review["game"]["game_id"] == game_id else 0)
+                if self._open_analysis_position(game_id, selected_ply):
+                    self._notify_inline(
+                        f"Анализ сохранён: оценено {count} позиций; открыт общий разбор партии.")
+                else:
+                    self._notify_inline(f"Анализ сохранён: оценено {count} позиций.")
             else:
-                QMessageBox.information(self, "Stockfish", "Оценок для этой партии нет.")
+                self._notify_inline("Stockfish не сохранил оценки для этой партии.")
 
-    def _open_analysis_position(self, game_id: str, ply: int) -> None:
+    def _open_analysis_position(self, game_id: str, ply: int) -> bool:
         game = self.game_repository.get_game(game_id)
         if not game:
-            return
+            return False
         if not self._open_saved_game(game):
             self.home_status.setText(self._raw_only_game_message(game))
-            return
-        self.navigate_to(ply)
+            return False
+        self.review_workspace.select_ply(ply)
+        return True
 
     @staticmethod
     def _is_standard_board_game(game: dict) -> bool:
@@ -5048,13 +6831,17 @@ class MainWindow(QMainWindow):
             self.home_status.setText(self._raw_only_game_message(game))
             return False
         self._disable_position_evaluation("Открыта другая партия; выполните новую проверку безопасности.")
+        self._revoke_review_safety(
+            "Оценки и варианты скрыты до проверки актуальной безопасности.",
+            preserve_offline=True)
         self.board.clear_annotations()
         session = LichessGameSession(game["game_id"], self.game_repository)
         session.initial_fen = game["initial_fen"]
         session.moves = game["moves"]
         account_color = game.get("account_color") or game.get("color")
         session.color = chess.WHITE if account_color == "white" else chess.BLACK
-        session.opponent = game["opponent"]
+        session.opponent = (game.get("account_opponent") or game.get("opponent") or
+                            game.get("black_player") or "Соперник")
         session.status = game["status"]
         session.winner = game["winner"]
         session.clock_control = game["clock"]
@@ -5063,9 +6850,21 @@ class MainWindow(QMainWindow):
         self._review_session = session
         self.online_view_ply = None
         self._screen_mode = "review"
-        self.screen_title.setText("Просмотр сохранённой партии")
-        self.screen_stack.setCurrentWidget(self.game_page)
-        self.refresh("Открыта локально сохранённая партия (только просмотр).")
+        self.board.set_flipped(session.color == chess.BLACK)
+        self.screen_title.setText("Разбор партии")
+        allowed, reason = self._review_training_safety()
+        try:
+            self.review_workspace.load_game(game, training_allowed=allowed,
+                                            training_block_reason=reason)
+        except (KeyError, ValueError) as exc:
+            self.home_status.setText(f"Не удалось открыть сохранённую линию: {exc}")
+            return False
+        self.screen_stack.setCurrentWidget(self.review_workspace)
+        self.game_status.setText("Сохранённая завершённая партия · только чтение")
+        self._active_route = "games"
+        self._schedule_workspace_save()
+        if not self.offline_mode and self._lichess_connected:
+            self._request_review_training_safety(str(game["game_id"]))
         return True
 
     def leave_online_game(self) -> None:
@@ -5084,6 +6883,8 @@ class MainWindow(QMainWindow):
         self.show_home()
 
     def closeEvent(self, event) -> None:
+        self._workspace_save_timer.stop()
+        self._persist_workspace_state()
         self._shutdown_requested = True
         self._position_eval_timer.stop()
         if self._position_eval_thread is not None:
@@ -5098,6 +6899,12 @@ class MainWindow(QMainWindow):
         analysis_running = bool(analysis_thread and analysis_thread.is_alive())
         batch_thread = self._batch_thread
         batch_running = bool(batch_thread and batch_thread.is_alive())
+        dashboard_thread = self._dashboard_thread
+        if dashboard_thread is not None and dashboard_thread.is_alive():
+            dashboard_thread.join(timeout=0.5)
+        dashboard_running = bool(dashboard_thread and dashboard_thread.is_alive())
+        if not dashboard_running:
+            self._dashboard_thread = None
         if analysis_running or batch_running:
             if self._analysis_shutdown_deadline is None:
                 self._analysis_shutdown_deadline = time.monotonic() + 10.0
@@ -5115,11 +6922,14 @@ class MainWindow(QMainWindow):
 
         workers_stopped = True
         if self.lichess:
-            close_method = self.lichess.close
-            try:
-                close_result = close_method(timeout=0.15)
-            except TypeError:
-                close_result = close_method()
+            close_method = getattr(self.lichess, "close", None)
+            if close_method is None:
+                close_result = True
+            else:
+                try:
+                    close_result = close_method(timeout=0.15)
+                except TypeError:
+                    close_result = close_method()
             workers_stopped = close_result is not False
         analysis_stopped = not (analysis_thread and analysis_thread.is_alive())
         batch_stopped = not (batch_thread and batch_thread.is_alive())
@@ -5129,7 +6939,7 @@ class MainWindow(QMainWindow):
         # has observed and released that child, even if state() already says stopped.
         engine_probes_stopped = not self._engine_probe_processes
         if (not workers_stopped or not analysis_stopped or not batch_stopped or not install_stopped
-                or not statistics_stopped
+                or not statistics_stopped or dashboard_running
                 or not engine_probes_stopped or self.game_repository.has_pending_writes()):
             event.ignore()
             self.home_status.setText(
@@ -5172,6 +6982,8 @@ class MainWindow(QMainWindow):
                 self._close_retry_timer.start()
             return
         self.game_repository.shutdown()
+        from .position_analysis import close_position_engines
+        close_position_engines()
         if self._offline_data_dir is not None:
             self._offline_data_dir.cleanup()
             self._offline_data_dir = None
