@@ -156,3 +156,4 @@ def test_manual_connect_runtime_creates_one_service_only_on_user_intent(tmp_path
     assert service is runtime.create_lichess_service(None, user_requested=True)
     assert len(constructed) == 1
     assert constructed[0]["repository"] is runtime.repository
+    assert constructed[0]["work_coordinator"] is runtime.work_coordinator

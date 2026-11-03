@@ -43,8 +43,7 @@ class LichessSyncMixin:
                                                    user="puzzle-activity-token")
                 puzzle_token = store.get()
                 if puzzle_token:
-                    with self._background_api_lock:
-                        username = str(self.client.get_account(puzzle_token)["username"])
+                    username = str(self.client.get_account(puzzle_token)["username"])
                 else:
                     callback = OAuthCallbackServer()
                     self._puzzle_callback = callback
@@ -57,11 +56,10 @@ class LichessSyncMixin:
                     self.puzzle_pilot_finished.emit(0, 0, "", "Пробный импорт отменён.")
                     return
                 self.puzzle_username = username
-                with self._background_api_lock:
-                    sync = PuzzleActivitySync(self.client, repo)
-                    result = sync.run_pilot(
-                        username, puzzle_token, stop, limit=limit,
-                        progress=lambda count, added: self.puzzle_pilot_progress.emit(count, added))
+                sync = PuzzleActivitySync(self.client, repo)
+                result = sync.run_pilot(
+                    username, puzzle_token, stop, limit=limit,
+                    progress=lambda count, added: self.puzzle_pilot_progress.emit(count, added))
                 received = int(result["received_count"])
                 new_count = int(result["new_count"])
                 run_id = str(result["run_id"])
@@ -96,15 +94,14 @@ class LichessSyncMixin:
         def work():
             count = 0
             try:
-                with self._background_api_lock:
-                    token = self.token_store.get()
-                    if not token:
-                        raise LichessError("Сначала подключите аккаунт Lichess.")
-                    username = self.username or str(self.client.get_account(token)["username"])
-                    sync = ArchiveSync(self.client, self.repository)
-                    count = sync.run(username, token, stop, full=full,
-                                     progress=(None if background else
-                                               lambda n, game_id: self.archive_progress.emit(n, game_id)))
+                token = self.token_store.get()
+                if not token:
+                    raise LichessError("Сначала подключите аккаунт Lichess.")
+                username = self.username or str(self.client.get_account(token)["username"])
+                sync = ArchiveSync(self.client, self.repository)
+                count = sync.run(username, token, stop, full=full,
+                                 progress=(None if background else
+                                           lambda n, game_id: self.archive_progress.emit(n, game_id)))
                 message = "Отменено." if stop.is_set() else f"Завершено, новых партий: {count}"
                 if background:
                     self.background_sync_finished.emit("партий", message)
@@ -128,19 +125,18 @@ class LichessSyncMixin:
         self._puzzle_stop = stop
         def work():
             try:
-                with self._background_api_lock:
-                    store = WindowsCredentialStore(
-                        service="ChessCoach.Lichess.Puzzles", user="puzzle-activity-token")
-                    token = store.get()
-                    if not token:
-                        return  # First-time authorization requires a user click.
-                    username = str(self.client.get_account(token)["username"])
-                    if username.casefold() != (self.username or "").casefold():
-                        self.background_sync_finished.emit(
-                            "задач", "Аккаунты не совпадают; обновление пропущено")
-                        return
-                    count = PuzzleActivitySync(self.client, repo).run(
-                        username, token, stop)
+                store = WindowsCredentialStore(
+                    service="ChessCoach.Lichess.Puzzles", user="puzzle-activity-token")
+                token = store.get()
+                if not token:
+                    return  # First-time authorization requires a user click.
+                username = str(self.client.get_account(token)["username"])
+                if username.casefold() != (self.username or "").casefold():
+                    self.background_sync_finished.emit(
+                        "задач", "Аккаунты не совпадают; обновление пропущено")
+                    return
+                count = PuzzleActivitySync(self.client, repo).run(
+                    username, token, stop)
                 if not stop.is_set():
                     self.background_sync_finished.emit(
                         "задач", f"Завершено, новых попыток: {count}")
@@ -178,8 +174,7 @@ class LichessSyncMixin:
                                                    user="puzzle-activity-token")
                 puzzle_token = store.get()
                 if puzzle_token:
-                    with self._background_api_lock:
-                        username = str(self.client.get_account(puzzle_token)["username"])
+                    username = str(self.client.get_account(puzzle_token)["username"])
                 else:
                     callback = OAuthCallbackServer()
                     self._puzzle_callback = callback
@@ -192,25 +187,24 @@ class LichessSyncMixin:
                     self.puzzles_finished.emit(0, "Синхронизация отменена.")
                     return
                 self.puzzle_username = username
-                with self._background_api_lock:
-                    account_id = repo.ensure_archive_account(username)
-                    sync_mode = ("incremental" if repo.puzzle_sync_state(account_id).get("backfill_complete")
-                                 else "initial backfill")
-                    self.puzzles_started.emit(sync_mode)
-                    sync = PuzzleActivitySync(self.client, repo)
-                    count = sync.run(username, puzzle_token, stop,
-                                     progress=lambda n: self.puzzles_progress.emit(n),
-                                     scanned=lambda n: self.puzzles_scanned.emit(n))
-                    status = ("Синхронизация отменена." if stop.is_set()
-                              else "История задач синхронизирована.")
-                    if not stop.is_set() and count > 0:
-                        try:
-                            dashboard = self.client.get_puzzle_dashboard(puzzle_token, 30)
-                            repo.save_puzzle_dashboard(account_id, 30, dashboard)
-                        except Exception:
-                            status += " Сводка Lichess недоступна; локальная статистика сохранена."
-                    elif not stop.is_set():
-                        status += " Новых попыток нет; сводный endpoint не запрашивался повторно."
+                account_id = repo.ensure_archive_account(username)
+                sync_mode = ("incremental" if repo.puzzle_sync_state(account_id).get("backfill_complete")
+                             else "initial backfill")
+                self.puzzles_started.emit(sync_mode)
+                sync = PuzzleActivitySync(self.client, repo)
+                count = sync.run(username, puzzle_token, stop,
+                                 progress=lambda n: self.puzzles_progress.emit(n),
+                                 scanned=lambda n: self.puzzles_scanned.emit(n))
+                status = ("Синхронизация отменена." if stop.is_set()
+                          else "История задач синхронизирована.")
+                if not stop.is_set() and count > 0:
+                    try:
+                        dashboard = self.client.get_puzzle_dashboard(puzzle_token, 30)
+                        repo.save_puzzle_dashboard(account_id, 30, dashboard)
+                    except Exception:
+                        status += " Сводка Lichess недоступна; локальная статистика сохранена."
+                elif not stop.is_set():
+                    status += " Новых попыток нет; сводный endpoint не запрашивался повторно."
                 self.puzzles_finished.emit(count, status)
             except Exception as exc:
                 self.puzzles_finished.emit(0, str(exc))
@@ -228,12 +222,11 @@ class LichessSyncMixin:
             return
         def work():
             try:
-                with self._background_api_lock:
-                    token = self.selected_token_store.get()
-                    if not token:
-                        raise LichessError("Сначала подключите аккаунт Lichess.")
-                    username = self.username or str(self.client.get_account(token)["username"])
-                    ArchiveSync(self.client, self.repository).refresh_game(username, token, game_id)
+                token = self.selected_token_store.get()
+                if not token:
+                    raise LichessError("Сначала подключите аккаунт Lichess.")
+                username = self.username or str(self.client.get_account(token)["username"])
+                ArchiveSync(self.client, self.repository).refresh_game(username, token, game_id)
                 self.archive_game_refresh_finished.emit(
                     game_id, "История этой партии обновлена из Lichess.")
             except Exception as exc:
@@ -252,15 +245,14 @@ class LichessSyncMixin:
         self._archive_stop = stop
         def work():
             try:
-                with self._background_api_lock:
-                    token = self.selected_token_store.get()
-                    if not token:
-                        raise LichessError("Сначала подключите аккаунт Lichess.")
-                    username = self.username or str(self.client.get_account(token)["username"])
-                    result = ArchiveSync(self.client, self.repository).run_pilot(
-                        username, token, stop, max_games=max_games,
-                        progress=lambda received, new, game_id:
-                        self.archive_pilot_progress.emit(received, new, game_id))
+                token = self.selected_token_store.get()
+                if not token:
+                    raise LichessError("Сначала подключите аккаунт Lichess.")
+                username = self.username or str(self.client.get_account(token)["username"])
+                result = ArchiveSync(self.client, self.repository).run_pilot(
+                    username, token, stop, max_games=max_games,
+                    progress=lambda received, new, game_id:
+                    self.archive_pilot_progress.emit(received, new, game_id))
                 message = ("Пробный импорт отменён; уже записанные партии сохранены."
                            if result["status"] == "interrupted" else "Пробный импорт завершён.")
                 self.archive_pilot_finished.emit(int(result["received"]), int(result["new"]), message)
@@ -292,49 +284,48 @@ class LichessSyncMixin:
 
         def work():
             try:
-                with self._background_api_lock:
-                    if not self.is_auth_generation_current(generation) or stop.is_set():
-                        return
-                    token = self.selected_token_store.get()
-                    if not token:
-                        return
-                    account_id = self.repository.ensure_archive_account(username)
-                    if not self.repository.lichess_analysis_backfill_has_due_work(
-                            account_id, daily_limit=daily_limit,
-                            force_retry=force_retry):
-                        # Avoid spending an account/playing API request when the
-                        # durable local queue is paused, complete, cooling down,
-                        # or has already reached its daily request budget.
-                        summary = self.repository.lichess_analysis_backfill_summary(account_id)
-                        retry_at = self.repository.lichess_analysis_retry_after(account_id)
-                        message = ("приостановлено" if self.repository.lichess_analysis_backfill_paused(account_id)
-                                   else "пауза · Retry-After" if retry_at
-                                   else "очередь готовой аналитики пуста")
-                        self.lichess_analysis_backfill_finished.emit(
-                            generation, username,
-                            int(summary.get("checked") or 0), int(summary.get("total") or 0),
-                            int(summary.get("accuracy") or 0), int(summary.get("evals") or 0),
-                            int(summary.get("no_data") or 0), int(summary.get("errors") or 0),
-                            message)
-                        return
-                    active_games = self.client.get_playing_games(token)
-                    from .session import classify_lichess_opponent
-                    if any(classify_lichess_opponent(game) != "official_ai"
-                           for game in active_games):
-                        self.lichess_analysis_backfill_finished.emit(
-                            generation, username,
-                            0, 0, 0, 0, 0, 0,
-                            "отложено · есть человеческая/неизвестная активная партия")
-                        return
-                    report = ArchiveSync(self.client, self.repository).refresh_ready_analytics(
-                        username, token, stop, limit=max(1, min(10, int(limit))),
-                        daily_limit=max(1, min(100, int(daily_limit))),
-                        force_retry=force_retry,
-                        generation_is_current=lambda: (
-                            self.is_auth_generation_current(generation)
-                            and self.username == username and not self._closing),
-                        progress=lambda done, total, game: self.lichess_analysis_backfill_progress.emit(
-                            generation, username, done, total, game))
+                if not self.is_auth_generation_current(generation) or stop.is_set():
+                    return
+                token = self.selected_token_store.get()
+                if not token:
+                    return
+                account_id = self.repository.ensure_archive_account(username)
+                if not self.repository.lichess_analysis_backfill_has_due_work(
+                        account_id, daily_limit=daily_limit,
+                        force_retry=force_retry):
+                    # Avoid spending an account/playing API request when the
+                    # durable local queue is paused, complete, cooling down,
+                    # or has already reached its daily request budget.
+                    summary = self.repository.lichess_analysis_backfill_summary(account_id)
+                    retry_at = self.repository.lichess_analysis_retry_after(account_id)
+                    message = ("приостановлено" if self.repository.lichess_analysis_backfill_paused(account_id)
+                               else "пауза · Retry-After" if retry_at
+                               else "очередь готовой аналитики пуста")
+                    self.lichess_analysis_backfill_finished.emit(
+                        generation, username,
+                        int(summary.get("checked") or 0), int(summary.get("total") or 0),
+                        int(summary.get("accuracy") or 0), int(summary.get("evals") or 0),
+                        int(summary.get("no_data") or 0), int(summary.get("errors") or 0),
+                        message)
+                    return
+                active_games = self.client.get_playing_games(token)
+                from .session import classify_lichess_opponent
+                if any(classify_lichess_opponent(game) != "official_ai"
+                       for game in active_games):
+                    self.lichess_analysis_backfill_finished.emit(
+                        generation, username,
+                        0, 0, 0, 0, 0, 0,
+                        "отложено · есть человеческая/неизвестная активная партия")
+                    return
+                report = ArchiveSync(self.client, self.repository).refresh_ready_analytics(
+                    username, token, stop, limit=max(1, min(10, int(limit))),
+                    daily_limit=max(1, min(100, int(daily_limit))),
+                    force_retry=force_retry,
+                    generation_is_current=lambda: (
+                        self.is_auth_generation_current(generation)
+                        and self.username == username and not self._closing),
+                    progress=lambda done, total, game: self.lichess_analysis_backfill_progress.emit(
+                        generation, username, done, total, game))
                 fatal_status = report.get("fatal_status")
                 if fatal_status in {401, 403}:
                     account_id = self.repository.ensure_archive_account(username)
@@ -402,15 +393,14 @@ class LichessSyncMixin:
         def work():
             refreshed = selected = 0
             try:
-                with self._background_api_lock:
-                    token = self.selected_token_store.get()
-                    if not token:
-                        raise LichessError("Сначала подключите аккаунт Lichess.")
-                    username = self.username or str(self.client.get_account(token)["username"])
-                    result = ArchiveSync(self.client, self.repository).refresh_missing_evaluations(
-                        username, token, stop, limit=limit,
-                        progress=lambda done, total, game_id:
-                        self.archive_eval_refresh_progress.emit(done, total, game_id))
+                token = self.selected_token_store.get()
+                if not token:
+                    raise LichessError("Сначала подключите аккаунт Lichess.")
+                username = self.username or str(self.client.get_account(token)["username"])
+                result = ArchiveSync(self.client, self.repository).refresh_missing_evaluations(
+                    username, token, stop, limit=limit,
+                    progress=lambda done, total, game_id:
+                    self.archive_eval_refresh_progress.emit(done, total, game_id))
                 refreshed = int(result["refreshed"])
                 selected = int(result["selected"])
                 message = ("Обновление оценок отменено." if result["cancelled"] else

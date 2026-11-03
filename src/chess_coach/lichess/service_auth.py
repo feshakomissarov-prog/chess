@@ -33,6 +33,39 @@ class LichessAuthMixin:
             return True
 
     def _thread(self, target, name: str) -> None:
+        coordinator = getattr(self, "work_coordinator", None)
+        if coordinator is not None:
+            lane = coordinator.lane_for_legacy_name(name)
+            stop_event = None
+            if "lichess-events" in name:
+                stop_event = self._connection_stop
+            elif name.startswith("chess-coach-game-"):
+                stop_event = self._game_stops.get(name.removeprefix("chess-coach-game-"))
+            elif "analysis-backfill" in name:
+                stop_event = self._analysis_backfill_stop
+            elif "puzzle" in name:
+                stop_event = self._puzzle_stop
+            elif "archive" in name:
+                stop_event = self._archive_stop
+            elif "challenge" in name:
+                stop_event = self._username_challenge_stop
+            with self._thread_lock:
+                if self._closing:
+                    return
+                try:
+                    operation = coordinator.start(
+                        target,
+                        kind=coordinator.kind_for_legacy_name(name),
+                        lane=lane,
+                        account_id=self.username,
+                        auth_generation=self.auth_generation,
+                        stop_event=stop_event,
+                        thread_name=f"chess-coach-{coordinator.kind_for_legacy_name(name)}",
+                    )
+                except RuntimeError:
+                    return
+                self._threads.append(operation)
+            return
         thread = threading.Thread(target=target, name=name, daemon=True)
         with self._thread_lock:
             if self._closing:

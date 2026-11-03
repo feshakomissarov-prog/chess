@@ -26,7 +26,7 @@ _HANDLER: logging.Handler | None = None
 _CONTEXT: contextvars.ContextVar[dict[str, str]] = contextvars.ContextVar(
     "chess_coach_diagnostic_context", default={})
 _LAST_ERROR_CODE = "none"
-_ALLOWED = {"duration_ms", "run_id", "job_id", "error_code", "status", "mode",
+_ALLOWED = {"duration_ms", "run_id", "job_id", "operation_id", "error_code", "status", "mode",
             "count", "new_count", "checked_count", "page", "http_status",
             "bytes", "records", "schema_version", "engine_verified", "thread",
             "response_type", "method", "route", "stage", "correlation_id",

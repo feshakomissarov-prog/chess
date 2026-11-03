@@ -6,6 +6,7 @@ import json
 import threading
 import time
 import uuid
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
 from dataclasses import dataclass
@@ -15,6 +16,7 @@ from urllib.parse import quote, urlencode
 from urllib.request import Request, urlopen
 
 from ..diagnostics import log_event
+from ..domain.work_context import current_work_priority
 
 
 class LichessError(RuntimeError):
@@ -31,6 +33,40 @@ class RateLimitError(LichessError):
     def __init__(self, retry_after: int = 60) -> None:
         super().__init__(f"Lichess ограничил частоту запросов. Повторите через {retry_after} с.", 429)
         self.retry_after = retry_after
+
+
+class _PriorityRequestGate:
+    """Admit one bounded HTTP request at a time; choose the highest priority next."""
+
+    def __init__(self) -> None:
+        self._condition = threading.Condition()
+        self._waiters: list[tuple[int, int]] = []
+        self._next_ticket = 0
+        self._active = False
+
+    @contextmanager
+    def request(self, priority: int):
+        with self._condition:
+            ticket = self._next_ticket
+            self._next_ticket += 1
+            waiter = (max(0, int(priority)), ticket)
+            self._waiters.append(waiter)
+            self._condition.notify_all()
+            while (self._active or waiter != max(self._waiters, key=lambda item: (item[0], -item[1]))):
+                self._condition.wait()
+            self._waiters.remove(waiter)
+            self._active = True
+        try:
+            yield
+        finally:
+            with self._condition:
+                self._active = False
+                self._condition.notify_all()
+
+    @property
+    def waiting_count(self) -> int:
+        with self._condition:
+            return len(self._waiters)
 
 
 @dataclass(frozen=True)
@@ -180,7 +216,10 @@ class LichessClient:
         self.transport = transport or UrlLibTransport()
         self.base_url = base_url.rstrip("/")
         self.request_timeout = request_timeout
-        self._request_lock = threading.Lock()
+        # Serialize one transport request and shared Retry-After state only.
+        # Workflow-level scans must yield between requests and never own this lock.
+        self._request_gate = _PriorityRequestGate()
+        self._cooldown_lock = threading.Lock()
         self._rate_limited_until = 0.0
 
     def _call(
@@ -207,14 +246,15 @@ class LichessClient:
             body = urlencode(form).encode("utf-8")
             headers["Content-Type"] = "application/x-www-form-urlencoded"
         try:
-            with self._request_lock:
-                self._check_cooldown_locked()
-                response = self.transport.request(
-                    method, url, headers, body, self.request_timeout
-                )
+            with self._request_gate.request(current_work_priority()):
+                with self._cooldown_lock:
+                    self._check_cooldown_locked()
+                response = self.transport.request(method, url, headers, body, self.request_timeout)
                 if response.status == 429:
                     retry_after = _retry_after_seconds(response.headers.get("Retry-After"))
-                    self._rate_limited_until = max(self._rate_limited_until, time.monotonic() + retry_after)
+                    with self._cooldown_lock:
+                        self._rate_limited_until = max(
+                            self._rate_limited_until, time.monotonic() + retry_after)
                     log_event("rate_limit_429", "lichess_api",
                               duration_ms=(time.monotonic() - started) * 1000,
                               http_status=429, mode=diagnostic_route,
@@ -258,7 +298,7 @@ class LichessClient:
 
     @property
     def rate_limit_remaining(self) -> int:
-        with self._request_lock:
+        with self._cooldown_lock:
             return max(0, int(self._rate_limited_until - time.monotonic() + 0.999))
 
     def _json_call(self, *args, **kwargs) -> dict:
@@ -528,7 +568,8 @@ class LichessClient:
         if form is not None:
             body = urlencode(form).encode("utf-8")
             headers["Content-Type"] = "application/x-www-form-urlencoded"
-        with self._request_lock:
+        # Long-lived event streams do not reserve the bounded-request gate.
+        with self._cooldown_lock:
             self._check_cooldown_locked()
         started = time.monotonic()
         byte_count = record_count = 0
@@ -558,7 +599,7 @@ class LichessClient:
                       bytes=byte_count, records=record_count, mode=diagnostic_mode)
         except RateLimitError as exc:
             retry_after = max(60, exc.retry_after)
-            with self._request_lock:
+            with self._cooldown_lock:
                 self._rate_limited_until = max(
                     self._rate_limited_until, time.monotonic() + retry_after
                 )

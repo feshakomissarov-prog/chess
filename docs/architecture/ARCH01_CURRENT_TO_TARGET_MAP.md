@@ -104,3 +104,12 @@ ui shell/pages/dialogs → app commands/read models         infrastructure adapt
 | Direct per-operation daemon threads and hidden queue/locks | One registry/policy coordinator plus independent interactive/safety/background/engine/write lanes | Existing signals forward lifecycle/progress IDs to UI |
 
 No benchmark, new product feature, Rust toolchain, data migration, WAL behavior change or secondary database is part of this map.
+
+### W5 — background operation registry and lanes
+
+- `application.background_work.BackgroundWorkCoordinator` records operation id, kind, lane, account/auth generation context, progress, terminal state, and cancellation/error reason. It starts an independent thread per operation; it is a registry/policy component, not a shared blocking executor.
+- LichessService's existing `_thread` compatibility method registers work with the coordinator when one is supplied; standalone service construction continues using its previous daemon-thread path.
+- Bounded HTTP requests use a priority gate that serializes a single transport call and admits interactive/safety work before queued background requests. NDJSON streams do not hold that gate. Archive sync no longer owns a lock across its whole scan and yields between HTTP pages.
+- Retry-After is guarded independently from request admission so streams and short requests observe the same cooldown without a stream blocking a board move.
+- Runtime shutdown waits for registered service work before repository shutdown; if work remains alive the close attempt is retried rather than closing its SQLite dependency.
+- Structured diagnostics accept the random operation id, but not account identity or secret-bearing execution context.

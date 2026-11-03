@@ -2,12 +2,13 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 import tempfile
 
 from PySide6.QtCore import QSettings, QStandardPaths
 
+from .application.background_work import BackgroundWorkCoordinator
 from .lichess.repository import GameRepository
 
 
@@ -18,6 +19,7 @@ class ApplicationRuntime:
     repository: GameRepository
     offline_mode: bool
     manual_connect_mode: bool
+    work_coordinator: BackgroundWorkCoordinator = field(default_factory=BackgroundWorkCoordinator)
     offline_data_dir: tempfile.TemporaryDirectory | None = None
     _lichess_service: object | None = None
     _closed: bool = False
@@ -37,6 +39,7 @@ class ApplicationRuntime:
                     user=WindowsCredentialStore.PERSONAL_TOKEN_USER),
                 auth_method=self.settings.value("lichess/selected_auth_method", "oauth", type=str),
                 repository=self.repository,
+                work_coordinator=self.work_coordinator,
                 parent=parent,
             )
             return self._lichess_service
@@ -60,14 +63,17 @@ class ApplicationRuntime:
             parent=parent,
         )
 
-    def close(self) -> None:
+    def close(self) -> bool:
         if self._closed:
-            return
+            return True
+        if not self.work_coordinator.close(timeout=0.5):
+            return False
         self._closed = True
         self.repository.shutdown()
         if self.offline_data_dir is not None:
             self.offline_data_dir.cleanup()
             self.offline_data_dir = None
+        return True
 
 
 def create_runtime(*, settings: QSettings | None = None, offline_mode: bool = False,
@@ -97,4 +103,4 @@ def create_runtime(*, settings: QSettings | None = None, offline_mode: bool = Fa
             offline_data_dir.cleanup()
         raise
     return ApplicationRuntime(active_settings, data_root, repository, offline_mode,
-                              manual_connect_mode, offline_data_dir)
+                              manual_connect_mode, offline_data_dir=offline_data_dir)

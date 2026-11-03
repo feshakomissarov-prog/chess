@@ -6980,7 +6980,15 @@ class MainWindow(QMainWindow):
                 self.setEnabled(False)
                 self._close_retry_timer.start()
             return
-        self.runtime.close()
+        if not self.runtime.close():
+            event.ignore()
+            self.home_status.setText(
+                "Завершаем фоновые операции; база останется открытой до безопасного завершения.")
+            if not self._close_retry_scheduled:
+                self._close_retry_scheduled = True
+                self.setEnabled(False)
+                self._close_retry_timer.start()
+            return
         from .position_analysis import close_position_engines
         close_position_engines()
         event.accept()

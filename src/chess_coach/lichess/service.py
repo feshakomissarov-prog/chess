@@ -54,7 +54,7 @@ class LichessService(QObject, LichessAuthMixin, LichessSyncMixin, LichessGameAct
 
     def __init__(self, client: LichessClient | None = None, token_store=None,
                  repository=None, parent=None, personal_token_store=None,
-                 auth_method: str = "oauth"):
+                 auth_method: str = "oauth", work_coordinator=None):
         super().__init__(parent)
         self.client = client or LichessClient()
         self.oauth_token_store = token_store or WindowsCredentialStore()
@@ -65,9 +65,9 @@ class LichessService(QObject, LichessAuthMixin, LichessSyncMixin, LichessGameAct
         self._auth_generation = 0
         self._auth_lock = threading.RLock()
         self.repository = repository
+        self.work_coordinator = work_coordinator
         self._archive_stop: threading.Event | None = None
         self._analysis_backfill_stop: threading.Event | None = None
-        self._background_api_lock = threading.Lock()
         self._puzzle_stop: threading.Event | None = None
         self._puzzle_callback: OAuthCallbackServer | None = None
         self._stop = threading.Event()

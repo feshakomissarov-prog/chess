@@ -83,3 +83,22 @@ Working branch: `codex/arch-01-modular-refactor` from `main` SHA `3e7f2cd48b1676
 - CI/physical Windows Lichess/OAuth не запускались; integration tests используют fakes.
 
 **Next:** W4 gate complete после full Lichess regressions; затем W5 вводит operation registry and independent resource lanes без единой блокирующей очереди.
+
+## W4 gate — завершён
+
+- Совместимый `LichessService` фасад и его API/OAuth/stream/backfill тесты прошли: **166 passed**.
+- Целевой расширенный повтор Lichess после начала W5 обнаружил, что извлечение общей HTTP-блокировки оставило старую ссылку в NDJSON пути. Исправлено: поток не занимает слот коротких HTTP запросов, а Retry-After защищён отдельным lock. Повторные Lichess/regression проверки прошли.
+- Реальных Lichess запросов не было.
+
+## W5 — registry операций и независимые линии исполнения (завершён)
+
+- Добавлен `application.background_work.BackgroundWorkCoordinator`: реестр operation id, типизированные стадии, lane/status/progress/cancellation reason/error code. Каждая операция сохраняет собственный thread; общий executor/FIFO для работы приложения не вводился.
+- `ApplicationRuntime` передаёт координатор в один `LichessService`. Существующий `_thread` compatibility seam регистрирует задачу, сохраняет тип остановки и generation/account context в памяти; текущее поведение worker signals и shutdown сохранено.
+- Удалён lock, который сериализовал целый archive scan с другими сетевыми потоками. Lichess transport ограничивает только отдельный HTTP-запрос; между запросами архивный sync уступает слот.
+- Запросная калитка выбирает следующий bounded HTTP request по приоритету (interactive/safety прежде background, FIFO в одном приоритете). Долгие NDJSON streams не занимают этот слот. 429/Retry-After остаётся общим безопасным cooldown.
+- Закрытие runtime сначала ждёт зарегистрированные worker operations и не закрывает SQLite, пока worker ещё жив; окно повторяет закрытие через существующий retry path.
+- `operation_id` добавлен в allowlist структурной диагностики; никакие account id, credentials, URL, payload, PGN или FEN туда не передаются. Добавлены fake tests для lanes, ошибки/отмены/прогресса, архива с уступкой между запросами и admission интерактивного запроса раньше ожидающего background запроса.
+- Проверки: `test_background_work.py` + `test_lichess_background_lanes.py`: **6 passed**; расширенный fake Lichess/OAuth/backfill/window набор в первом W5 прогоне: **355 passed** до добавления теста приоритета; отдельный повтор включал Lichess facade/stream/reconnect/429 и work lanes после исправления NDJSON lock. `compileall` и `git diff --check`: PASS.
+- Потоковые запросы всё ещё используют транспортный 35-секундный timeout и отмену через stop event; следующий короткий интерактивный запрос не ждёт весь поток. UI-initiated operations, которые синхронно выполняют SQL/HTTP, остаются предметом W7/W8 audit.
+
+**Next:** W6 вынести владение UCI process/analysis cancellation в `StockfishManager`, сохранив существующий Fair Play lease и настройки анализа.
