@@ -1400,8 +1400,8 @@ def test_explicit_offline_window_never_constructs_or_uses_lichess_credentials(qt
     def forbidden(*args, **kwargs):
         raise AssertionError("Offline mode must not construct Lichess or read credentials")
 
-    monkeypatch.setattr("chess_coach.window.WindowsCredentialStore", forbidden)
-    monkeypatch.setattr("chess_coach.window.LichessService", forbidden)
+    monkeypatch.setattr("chess_coach.lichess.auth.WindowsCredentialStore", forbidden)
+    monkeypatch.setattr("chess_coach.lichess.service.LichessService", forbidden)
     live_settings_path = tmp_path / "user-settings.ini"
     live_settings = QSettings(str(live_settings_path), QSettings.Format.IniFormat)
     live_settings.setValue("board_flipped", True)
@@ -1666,8 +1666,8 @@ def test_manual_connect_defers_lichess_and_credentials_until_button(qtbot, tmp_p
     def forbidden(*args, **kwargs):
         raise AssertionError("Manual mode must not initialize OAuth before explicit user intent")
 
-    monkeypatch.setattr("chess_coach.window.WindowsCredentialStore", forbidden)
-    monkeypatch.setattr("chess_coach.window.LichessService", forbidden)
+    monkeypatch.setattr("chess_coach.lichess.auth.WindowsCredentialStore", forbidden)
+    monkeypatch.setattr("chess_coach.lichess.service.LichessService", forbidden)
     settings = QSettings(str(tmp_path / "manual-settings.ini"), QSettings.Format.IniFormat)
     settings.setValue("board_flipped", True)
     settings.sync()
@@ -1726,7 +1726,7 @@ def test_normal_window_starts_async_restore_for_selected_auth_method(qtbot, tmp_
         rate_limit_remaining = 0
 
     class FakeService:
-        def __init__(self):
+        def __init__(self, **_kwargs):
             self.auth_method = "personal_token"
             self.username = None
             self.token = None
@@ -1740,7 +1740,14 @@ def test_normal_window_starts_async_restore_for_selected_auth_method(qtbot, tmp_
             return True
 
     service = FakeService()
-    monkeypatch.setattr(MainWindow, "_create_lichess_service", lambda _self: service)
+    class FakeCredentialStore:
+        PERSONAL_TOKEN_USER = "personal"
+        def __init__(self, **_kwargs): pass
+
+    monkeypatch.setattr("chess_coach.lichess.auth.WindowsCredentialStore",
+                        FakeCredentialStore)
+    monkeypatch.setattr("chess_coach.lichess.service.LichessService",
+                        lambda **_kwargs: service)
     monkeypatch.setattr(MainWindow, "_attach_lichess_service", lambda *_args: None)
     window = MainWindow(settings, asynchronous_storage=False)
     qtbot.addWidget(window)

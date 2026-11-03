@@ -51,6 +51,16 @@ ui shell/pages/dialogs → app commands/read models         infrastructure adapt
 
 ## Этапы и исходные владельцы
 
+### W1 завершённая часть
+
+- Добавлен framework-independent пакет `chess_coach.domain`: immutable `GameRef`, `GameSnapshot`, `ClockSnapshot`, `AnalysisScore`, `SourceCoverage`, `JobContext`; перечисления задают source и тип оценки.
+- `domain.ports` содержит Protocol-контракты для чтения/записи игры, feed, движка, отмены, событий и snapshot provider. Доменные типы не зависят от Qt, SQLite, сетевого транспорта или UI.
+- `chess_coach.bootstrap` стал явной точкой создания runtime, настроек и ровно одного `GameRepository`. `MainWindow` принимает готовый `ApplicationRuntime`; прямое конструирование окна и `python -m chess_coach` сохранены.
+- Runtime сохраняет режимы профиля: `--offline` создаёт временные настройки/SQLite; `--manual-connect` откладывает создание LichessService до пользовательского намерения; обычный запуск создаёт сервис для прежнего auto-restore. Runtime кеширует экземпляр сервиса, чтобы повторное действие не создавало второй.
+- `tests/test_architecture_w1.py` защищает типовые инварианты, import boundaries, временную изоляцию offline и создание ручного Lichess-клиента только по запросу. Существующие тесты launcher перенастроены на новый composition seam, без ослабления assertions.
+
+**Осталось в W1:** typed boundary conversions и no-import-side-effects proof расширить по мере появления application coordinators и инфраструктурных адаптеров; W1 commit фиксирует минимальные реально используемые контракты, без пустых plugin-слоёв.
+
 | Этап | Исходные точки | Проверяемое изменение |
 | --- | --- | --- |
 | W0 | `window.py`, `repository.py`, `service.py`, entrypoints, tests | Этот baseline/map, imports/routes/threads inventory |

@@ -11,12 +11,11 @@ import threading
 import platform
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-import tempfile
 import uuid
 import weakref
 import PySide6
 import shiboken6
-from PySide6.QtCore import QEvent, QProcess, QSettings, Qt, QStandardPaths, QTimer, Signal, qVersion, QUrl
+from PySide6.QtCore import QEvent, QProcess, QSettings, Qt, QTimer, Signal, qVersion, QUrl
 from PySide6.QtGui import QKeySequence, QShortcut, QColor, QPainter, QPen, QDesktopServices, QGuiApplication
 from PySide6.QtWidgets import (
     QCheckBox,
@@ -56,11 +55,12 @@ from .controller import GameController
 from .engine_manager import discover_stockfish, install_official_stockfish
 from .uci import popen_uci_hidden
 from .position_analysis import evaluate_position
-from .lichess.auth import CredentialStorageError, WindowsCredentialStore
+from .lichess.auth import CredentialStorageError
 from .lichess.analysis import AnalysisOptions, CLASSIFIER_VERSION, CompletedGameAnalyzer
 from .lichess.batch_analysis import BatchAnalysisRunner, FastPassOptions
 from .lichess.repository import GameRepository, SCHEMA_VERSION
 from .lichess.service import LichessService
+from .bootstrap import ApplicationRuntime, create_runtime
 from .lichess.session import LichessGameSession, classify_lichess_opponent
 from .lichess.statistics import StatisticsService
 from .diagnostics import anonymized_report, log_event, logs_directory
@@ -2050,53 +2050,38 @@ class MainWindow(QMainWindow):
         asynchronous_storage: bool = False,
         offline_mode: bool = False,
         manual_connect_mode: bool = False,
+        runtime: ApplicationRuntime | None = None,
     ) -> None:
         super().__init__()
         if offline_mode and manual_connect_mode:
             raise ValueError("--offline и --manual-connect нельзя включить одновременно")
-        self.offline_mode = offline_mode
-        self.manual_connect_mode = manual_connect_mode
-        self._offline_data_dir: tempfile.TemporaryDirectory | None = None
+        if settings is not None and runtime is not None and settings is not runtime.settings:
+            raise ValueError("MainWindow settings must be owned by the injected runtime")
+        if runtime is not None and (offline_mode or manual_connect_mode) and (
+                offline_mode != runtime.offline_mode
+                or manual_connect_mode != runtime.manual_connect_mode):
+            raise ValueError("MainWindow mode conflicts with the injected runtime")
         self._connection_dialog: LichessConnectionDialog | None = None
-        if offline_mode:
-            # Smoke runs must not read or write the owner's settings or game DB.
-            self._offline_data_dir = tempfile.TemporaryDirectory(prefix="chess-coach-offline-")
-            data_root = Path(self._offline_data_dir.name)
-            self.settings = QSettings(
-                str(data_root / "settings.ini"), QSettings.Format.IniFormat
-            )
-        else:
-            self.settings = settings if settings is not None else QSettings("ChessCoach", "ChessCoach")
-            data_root = Path(QStandardPaths.writableLocation(
-                QStandardPaths.StandardLocation.AppDataLocation
-            ))
-            data_root.mkdir(parents=True, exist_ok=True)
+        self.runtime = runtime or create_runtime(
+            settings=settings, offline_mode=offline_mode,
+            manual_connect_mode=manual_connect_mode,
+            asynchronous_storage=asynchronous_storage)
+        self._offline_data_dir = self.runtime.offline_data_dir
+        self.settings = self.runtime.settings
+        self.offline_mode = self.runtime.offline_mode
+        self.manual_connect_mode = self.runtime.manual_connect_mode
         selected_auth_method = self.settings.value("lichess/selected_auth_method", "oauth", type=str)
         if selected_auth_method not in {"oauth", "personal_token"}:
             selected_auth_method = "oauth"
             self.settings.setValue("lichess/selected_auth_method", selected_auth_method)
         color = self.settings.value("player_color", chess.WHITE, type=int)
         self.controller = GameController(chess.Color(color))
-        self.game_repository = GameRepository(data_root / "games.sqlite3", async_writes=asynchronous_storage)
-        self.sound_player = ChessSoundPlayer(
-            data_root / "sounds",
-            moves_enabled=self.settings.value("sound_moves_enabled", True, type=bool),
-            notifications_enabled=self.settings.value("sound_notifications_enabled", True, type=bool),
-            history_enabled=self.settings.value("sound_history_enabled", False, type=bool),
-            volume=self.settings.value("sound_volume", 45, type=int),
-            selections={
-                cue: self.settings.value(f"sound_selection_{cue}", default_id, type=str)
-                for cue, default_id in DEFAULT_SOUND_SELECTIONS.items()
-            }, parent=self)
+        self.game_repository = self.runtime.repository
+        self.sound_player = self.runtime.create_sound_player(self)
         self._online_history_game_id: str | None = None
         self._online_history_moves: tuple[chess.Move, ...] = ()
         self._online_history_position: chess.Board | None = None
-        if offline_mode or manual_connect_mode:
-            # Offline is isolated; manual-connect uses the normal profile but
-            # must not touch credentials or create workers before user intent.
-            self.lichess = None
-        else:
-            self.lichess = self._create_lichess_service()
+        self.lichess = self.runtime.create_lichess_service(self)
         self.online_sessions: dict[str, LichessGameSession] = {}
         self.online_session: LichessGameSession | None = None
         self._local_board_mode = "free"
@@ -2219,15 +2204,8 @@ class MainWindow(QMainWindow):
             QTimer.singleShot(75, self._restore_workspace_after_startup)
 
     def _create_lichess_service(self):
-        try:
-            return LichessService(token_store=WindowsCredentialStore(),
-                                  personal_token_store=WindowsCredentialStore(
-                                      user=WindowsCredentialStore.PERSONAL_TOKEN_USER),
-                                  auth_method=self.settings.value(
-                                      "lichess/selected_auth_method", "oauth", type=str),
-                                  repository=self.game_repository, parent=self)
-        except CredentialStorageError:
-            return None
+        """Compatibility hook; new assembly is owned by ApplicationRuntime."""
+        return self.runtime.create_lichess_service(self, user_requested=True)
 
     def _attach_lichess_service(self, service) -> None:
         service.session_status_changed.connect(self._lichess_session_status)
@@ -6981,12 +6959,9 @@ class MainWindow(QMainWindow):
                 self.setEnabled(False)
                 self._close_retry_timer.start()
             return
-        self.game_repository.shutdown()
+        self.runtime.close()
         from .position_analysis import close_position_engines
         close_position_engines()
-        if self._offline_data_dir is not None:
-            self._offline_data_dir.cleanup()
-            self._offline_data_dir = None
         event.accept()
         super().closeEvent(event)
 

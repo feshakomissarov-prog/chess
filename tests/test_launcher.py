@@ -32,13 +32,17 @@ def test_offline_cli_passes_isolation_mode_to_window(monkeypatch):
 
     monkeypatch.setattr(launcher, "QApplication", FakeApplication)
     monkeypatch.setattr(launcher, "MainWindow", FakeWindow)
+    runtime = object()
+    monkeypatch.setattr(launcher, "create_runtime",
+                        lambda **kwargs: (calls.update(runtime_args=kwargs), runtime)[1])
 
     assert launcher.main(["--offline"]) == 0
-    assert calls["window_kwargs"] == {
+    assert calls["runtime_args"] == {
         "asynchronous_storage": True,
         "offline_mode": True,
         "manual_connect_mode": False,
     }
+    assert calls["window_kwargs"] == {"runtime": runtime}
     assert calls["shown"] is True
 
 
@@ -63,13 +67,17 @@ def test_manual_connect_cli_passes_non_isolated_mode_to_window(monkeypatch):
 
     monkeypatch.setattr(launcher, "QApplication", FakeApplication)
     monkeypatch.setattr(launcher, "MainWindow", FakeWindow)
+    runtime = object()
+    monkeypatch.setattr(launcher, "create_runtime",
+                        lambda **kwargs: (calls.update(runtime_args=kwargs), runtime)[1])
 
     assert launcher.main(["--manual-connect"]) == 0
-    assert calls["window_kwargs"] == {
+    assert calls["runtime_args"] == {
         "asynchronous_storage": True,
         "offline_mode": False,
         "manual_connect_mode": True,
     }
+    assert calls["window_kwargs"] == {"runtime": runtime}
     assert calls["shown"] is True
     assert "activation_callback" in calls
 
@@ -94,12 +102,16 @@ def test_ordinary_cli_launch_uses_auto_restore_mode(monkeypatch):
     monkeypatch.setattr(launcher, "QApplication", FakeApplication)
     monkeypatch.setattr(launcher, "MainWindow", FakeWindow)
     monkeypatch.setattr(launcher, "acquire_single_instance", lambda _path: FakeGuard())
+    runtime = object()
+    monkeypatch.setattr(launcher, "create_runtime",
+                        lambda **kwargs: (calls.update(runtime_args=kwargs), runtime)[1])
     assert launcher.main([]) == 0
-    assert calls["kwargs"] == {
+    assert calls["runtime_args"] == {
         "asynchronous_storage": True,
         "offline_mode": False,
         "manual_connect_mode": False,
     }
+    assert calls["kwargs"] == {"runtime": runtime}
     assert calls["shown"]
 
 
