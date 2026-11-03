@@ -1,3 +1,11 @@
+## 03.11.2026 — принято целевое архитектурное решение ARCH-01
+
+После объединения PR #41 (M4.6) и PR #42 (утверждённая модель компетенций) владелец согласовал **модульный монолит Python 3.12 + PySide6**: один Windows desktop продукт, внутренние независимые модули, единую координацию асинхронных заданий без глобальной очереди для живых ходов, чёткие транзакционные SQLite-границы, отдельный менеджер Stockfish, непрерывный fail-closed Fair Play и обезличенную диагностику. Целевая платформа — обычный Windows-ноутбук 4 CPU cores / 8 ГБ RAM / SSD; Rust остаётся возможной *точечной* будущей оптимизацией при доказанном bottleneck. Обязательные benchmarks/latency SLA **сейчас отложены по решению владельца**.
+
+[Целевая архитектура](architecture/CHESS_COACH_TARGET_ARCHITECTURE.md) · [исполняемое Codex ТЗ ARCH-01](architecture/ARCHITECTURE_REFACTOR_EXECUTION_SPEC.md) · [ADR-0001](architecture/ADR-0001-MODULAR-MONOLITH.md). **ARCH-01 пока не реализован**: Codex должен открыть отдельный draft PR от актуального main, затем независимое code review и физический Windows pilot владельца; merge только после нового разрешения. Новые фичи GPT/дебютов/ML/voice и ROADMAP в рамках архитектурного этапа не изменять.
+
+---
+
 ## 03.11.2026 — M4.6 объединена с main; утверждённая модель Chess Coach
 
 **Код M4.6:** [PR #41](https://github.com/feshakomissarov-prog/chess/pull/41) объединён по разрешению владельца после ручной проверки. Проверенный head `2c3ccbd99c0c33526fb2bd996ab777a0ec5c8d31`, [Windows CI #41625429734](https://github.com/feshakomissarov-prog/chess/actions/runs/41625429734) — SUCCESS, 553 PASS; merge commit `27b42d3dc482efeff3c64ad3399f96bc74fcb041`. Физическую ручную проверку выполнил владелец; автоматическое тестирование не заменяет проверку настоящего Lichess, устройства звука и DPI.
