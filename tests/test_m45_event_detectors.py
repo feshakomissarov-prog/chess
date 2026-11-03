@@ -205,7 +205,7 @@ def test_selective_review_runs_only_capped_positions_and_persists_multipv_altern
         assert engine.configure_calls == [{"Threads": 1, "Hash": 128}]
         assert len(result["alternatives"]) == 4
         assert all(item["multipv_rank"] in {1, 2} for item in result["alternatives"])
-        assert len(checks) == 3  # before process start and before each search
+        assert len(checks) == 5  # before start, after factory, before each search, and before save
         detail = repository.latest_analysis_detail("review-game", 1)
         assert detail and detail["status"] == "partial"
         assert len(detail["alternatives"]) == 4
@@ -280,14 +280,14 @@ def test_selective_review_stops_on_cancellation_or_changed_safety_without_saving
             analyzer.review_selected_positions("cancel-review", engine_file, [1],
                                                 safety_check=lambda: True, stop_event=stop)
         assert engine.searches == 0
-        assert engine.quit_calls == 1
+        assert engine.quit_calls == 0  # pre-cancel returns before creating an engine
         assert repository.list_analyses("cancel-review") == []
         checks = iter([True, False])
         with pytest.raises(InterruptedError, match="safety state changed"):
             analyzer.review_selected_positions("cancel-review", engine_file, [1],
                                                 safety_check=lambda: next(checks))
         assert engine.searches == 0
-        assert engine.quit_calls == 2
+        assert engine.quit_calls == 1
         assert repository.list_analyses("cancel-review") == []
     finally:
         repository.shutdown()

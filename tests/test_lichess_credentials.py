@@ -49,7 +49,7 @@ class AccountClient:
             raise self.error
         return self.result
 
-    def stream_events(self, token, stop):
+    def stream_events(self, token, stop, on_connected=None):
         return iter(())
 
 
@@ -173,6 +173,53 @@ def test_personal_token_success_saves_only_after_account_validation_and_restores
     assert client.calls[-1] == "synthetic-new-personal-token"
     service.close()
     restarted.close()
+
+
+def test_restore_without_selected_credential_stays_local_and_makes_no_api_request(qtbot):
+    class TrackingEmptyStore(MemoryStore):
+        def __init__(self):
+            super().__init__()
+            self.reads = 0
+
+        def get(self):
+            self.reads += 1
+            return None
+
+    store = TrackingEmptyStore()
+    client = AccountClient()
+    service = LichessService(client=client, token_store=store,
+                             personal_token_store=MemoryStore(), auth_method="oauth")
+    statuses = []
+    service.session_status_changed.connect(lambda generation, value: statuses.append(value))
+    service.restore()
+    join_worker(service)
+    qtbot.waitUntil(lambda: bool(statuses) and statuses[-1] == "Не подключено", timeout=1000)
+    assert store.reads == 1
+    assert client.calls == []
+    assert service.username is None
+    assert statuses[-1] == "Не подключено"
+    service.close()
+
+
+def test_restore_reads_credentials_off_the_calling_thread():
+    entered = threading.Event()
+    release = threading.Event()
+
+    class BlockingStore(MemoryStore):
+        def get(self):
+            entered.set()
+            assert release.wait(2)
+            return None
+
+    service = LichessService(client=AccountClient(), token_store=BlockingStore(),
+                             personal_token_store=MemoryStore(), auth_method="oauth")
+    service.restore()
+    assert entered.wait(1)
+    assert any(worker.name == "chess-coach-restore-auth" and worker.is_alive()
+               for worker in service._threads)
+    release.set()
+    join_worker(service)
+    service.close()
 
 
 @pytest.mark.parametrize("status", [401, 403])
@@ -320,6 +367,242 @@ def test_pat_disconnect_and_local_delete_never_revoke_remote_token():
     service.delete_saved_personal_token()
     assert client.revocations == 0
     assert personal.value is None
+    service.close()
+
+
+def test_disconnect_is_local_and_generation_switch_cannot_stop_new_same_name_session():
+    class Client(AccountClient):
+        def __init__(self):
+            super().__init__()
+            self.revocations = []
+
+        def revoke_token(self, token):
+            self.revocations.append(token)
+
+    oauth = MemoryStore("oauth-b")
+    personal = MemoryStore("pat-a")
+    client = Client()
+    service = LichessService(client=client, token_store=oauth,
+                             personal_token_store=personal,
+                             auth_method="personal_token")
+    statuses = []
+    service.session_status_changed.connect(
+        lambda generation, status: statuses.append((generation, status)))
+    service.username = "SameName"
+    stale_generation = service.auth_generation
+    old_stop = service._connection_stop
+
+    service.disconnect_account()
+    assert old_stop.is_set()
+    assert personal.value == "pat-a"
+    assert client.revocations == []
+
+    service.set_auth_method("oauth")
+    current_generation = service.auth_generation
+    new_stop = service._connection_stop
+    service.username = "SameName"
+    assert not service._emit_session_status(stale_generation, "Не подключено")
+    assert not new_stop.is_set()
+    assert service.username == "SameName"
+    assert statuses[-1] == (current_generation, "Не подключено")
+    assert oauth.value == "oauth-b"
+    service.close()
+
+
+@pytest.mark.parametrize("status", [403, 429])
+def test_old_stream_error_after_switch_cannot_replace_new_connected_status(qtbot, status):
+    entered = threading.Event()
+    release = threading.Event()
+
+    class Client(AccountClient):
+        def stream_events(self, token, stop, on_connected=None):
+            if token == "old-session":
+                entered.set()
+                assert release.wait(2)
+                if status == 429:
+                    from chess_coach.lichess.api import RateLimitError
+                    raise RateLimitError(90)
+                raise LichessError("old response", status, "html")
+            entered_new.set()
+            stop.wait(2)
+            return
+            yield  # pragma: no cover
+
+    entered_new = threading.Event()
+    service = LichessService(client=Client(), token_store=MemoryStore("oauth"),
+                             personal_token_store=MemoryStore("pat"), auth_method="oauth")
+    service.username = "SameName"
+    statuses = []
+    errors = []
+    service.session_status_changed.connect(lambda gen, message: statuses.append((gen, message)))
+    service.session_error.connect(lambda gen, message: errors.append((gen, message)))
+    service._start_event_stream("old-session")
+    old_worker = service._threads[-1]
+    assert entered.wait(1)
+
+    service.set_auth_method("personal_token")
+    generation_b = service.auth_generation
+    service.username = "SameName"
+    service._start_event_stream("new-session", expected_generation=generation_b)
+    assert entered_new.wait(1)
+    assert statuses[-1] == (generation_b, "Подключено: SameName")
+
+    release.set()
+    qtbot.waitUntil(lambda: not old_worker.is_alive(), timeout=1000)
+    assert service.is_auth_generation_current(generation_b)
+    assert statuses[-1] == (generation_b, "Подключено: SameName")
+    assert errors == []
+    service.disconnect_account()
+    join_worker(service)
+    service.close()
+
+
+def test_new_generation_can_restore_while_old_account_check_is_still_blocked(qtbot, monkeypatch):
+    old_entered = threading.Event()
+    release_old = threading.Event()
+    authenticated = []
+
+    class Client(AccountClient):
+        def get_account(self, token):
+            self.calls.append(token)
+            if token == "old-oauth":
+                old_entered.set()
+                assert release_old.wait(2)
+            return {"username": "SameName"}
+
+    service = LichessService(client=Client(), token_store=MemoryStore("old-oauth"),
+                             personal_token_store=MemoryStore("new-pat"), auth_method="oauth")
+    monkeypatch.setattr(service, "_start_event_stream", lambda *_args, **_kwargs: None)
+    service.session_authenticated.connect(
+        lambda generation, username: authenticated.append((generation, username)))
+    service.restore()
+    assert old_entered.wait(1)
+
+    service.set_auth_method("personal_token")
+    new_generation = service.auth_generation
+    service.restore()
+    qtbot.waitUntil(lambda: authenticated == [(new_generation, "SameName")], timeout=1000)
+
+    release_old.set()
+    join_worker(service)
+    assert authenticated == [(new_generation, "SameName")]
+    assert service.username == "SameName"
+    service.close()
+
+
+def test_old_game_full_event_after_account_switch_is_discarded(qtbot):
+    entered = threading.Event()
+    release = threading.Event()
+    new_stop_ref = []
+
+    class Client(AccountClient):
+        def stream_game(self, token, game_id, stop):
+            entered.set()
+            assert release.wait(2)
+            yield {"type": "gameFull", "state": {"moves": "e2e4", "status": "started"}}
+
+        def stream_events(self, token, stop, on_connected=None):
+            new_stop_ref.append(stop)
+            stop.wait(2)
+            return
+            yield  # pragma: no cover
+
+    service = LichessService(client=Client(), token_store=MemoryStore("oauth"),
+                             personal_token_store=MemoryStore("pat"), auth_method="oauth")
+    received = []
+    service.session_game_event_received.connect(
+        lambda generation, game_id, event: received.append((generation, game_id, event)))
+    service.start_game("same-game", "old-session")
+    old_worker = service._threads[-1]
+    assert entered.wait(1)
+    service.set_auth_method("personal_token")
+    generation_b = service.auth_generation
+    service.username = "SameName"
+    current_stop = service._connection_stop
+    service._start_event_stream("new-session", expected_generation=generation_b)
+    qtbot.waitUntil(lambda: bool(new_stop_ref), timeout=1000)
+
+    release.set()
+    qtbot.waitUntil(lambda: not old_worker.is_alive(), timeout=1000)
+    assert received == []
+    assert service._connection_stop is current_stop
+    assert not current_stop.is_set()
+    service.disconnect_account()
+    join_worker(service)
+    service.close()
+
+
+def test_late_old_game_start_is_not_delivered_or_started(qtbot):
+    entered = threading.Event()
+    release = threading.Event()
+    new_started = threading.Event()
+
+    class Client(AccountClient):
+        def stream_events(self, token, stop, on_connected=None):
+            if token == "old-session":
+                entered.set()
+                assert release.wait(2)
+                yield {"type": "gameStart", "game": {"gameId": "old-game"}}
+                return
+            new_started.set()
+            stop.wait(2)
+            return
+            yield  # pragma: no cover
+
+    service = LichessService(client=Client(), token_store=MemoryStore("oauth"),
+                             personal_token_store=MemoryStore("pat"), auth_method="oauth")
+    started_games = []
+    events = []
+    service.start_game = lambda *args, **kwargs: started_games.append((args, kwargs))
+    service.session_event_received.connect(
+        lambda generation, event: events.append((generation, event)))
+    service._start_event_stream("old-session")
+    old_worker = service._threads[-1]
+    assert entered.wait(1)
+
+    service.set_auth_method("personal_token")
+    generation_b = service.auth_generation
+    service.username = "SameName"
+    service._start_event_stream("new-session", expected_generation=generation_b)
+    assert new_started.wait(1)
+    release.set()
+    qtbot.waitUntil(lambda: not old_worker.is_alive(), timeout=1000)
+
+    assert events == []
+    assert started_games == []
+    assert service.is_auth_generation_current(generation_b)
+    service.disconnect_account()
+    join_worker(service)
+    service.close()
+
+
+def test_explicit_oauth_revoke_does_not_delete_replacement_credential():
+    entered = threading.Event()
+    release = threading.Event()
+
+    class DelayedClient(AccountClient):
+        def __init__(self):
+            super().__init__()
+            self.revoked = []
+
+        def revoke_token(self, token):
+            self.revoked.append(token)
+            entered.set()
+            assert release.wait(2)
+
+    oauth = MemoryStore("oauth-old")
+    client = DelayedClient()
+    service = LichessService(client=client, token_store=oauth,
+                             personal_token_store=MemoryStore("pat"), auth_method="oauth")
+    service.revoke_oauth_credential()
+    assert entered.wait(1)
+    oauth.set("oauth-new")
+    with service._auth_lock:
+        service._cancel_active_session()
+    release.set()
+    join_worker(service)
+    assert client.revoked == ["oauth-old"]
+    assert oauth.value == "oauth-new"
     service.close()
 
 

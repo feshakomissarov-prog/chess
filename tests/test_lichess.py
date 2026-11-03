@@ -31,9 +31,11 @@ class FakeTransport:
         self.calls.append((method, url, headers, body))
         return self.responses.pop(0)
 
-    def stream(self, method, url, headers, body, timeout, stop_event):
+    def stream(self, method, url, headers, body, timeout, stop_event, on_connected=None):
         if self.stream_error:
             raise self.stream_error
+        if on_connected is not None:
+            on_connected()
         yield from self.lines
 
 
@@ -297,6 +299,31 @@ def test_analysis_safety_snapshot_is_one_explicit_fail_closed_request(monkeypatc
     assert failures and failures[0][0] == "req-429" and "90" in failures[0][1]
 
 
+def test_ready_analytics_worker_does_not_poll_playing_when_durable_queue_has_no_due_work(
+        monkeypatch, tmp_path):
+    class TokenStore:
+        def get(self):
+            return "fake-token"
+
+    class Client:
+        def get_playing_games(self, _token):
+            raise AssertionError("No safety request is needed when the local queue is empty")
+
+    repository = GameRepository(tmp_path / "empty-backfill.sqlite3")
+    service = LichessService(client=Client(), token_store=TokenStore(), repository=repository)
+    service.username = "Me"
+    service._auth_generation = 1
+    service.is_auth_generation_current = lambda generation: generation == 1
+    monkeypatch.setattr(service, "_thread", lambda target, _name: target())
+    results = []
+    service.lichess_analysis_backfill_finished.connect(lambda *args: results.append(args))
+
+    service.refresh_lichess_analysis_background(generation=1)
+
+    assert results and results[0][-1] == "очередь готовой аналитики пуста"
+    repository.shutdown()
+
+
 def test_retry_after_header_is_honored_and_stream_429_blocks_regular_requests():
     fake = FakeTransport([HttpResponse(429, {"Retry-After": "125"}, b"{}")])
     client = LichessClient(fake)
@@ -392,7 +419,7 @@ def test_event_stream_429_waits_before_retry_and_does_not_spin(monkeypatch):
         def __init__(self):
             self.calls = 0
 
-        def stream_events(self, token, stop_event):
+        def stream_events(self, token, stop_event, on_connected=None):
             self.calls += 1
             raise RateLimitError(70)
             yield  # pragma: no cover
@@ -423,6 +450,171 @@ def test_event_stream_429_waits_before_retry_and_does_not_spin(monkeypatch):
     assert client.calls == 1
     assert service._connection_stop.waits == [70]
     assert any(message.startswith("Ограничение Lichess (429)") for message in statuses)
+
+
+def test_event_stream_recovery_is_reported_only_after_same_generation_event(monkeypatch):
+    class TokenStore:
+        def get(self):
+            return "fake-token"
+
+    class StopControl:
+        def __init__(self):
+            self.stopped = False
+            self.waits = 0
+        def is_set(self):
+            return self.stopped
+        def set(self):
+            self.stopped = True
+        def wait(self, _seconds):
+            self.waits += 1
+            if self.waits == 2:
+                self.stopped = True
+                return True
+            return False
+
+    class Client:
+        def __init__(self):
+            self.calls = 0
+        def stream_events(self, _token, _stop_event, on_connected=None):
+            self.calls += 1
+            if self.calls == 1:
+                raise LichessError("synthetic temporary disconnect")
+            on_connected()
+            yield {"type": "challenge", "challenge": {"id": "synthetic"}}
+
+    stop = StopControl()
+    client = Client()
+    service = LichessService(client=client, token_store=TokenStore())
+    service.username = "Owner"
+    service._connection_stop = stop
+    statuses, events = [], []
+    service.session_status_changed.connect(lambda generation, status:
+                                           statuses.append((generation, status)))
+    service.session_event_received.connect(lambda generation, event:
+                                           events.append((generation, event)))
+    monkeypatch.setattr(service, "_thread", lambda target, _name: target())
+
+    service._start_event_stream("fake-token", expected_generation=service.auth_generation)
+
+    assert client.calls == 2
+    assert (service.auth_generation, "Переподключение…") in statuses
+    assert (service.auth_generation, "Поток восстановлен: Owner") in statuses
+    assert events == [(service.auth_generation,
+                       {"type": "challenge", "challenge": {"id": "synthetic"}})]
+
+
+def test_idle_keepalive_stream_confirms_recovery_without_emitting_game_event(monkeypatch):
+    class TokenStore:
+        def get(self):
+            return "fake-token"
+
+    class StopControl:
+        def __init__(self):
+            self.stopped = False
+            self.waits = 0
+        def is_set(self):
+            return self.stopped
+        def set(self):
+            self.stopped = True
+        def wait(self, _seconds):
+            self.waits += 1
+            return False
+
+    class KeepaliveTransport:
+        def __init__(self):
+            self.calls = 0
+            self.service = None
+            self.stop = None
+        def stream(self, _method, _url, _headers, _body, _timeout, _stop_event,
+                   on_connected=None):
+            self.calls += 1
+            if self.calls == 1:
+                raise LichessError("synthetic temporary disconnect")
+            on_connected()  # Headers accepted; no JSON event is sent.
+            yield b"\n"
+            self.stop.set()
+
+    stop = StopControl()
+    transport = KeepaliveTransport()
+    client = LichessClient(transport=transport, base_url="https://lichess.test")
+    service = LichessService(client=client, token_store=TokenStore())
+    service.username = "Owner"
+    service._connection_stop = stop
+    transport.service = service
+    transport.stop = stop
+    statuses, events = [], []
+    service.session_status_changed.connect(lambda generation, status:
+                                           statuses.append((generation, status)))
+    service.session_status_changed.connect(
+        lambda _generation, status: stop.set()
+        if status.startswith("Поток восстановлен:") else None)
+    service.session_event_received.connect(lambda generation, event:
+                                           events.append((generation, event)))
+    monkeypatch.setattr(service, "_thread", lambda target, _name: target())
+
+    service._start_event_stream("fake-token", expected_generation=service.auth_generation)
+
+    assert transport.calls == 2
+    assert (service.auth_generation, "Переподключение…") in statuses
+    assert (service.auth_generation, "Поток восстановлен: Owner") in statuses
+    assert events == []  # Empty keepalive is transport liveness, never a game event.
+
+
+@pytest.mark.parametrize("invalidator", ["stale_generation", "cancelled_connection"])
+def test_late_stream_ready_after_stale_or_cancelled_session_is_ignored(
+        monkeypatch, invalidator):
+    class TokenStore:
+        def get(self):
+            return "fake-token"
+
+    class StopControl:
+        def __init__(self):
+            self.stopped = False
+            self.waits = 0
+        def is_set(self):
+            return self.stopped
+        def set(self):
+            self.stopped = True
+        def wait(self, _seconds):
+            self.waits += 1
+            return False
+
+    class DelayedReadyTransport:
+        def __init__(self):
+            self.calls = 0
+            self.service = None
+            self.stop = None
+        def stream(self, _method, _url, _headers, _body, _timeout, _stop_event,
+                   on_connected=None):
+            self.calls += 1
+            if self.calls == 1:
+                raise LichessError("synthetic temporary disconnect")
+            if invalidator == "stale_generation":
+                self.service._auth_generation += 1
+            else:
+                self.stop.set()
+            on_connected()
+            yield b"\n"
+
+    stop = StopControl()
+    transport = DelayedReadyTransport()
+    service = LichessService(
+        client=LichessClient(transport=transport, base_url="https://lichess.test"),
+        token_store=TokenStore())
+    service.username = "Owner"
+    service._connection_stop = stop
+    transport.service = service
+    transport.stop = stop
+    statuses = []
+    service.session_status_changed.connect(lambda generation, status:
+                                           statuses.append((generation, status)))
+    monkeypatch.setattr(service, "_thread", lambda target, _name: target())
+    original_generation = service.auth_generation
+
+    service._start_event_stream("fake-token", expected_generation=original_generation)
+
+    assert transport.calls == 2
+    assert not any(status.startswith("Поток восстановлен:") for _, status in statuses)
 
 
 def test_finished_game_stream_interrupt_has_bounded_retry_and_keeps_sync_pending(monkeypatch):
@@ -750,8 +942,10 @@ def test_targeted_game_export_requests_only_the_validated_game_id():
 def test_archive_endpoint_streams_json_page_with_cursor_parameters():
     stop = threading.Event()
     class StreamTransport(FakeTransport):
-        def stream(self, method, url, headers, body, timeout, stop_event):
+        def stream(self, method, url, headers, body, timeout, stop_event, on_connected=None):
             self.calls.append((method, url, headers, body))
+            if on_connected is not None:
+                on_connected()
             yield from self.lines
     fake = StreamTransport(lines=[b'{"id":"game1","pgn":"1. e4 *"}\n'])
     client = LichessClient(fake, base_url="https://lichess.test")
@@ -1032,6 +1226,137 @@ def test_engine_startup_cancellation_quits_engine_without_analysis(tmp_path):
     repo.shutdown()
 
 
+def test_pre_cancelled_analysis_never_creates_engine_process(tmp_path):
+    from chess_coach.lichess.analysis import CompletedGameAnalyzer
+
+    repo = GameRepository(tmp_path / "analysis-pre-cancel.sqlite3")
+    repo.save_snapshot("pre-cancel", "startpos", "e2e4", "white", "Friend",
+                       False, "-", "finished", "white")
+    engine_path = tmp_path / "fake-engine.exe"
+    engine_path.write_bytes(b"synthetic executable")
+    stop = threading.Event()
+    stop.set()
+    factory_calls = []
+
+    def factory(path):
+        factory_calls.append(path)
+        pytest.fail("pre-cancelled analysis must not spawn an engine")
+
+    with pytest.raises(InterruptedError, match="до запуска движка"):
+        CompletedGameAnalyzer(repo, factory).analyze(
+            "pre-cancel", engine_path, stop_event=stop)
+    assert factory_calls == []
+    assert repo.list_analyses("pre-cancel") == []
+    repo.shutdown()
+
+
+def test_cancel_during_sqlite_analysis_transaction_rolls_back_only_new_run(tmp_path):
+    from chess_coach.lichess.analysis import AnalysisOptions, CompletedGameAnalyzer
+
+    repo = GameRepository(tmp_path / "analysis-cancel-transaction.sqlite3")
+    repo.save_snapshot("transaction-cancel", "startpos", "", "white", "Friend",
+                       False, "-", "finished", "white")
+    line = repo.current_line("transaction-cancel")
+    old_run = repo.save_analysis(
+        "transaction-cancel", line_revision=line["line_revision"],
+        line_hash=line["line_hash"], source="stockfish", engine_name="PreviousFish",
+        engine_version="previous-version", parameters={"previous": True},
+        assessments=[{"ply": 0, "white_cp": 15, "depth": 10, "nodes": 100}],
+        classifications=[])
+    engine_path = tmp_path / "fake-engine.exe"
+    engine_path.write_bytes(b"synthetic executable")
+    stop = threading.Event()
+    entered_commit_check, allow_commit_check = threading.Event(), threading.Event()
+    failure = []
+
+    class FakeResult:
+        def __init__(self):
+            self.info = {"score": chess.engine.PovScore(chess.engine.Cp(30), chess.WHITE),
+                         "depth": 12, "nodes": 1000, "pv": []}
+        def __enter__(self): return self
+        def __exit__(self, *_args): pass
+        def __iter__(self): return iter((self.info,))
+
+    class FakeEngine:
+        id = {"name": "CommitFish", "author": "synthetic"}
+        def configure(self, _options): pass
+        def analysis(self, _board, _limit): return FakeResult()
+        def quit(self): pass
+
+    def cancel_check_at_commit():
+        entered_commit_check.set()
+        if not allow_commit_check.wait(3):
+            raise AssertionError("test did not release the SQLite commit barrier")
+        return stop.is_set()
+
+    original_save = repo.save_analysis
+    def save_with_commit_barrier(*args, **kwargs):
+        kwargs["cancel_check"] = cancel_check_at_commit
+        return original_save(*args, **kwargs)
+    repo.save_analysis = save_with_commit_barrier
+
+    analyzer = CompletedGameAnalyzer(repo, lambda _path: FakeEngine())
+    def worker():
+        try:
+            analyzer.analyze("transaction-cancel", engine_path,
+                             AnalysisOptions(limit_kind="nodes", limit_value=30_000),
+                             stop_event=stop)
+        except Exception as exc:
+            failure.append(exc)
+
+    thread = threading.Thread(target=worker, name="synthetic-analysis-commit-test")
+    thread.start()
+    assert entered_commit_check.wait(3), "analysis never reached its in-transaction cancel check"
+    stop.set()
+    allow_commit_check.set()
+    thread.join(5)
+
+    assert not thread.is_alive()
+    assert len(failure) == 1 and isinstance(failure[0], InterruptedError)
+    runs = repo.list_analyses("transaction-cancel")
+    assert [run["run_id"] for run in runs] == [old_run]
+    with repo._connection() as db:
+        stored = db.execute("SELECT white_cp FROM position_assessments WHERE run_id=?",
+                            (old_run,)).fetchone()
+    assert stored["white_cp"] == 15
+    repo.shutdown()
+
+
+def test_completed_analysis_cancelled_after_last_position_is_not_persisted(tmp_path):
+    from chess_coach.lichess.analysis import CompletedGameAnalyzer
+
+    repo = GameRepository(tmp_path / "analysis-cancel-before-commit.sqlite3")
+    repo.save_snapshot("cancel-before-commit", "startpos", "", "white", "Friend",
+                       False, "-", "finished", "white")
+    engine_path = tmp_path / "fake-engine.exe"
+    engine_path.write_bytes(b"synthetic executable")
+    stop = threading.Event()
+
+    class FakeEngine:
+        id = {"name": "FakeFish", "author": "Test"}
+        def configure(self, _options): pass
+        def analysis(self, _board, _limit):
+            info = {"score": chess.engine.PovScore(chess.engine.Cp(0), chess.WHITE),
+                    "depth": 20, "nodes": 100_000, "pv": []}
+            class Result:
+                def __init__(self): self.info = info
+                def __enter__(self): return self
+                def __exit__(self, *_args): pass
+                def __iter__(self): return iter((info,))
+            return Result()
+        def quit(self): pass
+
+    def progress(done, total):
+        assert done == total == 1
+        stop.set()
+
+    with pytest.raises(InterruptedError, match="до сохранения"):
+        CompletedGameAnalyzer(repo, lambda _path: FakeEngine()).analyze(
+            "cancel-before-commit", engine_path, progress=progress, stop_event=stop)
+    assert repo.list_analyses("cancel-before-commit") == []
+    repo.shutdown()
+
+
 def test_engine_stream_error_stops_result_quits_engine_and_saves_nothing(tmp_path):
     from chess_coach.lichess.analysis import CompletedGameAnalyzer
 
@@ -1074,12 +1399,14 @@ def test_archive_import_keeps_lichess_pgn_evaluations_as_separate_source(tmp_pat
         "id": "eval-game",
         "pgn": '[Event "Archive"]\n[White "Me"]\n[Black "Friend"]\n[Result "1/2-1/2"]\n\n'
                '1. e4 { [%eval 0.25] } e5 1/2-1/2\n',
-        "lastMoveAt": 1000, "accuracy": {"white": 91.2, "black": 88.0},
+        "lastMoveAt": 1000,
+        "players": {"white": {"analysis": {"accuracy": 91}},
+                    "black": {"analysis": {"accuracy": 88}}},
         "division": {"middle": {"begin": 1}, "end": {"begin": 2}},
     }, checkpoint_ms=1000, backfill=True)
     game = repo.get_game("eval-game")
     assert game["raw_pgn"].find("[%eval 0.25]") >= 0
-    assert game["lichess_accuracy_white"] == 91.2
+    assert game["lichess_accuracy_white"] == 91
     runs = repo.list_analyses("eval-game")
     assert len(runs) == 1 and runs[0]["source"] == "lichess-pgn"
     cached = repo.find_analysis_cache("eval-game", 1, runs[0]["line_hash"],
@@ -1332,8 +1659,10 @@ def test_puzzle_activity_oauth_scope_and_activity_endpoint_are_explicit():
     auth = create_authorization_request("http://127.0.0.1/callback", scopes="puzzle:read")
     assert parse_qs(urlparse(auth.url).query)["scope"] == ["puzzle:read"]
     class StreamTransport(FakeTransport):
-        def stream(self, method, url, headers, body, timeout, stop_event):
+        def stream(self, method, url, headers, body, timeout, stop_event, on_connected=None):
             self.calls.append((method, url, headers, body))
+            if on_connected is not None:
+                on_connected()
             yield b'{"date":100,"win":true,"puzzle":{"id":"p1"}}\n'
     fake = StreamTransport()
     client = LichessClient(fake, base_url="https://lichess.test")
@@ -1770,13 +2099,15 @@ def test_puzzle_incremental_imports_1501_records_in_durable_pages(tmp_path):
 
 def test_archive_games_endpoint_uses_until_and_rejects_before_parameter():
     class StrictTransport(FakeTransport):
-        def stream(self, method, url, headers, body, timeout, stop_event):
+        def stream(self, method, url, headers, body, timeout, stop_event, on_connected=None):
             query = parse_qs(urlparse(url).query)
             allowed = {"max", "sort", "pgnInJson", "clocks", "evals", "accuracy",
                        "opening", "division", "finished", "ongoing", "since", "until"}
             assert not (set(query) - allowed)
             assert "before" not in query
             self.calls.append((method, url, headers, body))
+            if on_connected is not None:
+                on_connected()
             yield b'{"id":"g1","pgn":"1. e4 *"}\n'
     fake = StrictTransport()
     list(LichessClient(fake, base_url="https://lichess.test").stream_user_games(

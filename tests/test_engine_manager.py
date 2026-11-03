@@ -173,7 +173,8 @@ def test_uci_verification_runs_readiness_handshake_and_hashes_executable(tmp_pat
         def ping(self): calls.append("ready")
         def quit(self): calls.append("quit")
     monkeypatch.setattr(em.chess.engine.SimpleEngine, "popen_uci",
-                        lambda command, timeout, cwd: (calls.append((command, timeout, cwd)) or FakeEngine()))
+                        lambda command, **kwargs: (calls.append((command, kwargs["timeout"], kwargs["cwd"]))
+                                                  or FakeEngine()))
     result = em.verify_uci_engine(executable)
     assert result["name"] == "Stockfish fixture"
     assert result["sha256"] == hashlib.sha256(b"uci fixture").hexdigest()
@@ -188,21 +189,26 @@ def test_position_evaluator_uses_python_chess_analysis_and_returns_white_pov(mon
     class Analysis:
         info = {"score": Score(), "pv": [chess.Move.from_uci("e2e4")],
                 "depth": 12, "nodes": 1000}
+        def __iter__(self): return iter([self.info])
         def wait(self): return type("Best", (), {"move": chess.Move.from_uci("e2e4")})()
         def stop(self): pass
     class Engine:
-        def analysis(self, board, limit):
+        def analysis(self, board, limit, **kwargs):
             assert board.fen() == chess.Board().fen()
             assert limit.time == 2.0
+            assert kwargs["info"] == chess.engine.INFO_ALL
             return Analysis()
         def quit(self): pass
-    monkeypatch.setattr("chess_coach.position_analysis.chess.engine.SimpleEngine.popen_uci",
-                        lambda *args, **kwargs: Engine())
+    import chess_coach.position_analysis as position_module
+    monkeypatch.setattr(position_module, "popen_uci_hidden", lambda *args, **kwargs: Engine())
     result = evaluate_position(str(tmp_path / "stockfish.exe"), chess.Board(),
                                threading.Event(), {})
     assert result["score_white_cp"] == 35
     assert result["best_move"] == "e2e4"
     assert result["depth"] == 12
+    # The process is deliberately retained for the next position in this session.
+    from chess_coach.position_analysis import close_position_engines
+    close_position_engines()
 
 
 def test_position_evaluator_stops_stale_analysis(monkeypatch, tmp_path):
@@ -210,6 +216,7 @@ def test_position_evaluator_stops_stale_analysis(monkeypatch, tmp_path):
     calls = []
     class Analysis:
         info = {}
+        def __iter__(self): return iter(())
         def wait(self): return type("Best", (), {"move": None})()
         def stop(self): calls.append("stop")
     class Engine:
@@ -217,8 +224,55 @@ def test_position_evaluator_stops_stale_analysis(monkeypatch, tmp_path):
             stop.set()
             return Analysis()
         def quit(self): calls.append("quit")
-    monkeypatch.setattr("chess_coach.position_analysis.chess.engine.SimpleEngine.popen_uci",
-                        lambda *args, **kwargs: Engine())
+    import chess_coach.position_analysis as position_module
+    monkeypatch.setattr(position_module, "popen_uci_hidden", lambda *args, **kwargs: Engine())
     result = evaluate_position(str(tmp_path / "stockfish.exe"), chess.Board(), stop, {})
     assert result == {"cancelled": True}
-    assert calls == ["stop", "quit"]
+    assert calls == ["stop"]
+    from chess_coach.position_analysis import close_position_engines
+    close_position_engines()
+    assert calls[-1] == "quit"
+
+
+def test_uci_launch_options_hide_console_on_windows():
+    import os
+    from chess_coach.uci import hidden_process_options
+    options = hidden_process_options()
+    if os.name == "nt":
+        assert options["creationflags"] & __import__("subprocess").CREATE_NO_WINDOW
+        assert options["startupinfo"].dwFlags & __import__("subprocess").STARTF_USESHOWWINDOW
+        assert options["startupinfo"].wShowWindow == __import__("subprocess").SW_HIDE
+    else:
+        assert options == {}
+
+
+def test_position_evaluator_reuses_one_engine_for_a_local_session(monkeypatch, tmp_path):
+    import chess_coach.position_analysis as position_module
+    position_module.close_position_engines()
+    starts, quits = [], []
+    class Score:
+        def pov(self, _color): return self
+        def score(self, mate_score=None): return 0
+        def mate(self): return None
+    class Analysis:
+        def __init__(self):
+            self.info = {"score": Score(), "pv": [chess.Move.from_uci("e2e4")], "depth": 1}
+        def __iter__(self): return iter([self.info])
+        def wait(self): return type("Best", (), {"move": chess.Move.from_uci("e2e4")})()
+        def stop(self): pass
+    class Engine:
+        def analysis(self, *_args, **_kwargs): return Analysis()
+        def quit(self): quits.append("quit")
+    engine = Engine()
+    monkeypatch.setattr(position_module, "popen_uci_hidden",
+                        lambda *args, **kwargs: (starts.append(args[0]) or engine))
+    path = str(tmp_path / "stockfish.exe")
+    updates = []
+    first = position_module.evaluate_position(
+        path, chess.Board(), threading.Event(), {}, on_update=updates.append)
+    second = position_module.evaluate_position(path, chess.Board(), threading.Event(), {})
+    assert first["depth"] == second["depth"] == 1
+    assert len(updates) == 1 and updates[0]["depth"] == 1
+    assert len(starts) == 1
+    position_module.close_position_engines()
+    assert quits == ["quit"]
