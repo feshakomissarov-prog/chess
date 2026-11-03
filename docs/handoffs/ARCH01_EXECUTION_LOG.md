@@ -52,3 +52,15 @@ Working branch: `codex/arch-01-modular-refactor` from `main` SHA `3e7f2cd48b1676
 - Поведение online callbacks не переписано: сохранённые handlers остаются authoritative, но registry/session selection теперь имеет явного application owner. Полные use-case flows ещё не извлечены.
 
 **Next:** закончить W2 там, где перенос явно снижает ответственность без смены UX; затем W3 начать с одной SQLite transaction/connection policy и тематических store adapters, не менять схему.
+
+## W3 — SQLite responsibility split (в работе)
+
+- `SQLiteUnitOfWork` (`infrastructure/sqlite/transactions.py`) теперь создаёт connection с теми же timeout/foreign_keys/Row settings и закрывает её после штатного commit либо rollback. `GameRepository._connection()` оставлен делегирующим compatibility seam.
+- `SQLiteMigrationMixin` (`migrations.py`) владеет initialization, backup-first проверкой, schema migration и integrity path; `SCHEMA_VERSION=19`, таблицы/DDL/data migration не менялись.
+- `GameRepository` уменьшен с примерно 3000 строк до компактной фасадной части (~420 строк по текущему файлу) и наследует тематические persistence mixins: игры/заметки, архив, анализ/оценки/фазы, backfill+engine jobs и Puzzle Activity. Общая identity helper вынесена отдельно и переэкспортируется через старый `lichess.repository`.
+- Один физический SQLite и существующий single-writer ThreadPoolExecutor сохранены. WAL и pool не включались; CAS-проверки и бизнес-транзакции остались в соответствующих store methods.
+- Тесты без изменения личных данных: `21 passed` puzzle/connection close; `219 passed` после первых store migrations; `248 passed` combined Lichess/SQLite/analysis/dashboard suite после analysis-store split; `272 passed` после game read/notes split; `179 passed` после archive split; `40 passed` migration/backup/connection subset; `29 passed` save/revision/archive subset. Единый expanded suite после переносов: `287 passed, 2 failed` только из-за пропущенного импорта `chess` в extracted migration mixin; после фикса миграционные suite и эти две регрессии повторно прошли: `18 passed`. Полный expanded suite после этой одноимпортной правки пока не перезапускался.
+- Тест `test_sqlite_uow.py` проверяет commit/rollback, foreign keys, façade UOW ownership и неизменность user_version.
+- Новых зависимостей и schema migrations нет; тесты используют только временные SQLite и fake data.
+
+**Next:** повторить единый регрессионный SQLite set после всех извлечений; затем перенести LichessService responsibilities, сохранив его сигналы/методы фасада.

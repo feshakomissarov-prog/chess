@@ -63,6 +63,16 @@ ui shell/pages/dialogs → app commands/read models         infrastructure adapt
 
 **Осталось в W1:** typed boundary conversions и no-import-side-effects proof расширить по мере появления application coordinators и инфраструктурных адаптеров; W1 commit фиксирует минимальные реально используемые контракты, без пустых plugin-слоёв.
 
+### W3 — SQLite ownership и тематические фасады
+
+- `infrastructure.sqlite.transactions.SQLiteUnitOfWork` владеет connection settings, foreign-key enforcement, commit/rollback и обязательным close. `GameRepository._connection()` сохранён как совместимый delegating seam.
+- `infrastructure.sqlite.migrations.SQLiteMigrationMixin` владеет backup-first initialization и additive migrations; `SCHEMA_VERSION` остаётся 19, migration SQL/data logic не менялась.
+- `GameRepository` теперь является компактным public façade с существующими именами методов и тематическими mixins: `GamesStoreMixin`, `ArchiveStoreMixin`, `AnalysisStoreMixin`, `AnalysisJobsStoreMixin`, `PuzzleActivityStoreMixin`.
+- Файлы ответственности: `games.py`, `archive_store.py`, `analysis.py`, `jobs.py`, `puzzles.py`; `line.py` содержит каноническую идентичность линии/PGN-поля, `migrations.py` — DDL/data migration, `transactions.py` — соединение и transaction context.
+- Общие константы/идентичность линии вынесены в `constants.py`/`line.py`; public import names повторно экспортируются из `lichess.repository`.
+- Единый одинарный SQLite writer executor, очередь, CAS/ревизии и транзакционные границы сохранены в фасаде до отдельной безопасной миграции writer-lane coordination. WAL/pool/schema/backup behavior не изменён.
+- Storage-specific AST checks запрещают инфраструктуре импортировать UI.
+
 | Этап | Исходные точки | Проверяемое изменение |
 | --- | --- | --- |
 | W0 | `window.py`, `repository.py`, `service.py`, entrypoints, tests | Этот baseline/map, imports/routes/threads inventory |

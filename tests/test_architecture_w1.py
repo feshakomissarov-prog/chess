@@ -93,6 +93,14 @@ def test_application_package_starts_as_framework_independent_boundary():
         assert not violations, f"{path.name} has forbidden imports: {sorted(violations)}"
 
 
+def test_infrastructure_never_imports_ui_modules():
+    for path in (SRC / "infrastructure").rglob("*.py"):
+        imports = _imports(path)
+        violations = {name for name in imports
+                      if name == "chess_coach.ui" or name.startswith("chess_coach.ui.")}
+        assert not violations, f"{path.relative_to(SRC)} imports UI: {sorted(violations)}"
+
+
 def test_offline_runtime_uses_and_cleans_only_its_temporary_profile(monkeypatch):
     observed = {}
 
