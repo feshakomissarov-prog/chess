@@ -164,7 +164,15 @@ def test_cli_modes_reach_real_window_and_apply_runtime_ui_without_credentials_or
         def close(self):
             pass
 
-    monkeypatch.setattr(launcher, "QApplication", lambda _argv: app)
+    class ExistingApplicationRunner:
+        """Run one event-processing turn without terminating pytest's shared QApplication."""
+        def __init__(self, _argv): pass
+        def __getattr__(self, name): return getattr(app, name)
+        def exec(self):
+            app.processEvents()
+            return 0
+
+    monkeypatch.setattr(launcher, "QApplication", ExistingApplicationRunner)
     monkeypatch.setattr(launcher, "MainWindow", TrackingWindow)
     monkeypatch.setattr(launcher, "acquire_single_instance", lambda _path: FakeGuard())
     monkeypatch.setattr(QStandardPaths, "writableLocation",
@@ -188,7 +196,6 @@ def test_cli_modes_reach_real_window_and_apply_runtime_ui_without_credentials_or
             runtime_isolated=window.offline_mode,
             runtime_manual=window.manual_connect_mode,
         )
-        app.quit()
 
     QTimer.singleShot(0, inspect_visible_window)
     assert launcher.main(arguments) == 0

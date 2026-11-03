@@ -9,6 +9,7 @@ import tempfile
 from PySide6.QtCore import QSettings, QStandardPaths
 
 from .application.background_work import BackgroundWorkCoordinator
+from .application.engine_analysis import EngineAnalysisCoordinator
 from .engine_manager import StockfishManager
 from .lichess.repository import GameRepository
 
@@ -22,9 +23,13 @@ class ApplicationRuntime:
     manual_connect_mode: bool
     work_coordinator: BackgroundWorkCoordinator = field(default_factory=BackgroundWorkCoordinator)
     stockfish_manager: StockfishManager = field(default_factory=StockfishManager)
+    engine_analysis: EngineAnalysisCoordinator = field(init=False)
     offline_data_dir: tempfile.TemporaryDirectory | None = None
     _lichess_service: object | None = None
     _closed: bool = False
+
+    def __post_init__(self) -> None:
+        self.engine_analysis = EngineAnalysisCoordinator(self.stockfish_manager)
 
     def create_lichess_service(self, parent, *, user_requested: bool = False):
         if self._lichess_service is not None:

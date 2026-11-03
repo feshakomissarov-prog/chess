@@ -60,6 +60,7 @@ class BatchAnalysisRunner:
                  *, options: FastPassOptions = FastPassOptions(),
                  analyzer: CompletedGameAnalyzer | None = None,
                  engine_factory: Callable[[str], chess.engine.SimpleEngine] | None = None,
+                 engine_manager=None,
                  lease_seconds: int = 300,
                  safety_refresh_seconds: float = 10.0) -> None:
         self.repository = repository
@@ -74,7 +75,9 @@ class BatchAnalysisRunner:
         self.review_engine_key = "stockfish-review-sha256:" + self.binary_sha256
         self.lease_seconds = max(30, min(3600, int(lease_seconds)))
         self.safety_refresh_seconds = max(0.01, min(60.0, float(safety_refresh_seconds)))
-        self.analyzer = analyzer or CompletedGameAnalyzer(repository, engine_factory)
+        self.engine_manager = engine_manager
+        self.analyzer = analyzer or CompletedGameAnalyzer(
+            repository, engine_factory, engine_manager=engine_manager)
         self.worker_id = uuid.uuid4().hex
 
     def enqueue_missing(self, *, account_id: str | None = None,
@@ -232,7 +235,12 @@ class BatchAnalysisRunner:
 
                 try:
                     if engine is None:
-                        engine = self.analyzer.engine_factory(str(self.engine_path))
+                        if self.engine_manager is not None:
+                            engine = self.engine_manager.open_engine(
+                                str(self.engine_path), stop_event=analysis_stop,
+                                safety_check=lambda: check_active_safety(job))
+                        else:
+                            engine = self.analyzer.engine_factory(str(self.engine_path))
                         log_event("uci_engine_opened", "batch_analysis", run_id=run_id)
                     if job["analysis_pass"] == "fast":
                         result = self.analyzer.analyze(

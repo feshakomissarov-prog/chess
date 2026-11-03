@@ -285,12 +285,149 @@ def test_stockfish_manager_reuses_position_engine_and_closes_it_on_shutdown(tmp_
     manager = manager_module.StockfishManager(
         engine_factory=lambda command, **_kwargs: (started.append(command) or FakeEngine()))
     first = manager.position_engine(executable)
+    first.quit()
     second = manager.position_engine(executable)
-    assert first is second
     assert len(started) == manager.active_process_count == 1
+    second.quit()
     manager.close_all()
     assert stopped == [True]
     assert manager.active_process_count == 0
+
+
+def test_stockfish_manager_bounds_all_analysis_modes_and_rechecks_safety_after_wait(tmp_path):
+    import time
+    executable = tmp_path / "stockfish.exe"
+    executable.write_bytes(b"synthetic")
+    started, stopped = [], []
+    lock = threading.Lock()
+    active = maximum = 0
+    first_ready, release_first, second_done = threading.Event(), threading.Event(), threading.Event()
+    denied = []
+
+    class FakeEngine:
+        id = {"name": "Synthetic"}
+        def __init__(self, index): self.index = index
+        def quit(self):
+            nonlocal active
+            with lock:
+                active -= 1
+            stopped.append(self.index)
+
+    def factory(*_args, **_kwargs):
+        nonlocal active, maximum
+        with lock:
+            active += 1
+            maximum = max(maximum, active)
+            index = len(started)
+            started.append(index)
+        return FakeEngine(index)
+
+    manager = em.StockfishManager(factory, max_concurrent=1)
+    first = manager.open_engine(executable)
+
+    def queued_open():
+        try:
+            manager.open_engine(executable, safety_check=lambda: False)
+        except Exception as exc:
+            denied.append(exc)
+        finally:
+            second_done.set()
+
+    thread = threading.Thread(target=queued_open)
+    thread.start()
+    deadline = time.monotonic() + 1
+    while manager.active_analysis_count != 1 and time.monotonic() < deadline:
+        time.sleep(.005)
+    first_ready.set()
+    first.quit()
+    thread.join(1)
+    assert not thread.is_alive()
+    assert second_done.is_set()
+    assert any(isinstance(error, InterruptedError) for error in denied)
+    assert started == [0], "unsafe waiter must be rejected before engine creation"
+    assert maximum == 1 and manager.active_analysis_count == 0
+    assert stopped == [0]
+    manager.close_all()
+
+
+def test_stockfish_manager_cancelled_waiter_never_creates_engine_and_position_shares_gate(tmp_path):
+    import time
+    executable = tmp_path / "stockfish.exe"
+    executable.write_bytes(b"synthetic")
+    starts, quits = [], []
+
+    class FakeEngine:
+        def quit(self): quits.append(True)
+
+    manager = em.StockfishManager(
+        lambda *_args, **_kwargs: (starts.append(True) or FakeEngine()))
+    lease = manager.position_engine(executable)
+    stop = threading.Event()
+    errors = []
+
+    def waiting_position():
+        try:
+            manager.position_engine(executable, stop_event=stop)
+        except Exception as exc:
+            errors.append(exc)
+
+    thread = threading.Thread(target=waiting_position)
+    thread.start()
+    deadline = time.monotonic() + 1
+    while manager.active_analysis_count != 1 and time.monotonic() < deadline:
+        time.sleep(.005)
+    stop.set()
+    thread.join(1)
+    assert not thread.is_alive()
+    assert any(isinstance(error, InterruptedError) for error in errors)
+    assert starts == [True]
+    lease.quit()
+    position = manager.position_engine(executable)
+    assert starts == [True], "position evaluation should reuse its cached process"
+    assert manager.active_analysis_count == 1
+    position.quit()
+    assert manager.active_analysis_count == 0
+    manager.close_all()
+    assert len(quits) == 1
+
+
+def test_stockfish_pre_cancelled_jobs_and_safety_denial_do_not_create_engine(tmp_path):
+    executable = tmp_path / "stockfish.exe"
+    executable.write_bytes(b"synthetic")
+    starts = []
+    manager = em.StockfishManager(
+        lambda *_args, **_kwargs: (starts.append(True) or object()))
+    stop = threading.Event()
+    stop.set()
+    with pytest.raises(InterruptedError):
+        manager.open_engine(executable, stop_event=stop)
+    with pytest.raises(InterruptedError):
+        manager.open_engine(executable, safety_check=lambda: None)
+    assert starts == []
+    assert manager.active_analysis_count == 0
+
+
+def test_stockfish_manager_reuses_the_position_process_for_review_and_batch(tmp_path):
+    executable = tmp_path / "stockfish.exe"
+    executable.write_bytes(b"synthetic")
+    starts, quits = [], []
+
+    class FakeEngine:
+        def quit(self): quits.append(True)
+
+    manager = em.StockfishManager(
+        lambda *_args, **_kwargs: (starts.append(True) or FakeEngine()))
+    position = manager.position_engine(executable)
+    position.quit()
+    review = manager.open_engine(executable)
+    assert len(starts) == 1
+    assert manager.active_process_count == 1
+    review.quit()  # cached process remains available for the next sequential use
+    next_position = manager.position_engine(executable)
+    assert len(starts) == 1
+    next_position.quit()
+    manager.close_all()
+    assert quits == [True]
 
 
 def test_position_evaluator_reuses_one_engine_for_a_local_session(monkeypatch, tmp_path):

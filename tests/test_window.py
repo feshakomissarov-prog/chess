@@ -13,10 +13,11 @@ from chess_coach.board_view import BoardView
 from chess_coach.window import (ActiveGamesDialog, BatchAnalysisDialog, EvaluationGraph, MainWindow,
                                 OnlineGameDialog,
                                 SettingsDialog, StatisticsDialog, StatisticsGameDialog,
-                                _archive_row_presentation, _batch_safety_from_games, _clock_filter_sort_key,
+                                _archive_row_presentation, _clock_filter_sort_key,
                                 _puzzle_attempt_summary)
 from chess_coach.lichess.session import LichessGameSession
 from chess_coach.lichess.repository import GameRepository
+from chess_coach.application.fair_play import playing_snapshot_allows_analysis as _batch_safety_from_games
 from chess_coach.ui.workspace_state import geometry_intersects_available, reposition_visible_frame
 
 
@@ -1103,8 +1104,8 @@ def test_official_engine_install_requires_explicit_confirm_and_persists_verified
 
 
 def test_batch_analysis_safety_snapshot_fails_closed_and_allows_builtin_ai_only():
-    ai = {"source": "ai", "opponent": {"ai": 3, "id": None}}
-    bot_account = {"source": "friend", "opponent": {"ai": None, "id": "enginebot",
+    ai = {"gameId": "ai-game", "source": "ai", "opponent": {"ai": 3, "id": None}}
+    bot_account = {"gameId": "bot-game", "source": "friend", "opponent": {"ai": None, "id": "enginebot",
                                                        "title": "BOT"}}
     assert _batch_safety_from_games([]) is True
     assert _batch_safety_from_games([ai]) is True
@@ -1448,7 +1449,7 @@ def test_position_evaluation_is_explicit_offline_only_and_stale_result_is_hidden
     window.start_local_game()
     assert window.position_eval_button.isVisible()
     calls = []
-    def fake_eval(_path, board, _stop, _active, *, engine_manager=None):
+    def fake_eval(_path, board, _stop, _active, **_kwargs):
         calls.append(board.fen())
         return {"score_white_cp": 35, "mate_white": None,
                 "best_move": "e2e4", "depth": 12}
@@ -1503,9 +1504,11 @@ def test_position_evaluation_normal_mode_requires_safe_preflight_and_rejects_sta
 
     class Client:
         rate_limit_remaining = 0
+        def get_playing_games(self, _token): return []
 
     class Service:
         username = "StudyUser"
+        token = "synthetic-token"
         client = Client()
         def __init__(self): self.requests = []
         def check_active_games_for_analysis(self, request_id): self.requests.append(request_id)
@@ -1518,7 +1521,7 @@ def test_position_evaluation_normal_mode_requires_safe_preflight_and_rejects_sta
     window.start_local_game()
     assert window.position_eval_button.isVisible() and window.position_eval_button.isEnabled()
     calls = []
-    def fake_eval(_path, board, stop, _active, *, engine_manager=None):
+    def fake_eval(_path, board, stop, _active, **_kwargs):
         calls.append(board.fen())
         return {"score_white_cp": -25, "mate_white": None,
                 "best_move": "e2e4", "pv": ["e2e4"], "depth": 9}
@@ -1576,8 +1579,10 @@ def test_position_evaluation_stops_on_human_game_start_and_hides_stale_pv(
 
     class Client:
         rate_limit_remaining = 0
+        def get_playing_games(self, _token): return []
     class Service:
         username = "StudyUser"
+        token = "synthetic-token"
         client = Client()
         def __init__(self): self.requests = []
         def check_active_games_for_analysis(self, request_id): self.requests.append(request_id)
@@ -1589,7 +1594,7 @@ def test_position_evaluation_stops_on_human_game_start_and_hides_stale_pv(
     window.show()
     window.start_local_game()
     started = threading.Event()
-    def blocked_eval(_path, _board, stop, _active, *, engine_manager=None):
+    def blocked_eval(_path, _board, stop, _active, **_kwargs):
         started.set()
         stop.wait(3)
         return {"cancelled": stop.is_set(), "score_white_cp": 900,
@@ -1626,8 +1631,10 @@ def test_finished_game_review_position_uses_same_live_safety_preflight(qtbot, tm
 
     class Client:
         rate_limit_remaining = 0
+        def get_playing_games(self, _token): return []
     class Service:
         username = "ReviewUser"
+        token = "synthetic-token"
         client = Client()
         def __init__(self): self.requests = []
         def check_active_games_for_analysis(self, request_id): self.requests.append(request_id)
@@ -1648,7 +1655,7 @@ def test_finished_game_review_position_uses_same_live_safety_preflight(qtbot, tm
     assert window.position_eval_button.isVisible() and window.position_eval_button.isEnabled()
     seen = []
     monkeypatch.setattr("chess_coach.window.evaluate_position",
-                            lambda _path, board, _stop, _active, *, engine_manager=None: (
+                            lambda _path, board, _stop, _active, **_kwargs: (
                             seen.append(board.fen()) or {"score_white_cp": 0,
                                 "mate_white": None, "best_move": "e2e4",
                                 "pv": ["e2e4"], "depth": 8}))
@@ -3907,6 +3914,8 @@ def test_connected_analysis_cancel_stops_fake_analyzer_without_saving_complete_r
 
     class ConnectedService:
         username = "AccountA"
+        token = "synthetic-token"
+        client = type("Client", (), {"get_playing_games": lambda self, _token: []})()
         def __init__(self): self.requests = []
         def check_active_games_for_analysis(self, request_id): self.requests.append(request_id)
         def close(self, timeout=1.0): return True
@@ -3918,7 +3927,7 @@ def test_connected_analysis_cancel_stops_fake_analyzer_without_saving_complete_r
     analyzer_stopped = threading.Event()
 
     class FakeAnalyzer:
-        def __init__(self, _repository, *, engine_factory=None): pass
+        def __init__(self, _repository, *, engine_factory=None, engine_manager=None): pass
         def analyze(self, _game_id, _engine_path, _options, **kwargs):
             stop_event = kwargs["stop_event"]
             analyzer_started.set()
@@ -4235,7 +4244,9 @@ def test_fair_play_revocation_stops_running_game_analysis_and_discards_late_succ
 
     class ConnectedService:
         username = "AccountA"
-        client = type("Client", (), {"rate_limit_remaining": 0})()
+        token = "synthetic-token"
+        client = type("Client", (), {"rate_limit_remaining": 0,
+                                      "get_playing_games": lambda self, _token: []})()
         def __init__(self): self.requests = []
         def check_active_games_for_analysis(self, request_id): self.requests.append(request_id)
         def close(self, timeout=1.0): return True
@@ -4246,7 +4257,7 @@ def test_fair_play_revocation_stops_running_game_analysis_and_discards_late_succ
     opened = []
 
     class BlockingAnalyzer:
-        def __init__(self, _repository, *, engine_factory=None): pass
+        def __init__(self, _repository, *, engine_factory=None, engine_manager=None): pass
         def analyze(self, _game_id, _engine_path, _options, **kwargs):
             stop_event = kwargs["stop_event"]
             started.set()

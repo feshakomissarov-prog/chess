@@ -64,11 +64,14 @@ from .bootstrap import ApplicationRuntime, create_runtime
 from .application.app_state import ReviewResumeTarget, WorkspaceSnapshot, WorkspaceStateStore
 from .application.game_sessions import GameSessionCoordinator
 from .application.background_work import OperationLane
+from .application.archive_sync import ArchiveSyncCoordinator
+from .application.dashboard import (DashboardQueryCoordinator, dashboard_options,
+                                    dashboard_snapshot)
 from .lichess.session import LichessGameSession, classify_lichess_opponent
 from .lichess.statistics import StatisticsService
 from .diagnostics import anonymized_report, log_event, logs_directory
 from .ui.theme import TOKENS, stylesheet as desktop_stylesheet
-from .ui.dashboard import dashboard_options, dashboard_snapshot, game_card_text
+from .ui.dashboard import game_card_text
 from .ui.game_review import GameReviewWorkspace
 from .ui.move_table import MoveTable
 from .ui.sounds import (
@@ -163,15 +166,6 @@ def _archive_row_presentation(game: dict) -> tuple[str, str]:
     return text, source_label
 
 
-def _batch_safety_from_games(games: object) -> bool | None:
-    """Classify one complete /api/account/playing snapshot; uncertainty blocks UCI."""
-    if not isinstance(games, list) or len(games) >= 50:
-        return None
-    return not any(classify_lichess_opponent(game) != "official_ai" for game in games)
-
-
-
-
 class _DashboardGameCard(QFrame):
     activated = Signal()
 
@@ -264,6 +258,7 @@ class MainWindow(QMainWindow):
             manual_connect_mode=manual_connect_mode,
             asynchronous_storage=asynchronous_storage)
         self.stockfish_manager = self.runtime.stockfish_manager
+        self.engine_analysis = self.runtime.engine_analysis
         self._offline_data_dir = self.runtime.offline_data_dir
         self.settings = self.runtime.settings
         self.workspace_state = WorkspaceStateStore(self.settings)
@@ -276,6 +271,8 @@ class MainWindow(QMainWindow):
         color = self.settings.value("player_color", chess.WHITE, type=int)
         self.controller = GameController(chess.Color(color))
         self.game_repository = self.runtime.repository
+        self.archive_sync = ArchiveSyncCoordinator(self.game_repository)
+        self.dashboard_queries = DashboardQueryCoordinator(self.game_repository)
         self.sound_player = self.runtime.create_sound_player(self)
         self._online_history_game_id: str | None = None
         self._online_history_moves: tuple[chess.Move, ...] = ()
@@ -307,9 +304,7 @@ class MainWindow(QMainWindow):
         self._batch_engine_key: str | None = None
         self._batch_config: tuple[str, int, int] | None = None
         self._statistics_workers: set[threading.Thread] = set()
-        self._dashboard_generation = 0
         self._dashboard_thread: threading.Thread | None = None
-        self._dashboard_pending: tuple[int, str | None, str | None] | None = None
         self._position_eval_generation = 0
         self._position_eval_thread: threading.Thread | None = None
         self._position_eval_stop: threading.Event | None = None
@@ -1272,13 +1267,12 @@ class MainWindow(QMainWindow):
             return
         account_id = self.dashboard_account.currentData() if hasattr(self, "dashboard_account") else None
         clock = (self.dashboard_clock.currentData() if hasattr(self, "dashboard_clock") else "") or None
-        self._dashboard_generation += 1
-        generation = self._dashboard_generation
+        generation = self.dashboard_queries.begin_request()
         for detail in self._dashboard_metric_details.values():
             if detail.text() in {"Локальные данные", "Обновляем локальную сводку…"}:
                 detail.setText("Обновляем локальную сводку…")
         if self._dashboard_thread is not None and self._dashboard_thread.is_alive():
-            self._dashboard_pending = (generation, account_id, clock)
+            self.dashboard_queries.defer((generation, account_id, clock))
             return
         self._launch_dashboard_snapshot(generation, account_id, clock)
 
@@ -1286,8 +1280,8 @@ class MainWindow(QMainWindow):
                                    clock: str | None) -> None:
         def work():
             try:
-                result = dashboard_snapshot(self.game_repository, account_id=account_id,
-                                            clock=clock)
+                result = self.dashboard_queries.snapshot(
+                    account_id=account_id, clock=clock, query=dashboard_snapshot)
                 error = None
             except Exception as exc:
                 result, error = None, exc
@@ -1304,9 +1298,9 @@ class MainWindow(QMainWindow):
         if self._dashboard_thread is not None and not self._dashboard_thread.is_alive():
             self._dashboard_thread = None
         if self._shutdown_requested:
-            self._dashboard_pending = None
+            self.dashboard_queries.clear_pending()
             return
-        if generation == self._dashboard_generation:
+        if self.dashboard_queries.is_current(generation):
             if error is not None:
                 for value in self._dashboard_metric_values.values():
                     value.setText("н/д")
@@ -1314,7 +1308,7 @@ class MainWindow(QMainWindow):
                     detail.setText("Не удалось прочитать локальные данные. Повторите обновление.")
             elif isinstance(snapshot, dict):
                 self._render_dashboard_snapshot(snapshot)
-        pending, self._dashboard_pending = self._dashboard_pending, None
+        pending = self.dashboard_queries.take_pending()
         if pending is not None and not self._shutdown_requested:
             self._launch_dashboard_snapshot(*pending)
 
@@ -1585,10 +1579,11 @@ class MainWindow(QMainWindow):
         dialog = QProgressDialog("Подготовка синхронизации…", "Отменить", 0, 0, self)
         dialog.setWindowTitle("Архив Lichess")
         dialog.setMinimumDuration(0)
-        dialog.canceled.connect(self.lichess.cancel_archive_sync)
+        service = self.lichess
+        dialog.canceled.connect(lambda: self.archive_sync.cancel(service))
         self._archive_progress_dialog = dialog
         dialog.show()
-        self.lichess.sync_archive()
+        self.archive_sync.start_full_sync(service)
 
     def start_archive_pilot(self) -> None:
         if not self._online_actions_allowed():
@@ -1611,10 +1606,11 @@ class MainWindow(QMainWindow):
         dialog = QProgressDialog("Получено: 0 · новых: 0", "Отменить", 0, 0, self)
         dialog.setWindowTitle("Пробный импорт Lichess")
         dialog.setMinimumDuration(0)
-        dialog.canceled.connect(self.lichess.cancel_archive_sync)
+        service = self.lichess
+        dialog.canceled.connect(lambda: self.archive_sync.cancel(service))
         self._archive_progress_dialog = dialog
         dialog.show()
-        self.lichess.pilot_import_archive(max_games=limit)
+        self.archive_sync.start_pilot(service, max_games=limit)
 
     def _archive_pilot_progress(self, received: int, new: int, game_id: str) -> None:
         if self._archive_progress_dialog:
@@ -1655,7 +1651,7 @@ class MainWindow(QMainWindow):
         if not self.lichess or not self.lichess.username:
             return {}
         account_id = f"lichess:{self.lichess.username.strip().lower()}"
-        return self.game_repository.archive_sync_state(account_id)
+        return self.archive_sync.account_state(account_id)
 
     def show_archive_status(self) -> None:
         username = self.lichess.username if self.lichess and self.lichess.username else None
@@ -1673,14 +1669,14 @@ class MainWindow(QMainWindow):
             f"Lichess аккаунт: {username or 'не подключён'}",
         ]
         if account_id:
-            state = self.game_repository.archive_sync_state(account_id)
+            state = self.archive_sync.account_state(account_id)
             stage = "Полная выгрузка завершена" if state.get("backfill_complete") else "Полная выгрузка не завершена"
             details.append(f"Этап архива: {stage}")
             details.append(f"Последняя полная/инкрементальная синхронизация: "
                            f"{self._format_sync_time(state.get('last_success_at')) if state.get('last_success_at') else 'нет'}")
             details.append(f"Новых партий при последней синхронизации: {state.get('last_sync_new_count', 0)}")
             details.append(f"Можно продолжить: {'да' if state.get('last_error') or not state.get('backfill_complete') else 'нет'}")
-            runs = self.game_repository.list_archive_pilot_runs(account_id, limit=1)
+            runs = self.archive_sync.recent_pilot_runs(account_id, limit=1)
             if runs:
                 pilot = runs[0]
                 details.append(f"Последний пробный импорт: получено {pilot['received_count']}, "
@@ -1779,9 +1775,8 @@ class MainWindow(QMainWindow):
             return
         try:
             options = FastPassOptions(nodes=nodes, hash_mb=hash_mb)
-            runner = BatchAnalysisRunner(
-                self.game_repository, engine_path, options=options,
-                engine_factory=self.stockfish_manager.engine_factory)
+            runner = self.engine_analysis.create_batch_runner(
+                self.game_repository, engine_path, options=options)
             resumed_original_budget = False
             if resume:
                 saved_parameters = self.game_repository.pending_fast_analysis_parameters(
@@ -1790,10 +1785,9 @@ class MainWindow(QMainWindow):
                     saved_nodes = int(saved_parameters.get("limit_value", nodes))
                     saved_hash = int(saved_parameters.get("hash_mb", hash_mb))
                     if (saved_nodes, saved_hash) != (runner.options.nodes, runner.options.hash_mb):
-                        runner = BatchAnalysisRunner(
+                        runner = self.engine_analysis.create_batch_runner(
                             self.game_repository, engine_path,
-                            options=FastPassOptions(nodes=saved_nodes, hash_mb=saved_hash),
-                            engine_factory=self.stockfish_manager.engine_factory)
+                            options=FastPassOptions(nodes=saved_nodes, hash_mb=saved_hash))
                         nodes, hash_mb = saved_nodes, saved_hash
                         dialog.nodes.setValue(saved_nodes)
                         dialog.hash_mb.setValue(saved_hash)
@@ -1857,32 +1851,23 @@ class MainWindow(QMainWindow):
                 def safety_check(_job: dict) -> bool | None:
                     # Called before every game. Any disconnect, identity change,
                     # malformed/truncated list, or API error fails closed.
-                    if (stop.is_set() or pause.is_set() or not self._lichess_connected
-                            or self.lichess is not service
-                            or generation != self._analysis_session_generation
-                            or str(getattr(service, "username", "") or "").strip().casefold()
-                               != username.casefold()):
+                    current = lambda: (
+                        not stop.is_set() and not pause.is_set()
+                        and self._lichess_connected and self.lichess is service
+                        and generation == self._analysis_session_generation
+                        and str(getattr(service, "username", "") or "").strip().casefold()
+                        == username.casefold())
+                    token = getattr(service, "token", None)
+                    active_human = any(
+                        session.status in {"started", "playing"} and not session.is_ai_opponent
+                        for session in self.online_sessions.values())
+                    if not current() or not token:
                         unknown_preflight.set()
                         return None
-                    token = service.token
-                    if not token:
-                        unknown_preflight.set()
-                        return None
-                    try:
-                        games = service.client.get_playing_games(token)
-                    except Exception:
-                        unknown_preflight.set()
-                        raise
-                    if (stop.is_set() or pause.is_set() or not self._lichess_connected
-                            or self.lichess is not service
-                            or generation != self._analysis_session_generation
-                            or str(getattr(service, "username", "") or "").strip().casefold()
-                               != username.casefold()
-                            or service.token != token):
-                        unknown_preflight.set()
-                        return None
-                    safety = _batch_safety_from_games(games)
-                    if safety is None:
+                    safety = self.engine_analysis.refresh_fair_play(
+                        service, token, username, current,
+                        active_human_session=active_human)
+                    if not safety:
                         unknown_preflight.set()
                     return safety
 
@@ -2748,7 +2733,8 @@ class MainWindow(QMainWindow):
         active_human_sessions = any(
             session.status in {"started", "playing"} and not session.is_ai_opponent
             for session in self.online_sessions.values())
-        if active_human_sessions or any(self._active_game_blocks_engine(game) for game in games):
+        if (active_human_sessions
+                or self.engine_analysis.playing_snapshot_allows_analysis(games) is not True):
             self._disable_position_evaluation(
                 "Stockfish заблокирован: у аккаунта есть активная партия с человеком.")
             return
@@ -2824,10 +2810,39 @@ class MainWindow(QMainWindow):
         self.position_eval_button.setEnabled(False)
         self.position_eval_label.setText("Оцениваем текущую позицию…")
 
+        lease = self._position_eval_safety_lease
+        position_service = self.lichess
+        position_generation = self._analysis_session_generation
+        position_token = getattr(position_service, "token", None) if position_service else None
+        position_username = str(getattr(position_service, "username", "") or "").strip().casefold()
+        isolated_offline = bool(self.offline_mode and position_service is None
+                                and not self._lichess_connected)
+        active_human_ids = {session.game_id for session in self.online_sessions.values()
+                            if session.status in {"started", "playing"} and not session.is_ai_opponent}
+
+        def position_safety_check() -> bool:
+            if stop_event.is_set() or active_human_ids:
+                return False
+            if isolated_offline:
+                return (self.offline_mode and self.lichess is None
+                        and not self._lichess_connected
+                        and position_generation == self._analysis_session_generation)
+            if not lease:
+                return False
+            return self.engine_analysis.refresh_fair_play(
+                position_service, position_token, position_username,
+                is_current=lambda: (
+                    not stop_event.is_set() and position_service is self.lichess
+                    and self._lichess_connected
+                    and position_generation == self._analysis_session_generation
+                    and self._online_actions_allowed()),
+                active_human_session=bool(active_human_ids))
+
         def work() -> None:
             try:
-                payload = evaluate_position(engine_path, board, stop_event, active,
-                                            engine_manager=self.stockfish_manager)
+                payload = self.engine_analysis.evaluate_position(
+                    engine_path, board, stop_event, active,
+                    safety_check=position_safety_check, evaluator=evaluate_position)
             except Exception as exc:
                 payload = {"error": str(exc)}
             active["worker_thread"] = threading.current_thread()
@@ -3565,7 +3580,7 @@ class MainWindow(QMainWindow):
         self._sync_position_eval_controls(self._position_eval_context_available())
 
     def _enable_restore_retry(self) -> None:
-        if (self.lichess and self.lichess.token and not self._lichess_connected
+        if (self.lichess and getattr(self.lichess, "token", None) and not self._lichess_connected
                 and not self.offline_mode and not self._event_stream_recovery_pending):
             self._restore_retry_ready = True
             self.connect_button.setText("Повторить подключение")
@@ -3630,7 +3645,7 @@ class MainWindow(QMainWindow):
         if any(s.status in {"started", "playing"} and not s.is_ai_opponent
                for s in self.online_sessions.values()):
             return  # Prioritize live play over background network traffic.
-        self.lichess.sync_archive(background=True)
+        self.archive_sync.start_full_sync(self.lichess, background=True)
         self.lichess.sync_puzzle_activity_background(self.game_repository)
         generation = getattr(self.lichess, "auth_generation", None)
         if generation is not None and self._lichess_stream_ready_generation == generation:
@@ -4382,7 +4397,7 @@ class MainWindow(QMainWindow):
                 QMessageBox.information(dialog, "Обновить партию",
                     "Обновление доступно для партий, импортированных из текущего аккаунта Lichess.")
                 return
-            self.lichess.refresh_archive_game(game["game_id"])
+            self.archive_sync.refresh_game(self.lichess, game["game_id"])
 
         page.query_requested.connect(load_page)
         page.open_requested.connect(open_selected)
@@ -4623,18 +4638,40 @@ class MainWindow(QMainWindow):
         active_human_ids = {session.game_id for session in self.online_sessions.values()
                             if session.status in {"started", "playing"} and not session.is_ai_opponent}
 
+        def safety_check_after_engine_wait() -> bool:
+            if stop.is_set() or active_human_ids:
+                return False
+            if isolated_offline:
+                return (self.offline_mode and self.lichess is None
+                        and not self._lichess_connected
+                        and self._analysis_session_generation == context[4])
+            service = context[6]
+            username = str(context[5]).casefold()
+            token = getattr(service, "token", None)
+            generation = context[4]
+            return self.engine_analysis.refresh_fair_play(
+                service, token, username,
+                is_current=lambda: (
+                    not stop.is_set() and service is self.lichess
+                    and self._lichess_connected
+                    and generation == self._analysis_session_generation
+                    and self._online_actions_allowed()),
+                active_human_session=bool(active_human_ids))
+
         def work():
             try:
-                result = CompletedGameAnalyzer(
-                    self.game_repository,
-                    engine_factory=self.stockfish_manager.engine_factory).analyze(
-                    game_id, engine_path, options,
+                result = self.engine_analysis.analyze_completed_game(
+                    self.game_repository, game_id, engine_path, options, stop_event=stop,
                     active_human_game_ids=active_human_ids,
                     progress=lambda done, total: self.analysis_progress.emit(game_id, done, total),
-                    stop_event=stop)
-                self.analysis_finished.emit(game_id, result)
+                    safety_check=safety_check_after_engine_wait,
+                    analyzer_factory=CompletedGameAnalyzer)
+                payload = dict(result) if isinstance(result, dict) else {"result": result}
+                payload["_worker_request_id"] = request_id
+                self.analysis_finished.emit(game_id, payload)
             except Exception as exc:
-                self.analysis_finished.emit(game_id, {"error": str(exc)})
+                self.analysis_finished.emit(game_id, {
+                    "error": str(exc), "_worker_request_id": request_id})
 
         thread = self._start_registered_work(
             work, kind="stockfish_game_analysis", lane=OperationLane.ENGINE,
@@ -4671,7 +4708,15 @@ class MainWindow(QMainWindow):
 
     def _analysis_finished(self, game_id: str, result: object) -> None:
         context = self._analysis_worker_context
+        worker_request_id = (result.get("_worker_request_id")
+                             if isinstance(result, dict) else None)
+        owns_current_context = bool(
+            context and (worker_request_id == context[0]
+                         if worker_request_id is not None
+                         else context[0] == self._analysis_safety_request_id))
         stale_or_cancelled = bool(context and (
+            (worker_request_id is not None and worker_request_id != context[0])
+            or
             context[1] != game_id
             or context[2] != self._analysis_session_generation
             or context[5].is_set()
@@ -4681,7 +4726,7 @@ class MainWindow(QMainWindow):
             # Defensive fail-closed handling for any worker signal that lost its
             # immutable launch context.
             stale_or_cancelled = True
-        if context is None or context[0] == self._analysis_safety_request_id:
+        if context is None or owns_current_context:
             self._analysis_stop = None
             self._analysis_safety_request_id = None
             self._analysis_safety_context = None

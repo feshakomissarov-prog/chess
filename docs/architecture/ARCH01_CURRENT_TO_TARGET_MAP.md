@@ -136,6 +136,15 @@ No benchmark, new product feature, Rust toolchain, data migration, WAL behavior 
 - Remaining direct threads are intentionally local owners: OAuth helper/service workers under their service lifecycle, statistics/opening-index workers owned by the modal statistics dialog, and short-lived UCI probe/process monitoring. They are not placed behind archive/engine work; W9 must validate application close and preservation of their existing lifecycle contracts.
 - Current W8 audit does not add empty future plugins. Competency/educational model and repertoire tree remain documented future contracts; no GPT, ML, Rust, database schema or settings-key change is included.
 
+### ARCH-FIX-01–04 — reviewer boundary fixes
+
+- `application.engine_analysis.EngineAnalysisCoordinator` is composed once by `ApplicationRuntime` with its single `StockfishManager`. Completed-game analysis, batch-runner construction and position evaluation all use that same admission/resource owner.
+- `StockfishManager` now bounds active analysis to one lease, supports cancellation while waiting and rechecks the supplied Fair Play callback only after admission. A cancelled or denied waiter cannot launch UCI. A cached position process can be reused by review/batch; a different path closes the old idle process first.
+- `application.fair_play` is the single fail-closed decision source for the complete server `/api/account/playing` snapshot and post-wait refresh. Unknown/incomplete opponents, human sessions, API errors/429, account/token/generation changes deny engine admission. The window does not implement a second opponent policy.
+- `application.dashboard.DashboardQueryCoordinator` owns the bounded SQL read model plus generation/pending/stale-response policy. `application.archive_sync.ArchiveSyncCoordinator` owns archive command/status routing while `LichessService` remains its worker/API adapter.
+- `MainWindow` still owns Qt dialogs and signal routing, widget state, board/session presentation, the UI-side preflight request id/generation and progress presentation. Those Qt callbacks are not moved because their lifetime is tied to visible widgets; they delegate server interpretation and all engine admission to application coordinators. Archive progress dialogs likewise remain presentation-only.
+- `application.fair_play` and `application.engine_analysis` have no token logging and keep real Lichess credentials/network out of tests. There are no schema/settings/user data changes.
+
 ### W9 — delivery gate
 
 - Full local Windows Python 3.12 run: **589 passed**; compileall, isolated offline `QApplication`/`MainWindow` init-close, and diff-check passed.

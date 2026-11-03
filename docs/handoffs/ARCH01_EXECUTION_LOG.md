@@ -153,8 +153,25 @@ Working branch: `codex/arch-01-modular-refactor` from `main` SHA `3e7f2cd48b1676
 - Регрессии используют fake transport: два одновременных постоянных потока, конечная выгрузка, отложенная вторая выгрузка, интерактивный ход, отмена ожидающего запроса и finite-stream 429/cooldown. Целевые `test_lichess_background_lanes.py` + `test_lichess.py`: **87 passed**.
 - Реальные Lichess-запросы не выполнялись; схема SQLite и личные данные не менялись.
 
-## ARCH-FIX-03 — общий допуск Stockfish (в работе)
+## ARCH-FIX-03 — общий допуск Stockfish
 
-- Первые изменения `StockfishManager` вводят отменяемый общий слот для single/batch/position use cases, повторную проверку Fair Play после ожидания, и освобождение slot отдельной позиционной lease при сохранении одного кешированного процесса.
-- Первые fake-engine регрессии подтверждают запрет UCI при отмене до admission/создания, fail-closed safety check и общий слот между process analysis и position lease. Целевые engine manager: **21 passed**; batch + analysis-store + Lichess lanes: **87 passed**.
-- Дальше проверяются все потребители manager, очереди и реальные lifecycle/Qt границы; пока не считать ARCH-FIX-03 завершённым.
+- `StockfishManager` теперь выдаёт отменяемый общий слот для single/batch/position use cases, повторяет fail-closed Fair Play-проверку после ожидания и удерживает один кешированный процесс для последовательного использования разными режимами. При смене пути старый idle process закрывается; shutdown уведомляет ожидающих. Предварительно отменённое задание не создаёт UCI process.
+- `EngineAnalysisCoordinator`, принадлежащий `ApplicationRuntime`, создаёт batch runner, выполняет анализ завершённой партии и позиционную оценку через тот же менеджер. Single и position после ожидания получают свежий `/api/account/playing` с повторной проверкой токена/аккаунта/session generation; batch rechecks безопасный снимок после engine admission. Ошибка/429/неполный ответ/session switch отказывает до движка.
+- Fake-engine tests проверяют admission, cancellation, safety denial, общий кэшированный процесс и запрет процесса после отмены; Qt-тесты прежних single/position safety/cancel/fair-play сценариев сохранены. Целевой engine/fair-play/coordinator/launcher/architecture/Lichess набор: **172 passed**; весь `test_window.py`: **passed**.
+- Реальный Stockfish и реальные сетевые подключения не запускались.
+
+## ARCH-FIX-04 — владельцы сценариев в application layer
+
+- Из `MainWindow` делегированы SQL dashboard read model и поколение/отбрасывание stale результатов (`application.dashboard.DashboardQueryCoordinator`), команды импорта/отмены/refresh и чтение статуса архива (`application.archive_sync.ArchiveSyncCoordinator`), все движковые сценарии (`application.engine_analysis.EngineAnalysisCoordinator`) и единственная консервативная политика Fair Play (`application.fair_play`).
+- `ApplicationRuntime` собирает один `StockfishManager` и один engine-analysis coordinator. Совместимые `window` imports и Qt signals сохранены; текущие существующие fake seams инжектируются в coordinator, чтобы тестировать фактический GUI entry path без подмены бизнес-логики.
+- В `MainWindow` остаются presentation/dialog ownership, Qt signal routing, активное состояние виджетов/партии, запуск и отображение worker progress. Пред-/post-game review request id и generation пока остаются в shell, поскольку их асинхронные Qt signals непосредственно обслуживают UI; решение о допуске, классификация серверного snapshot и повторная online проверка выполняются в единой application policy/coordinator. Это не второй механизм безопасности.
+- Архивные progress-dialog handlers и действия пользовательского интерфейса остаются в shell; сами archive commands/status-query направлены через `ArchiveSyncCoordinator`. SQLite schema, пользовательские данные и настройки не менялись.
+- Добавлены coordinator boundary tests: временная SQLite dashboard snapshot, stale-generation/pending behavior, archive command routing и проверка отсутствия прямых dashboard SQL/Stockfish/archive calls в `MainWindow`. Физический UI/реальные сервисы остаются непроверенными.
+
+### ARCH-FIX-01–04 — локальный контрольный прогон
+
+- После объединения фиксов выполнен полный локальный набор на Windows, Python 3.12: `python -m pytest -o addopts='' -q` — **604 passed**.
+- `python -m compileall -q src tests scripts` — PASS; `git diff --check` — PASS.
+- Отдельные интеграционные тесты CLI→runtime→реальный `MainWindow` с `--offline` и `--manual-connect`: **2 passed**. Проверки используют временные данные/подменённый транспорт; credential store и сеть не читаются.
+- Исправлен тестовый адаптер QApplication: он обрабатывает один Qt event turn и не вызывает `quit()` на общей QApplication pytest, предотвращая побочное падение остальных Qt-тестов.
+- Полный hosted Windows CI ещё ожидает публикации итогового SHA. Реальные Lichess/OAuth/PAT, Stockfish и постоянная пользовательская SQLite не запускались и не открывались.

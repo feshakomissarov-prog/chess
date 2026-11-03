@@ -1,3 +1,9 @@
+## 04.11.2026 — ARCH-FIX-01–04 в работе в draft PR #44
+
+В PR #44 закрывается повторное ревью ARCH-01 SHA `763bcb25a5c83feeb583db135823e7dd5135e8b6`. Ветка `codex/arch-01-modular-refactor`; PR остаётся draft, merge не выполняется. ARCH-FIX-01 исправил UI-режимы CLI `--offline`/`--manual-connect` с интеграционными тестами. ARCH-FIX-02 ограничил конечные archive/puzzle NDJSON выгрузки, оставил отдельные живые потоки и приоритет коротких игровых действий. ARCH-FIX-03 вводит общий отменяемый admission Stockfish с повторной проверкой Fair Play и одним общим `EngineAnalysisCoordinator`. ARCH-FIX-04 перемещает dashboard query/stale-result ownership, archive workflow и engine/Fair Play decision boundaries из `MainWindow` в application coordinators. Локальный полный Windows/Python 3.12 suite: **604 PASS**; `compileall`, `git diff --check` и интеграционный CLI→runtime→MainWindow для `--offline`/`--manual-connect` прошли. Полный Windows hosted CI для итогового SHA ожидается. Реальные Lichess/OAuth, Stockfish и пользовательская SQLite не запускались и не открывались.
+
+---
+
 ## 03.11.2026 — принято целевое архитектурное решение ARCH-01
 
 После объединения PR #41 (M4.6) и PR #42 (утверждённая модель компетенций) владелец согласовал **модульный монолит Python 3.12 + PySide6**: один Windows desktop продукт, внутренние независимые модули, единую координацию асинхронных заданий без глобальной очереди для живых ходов, чёткие транзакционные SQLite-границы, отдельный менеджер Stockfish, непрерывный fail-closed Fair Play и обезличенную диагностику. Целевая платформа — обычный Windows-ноутбук 4 CPU cores / 8 ГБ RAM / SSD; Rust остаётся возможной *точечной* будущей оптимизацией при доказанном bottleneck. Обязательные benchmarks/latency SLA **сейчас отложены по решению владельца**.
