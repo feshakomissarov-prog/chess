@@ -58,7 +58,10 @@ def test_operation_failure_and_progress_are_visible_in_registry(monkeypatch):
 
 
 def test_cancel_sets_supplied_cooperative_event_and_records_reason(monkeypatch):
-    monkeypatch.setattr(background_work, "log_event", lambda *_args, **_kwargs: None)
+    recorded = []
+    monkeypatch.setattr(background_work, "log_event",
+                        lambda event, component, **fields:
+                        recorded.append((event, component, fields)))
     coordinator = BackgroundWorkCoordinator()
     stop = threading.Event()
     started = threading.Event()
@@ -75,6 +78,24 @@ def test_cancel_sets_supplied_cooperative_event_and_records_reason(monkeypatch):
     assert stop.is_set()
     assert handle.snapshot.status is OperationStatus.CANCELLED
     assert handle.snapshot.cancellation_reason == "account_switched"
+    finished = [fields for event, _component, fields in recorded
+                if event == "operation_finished"]
+    assert finished[0]["reason_code"] == "account_switched"
+    assert all(fields.get("operation_id") == handle.operation_id
+               for _event, _component, fields in recorded)
+    assert coordinator.close(1)
+
+
+def test_cancellation_reason_does_not_store_arbitrary_user_data(monkeypatch):
+    monkeypatch.setattr(background_work, "log_event", lambda *_args, **_kwargs: None)
+    coordinator = BackgroundWorkCoordinator()
+    started, stop = threading.Event(), threading.Event()
+    handle = coordinator.start(lambda: (started.set(), stop.wait(2)), kind="sync",
+                               lane=OperationLane.NETWORK_BACKGROUND, stop_event=stop)
+    assert started.wait(1)
+    assert handle.cancel("Bearer fake-secret")
+    handle.join(1)
+    assert handle.snapshot.cancellation_reason == "cancelled"
     assert coordinator.close(1)
 
 

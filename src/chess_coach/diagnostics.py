@@ -30,7 +30,7 @@ _ALLOWED = {"duration_ms", "run_id", "job_id", "operation_id", "error_code", "st
             "count", "new_count", "checked_count", "page", "http_status",
             "bytes", "records", "schema_version", "engine_verified", "thread",
             "response_type", "method", "route", "stage", "correlation_id",
-            "retry_after"}
+            "retry_after", "reason_code"}
 _SECRET = re.compile(
     r"(?i)(bearer\s+\S+|(?:access[_-]?token|refresh[_-]?token|token|authorization|"
     r"client[_-]?secret|oauth[_-]?code|code)[=:]\s*\S+)")
@@ -116,8 +116,17 @@ def log_event(event: str, component: str, *, level: int = logging.INFO,
 
 
 def set_context(**values: str) -> contextvars.Token:
-    allowed = {key: _safe_text(value, 64) for key, value in values.items()
-               if key in {"run_id", "job_id"} and value}
+    allowed = {}
+    for key, value in values.items():
+        if key not in {"run_id", "job_id", "operation_id"} or not value:
+            continue
+        raw = str(value)
+        if key == "operation_id":
+            if not re.fullmatch(r"[a-f0-9]{32}", raw):
+                continue
+            allowed[key] = raw
+        else:
+            allowed[key] = _safe_text(raw, 64)
     return _CONTEXT.set({**_CONTEXT.get(), **allowed})
 
 

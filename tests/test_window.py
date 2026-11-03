@@ -3723,6 +3723,9 @@ def test_window_close_cancels_analysis_and_waits_for_engine_quit_before_sqlite(
     worker = window._analysis_thread
     assert worker is not None
     qtbot.waitUntil(started.is_set, timeout=2000)
+    registered = window.runtime.work_coordinator.snapshots()
+    assert any(item.lane.value == "engine" and
+               item.context.kind == "stockfish_game_analysis" for item in registered)
     window._start_game_analysis("close-analysis", str(engine_path))
     assert len(engine_starts) == 1
 

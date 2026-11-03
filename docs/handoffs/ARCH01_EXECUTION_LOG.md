@@ -123,3 +123,13 @@ Working branch: `codex/arch-01-modular-refactor` from `main` SHA `3e7f2cd48b1676
 - Текущее ограничение: `MainWindow` всё ещё содержит application workflow/callback orchestration (в частности puzzle replay, online event dispatch и некоторые async result handlers); компоненты больше не содержат владельца состояния приложения. W8/W9 boundary audit и оставшаяся декомпозиция use cases проверят, что этот shell постепенно сводится к маршрутизации, не переписывая бизнес-логику или экран.
 
 **Next:** W8 расширить structured operation correlation/redaction, архитектурные import checks и fault-path regression; закрыть обнаруженные UI→worker и lifecycle coupling.
+
+## W8 — diagnostics, operation correlation и границы (выполняется)
+
+- Начата регистрация долгих операций, запущенных из `MainWindow`: чтение карточек главной, batch Stockfish, оценка позиции, установка движка и анализ завершённой партии теперь стартуют через `ApplicationRuntime.work_coordinator`. Координатор регистрирует их в отдельных потоках и не объединяет сетевые и engine lanes в блокирующую очередь. Совместимый thread-shaped handle сохраняет существующие проверки `is_alive()`/`join()` и остановку по событиям.
+- На рабочем потоке операции задаётся random 32-hex `operation_id` диагностического контекста; события начала/завершения получают один correlation id. Arbitrary cancellation text сводится к безопасному статическому коду, а диагностический allowlist не сериализует exception message, токены, email, пути и игровые данные.
+- Регрессии проверяют отмену с безопасным reason code, корреляцию в событиях операции, исключение произвольного текста, allowlist operation id и редактирование поддельных секретов/пути/email в диагностическом файле. Добавлено Qt-подтверждение, что анализ партии действительно зарегистрирован в engine lane.
+- Первый узкий прогон выявил только ошибочное ожидание теста: контекст `run_id` безопасно очищал распознаваемый шаблон `token=...`, а не произвольный текст. Исправлен fixture; повтор целевых diagnostic/background/Lichess/Qt сценариев: **18 passed**.
+- На момент записи W8 ещё не закрыт: необходимы статический аудит оставшихся thread owners и полный итоговый suite в W9. Отдельные dialog-owned workers статистики/индекса дебютов и engine probe сохраняют прежние владельцы; приёмка должна подтвердить, что их shutdown/ownership корректны. Физическая Windows-визуальная проверка и сетевые/секретные сценарии не выполнялись.
+
+**Next:** завершить W8 audit и обновить карту/PROJECT_STATUS; затем W9 exact-head полный Windows CI, compileall, diff-check и isolated offline window smoke.

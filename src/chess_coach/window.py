@@ -63,6 +63,7 @@ from .lichess.service import LichessService
 from .bootstrap import ApplicationRuntime, create_runtime
 from .application.app_state import ReviewResumeTarget, WorkspaceSnapshot, WorkspaceStateStore
 from .application.game_sessions import GameSessionCoordinator
+from .application.background_work import OperationLane
 from .lichess.session import LichessGameSession, classify_lichess_opponent
 from .lichess.statistics import StatisticsService
 from .diagnostics import anonymized_report, log_event, logs_directory
@@ -1158,6 +1159,15 @@ class MainWindow(QMainWindow):
         status.setAccessibleName("Уведомление: " + str(message)[:120])
         status.showMessage(str(message), max(1000, int(timeout_ms)))
 
+    def _start_registered_work(self, target, *, kind: str, lane: OperationLane,
+                               thread_name: str, stop_event: threading.Event | None = None):
+        """Register a shell-owned worker without serializing it behind other lanes."""
+        return self.runtime.work_coordinator.start(
+            target, kind=kind, lane=lane,
+            auth_generation=(self._analysis_session_generation
+                             if hasattr(self, "_analysis_session_generation") else None),
+            stop_event=stop_event, thread_name=thread_name)
+
     def _set_active_route(self, route: str) -> None:
         for key, button in self._nav_buttons.items():
             button.setProperty("active", key == route)
@@ -1278,16 +1288,17 @@ class MainWindow(QMainWindow):
             except Exception as exc:
                 result, error = None, exc
             self.dashboard_finished.emit(generation, result, error, threading.current_thread())
-        thread = threading.Thread(target=work, name="chess-coach-dashboard-read", daemon=True)
+        thread = self._start_registered_work(
+            work, kind="dashboard_read", lane=OperationLane.NETWORK_BACKGROUND,
+            thread_name="chess-coach-dashboard-read")
         self._dashboard_thread = thread
-        thread.start()
 
     def _dashboard_result_ready(self, generation: int, snapshot: object, error: object,
                                 thread: object) -> None:
         if isinstance(thread, threading.Thread):
             thread.join(timeout=0.01)
-            if self._dashboard_thread is thread:
-                self._dashboard_thread = None
+        if self._dashboard_thread is not None and not self._dashboard_thread.is_alive():
+            self._dashboard_thread = None
         if self._shutdown_requested:
             self._dashboard_pending = None
             return
@@ -1917,9 +1928,10 @@ class MainWindow(QMainWindow):
             except Exception as exc:
                 dialog.worker_finished.emit(False, f"Очередь не запущена или остановлена: {exc}")
 
-        thread = threading.Thread(target=work, name="chess-coach-batch-analysis", daemon=True)
+        thread = self._start_registered_work(
+            work, kind="stockfish_batch_analysis", lane=OperationLane.ENGINE,
+            stop_event=stop, thread_name="chess-coach-batch-analysis")
         self._batch_thread = thread
-        thread.start()
 
     def _pause_batch_analysis(self) -> None:
         if self._batch_pause is not None:
@@ -2814,12 +2826,14 @@ class MainWindow(QMainWindow):
                                             engine_manager=self.stockfish_manager)
             except Exception as exc:
                 payload = {"error": str(exc)}
+            active["worker_thread"] = threading.current_thread()
             self.position_eval_finished.emit(generation, payload, threading.current_thread())
 
-        thread = threading.Thread(target=work, name="chess-coach-position-eval", daemon=True)
+        thread = self._start_registered_work(
+            work, kind="stockfish_position_evaluation", lane=OperationLane.ENGINE,
+            stop_event=stop_event, thread_name="chess-coach-position-eval")
         self._position_eval_thread = thread
         self._statistics_workers.add(thread)
-        thread.start()
 
     def _cancel_position_evaluation(self, message: str) -> None:
         self._position_eval_generation += 1
@@ -2838,7 +2852,10 @@ class MainWindow(QMainWindow):
                                  thread: threading.Thread) -> None:
         thread.join(timeout=0.05)
         self._statistics_workers.discard(thread)
-        if self._position_eval_thread is thread:
+        operation = self._position_eval_thread
+        if operation is not None:
+            self._statistics_workers.discard(operation)
+        if self._position_eval_handle.get("worker_thread") is thread:
             self._position_eval_thread = None
             self._position_eval_stop = None
             self._position_eval_handle = {}
@@ -3143,9 +3160,10 @@ class MainWindow(QMainWindow):
             except Exception as exc:
                 self.engine_install_finished.emit({"error": str(exc), "dialog": settings_dialog})
 
-        thread = threading.Thread(target=work, name="chess-coach-stockfish-install", daemon=True)
+        thread = self._start_registered_work(
+            work, kind="stockfish_install", lane=OperationLane.NETWORK_BACKGROUND,
+            stop_event=stop, thread_name="chess-coach-stockfish-install")
         self._engine_install_thread = thread
-        thread.start()
 
     def _engine_install_progress_changed(self, message: str) -> None:
         if self._engine_install_dialog is not None:
@@ -4614,9 +4632,10 @@ class MainWindow(QMainWindow):
             except Exception as exc:
                 self.analysis_finished.emit(game_id, {"error": str(exc)})
 
-        thread = threading.Thread(target=work, name="chess-coach-analysis", daemon=True)
+        thread = self._start_registered_work(
+            work, kind="stockfish_game_analysis", lane=OperationLane.ENGINE,
+            stop_event=stop, thread_name="chess-coach-analysis")
         self._analysis_thread = thread
-        thread.start()
     def _analysis_options_from_settings(self) -> AnalysisOptions:
         kind = self.settings.value("analysis_limit_kind", "nodes", type=str)
         value = self.settings.value("analysis_limit_value", 100_000, type=int)

@@ -10,7 +10,18 @@ import uuid
 
 from ..domain.models import JobContext
 from ..domain.work_context import reset_work_priority, set_work_priority
-from ..diagnostics import log_event
+from ..diagnostics import log_event, reset_context, set_context
+
+
+_CANCELLATION_CODES = {
+    "user_cancelled", "shutdown", "account_switched", "session_replaced",
+    "safety_revoked", "rate_limited", "paused", "worker_stop_event",
+}
+
+
+def _safe_cancellation_code(reason: object) -> str:
+    value = str(reason)
+    return value if value in _CANCELLATION_CODES else "cancelled"
 
 
 class OperationLane(StrEnum):
@@ -82,7 +93,7 @@ class OperationHandle:
         if self._thread.is_alive() and self._stop_event is not None:
             self._stop_event.set()
             self._replace(status=OperationStatus.CANCELLED,
-                          cancellation_reason=str(reason)[:80])
+                          cancellation_reason=_safe_cancellation_code(reason))
             return True
         return False
 
@@ -92,7 +103,9 @@ class OperationHandle:
     def transition(self, status: OperationStatus, *, reason: str | None = None,
                    failure_code: str | None = None) -> None:
         self._replace(status=status,
-                      cancellation_reason=str(reason)[:80] if reason else None,
+                      cancellation_reason=(_safe_cancellation_code(reason)
+                                           if reason and status is OperationStatus.CANCELLED
+                                           else str(reason)[:80] if reason else None),
                       failure_code=str(failure_code)[:80] if failure_code else None)
 
     def is_alive(self) -> bool:
@@ -174,10 +187,11 @@ class BackgroundWorkCoordinator:
             def run() -> None:
                 handle = holder["handle"]
                 handle._replace(status=OperationStatus.RUNNING, started_at=time.monotonic())
-                log_event("operation_started", "background_work", operation_id=context.operation_id,
-                          stage=kind, mode=lane.value)
+                diagnostic_context = set_context(operation_id=context.operation_id)
                 priority_token = set_work_priority(context.priority)
                 try:
+                    log_event("operation_started", "background_work",
+                              operation_id=context.operation_id, stage=kind, mode=lane.value)
                     target()
                 except Exception as exc:
                     handle._replace(status=OperationStatus.FAILED,
@@ -199,9 +213,12 @@ class BackgroundWorkCoordinator:
                         handle._replace(finished_at=time.monotonic())
                     log_event("operation_finished", "background_work",
                               operation_id=context.operation_id, stage=kind,
-                              mode=lane.value, status=handle.snapshot.status.value)
+                              mode=lane.value, status=handle.snapshot.status.value,
+                              reason_code=(handle.snapshot.cancellation_reason
+                                           or handle.snapshot.failure_code))
                 finally:
                     reset_work_priority(priority_token)
+                    reset_context(diagnostic_context)
                     with self._lock:
                         self._operations.pop(context.operation_id, None)
 
