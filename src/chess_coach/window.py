@@ -917,6 +917,7 @@ class MainWindow(QMainWindow):
         splitter = QSplitter(Qt.Orientation.Horizontal)
         splitter.setChildrenCollapsible(False)
         board_column = QWidget()
+        self.board_column = board_column
         board_layout = QVBoxLayout(board_column)
         board_layout.setContentsMargins(0, 0, 8, 0)
         board_layout.setSpacing(8)
@@ -938,7 +939,7 @@ class MainWindow(QMainWindow):
         self.focus_mode_button.toggled.connect(self._set_focus_mode)
         board_layout.addWidget(self.focus_mode_button)
         self.board = BoardView(self.controller.board)
-        self.board.setMinimumSize(320, 320)
+        self.board.setMinimumSize(160, 160)
         self.board.set_premove(self.controller.premove, self.controller.player_color)
         self.board.move_intent.connect(self.on_move_intent)
         self.board.wheel_navigate.connect(self.navigate_by)
@@ -1144,6 +1145,7 @@ class MainWindow(QMainWindow):
         splitter.setStretchFactor(1, 7)
         splitter.setSizes([850, 450])
         self.game_splitter = splitter
+        splitter.splitterMoved.connect(lambda *_: QTimer.singleShot(0, self._apply_board_size))
         splitter.setOrientation(
             Qt.Orientation.Vertical if self.width() < 1120 else Qt.Orientation.Horizontal)
         # The board workspace itself must not become a page-wide scroll area:
@@ -1178,6 +1180,7 @@ class MainWindow(QMainWindow):
         self._apply_header_responsive()
         self._set_active_route("home")
         self._update_play_mode_availability()
+        QTimer.singleShot(0, self._apply_board_size)
 
     def _board_size_changed(self, _index: int) -> None:
         if not hasattr(self, "board_size_combo"):
@@ -1190,15 +1193,28 @@ class MainWindow(QMainWindow):
         if not hasattr(self, "board"):
             return
         target = int(self.settings.value("board_target_size", 480, type=int))
-        sidebar_width = self.sidebar.width() if hasattr(self, "sidebar") else 212
-        focus = bool(getattr(self, "_board_focus_mode", False))
-        inspector_width = 0 if focus else 340
-        available_width = max(320, self.width() - sidebar_width - inspector_width - 96)
-        available_height = max(320, self.height() - 64 - 210)
+        # Measure the actual splitter column and the real space between controls;
+        # do not guess widths from nominal sidebar/inspector constants.
+        column = self.board_column
+        contents = column.contentsRect()
+        layout = column.layout()
+        margins = layout.contentsMargins()
+        visible_non_board = [item.widget() for index in range(layout.count())
+                             if (item := layout.itemAt(index)).widget() is not None
+                             and item.widget() is not self.board
+                             and not item.widget().isHidden()]
+        occupied_height = sum(widget.sizeHint().height() for widget in visible_non_board)
+        occupied_height += max(0, len(visible_non_board)) * layout.spacing()
+        available_width = max(160, contents.width() - margins.left() - margins.right())
+        available_height = max(
+            160, column.height() - margins.top() - margins.bottom() - occupied_height)
         requested = min(available_width, available_height) if target <= 0 else target
-        actual = max(320, min(requested, available_width, available_height))
+        actual = max(160, min(requested, available_width, available_height))
         self.board.setFixedSize(actual, actual)
         if hasattr(self, "review_workspace"):
+            sidebar_width = self.sidebar.width() if hasattr(self, "sidebar") else 212
+            focus = bool(getattr(self, "_board_focus_mode", False))
+            inspector_width = 0 if focus else 340
             review_width = max(320, self.width() - sidebar_width - inspector_width - 96)
             review_height = max(320, self.height() - 64 - 210)
             review_size = max(320, min(requested, review_width, review_height))
@@ -1221,6 +1237,7 @@ class MainWindow(QMainWindow):
         if hasattr(self, "game_splitter"):
             self.game_splitter.setOrientation(
                 Qt.Orientation.Vertical if self.width() < 1120 else Qt.Orientation.Horizontal)
+            QTimer.singleShot(0, self._apply_board_size)
         self._apply_header_responsive()
         self._layout_dashboard_metrics()
         self._layout_play_mode_cards()
@@ -1829,6 +1846,25 @@ class MainWindow(QMainWindow):
 
     def _render_dashboard_snapshot(self, snapshot: dict) -> None:
         self._latest_dashboard_snapshot = snapshot
+        trend = snapshot.get("activity_trend") or []
+        if trend:
+            points = [f"{item['month']}: {item['average_rating']} · {item['attempts']} попыток"
+                      for item in trend if item.get("average_rating") is not None]
+            self._home_view.activity_status.setText(
+                "Рейтинг личных задач Lichess по месяцам · N "
+                f"{sum(int(item.get('attempts') or 0) for item in trend)}. "
+                + (" → ".join(points[-4:]) if points else "Нет рейтинговых точек."))
+            self._home_view.activity_status.setToolTip(
+                "Источник: локально сохранённые попытки Lichess; сгруппировано по месяцу. "
+                "Это история, не персональная рекомендация.")
+        elif snapshot.get("filter", {}).get("account_id"):
+            self._home_view.activity_status.setText(
+                "Для выбранного аккаунта пока нет сохранённой помесячной истории рейтинга задач.")
+            self._home_view.activity_status.setToolTip("Для тренда нужны сохранённые попытки.")
+        else:
+            self._home_view.activity_status.setText(
+                "Выберите аккаунт Lichess с сохранёнными попытками, чтобы увидеть их реальный тренд.")
+            self._home_view.activity_status.setToolTip("Нет временных точек для всех локальных партий.")
         active_human = any(
             session.status in {"started", "playing"} and not session.is_ai_opponent
             for session in self.online_sessions.values())
@@ -2405,6 +2441,7 @@ class MainWindow(QMainWindow):
         dialog.engine_settings_requested.connect(self.open_settings)
         dialog.diagnostics_requested.connect(
             lambda: QDesktopServices.openUrl(QUrl.fromLocalFile(str(logs_directory()))))
+        dialog.lichess_inspector_requested.connect(self.show_background_analytics)
         dialog.pause_requested.connect(self._pause_batch_analysis)
         dialog.cancel_requested.connect(self._cancel_batch_analysis)
         dialog.setModal(False)
@@ -2535,7 +2572,7 @@ class MainWindow(QMainWindow):
                         f"выполнены: {counts.get('complete', 0)} · ошибки: {counts.get('failed', 0)} · "
                         f"неизвестное состояние: {int(unknown_preflight.is_set())}")
                     dialog.worker_progress.emit(
-                        f"Партия {game_id}: позиции {done}/{total} · "
+                        f"Текущая партия · позиции {done}/{total} · "
                         f"очередь: {counts.get('queued', 0)} · готово: {counts.get('complete', 0)} · "
                         f"ошибки: {counts.get('failed', 0)}")
                     dialog.worker_run_status.emit(
@@ -5064,6 +5101,18 @@ class MainWindow(QMainWindow):
             self.opponent_clock_label.setStyleSheet("font-size: 28px; font-weight: 700; padding: 2px 8px;")
             self.you_clock_label.setStyleSheet("font-size: 28px; font-weight: 700; padding: 2px 8px;")
             return
+        if session.clock_state_valid is False:
+            message = "—:— · часы синхронизируются"
+            self.opponent_clock_label.setText(message)
+            self.you_clock_label.setText(message)
+            self.clock_label.setText("Ожидаем корректные часы сервера")
+            self.opponent_clock_detail.clear()
+            self.you_clock_detail.clear()
+            self.opponent_clock_label.setStyleSheet(
+                f"font-size: 28px; font-weight: 600; padding: 2px 8px; color: {TOKENS.secondary};")
+            self.you_clock_label.setStyleSheet(
+                f"font-size: 28px; font-weight: 600; padding: 2px 8px; color: {TOKENS.secondary};")
+            return
         if session.white_ms is None or session.black_ms is None:
             waiting = self._screen_mode == "online" and session.clock_control != "-"
             fallback = "—:— · ожидаем часы Lichess" if waiting else "Без часов"
@@ -5119,11 +5168,11 @@ class MainWindow(QMainWindow):
         self.opponent_clock_label.setText(opponent_text + opponent_marker)
         self.you_clock_label.setStyleSheet(
             f"font-size: 28px; font-weight: 800; padding: 2px 8px; color: #F3C969;" if own_warning else
-            f"font-size: 28px; font-weight: 800; padding: 2px 8px; color: {TOKENS.text};" if owner_active else
+            f"font-size: 28px; font-weight: 800; padding: 2px 8px; color: #FFFFFF;" if owner_active else
             f"font-size: 28px; font-weight: 600; padding: 2px 8px; color: {TOKENS.secondary};")
         self.opponent_clock_label.setStyleSheet(
             f"font-size: 28px; font-weight: 800; padding: 2px 8px; color: #F3C969;" if opponent_warning else
-            f"font-size: 28px; font-weight: 800; padding: 2px 8px; color: {TOKENS.text};" if opponent_active else
+            f"font-size: 28px; font-weight: 800; padding: 2px 8px; color: #FFFFFF;" if opponent_active else
             f"font-size: 28px; font-weight: 600; padding: 2px 8px; color: {TOKENS.secondary};")
         self.clock_label.setText(f"Контроль {format_clock_control(session.clock_control)} · часы Lichess")
 

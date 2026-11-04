@@ -338,13 +338,17 @@ def test_m46_board_size_presets_are_available_and_persisted(qtbot, tmp_path, siz
     assert [window.board_size_combo.itemData(i) for i in range(window.board_size_combo.count())] == [
         400, 480, 560, 720, -1]
     window.board_size_combo.setCurrentIndex(window.board_size_combo.findData(size))
+    window.screen_stack.setCurrentWidget(window.game_page)
+    window.show()
+    qtbot.wait(20)
+    window._apply_board_size()
     assert window.settings.value("board_target_size", type=int) == size
     if size > 0:
         assert window.board.width() <= size
         assert window.board.height() <= size
     else:
         assert window.settings.value("board_target_size", type=int) == -1
-    assert window.board.width() >= 320
+    assert window.board.width() >= 160
 
 
 def test_clock_filter_sort_uses_raw_control_time_and_keeps_daily_last():
@@ -353,16 +357,22 @@ def test_clock_filter_sort_uses_raw_control_time_and_keeps_daily_last():
         "3+2", "15+10", "300+3", "daily:86400", "bad"]
 
 
-@pytest.mark.parametrize(("width", "height", "minimum"), [(1024, 700, 320), (1920, 1080, 800)])
+@pytest.mark.parametrize(("width", "height"), [(1024, 700), (1920, 1080)])
 def test_board_fit_uses_available_window_area_and_focus_hides_inspector(
-        qtbot, tmp_path, width, height, minimum):
+        qtbot, tmp_path, width, height):
     window = MainWindow(QSettings(str(tmp_path / f"board-fit-{width}.ini"),
                                   QSettings.Format.IniFormat), offline_mode=True)
     qtbot.addWidget(window)
     window.resize(width, height)
+    window.screen_stack.setCurrentWidget(window.game_page)
+    window.show()
+    qtbot.wait(20)
     window.board_size_combo.setCurrentIndex(window.board_size_combo.findData(-1))
     window._apply_board_size()
-    assert window.board.width() >= minimum
+    assert window.board.width() >= 160
+    assert window.board.width() <= min(window.board_column.contentsRect().width(),
+                                        window.board_column.layout().itemAt(
+                                            window.board_column.layout().indexOf(window.board)).geometry().height())
     if width == 1920:
         before = window.board.width()
         window.focus_mode_button.setChecked(True)
@@ -1076,18 +1086,25 @@ def test_batch_analysis_controls_are_explicit_and_resume_after_pause(qtbot, tmp_
     dialog.pause_requested.connect(lambda: paused.append(True))
     assert not dialog.pause_button.isEnabled()
     assert not dialog.resume_button.isEnabled()
+    assert dialog.pause_button.isHidden() and dialog.cancel_button.isHidden()
     engine = tmp_path / "stockfish.exe"
     engine.write_bytes(b"verified synthetic executable")
     dialog.set_readiness(str(engine), True, True)
     assert dialog.start_button.isEnabled() and not dialog.resume_button.isEnabled()
+    assert str(engine) not in dialog.engine_status.text()
+    assert dialog.settings_content.isHidden()
+    assert not dialog.start_button.isHidden() and dialog.resume_button.isHidden()
+    assert not dialog.settings_content.isVisible()
     qtbot.mouseClick(dialog.start_button, Qt.MouseButton.LeftButton)
     assert started == [(2, 20_000, 64, False, False, False)]
     dialog.set_running(True)
+    assert not dialog.pause_button.isHidden() and not dialog.cancel_button.isHidden()
     assert dialog.close() is False
     qtbot.mouseClick(dialog.pause_button, Qt.MouseButton.LeftButton)
     assert paused == [True]
     dialog.worker_finished.emit(True, "Пауза")
     assert dialog.resume_button.isEnabled()
+    assert dialog.start_button.isHidden() and not dialog.resume_button.isHidden()
     dialog.nodes.setValue(1_000_000)
     assert dialog.nodes.value() == 1_000_000
     assert "основного прохода" in dialog.selective_review.text()
@@ -1098,8 +1115,25 @@ def test_batch_analysis_controls_are_explicit_and_resume_after_pause(qtbot, tmp_
     dialog.worker_finished.emit(False, "Завершено")
     assert not dialog.pause_button.isEnabled()
     assert dialog.start_button.isEnabled() and not dialog.resume_button.isEnabled()
+    assert not dialog.start_button.isHidden() and dialog.resume_button.isHidden()
     dialog.set_readiness("", False, False)
     assert not dialog.start_button.isEnabled() and not dialog.resume_button.isEnabled()
+
+
+def test_batch_queue_cancel_requires_confirmation_and_preserves_results(qtbot, monkeypatch):
+    dialog = BatchAnalysisDialog()
+    qtbot.addWidget(dialog)
+    emitted = []
+    answers = []
+    dialog.cancel_requested.connect(lambda: emitted.append(True))
+    monkeypatch.setattr(QMessageBox, "question", lambda *args: answers.pop(0))
+    dialog.set_running(True)
+    answers.append(QMessageBox.StandardButton.Cancel)
+    dialog.cancel_button.click()
+    assert emitted == []
+    answers.append(QMessageBox.StandardButton.Yes)
+    dialog.cancel_button.click()
+    assert emitted == [True]
 
 
 def test_batch_dialog_readiness_tracks_account_429_and_removed_engine(qtbot, tmp_path):
@@ -2991,6 +3025,57 @@ def test_finished_game_write_finalizes_after_navigation_away_from_board(qtbot, t
     assert "e7e5" in window.game_repository.get_game(session.game_id)["moves"]
 
 
+def test_background_finished_game_sync_waits_for_sqlite_without_stealing_active_game(
+        qtbot, tmp_path, monkeypatch):
+    window = MainWindow(QSettings(str(tmp_path / "background-finish-save.ini"),
+                                  QSettings.Format.IniFormat), offline_mode=True)
+    qtbot.addWidget(window)
+    active = LichessGameSession("selected-active", window.game_repository)
+    active.apply_event({"type": "gameFull", "initialFen": "startpos",
+                        "state": {"moves": "d2d4", "status": "started"}})
+    background = LichessGameSession("finished-background", window.game_repository)
+    background.apply_event({"type": "gameFull", "initialFen": "startpos",
+                            "state": {"moves": "e2e4 e7e5", "status": "started"}})
+    window.online_sessions.update({active.game_id: active, background.game_id: background})
+    window.online_session = active
+    window._selected_live_game_id = active.game_id
+    window._screen_mode = "online"
+    window.screen_stack.setCurrentWidget(window.game_page)
+    sync_calls = []
+    class FakeClient:
+        rate_limit_remaining = 0
+    class FakeService:
+        username = "SyntheticAccount"
+        client = FakeClient()
+        def mark_game_finished(self, game_id): sync_calls.append(("mark", game_id))
+        def start_game(self, game_id): sync_calls.append(("start", game_id))
+    window.lichess = FakeService()
+    window.offline_mode = False
+    window._lichess_connected = True
+    pending = {background.game_id: True}
+    real_pending = window.game_repository.has_pending_write
+    monkeypatch.setattr(window.game_repository, "has_pending_write",
+                        lambda game_id: pending.get(game_id, False) or real_pending(game_id))
+
+    window._lichess_event({"type": "gameFinish", "game": {
+        "gameId": background.game_id, "status": {"name": "mate"}, "winner": "white"}})
+    window.show_analysis()  # Leave the board while the background game is finalizing.
+    window._lichess_game_event(background.game_id, {
+        "type": "gameState", "moves": "e2e4 e7e5 g1f3", "status": "mate", "winner": "white"})
+    assert window.online_session is active
+    assert window._selected_live_game_id == active.game_id
+    assert background.final_sync_pending is False
+    assert window.game_finalization.get(background.game_id).phase.value == "local_write"
+    assert "сохранена локально" not in window.result_saved_label.text().lower()
+
+    pending[background.game_id] = False
+    window._poll_result_write(background.game_id)
+    assert window.game_finalization.get(background.game_id) is None
+    assert window.game_repository.get_game(background.game_id)["moves"] == "e2e4 e7e5 g1f3"
+    assert sync_calls == [("mark", background.game_id), ("start", background.game_id)]
+    assert window.online_session is active
+
+
 def test_online_history_position_stays_selected_until_explicit_live_navigation(qtbot, tmp_path):
     window = MainWindow(QSettings(str(tmp_path / "history-stays.ini"), QSettings.Format.IniFormat))
     qtbot.addWidget(window)
@@ -4021,7 +4106,7 @@ def test_clock_styles_are_readable_in_rendered_active_inactive_and_warning_state
     window._update_clock()
     active = render_clock(window.you_clock_label)
     assert active.width() > 0 and active.height() > 0
-    assert contains_color(active, "#F0EBE3")
+    assert contains_color(active, "#FFFFFF")
     assert "font-size: 28px" in window.you_clock_label.styleSheet()
     assert window.you_clock_label.isVisible()
     opponent_inactive = render_clock(window.opponent_clock_label)
@@ -4032,7 +4117,7 @@ def test_clock_styles_are_readable_in_rendered_active_inactive_and_warning_state
     inactive = render_clock(window.you_clock_label)
     assert contains_color(inactive, "#B8BDC7")
     opponent_active = render_clock(window.opponent_clock_label)
-    assert contains_color(opponent_active, "#F0EBE3")
+    assert contains_color(opponent_active, "#FFFFFF")
 
     session.black_ms = 20_000
     window._update_clock()
@@ -4047,9 +4132,68 @@ def test_clock_styles_are_readable_in_rendered_active_inactive_and_warning_state
     assert contains_color(warning, "#F3C969")
     assert "⚠ МЕНЬШЕ 30 СЕК" in window.you_clock_label.text()
     from chess_coach.ui.theme import contrast_ratio
-    assert contrast_ratio("#F0EBE3", "#14171C") >= 4.5
+    assert contrast_ratio("#FFFFFF", "#14171C") >= 4.5
     assert contrast_ratio("#B8BDC7", "#14171C") >= 4.5
     assert contrast_ratio("#F3C969", "#14171C") >= 4.5
+
+
+@pytest.mark.parametrize(("width", "height", "flipped"), [
+    (1280, 720, False), (1366, 768, True), (1600, 900, False), (1920, 1080, True),
+])
+def test_live_board_fits_real_splitter_geometry_and_square_hit_map(
+        qtbot, tmp_path, width, height, flipped):
+    from PySide6.QtCore import QPointF
+
+    window = MainWindow(QSettings(str(tmp_path / f"board-hit-{width}.ini"),
+                                  QSettings.Format.IniFormat), offline_mode=True)
+    qtbot.addWidget(window)
+    window.resize(width, height)
+    window.board_size_combo.setCurrentIndex(window.board_size_combo.findData(-1))
+    window.screen_stack.setCurrentWidget(window.game_page)
+    window.show()
+    qtbot.wait(30)
+    board = window.board
+    board.set_flipped(flipped)
+    window._apply_board_size()
+    qtbot.wait(10)
+
+    rect = board.geometry()
+    content = window.board_column.contentsRect()
+    assert rect.width() == rect.height()
+    assert rect.width() >= 160
+    assert rect.left() >= content.left()
+    assert rect.top() >= content.top()
+    assert rect.right() <= content.right()
+    assert rect.bottom() <= content.bottom()
+    board_rect = board._get_board_rect()
+    side = board_rect.width()
+    for file_index, rank_index in ((0, 0), (7, 0), (0, 7), (7, 7), (3, 3)):
+        x, y = file_index, 7 - rank_index
+        if board._flipped:
+            x, y = 7 - file_index, rank_index
+        point = QPointF(board_rect.x() + (x + 0.5) * side / 8,
+                        board_rect.y() + (y + 0.5) * side / 8)
+        assert board._pos_to_square(point) == chess.square(file_index, rank_index)
+    window.close()
+
+
+def test_malformed_server_clock_is_not_rendered_as_plausible_time(qtbot, tmp_path):
+    window = MainWindow(QSettings(str(tmp_path / "clock-invalid.ini"),
+                                  QSettings.Format.IniFormat), offline_mode=True)
+    qtbot.addWidget(window)
+    session = LichessGameSession("bad-clock", window.game_repository)
+    session.apply_event({"type": "gameFull", "initialFen": "startpos",
+                         "clock": {},
+                         "state": {"moves": "", "status": "started",
+                                   "wtime": 596 * 60 * 60 * 1000,
+                                   "btime": 596 * 60 * 60 * 1000}})
+    window.online_session = session
+    window._screen_mode = "online"
+    window._update_clock()
+    assert session.clock_state_valid is False
+    assert window.you_clock_label.text() == "—:— · часы синхронизируются"
+    assert window.opponent_clock_label.text() == window.you_clock_label.text()
+    window.close()
 
 
 def test_queued_backfill_status_from_previous_account_is_ignored(qtbot, tmp_path):

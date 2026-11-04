@@ -13,7 +13,7 @@ from PySide6.QtGui import QDesktopServices, QGuiApplication
 from PySide6.QtWidgets import (
     QButtonGroup, QCheckBox, QComboBox, QDialog, QDialogButtonBox, QGridLayout,
     QHBoxLayout, QLabel, QListWidget, QListWidgetItem, QLineEdit, QPushButton,
-    QRadioButton, QStackedWidget, QVBoxLayout, QSpinBox,
+    QRadioButton, QStackedWidget, QVBoxLayout, QSpinBox, QMessageBox,
     QWidget, QApplication, QFileDialog, QFrame, QGroupBox, QScrollArea, QSlider, QTabWidget,
 )
 from ..diagnostics import anonymized_report, logs_directory
@@ -107,11 +107,12 @@ class BatchAnalysisDialog(QDialog):
     worker_run_status = Signal(str)
     worker_finished = Signal(bool, str)
     diagnostics_requested = Signal()
+    lichess_inspector_requested = Signal()
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
         self.setWindowTitle("Анализ партий")
-        self.setMinimumWidth(520)
+        self.setMinimumWidth(440)
         self._readiness = False
         self._running = False
         self._paused = False
@@ -126,10 +127,24 @@ class BatchAnalysisDialog(QDialog):
         self.account_status = QLabel("Аккаунт Lichess не подключён; fair-play preflight недоступен.")
         self.account_status.setWordWrap(True)
         layout.addWidget(self.account_status)
-        self.engine_settings_button = QPushButton("Найти / установить / проверить Stockfish")
+        self.engine_settings_button = QPushButton("Настроить Stockfish…")
         self.engine_settings_button.clicked.connect(self.engine_settings_requested.emit)
         layout.addWidget(self.engine_settings_button)
-        layout.addWidget(QLabel(
+        self.lichess_inspector_button = QPushButton("Готовые данные Lichess…")
+        self.lichess_inspector_button.clicked.connect(self.lichess_inspector_requested.emit)
+        layout.addWidget(self.lichess_inspector_button)
+        self.settings_group = QGroupBox("Параметры анализа")
+        self.settings_group.setCheckable(True)
+        self.settings_group.setChecked(False)
+        group_layout = QVBoxLayout(self.settings_group)
+        self.settings_content = QWidget()
+        self.settings_content.setVisible(False)
+        self.settings_group.toggled.connect(self.settings_content.setVisible)
+        group_layout.addWidget(self.settings_content)
+        settings_layout = QVBoxLayout(self.settings_content)
+        settings_layout.setContentsMargins(0, 4, 0, 0)
+        layout.addWidget(self.settings_group)
+        settings_layout.addWidget(QLabel(
             "Проанализировать две последние недостающие завершённые партии. "
             "Партии с готовой Lichess-оценкой, уже завершённым заданием или неподдерживаемым PGN пропускаются."))
         form = QGridLayout()
@@ -154,13 +169,13 @@ class BatchAnalysisDialog(QDialog):
                 "(до 12 на игру / 100 всего)")
         self.nodes.valueChanged.connect(update_budget_note)
         self.nodes.valueChanged.emit(self.nodes.value())
-        layout.addWidget(self.budget_note)
+        settings_layout.addWidget(self.budget_note)
         form.addWidget(QLabel("Максимум партий за один запуск"), 0, 0); form.addWidget(self.limit, 0, 1)
         form.addWidget(QLabel("Узлов на позицию"), 1, 0); form.addWidget(self.nodes, 1, 1)
         form.addWidget(QLabel("Hash (МБ)"), 2, 0); form.addWidget(self.hash_mb, 2, 1)
-        layout.addLayout(form)
-        layout.addWidget(self.retry_failed)
-        layout.addWidget(self.selective_review)
+        settings_layout.addLayout(form)
+        settings_layout.addWidget(self.retry_failed)
+        settings_layout.addWidget(self.selective_review)
         self.queue_label = QLabel("Очередь ещё не загружена")
         self.queue_label.setWordWrap(True)
         layout.addWidget(self.queue_label)
@@ -183,10 +198,12 @@ class BatchAnalysisDialog(QDialog):
         self.resume_button.clicked.connect(self._emit_resume_request)
         self.pause_button = QPushButton("Пауза")
         self.pause_button.setEnabled(False)
+        self.pause_button.setVisible(False)
         self.pause_button.clicked.connect(self.pause_requested.emit)
         self.cancel_button = QPushButton("Отменить очередь")
         self.cancel_button.setEnabled(False)
-        self.cancel_button.clicked.connect(self.cancel_requested.emit)
+        self.cancel_button.setVisible(False)
+        self.cancel_button.clicked.connect(self._confirm_cancel)
         controls.addWidget(self.start_button); controls.addWidget(self.resume_button)
         controls.addWidget(self.pause_button); controls.addWidget(self.cancel_button)
         layout.addLayout(controls)
@@ -199,7 +216,7 @@ class BatchAnalysisDialog(QDialog):
         self.worker_finished.connect(self._worker_finished)
         self.diagnostics_button = QPushButton("Открыть папку диагностических логов")
         self.diagnostics_button.clicked.connect(self.diagnostics_requested.emit)
-        layout.addWidget(self.diagnostics_button)
+        settings_layout.addWidget(self.diagnostics_button)
 
     def _emit_start_request(self) -> None:
         self._active_queue_parameters = (self.nodes.value(), self.hash_mb.value())
@@ -214,17 +231,26 @@ class BatchAnalysisDialog(QDialog):
         self.run_requested.emit(self.limit.value(), self.nodes.value(), self.hash_mb.value(), True,
                                 False, self.selective_review.isChecked())
 
+    def _confirm_cancel(self) -> None:
+        answer = QMessageBox.question(
+            self, "Отменить пакетный анализ",
+            "Остановить текущий анализ и отметить оставшуюся очередь как отменённую? "
+            "Уже сохранённые результаты останутся в базе.",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel,
+            QMessageBox.StandardButton.Cancel)
+        if answer == QMessageBox.StandardButton.Yes:
+            self.cancel_requested.emit()
+
     def set_readiness(self, engine_path: str, engine_verified: bool, account_connected: bool,
                       account_reason: str | None = None) -> None:
         path = Path(engine_path) if engine_path else None
         available = bool(path and path.is_file())
         if not available:
-            self.engine_status.setText("Движок не найден. Установите или выберите Stockfish в настройках.")
+            self.engine_status.setText("Stockfish не настроен. Выберите или проверьте движок в настройках.")
         elif engine_verified:
-            self.engine_status.setText(f"Движок готов и проверен UCI handshake: {path}")
+            self.engine_status.setText("Stockfish готов · UCI-проверка пройдена")
         else:
-            self.engine_status.setText(
-                f"Движок найден, но не проверен. Нажмите «Проверить движок» в настройках: {path}")
+            self.engine_status.setText("Stockfish найден, требуется проверка в настройках")
         self.account_status.setText(
             "Аккаунт подключён. Перед каждым заданием будет выполнена live fair-play проверка."
             if account_connected else
@@ -254,12 +280,16 @@ class BatchAnalysisDialog(QDialog):
         self.selective_review.setEnabled(not running)
         self.pause_button.setEnabled(running)
         self.cancel_button.setEnabled(running)
+        self.pause_button.setVisible(running)
+        self.cancel_button.setVisible(running)
         self._update_action_state()
 
     def _update_action_state(self) -> None:
         idle = not self._running
         self.start_button.setEnabled(idle and self._readiness and not self._paused)
         self.resume_button.setEnabled(idle and self._readiness and self._paused)
+        self.start_button.setVisible(not self._paused)
+        self.resume_button.setVisible(self._paused)
 
     def closeEvent(self, event) -> None:
         if self.pause_button.isEnabled() or self.cancel_button.isEnabled():

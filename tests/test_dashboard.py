@@ -115,6 +115,30 @@ def test_source_filters_and_dashboard_count_distinct_usable_current_line_games(t
         repo.shutdown()
 
 
+def test_home_activity_trend_uses_bounded_saved_puzzle_history_or_honest_empty_state(tmp_path):
+    from datetime import datetime, timezone
+
+    repo = GameRepository(tmp_path / "home-puzzle-trend.sqlite3")
+    try:
+        account = repo.ensure_archive_account("trend-fixture")
+        assert dashboard_snapshot(repo, account_id=account)["activity_trend"] == []
+        records = []
+        for index, (month, rating) in enumerate((("2026-09", 1450), ("2026-10", 1500),
+                                                  ("2026-11", 1540))):
+            stamp = datetime.fromisoformat(f"{month}-05T12:00:00+00:00").timestamp()
+            records.append({"date": int(stamp * 1000) + index, "win": True,
+                            "puzzle": {"id": f"trend-{index}", "fen": "startpos",
+                                       "solution": ["e2e4"], "themes": ["opening"],
+                                       "rating": rating, "plays": 100}})
+        repo.import_puzzle_activities("trend-fixture", records)
+        snapshot = dashboard_snapshot(repo, account_id=account)
+        assert len(snapshot["activity_trend"]) == 3
+        assert [item["average_rating"] for item in snapshot["activity_trend"]] == [1450, 1500, 1540]
+        assert snapshot["activity_trend_source"] == "Lichess puzzle attempts saved locally"
+    finally:
+        repo.shutdown()
+
+
 def test_dashboard_account_and_clock_filters_match_sql_scope(tmp_path):
     repo = GameRepository(tmp_path / "dashboard-filter.sqlite3")
     try:

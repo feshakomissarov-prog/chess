@@ -406,6 +406,9 @@ class GameReviewWorkspace(QWidget):
         self.training_candidate: chess.Move | None = None
         self.training_proven: dict[str, dict] = {}
         self._current_training_improved = False
+        self._ephemeral_board: chess.Board | None = None
+        self._ephemeral_branch: list[chess.Move] = []
+        self._ephemeral_undo: list[chess.Board] = []
         self._build_ui()
 
     def _build_ui(self):
@@ -448,6 +451,20 @@ class GameReviewWorkspace(QWidget):
         self.training_prompt.setAlignment(Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft)
         self.training_prompt.setVisible(False)
         board_layout.addWidget(self.training_prompt)
+        self.ephemeral_controls = QWidget()
+        ephemeral_layout = QHBoxLayout(self.ephemeral_controls)
+        ephemeral_layout.setContentsMargins(0, 0, 0, 0)
+        self.ephemeral_status = QLabel("Ветка исследования временная и не сохранится в PGN.")
+        self.ephemeral_status.setWordWrap(True)
+        self.ephemeral_undo_button = QPushButton("Отменить ход ветки")
+        self.ephemeral_reset_button = QPushButton("Сбросить ветку")
+        self.ephemeral_undo_button.clicked.connect(self.undo_ephemeral_move)
+        self.ephemeral_reset_button.clicked.connect(self.reset_ephemeral_branch)
+        ephemeral_layout.addWidget(self.ephemeral_status, 1)
+        ephemeral_layout.addWidget(self.ephemeral_undo_button)
+        ephemeral_layout.addWidget(self.ephemeral_reset_button)
+        self.ephemeral_controls.setVisible(False)
+        board_layout.addWidget(self.ephemeral_controls)
         self.white_name = QLabel("Белые")
         self.white_name.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.white_name.setVisible(False)
@@ -458,7 +475,7 @@ class GameReviewWorkspace(QWidget):
         self.review_board.set_interaction_enabled(False)
         self.review_board.set_premove_allowed(False)
         self.review_board.set_annotations_enabled(False)
-        self.review_board.move_intent.connect(self._training_move_intent)
+        self.review_board.move_intent.connect(self._review_board_move_intent)
         self.review_board.wheel_navigate.connect(self._navigate_wheel)
         self.black_name = QLabel("Чёрные")
         self.black_name.setAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -698,6 +715,13 @@ class GameReviewWorkspace(QWidget):
                   training_block_reason: str | None = None,
                   ephemeral: bool = False) -> None:
         self._ephemeral_study = bool(ephemeral)
+        self._ephemeral_board = None
+        self._ephemeral_branch.clear()
+        self._ephemeral_undo.clear()
+        self.ephemeral_controls.setVisible(self._ephemeral_study)
+        self.ephemeral_status.setText(
+            "Исследование временное: ходы не попадут в PGN, SQLite или онлайн-партию."
+            if self._ephemeral_study else "")
         self.review = load_game_review(self.repository, game)
         if training_allowed is not None:
             self.training_allowed = training_allowed
@@ -737,6 +761,13 @@ class GameReviewWorkspace(QWidget):
         color = self.review["owner_color"]
         self.review_board.set_flipped(color == "black")
         self.review_board.set_position(self.review["positions"][0])
+        if self._ephemeral_study:
+            self._ephemeral_board = self.review["positions"][0].copy(stack=True)
+            self.review_board.set_interaction_enabled(True)
+            self.ephemeral_undo_button.setEnabled(False)
+            self.ephemeral_reset_button.setEnabled(False)
+        else:
+            self.review_board.set_interaction_enabled(False)
         assessment_by_ply = {int(item["ply"]): dict(item)
                              for item in analysis.get("assessments", [])}
         for move in self.review["moves"]:
@@ -752,7 +783,7 @@ class GameReviewWorkspace(QWidget):
         self.moves_list.set_rows(
             self.review["moves"],
             scores=assessment_by_ply if self.evaluation_allowed else {},
-            enabled=self.evaluation_allowed,
+            enabled=self.evaluation_allowed or self._ephemeral_study,
             show_severity=self.evaluation_allowed)
         metrics = self.review["per_side"]
         accuracy = self.review["official_accuracy"]
@@ -1048,7 +1079,7 @@ class GameReviewWorkspace(QWidget):
         self.graph.update()
 
     def set_training_safety_result(self, allowed: bool, reason: str = ""):
-        ephemeral = self._ephemeral_study
+        ephemeral = bool(getattr(self, "_ephemeral_study", False))
         selected_ply = self.selected_ply
         self.training_allowed = bool(allowed)
         self.evaluation_allowed = bool(allowed)
@@ -1088,6 +1119,15 @@ class GameReviewWorkspace(QWidget):
             return
         ply = max(0, min(len(self.review["moves"]), int(ply)))
         self.selected_ply = ply
+        if self._ephemeral_study:
+            self._ephemeral_board = self.review["positions"][ply].copy(stack=True)
+            self._ephemeral_branch.clear()
+            self._ephemeral_undo.clear()
+            self.review_board.set_interaction_enabled(True)
+            self.ephemeral_undo_button.setEnabled(False)
+            self.ephemeral_reset_button.setEnabled(False)
+            self.ephemeral_status.setText(
+                f"Временное исследование позиции после {ply} полуходов; PGN не изменяется.")
         phase = self._phase_by_ply().get(ply) if self.evaluation_allowed else None
         phase_name = phase_label(phase)
         phase_index = self.phase_selector.findData(phase or "all")
@@ -1196,6 +1236,49 @@ class GameReviewWorkspace(QWidget):
                 + (f" · лучший ход: {position_best_label}" if position_best_label else ""))
         self._refresh_selected_ply_events()
         self.position_selected.emit(str(self.review["game"]["game_id"]), ply)
+
+    def _review_board_move_intent(self, move: chess.Move) -> None:
+        if self.training_mode:
+            self._training_move_intent(move)
+            return
+        if not self._ephemeral_study or self._ephemeral_board is None:
+            return
+        if move not in self._ephemeral_board.legal_moves:
+            return
+        san = self._ephemeral_board.san(move)
+        self._ephemeral_undo.append(self._ephemeral_board.copy(stack=True))
+        self._ephemeral_board.push(move)
+        self._ephemeral_branch.append(move)
+        self.review_board.set_position(self._ephemeral_board)
+        self.ephemeral_undo_button.setEnabled(True)
+        self.ephemeral_reset_button.setEnabled(True)
+        self.ephemeral_status.setText(
+            f"Временная ветка: {len(self._ephemeral_branch)} ход(а) · последний ход {san}. "
+            "Она не изменяет исходную линию и не запускает движок.")
+
+    def undo_ephemeral_move(self) -> None:
+        if not self._ephemeral_study or not self._ephemeral_undo:
+            return
+        self._ephemeral_board = self._ephemeral_undo.pop()
+        if self._ephemeral_branch:
+            self._ephemeral_branch.pop()
+        self.review_board.set_position(self._ephemeral_board)
+        self.ephemeral_undo_button.setEnabled(bool(self._ephemeral_undo))
+        self.ephemeral_reset_button.setEnabled(bool(self._ephemeral_branch))
+        self.ephemeral_status.setText(
+            f"Временная ветка: {len(self._ephemeral_branch)} полуходов · исходный PGN не меняется.")
+
+    def reset_ephemeral_branch(self) -> None:
+        if not self._ephemeral_study or not self.review:
+            return
+        self._ephemeral_board = self.review["positions"][self.selected_ply].copy(stack=True)
+        self._ephemeral_branch.clear()
+        self._ephemeral_undo.clear()
+        self.review_board.set_position(self._ephemeral_board)
+        self.ephemeral_undo_button.setEnabled(False)
+        self.ephemeral_reset_button.setEnabled(False)
+        self.ephemeral_status.setText(
+            f"Ветка сброшена к позиции после {self.selected_ply} полуходов; PGN не изменён.")
 
     def _phase_metrics_text(self, owner_color: str) -> str:
         if not self.evaluation_allowed:

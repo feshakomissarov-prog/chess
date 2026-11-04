@@ -3026,6 +3026,32 @@ def test_clock_only_duplicate_does_not_reserialize_or_resave_full_pgn(tmp_path, 
     assert len(saves) == 1
 
 
+def test_server_clock_accepts_correspondence_units_and_rejects_corruption(tmp_path):
+    repo = GameRepository(tmp_path / "clock-plausibility.sqlite3")
+    session = LichessGameSession("long-correspondence", repo)
+    day = 24 * 60 * 60 * 1000
+    session.apply_event({
+        "type": "gameFull", "initialFen": "startpos",
+        "clock": {"initial": 30 * day, "increment": 0},
+        "state": {"moves": "", "status": "started", "wtime": 596 * 60 * 60 * 1000,
+                  "btime": 29 * day, "winc": 0, "binc": 0},
+    })
+    assert session.clock_state_valid is True
+    assert session.white_ms == 596 * 60 * 60 * 1000
+
+    session.apply_event({"type": "gameState", "moves": "", "status": "started",
+                         "wtime": 31 * day, "btime": 29 * day, "winc": 0, "binc": 0})
+    assert session.clock_state_valid is False
+    # Invalid server units/data do not replace the last confirmed values.
+    assert session.white_ms == 596 * 60 * 60 * 1000
+
+    session.apply_event({"type": "gameFull", "initialFen": "startpos",
+                         "clock": {"initial": 30 * day, "increment": 0},
+                         "state": {"moves": "", "status": "started"}})
+    assert session.white_ms is None and session.black_ms is None
+    assert session.clock_state_valid is None
+
+
 def test_disconnect_cancels_archive_and_puzzle_background_workers(monkeypatch):
     service = LichessService(client=object(), token_store=object())
     service._archive_stop = threading.Event()

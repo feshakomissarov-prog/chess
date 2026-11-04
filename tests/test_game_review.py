@@ -180,6 +180,35 @@ def test_review_moves_graph_and_training_share_position_without_mutating_saved_p
         repo.shutdown()
 
 
+def test_ephemeral_study_can_explore_legal_branch_undo_and_reset_without_persistence(qtbot):
+    from chess_coach.window import EphemeralReviewRepository
+
+    repository = EphemeralReviewRepository("external:synthetic", "startpos", "e2e4 e7e5")
+    game = {"game_id": "external:synthetic", "initial_fen": "startpos",
+            "moves": "e2e4 e7e5", "line_revision": 1, "line_hash": "ephemeral",
+            "color": "white", "opponent": "External", "rated": False, "clock": "-",
+            "status": "unknownFinish", "winner": None, "source": "external",
+            "source_game_id": None, "variant": "standard", "white_player": "A",
+            "black_player": "B", "started_at": None, "game_time_precision": "unknown"}
+    workspace = GameReviewWorkspace(repository, training_allowed=False)
+    qtbot.addWidget(workspace)
+    workspace.load_game(game, training_allowed=False, ephemeral=True)
+    assert not workspace.ephemeral_controls.isHidden()
+    assert workspace.review_board._interaction_enabled
+    assert workspace.analysis_button.isHidden()
+    workspace.review_board.move_intent.emit(chess.Move.from_uci("d2d4"))
+    assert workspace._ephemeral_board.piece_at(chess.D4) == chess.Piece(chess.PAWN, chess.WHITE)
+    assert workspace._ephemeral_branch == [chess.Move.from_uci("d2d4")]
+    assert repository.current_line(game["game_id"])["moves"] == "e2e4 e7e5"
+    workspace.undo_ephemeral_move()
+    assert workspace._ephemeral_board.fen() == workspace.review["positions"][0].fen()
+    workspace.review_board.move_intent.emit(chess.Move.from_uci("d2d4"))
+    workspace.reset_ephemeral_branch()
+    assert workspace._ephemeral_branch == []
+    assert workspace._ephemeral_board.fen() == workspace.review["positions"][0].fen()
+    assert repository.current_line(game["game_id"])["moves"] == "e2e4 e7e5"
+
+
 def test_move_table_groups_white_and_black_in_fullmove_rows_and_keeps_ply(qtbot):
     from types import SimpleNamespace
     table = MoveTable()
@@ -672,3 +701,12 @@ def test_review_advantage_bar_uses_mate_status_without_centipawn_fill(qtbot, tmp
         assert "белые ставят мат через 3" in workspace.advantage_label.text()
     finally:
         repo.shutdown()
+
+
+def test_safety_refresh_before_any_game_is_loaded_is_safe(qtbot, tmp_path):
+    workspace = GameReviewWorkspace(GameRepository(tmp_path / "empty-review.sqlite3"))
+    qtbot.addWidget(workspace)
+    workspace.set_safety_pending("Проверяем безопасность.")
+    workspace.set_training_safety_result(False, "Аналитика скрыта.")
+    assert workspace.review is None
+    assert workspace.training_block_reason == "Аналитика скрыта."

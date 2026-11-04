@@ -33,6 +33,8 @@ def test_remaining_clock_formatting_ticks_only_active_snapshot_and_marks_low_tim
     assert format_remaining_clock(29_000) == ("00:29", True)
     assert format_remaining_clock(9_900, active=True, elapsed_ms=100) == ("0:09.8", True)
     assert format_remaining_clock(3_661_000) == ("1:01:01", False)
+    assert format_remaining_clock(24 * 60 * 60 * 1000 + 3_661_000) == (
+        "1д 01:01:01", False)
     assert format_remaining_clock(90_000, elapsed_ms=9_000, active=True, syncing=True) == (
         "—:— · синхронизация", False)
 

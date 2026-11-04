@@ -84,7 +84,11 @@ def format_remaining_clock(milliseconds: int, *, elapsed_ms: int = 0,
     elif remaining >= 3_600_000:
         hours, rest = divmod(remaining // 1000, 3600)
         minutes, seconds = divmod(rest, 60)
-        value = f"{hours}:{minutes:02}:{seconds:02}"
+        if hours >= 24:
+            days, hours = divmod(hours, 24)
+            value = f"{days}д {hours:02}:{minutes:02}:{seconds:02}"
+        else:
+            value = f"{hours}:{minutes:02}:{seconds:02}"
     else:
         value = f"{remaining // 60_000:02}:{remaining // 1000 % 60:02}"
     return value, warning

@@ -20,6 +20,12 @@ LICHESS_PLAYER_TITLES = frozenset({
     "GM", "WGM", "IM", "WIM", "FM", "WFM", "NM", "CM", "WCM", "WNM", "LM",
 })
 
+# Lichess reports all live clock values in milliseconds. These bounds reject
+# unit mixups/corrupt payloads without discarding legitimate correspondence games.
+_MAX_CLOCK_MS = 365 * 24 * 60 * 60 * 1000
+_MAX_INCREMENT_MS = 3 * 60 * 60 * 1000
+_UNKNOWN_CONTROL_SAFE_MS = 24 * 60 * 60 * 1000
+
 
 def classify_lichess_opponent(game: Any) -> str:
     """Classify a server game conservatively for fair-play decisions.
@@ -101,6 +107,7 @@ class LichessGameSession:
         self.white_inc = self.black_inc = 0
         self.clock_initial = 0
         self.clock_control = "-"
+        self.clock_state_valid: bool | None = None
         self.rated = False
         self.winner = None
         self.final_sync_pending = False
@@ -244,10 +251,7 @@ class LichessGameSession:
         if kind in {"gameState", "gameFull"}:
             self.status = state.get("status", self.status)
             self.moves = " ".join(incoming_moves)
-            self.white_ms = state.get("wtime", self.white_ms)
-            self.black_ms = state.get("btime", self.black_ms)
-            self.white_inc = state.get("winc", self.white_inc)
-            self.black_inc = state.get("binc", self.black_inc)
+            self._apply_clock_state(state)
             self.winner = state.get("winner", self.winner)
             own_draw_flag = "bdraw" if self.color == chess.WHITE else "wdraw"
             self.draw_offered_by_opponent = bool(state.get(own_draw_flag, False))
@@ -327,6 +331,8 @@ class LichessGameSession:
     def _apply_game_full_metadata(self, event: dict, incoming_fen: str) -> None:
         self.initial_fen = incoming_fen
         self.rated = bool(event.get("rated", False))
+        self.white_ms = self.black_ms = None
+        self.clock_state_valid = None
         created_at = event.get("createdAt") or event.get("created_at")
         if created_at and not self.started_at:
             try:
@@ -334,11 +340,49 @@ class LichessGameSession:
             except (TypeError, ValueError, OverflowError):
                 self.started_at = str(created_at)[:10].replace("-", ".")
         clock = event.get("clock") or {}
-        self.clock_initial = int(clock.get("initial", 0) or 0)
-        self.white_inc = int(clock.get("increment", 0) or 0)
+        initial = clock.get("initial") if isinstance(clock, dict) else None
+        increment = clock.get("increment") if isinstance(clock, dict) else None
+        valid_initial = (type(initial) is int and 0 < initial <= _MAX_CLOCK_MS)
+        valid_increment = (type(increment) is int and 0 <= increment <= _MAX_INCREMENT_MS)
+        self.clock_initial = initial if valid_initial else 0
+        self.white_inc = increment if valid_increment else 0
         self.black_inc = self.white_inc
-        self.clock_control = (f"{self.clock_initial // 1000}+{self.white_inc // 1000}"
-                              if self.clock_initial else "-")
+        if valid_initial and valid_increment:
+            self.clock_control = f"{initial // 1000}+{increment // 1000}"
+        elif initial is None and increment is None:
+            self.clock_control = "-"
+            self.clock_state_valid = None
+        else:
+            self.clock_control = "-"
+            self.clock_state_valid = False
+
+    def _apply_clock_state(self, state: dict) -> None:
+        """Accept only plausible millisecond clock snapshots; never clamp bad data."""
+        supplied = {"wtime": state.get("wtime", self.white_ms),
+                    "btime": state.get("btime", self.black_ms),
+                    "winc": state.get("winc", self.white_inc),
+                    "binc": state.get("binc", self.black_inc)}
+        times = (supplied["wtime"], supplied["btime"])
+        increments = (supplied["winc"], supplied["binc"])
+        has_times = any(name in state for name in ("wtime", "btime"))
+        if not has_times:
+            return
+        if any(type(value) is not int or value < 0 or value > _MAX_CLOCK_MS
+               for value in times):
+            self.clock_state_valid = False
+            return
+        if any(type(value) is not int or value < 0 or value > _MAX_INCREMENT_MS
+               for value in increments):
+            self.clock_state_valid = False
+            return
+        upper = (self.clock_initial + max(increments) + 2_000
+                 if self.clock_initial else _UNKNOWN_CONTROL_SAFE_MS)
+        if any(value > upper for value in times):
+            self.clock_state_valid = False
+            return
+        self.white_ms, self.black_ms = times
+        self.white_inc, self.black_inc = increments
+        self.clock_state_valid = True
 
     def _apply_final_sync_event(self, event: dict, kind: str, state: dict,
                                 incoming_fen: str, incoming_moves: tuple[str, ...],
@@ -360,10 +404,7 @@ class LichessGameSession:
         self.status = str(incoming_status)
         if "winner" in state:
             self.winner = state.get("winner")
-        self.white_ms = state.get("wtime", self.white_ms)
-        self.black_ms = state.get("btime", self.black_ms)
-        self.white_inc = state.get("winc", self.white_inc)
-        self.black_inc = state.get("binc", self.black_inc)
+        self._apply_clock_state(state)
         self.board = board
         if kind == "gameFull":
             self.awaiting_authoritative_snapshot = False

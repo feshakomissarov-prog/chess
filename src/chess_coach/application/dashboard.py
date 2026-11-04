@@ -116,6 +116,8 @@ def dashboard_snapshot(repository, *, account_id: str | None = None,
             "FROM runs", run_params).fetchone()
 
     summary = StatisticsService(repository).summary(account_id=account_id, clock=clock)
+    activity_trend = (repository.puzzle_rating_trend(account_id, limit=6)
+                      if account_id and hasattr(repository, "puzzle_rating_trend") else [])
     total = int(row["games"] or 0)
     accuracy_n = int(row["accuracy_games"] or 0)
     accuracy = row["owner_accuracy"]
@@ -158,6 +160,8 @@ def dashboard_snapshot(repository, *, account_id: str | None = None,
     for game in games:
         game["review_metrics"] = game_card_metrics(repository, game)
     return {"metrics": metrics, "recent_games": games,
+            "activity_trend": activity_trend,
+            "activity_trend_source": "Lichess puzzle attempts saved locally" if activity_trend else None,
             "scope": scope, "filter": {"account_id": account_id, "clock": clock}}
 
 
