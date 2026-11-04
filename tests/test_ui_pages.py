@@ -1,10 +1,14 @@
 import ast
+import chess
 from pathlib import Path
-from PySide6.QtWidgets import QScrollArea
 from types import SimpleNamespace
+from PySide6.QtCore import QPoint, Qt
+from PySide6.QtTest import QTest
+from PySide6.QtWidgets import QScrollArea
 
 from chess_coach.ui.pages import LibraryPage, PlayPage, ResultPage
 from chess_coach.ui.pages.background import BackgroundOperationsPage
+from chess_coach.ui.pages.position_setup import PositionSetupWidget
 
 
 def test_play_page_keeps_each_action_connected_and_reflows_cards(qtbot):
@@ -110,6 +114,26 @@ def test_background_operations_page_renders_shared_registry_and_pause_state(qtbo
     assert page.pause_button.text() == "Возобновить Lichess"
     assert not page.manual_check_button.isEnabled()
     assert "Retry-After" in page.retry_status.text()
+
+
+def test_position_setup_uses_shared_board_and_emits_ephemeral_fen(qtbot):
+    page = PositionSetupWidget()
+    qtbot.addWidget(page)
+    page.show()
+    page.setChecked(True)
+    page.piece_selector.setCurrentIndex(page.piece_selector.findData("Q"))
+    center = page.board_view._get_square_center(chess.E2)
+    QTest.mouseClick(page.board_view, Qt.MouseButton.LeftButton,
+                     pos=QPoint(round(center.x()), round(center.y())))
+    assert page._board.piece_at(chess.E2) == chess.Piece(chess.QUEEN, chess.WHITE)
+    page.turn_selector.setCurrentIndex(page.turn_selector.findData(chess.BLACK))
+    positions = []
+    page.position_requested.connect(positions.append)
+    page.open_button.click()
+    assert len(positions) == 1
+    assert chess.Board(positions[0]).piece_at(chess.E2) == chess.Piece(chess.QUEEN, chess.WHITE)
+    assert chess.Board(positions[0]).turn == chess.BLACK
+    page.close()
 
 
 def test_library_detail_reuses_review_graph_and_masks_until_safety_gate(qtbot):

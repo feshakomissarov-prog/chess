@@ -371,6 +371,54 @@ def test_board_fit_uses_available_window_area_and_focus_hides_inspector(
     window.close()
 
 
+@pytest.mark.parametrize(("width", "height"), [(1280, 720), (1366, 768), (1920, 1080)])
+def test_game_workspace_has_no_page_wide_scroll_and_keeps_live_controls_visible(
+        qtbot, tmp_path, width, height):
+    from PySide6.QtCore import QPoint
+    from PySide6.QtWidgets import QScrollArea
+
+    window = MainWindow(QSettings(str(tmp_path / f"game-layout-{width}.ini"),
+                                  QSettings.Format.IniFormat), offline_mode=True)
+    qtbot.addWidget(window)
+    window.resize(width, height)
+    session = LichessGameSession(f"layout-{width}", window.game_repository)
+    session.color = chess.WHITE
+    session.opponent = "Synthetic opponent"
+    session.apply_event({"type": "gameFull", "initialFen": "startpos",
+                         "state": {"moves": "e2e4", "status": "playing"}})
+    select_online(window, session)
+    window.show()
+    window.refresh()
+    qtbot.wait(20)
+
+    assert not isinstance(window.game_page, QScrollArea)
+    assert window.moves.isVisibleTo(window)
+    required = (window.takeback_button, window.draw_button, window.resign_button)
+    for control in required:
+        assert control.isVisibleTo(window)
+        top_left = control.mapTo(window, QPoint(0, 0))
+        assert top_left.y() >= 0
+        assert top_left.y() + control.height() <= window.height()
+    window.close()
+
+
+def test_progress_safety_lease_refreshes_only_when_display_becomes_allowed(
+        qtbot, tmp_path):
+    dialog = StatisticsDialog(GameRepository(tmp_path / "safety-refresh.sqlite3"))
+    qtbot.addWidget(dialog)
+    refreshes = []
+    dialog._schedule_refresh = lambda: refreshes.append(True)
+
+    dialog.set_safety_display_allowed(True)
+    dialog.set_safety_display_allowed(True)
+    dialog.set_safety_display_allowed(False, "Состояние перепроверяется.")
+    dialog.set_safety_display_allowed(False, "Состояние перепроверяется.")
+    dialog.set_safety_display_allowed(True)
+
+    assert refreshes == [True, True]
+    dialog.close()
+
+
 @pytest.mark.parametrize(("games", "allowed"), [
     ([{"source": "ai", "opponent": {"ai": 3, "id": None}}], True),
     ([{"source": "friend", "opponent": {"id": "human"}}], False),

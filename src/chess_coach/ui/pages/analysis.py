@@ -9,6 +9,8 @@ from PySide6.QtWidgets import (
     QVBoxLayout, QWidget,
 )
 
+from .position_setup import PositionSetupWidget
+
 
 class AnalysisLandingPage(QWidget):
     """Small in-shell entry point; it does not start imports or engines itself."""
@@ -75,6 +77,9 @@ class AnalysisLandingPage(QWidget):
         self.external_status.setWordWrap(True)
         external_layout.addWidget(self.external_status)
         root.addWidget(self.external_group)
+        self.position_setup = PositionSetupWidget(self)
+        self.position_setup.position_requested.connect(lambda fen: actions["open_text"](fen))
+        root.addWidget(self.position_setup)
         root.addStretch(1)
 
     def set_external_status(self, text: str) -> None:

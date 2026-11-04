@@ -373,6 +373,7 @@ class StatisticsDialog(QDialog):
         self._opening_thread: threading.Thread | None = None
         self._pending_refresh = False
         self._close_when_idle = False
+        self._safety_display_state: bool | None = None
         self._rows: list[dict] = []
         root = QVBoxLayout(self)
         self.tabs = QTabWidget(self)
@@ -587,12 +588,14 @@ class StatisticsDialog(QDialog):
     def set_safety_display_allowed(self, allowed: bool, reason: str = "") -> None:
         """Hide every cached statistics tab until the shared safety lease is current."""
         permitted = bool(allowed)
+        changed = self._safety_display_state is None or self._safety_display_state != permitted
+        self._safety_display_state = permitted
         self.tabs.setVisible(permitted)
         self.analysis_mask.setVisible(not permitted)
         self.analysis_safety_button.setEnabled(not permitted)
         if reason:
             self.analysis_mask_label.setText(str(reason))
-        if permitted:
+        if permitted and changed:
             self._schedule_refresh()
 
     @staticmethod

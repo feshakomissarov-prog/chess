@@ -41,7 +41,6 @@ from PySide6.QtWidgets import (
     QPushButton,
     QProgressDialog,
     QRadioButton,
-    QScrollArea,
     QTabWidget,
     QSpinBox,
     QSlider,
@@ -1060,11 +1059,13 @@ class MainWindow(QMainWindow):
         self.game_splitter = splitter
         splitter.setOrientation(
             Qt.Orientation.Vertical if self.width() < 1120 else Qt.Orientation.Horizontal)
-        game_scroll = QScrollArea()
-        game_scroll.setWidgetResizable(True)
-        game_scroll.setFrameShape(QFrame.Shape.NoFrame)
-        game_scroll.setWidget(splitter)
-        self.game_page = game_scroll
+        # The board workspace itself must not become a page-wide scroll area:
+        # the move table owns its own scrolling and the side controls stay in view.
+        game_page = QWidget()
+        game_page_layout = QVBoxLayout(game_page)
+        game_page_layout.setContentsMargins(0, 0, 0, 0)
+        game_page_layout.addWidget(splitter)
+        self.game_page = game_page
         self.screen_stack.addWidget(self.game_page)
         self.result_page = self._build_result_page()
         self.review_workspace = GameReviewWorkspace(self.game_repository, settings=self.settings,

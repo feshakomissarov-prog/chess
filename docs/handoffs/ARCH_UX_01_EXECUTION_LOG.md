@@ -100,3 +100,11 @@ Each stage will be appended here with commit SHA, changed responsibilities, focu
 | ID | Route / outcome | Verification |
 |---|---|---|
 | COV-01…24 | To be completed stage-by-stage | To be completed |
+
+## A11/A12 — adaptive game viewport and temporary board setup checkpoint
+
+- Replaced the full-page game `QScrollArea` with a regular workspace container. The move-history table remains the scrollable region; the live controls stay in the game side panel. Fair Play, session state and the underlying `BoardView` were not changed.
+- Added an optional collapsed mouse-based position setup on the Analysis landing. It reuses `BoardView`/chess-widgets to place/remove pieces, choose side to move, and emit a temporary FEN into the already bounded external PGN/FEN parser and ephemeral review path. It never writes to SQLite, opens a network connection or starts Stockfish by itself. The panel is collapsed by default to keep the Analysis landing usable.
+- Prevented redundant Statistics/Progress refreshes when the same safe display lease is re-applied; a transition from masked to permitted still triggers a refresh.
+- Regression coverage: game workspace geometry/live action visibility at 1280×720, 1366×768 and 1920×1080; Qt mouse placement/temporary FEN; duplicate safety-state delivery. Focused suite: **16 passed** including existing rendered-clock and P0 visibility tests; compileall PASS; `git diff --check` PASS. This is offscreen Qt geometry verification only, not physical Windows DPI acceptance.
+- Risks/limits: position editor uses the existing BoardView coordinate mapper and the standard temporary FEN validation; it is intentionally not a free-form chess variant editor. Full-suite/CI and the final 24-ID trace remain pending.
