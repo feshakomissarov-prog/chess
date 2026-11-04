@@ -149,6 +149,40 @@ def test_no_server_data_is_not_repolled_before_seven_day_ttl(tmp_path):
     repository.shutdown()
 
 
+def test_backfill_due_facets_are_independent_and_cooldown_is_preserved(tmp_path):
+    from datetime import datetime, timedelta, timezone
+
+    repository = GameRepository(tmp_path / "independent-due.sqlite3")
+    game_id = _import_games(repository, 1)[0]
+    future = (datetime.now(timezone.utc) + timedelta(days=2)).isoformat()
+    repository.enqueue_lichess_analysis_backfill("lichess:me")
+    with repository._connection() as db:
+        db.execute("UPDATE lichess_analysis_backfill SET accuracy_status='queued',"
+                   "evals_status='no_server_data',evals_next_retry_at=? "
+                   "WHERE account_id='lichess:me' AND game_id=?", (future, game_id))
+    accuracy_only = repository.list_lichess_analysis_backfill("lichess:me", limit=1)[0]
+    assert accuracy_only["check_accuracy"] == 1
+    assert accuracy_only["check_evals"] == 0
+    repository.mark_lichess_analysis_backfill_running(
+        "lichess:me", game_id, check_accuracy=True, check_evals=False)
+    repository.record_lichess_analysis_backfill(
+        "lichess:me", game_id, accuracy_status="has_data", evals_status="queued",
+        check_accuracy=True, check_evals=False)
+    state = repository.lichess_analysis_backfill_state("lichess:me", game_id)
+    assert state["accuracy_status"] == "has_data"
+    assert state["evals_status"] == "no_server_data"
+    assert state["evals_next_retry_at"] == future
+
+    with repository._connection() as db:
+        db.execute("UPDATE lichess_analysis_backfill SET accuracy_status='no_server_data',"
+                   "accuracy_next_retry_at=?,evals_status='queued',evals_next_retry_at=NULL "
+                   "WHERE account_id='lichess:me' AND game_id=?", (future, game_id))
+    evals_only = repository.list_lichess_analysis_backfill("lichess:me", limit=1)[0]
+    assert evals_only["check_accuracy"] == 0
+    assert evals_only["check_evals"] == 1
+    repository.shutdown()
+
+
 def test_preexisting_partial_pgn_evaluations_still_get_metadata_backfill(tmp_path):
     repository = GameRepository(tmp_path / "partial-old.sqlite3")
     game_id = _import_games(repository, 1)[0]

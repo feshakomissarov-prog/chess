@@ -660,6 +660,13 @@ class MainWindow(QMainWindow):
             "Локальные оценки Stockfish хранятся отдельно.")
         if not self._shutdown_requested and self._screen_mode == "home":
             self.refresh()
+        # Continue a full bounded page after a quiet delay. The next worker checks
+        # SQLite eligibility and the persistent 429/day budget before any request.
+        # A zero-result or limited batch never schedules another worker.
+        if (checked >= 10 and state == "проверка завершена"
+                and self.settings.value("lichess/auto_ready_analytics", True, type=bool)
+                and not self.settings.value("lichess/ready_analytics_paused", False, type=bool)):
+            QTimer.singleShot(60_000, lambda: self._start_lichess_analysis_backfill(generation))
 
     def show_background_analytics(self) -> None:
         page = getattr(self, "_background_operations_page", None)
@@ -759,13 +766,14 @@ class MainWindow(QMainWindow):
             source_summary = (
                 "Источник: Lichess · документированный JSON export. "
                 f"Партии: {summary.get('total', 0)} · проверено: {summary.get('checked', 0)} · "
-                f"точность: {summary.get('accuracy', 0)} · оценки: {summary.get('evals', 0)} · "
+                f"готовая точность: {summary.get('accuracy', 0)} партий · "
+                f"партии с оценками ходов: {summary.get('evals', 0)} · "
                 f"нет серверного анализа: {summary.get('no_data', 0)} · "
                 f"ошибки/ограничения: {summary.get('errors', 0)} · ожидают: {summary.get('pending', 0)}. "
                 "Chess Coach не запрашивает создание серверного анализа."
                 if account_id else
                 "Lichess не подключён; локальные фоновые задачи могут работать отдельно.")
-            retry = (f"Следующая проверка: {summary['retry_at']}"
+            retry = (f"Следующая разрешённая попытка: {summary['retry_at']}"
                      if summary.get("retry_at") else
                      "Ограничение запросов Lichess и Retry-After учитываются сервисом."
                      if summary.get("errors") else "")

@@ -761,6 +761,16 @@ class GameReviewWorkspace(QWidget):
         accuracy_text = (f"Точность Lichess · сервер: белые {percent(accuracy['white'])}, "
                          f"чёрные {percent(accuracy['black'])}"
                          if accuracy["source"] else "Точность Lichess · сервер: нет источника")
+        local_accuracy = self.review.get("local_game_accuracy") or {}
+        local_accuracy_status = self.review.get("local_accuracy_status") or {}
+        local_coverage = local_accuracy_status.get("coverage") or {}
+        local_accuracy_text = (
+            f"Расчёт Chess Coach (методика Lichess, {local_accuracy_status.get('formula_id') or 'версия н/д'}; "
+            f"неофициально): белые {percent(local_accuracy.get('white'))}, "
+            f"чёрные {percent(local_accuracy.get('black'))} · "
+            f"охват {local_coverage.get('scored', 0)}/{local_coverage.get('total', 0)} · "
+            f"источник {source_short(local_accuracy_status.get('source'))[1]} · "
+            f"{local_accuracy_status.get('reason') or 'сохранённые оценки'}")
         backfill = self.review.get("lichess_backfill_state") or {}
         if game.get("source_game_id"):
             if (backfill.get("accuracy_status") == "no_server_data"
@@ -796,7 +806,6 @@ class GameReviewWorkspace(QWidget):
                                  for item in analysis.get("assessments", []))
             metrics_text = (
             f"Источник оценки: {source_short(source)[1]}\n"
-            f"Точность Chess Coach (эксп.): н/д · формула не валидирована\n"
             f"Позиции оценены: {self.review['coverage']['scored']}/{self.review['coverage']['total']}\n"
             f"Решения с сопоставимым качеством: белые {self.review['per_side']['white']['assessed']}/{self.review['per_side']['white']['total']}, "
             f"чёрные {self.review['per_side']['black']['assessed']}/{self.review['per_side']['black']['total']}\n"
@@ -806,7 +815,7 @@ class GameReviewWorkspace(QWidget):
             f"чёрные {self.review['per_side']['black']['best_matches']}/{self.review['per_side']['black']['best_known'] or 'н/д'}\n"
             f"Матовые оценки позиций: {mate_positions}\n"
             f"{side_counts('white')}\n{side_counts('black')}\n"
-            f"{accuracy_text}\n{server_analysis_text}")
+            f"{accuracy_text}\n{local_accuracy_text}\n{server_analysis_text}")
         else:
             metrics_text = (self.training_block_reason or
                             "Оценки, варианты и подсказки скрыты до проверки Fair Play.")

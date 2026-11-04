@@ -269,13 +269,16 @@ class ArchiveSync:
                 limited = True
                 break
             game_id = str(item["game_id"])
+            check_accuracy = bool(item.get("check_accuracy", 1))
+            check_evals = bool(item.get("check_evals", 1))
             if not self.repository.reserve_lichess_analysis_request(
                     account_id, daily_limit=daily_limit):
                 limited = True
                 break
             self.repository.mark_lichess_analysis_backfill_running(
                 account_id, game_id, line_revision=int(item["line_revision"]),
-                line_hash=str(item["line_hash"]))
+                line_hash=str(item["line_hash"]), check_accuracy=check_accuracy,
+                check_evals=check_evals)
             try:
                 payload = self.client.export_game_json(token, str(item["source_game_id"]))
                 if not current():
@@ -324,21 +327,31 @@ class ArchiveSync:
                 has_evals = eval_positions > 0
                 invalid_accuracy = any(issue in {"invalid_white_accuracy", "invalid_black_accuracy"}
                                        for issue in normalized.issues)
-                accuracy_status = ("has_data" if complete_accuracy else
-                                   "partial" if has_accuracy or invalid_accuracy else "no_server_data")
+                fetched_accuracy_status = ("has_data" if complete_accuracy else
+                                           "partial" if has_accuracy or invalid_accuracy
+                                           else "no_server_data")
                 malformed_array = any(issue.startswith(("analysis_", "invalid_analysis_",
                                                         "conflicting_score_", "invalid_eval_",
                                                         "invalid_mate_")) for issue in normalized.issues)
-                evals_status = ("has_data" if eval_positions >= position_count and not malformed_array else
-                                "partial" if has_evals or (normalized.array_present and
-                                                          not normalized.array_complete)
-                                else "no_server_data")
-                retry_seconds = (7 * 24 * 60 * 60 if "no_server_data" in
-                                 {accuracy_status, evals_status} or "partial" in
-                                 {accuracy_status, evals_status} else 0)
+                fetched_evals_status = (
+                    "has_data" if eval_positions >= position_count and not malformed_array else
+                    "partial" if has_evals or (normalized.array_present and
+                                               not normalized.array_complete)
+                    else "no_server_data")
+                accuracy_status = fetched_accuracy_status if check_accuracy else str(
+                    item["accuracy_status"])
+                evals_status = fetched_evals_status if check_evals else str(item["evals_status"])
+                considered_statuses = set()
+                if check_accuracy:
+                    considered_statuses.add(fetched_accuracy_status)
+                if check_evals:
+                    considered_statuses.add(fetched_evals_status)
+                retry_seconds = (7 * 24 * 60 * 60 if considered_statuses.intersection(
+                    {"no_server_data", "partial"}) else 0)
                 self.repository.record_lichess_analysis_backfill(
                     account_id, game_id, accuracy_status=accuracy_status,
-                    evals_status=evals_status, retry_after_seconds=retry_seconds)
+                    evals_status=evals_status, retry_after_seconds=retry_seconds,
+                    check_accuracy=check_accuracy, check_evals=check_evals)
                 checked += 1
                 accuracy_count += int(has_accuracy)
                 eval_count += int(has_evals)
@@ -355,7 +368,8 @@ class ArchiveSync:
                     account_id, game_id, accuracy_status=status, evals_status=status,
                     retry_after_seconds=(max(60, retry_after) if status == "stale_line" else backoff),
                     error=f"{type(exc).__name__}" + (f" HTTP {http_status}" if http_status else ""),
-                    line_revision=int(item["line_revision"]), line_hash=str(item["line_hash"]))
+                    line_revision=int(item["line_revision"]), line_hash=str(item["line_hash"]),
+                    check_accuracy=check_accuracy, check_evals=check_evals)
                 if http_status in {401, 403, 429}:
                     fatal_status = int(http_status)
                     if http_status == 429:

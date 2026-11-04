@@ -62,6 +62,8 @@ def test_opening_families_translate_deterministically_and_keep_eco():
 def test_source_badges_have_accessible_explanations():
     assert source_short("stockfish")[0] == "S"
     assert "Lichess" in source_short("lichess")[1]
+    assert source_short("lichess-json")[0] == "L"
+    assert source_short("lichess-pgn")[0] == "L"
     assert source_short(None) == ("—", "Оценка отсутствует")
 
 

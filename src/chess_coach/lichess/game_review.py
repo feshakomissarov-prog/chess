@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from typing import Any
 
 import chess
+from ..domain.accuracy import calculate_saved_game_accuracy
 
 ACCEPTANCE_POLICY_VERSION = "saved-stockfish-pv-improvement-v1"
 MIN_VERIFIED_DEPTH = 15
@@ -136,6 +137,18 @@ def load_game_review(repository, game: dict[str, Any]) -> dict[str, Any]:
     }
     server_backfill = (repository.lichess_analysis_backfill_state(
         str(account_id), game_id) if account_id and source_is_lichess else None)
+    local_accuracy = calculate_saved_game_accuracy(game, line, analysis, positions)
+    if analysis is not None:
+        analysis["local_game_accuracy"] = dict(local_accuracy.values)
+        analysis["local_game_accuracy_formula_id"] = local_accuracy.formula_id
+        analysis["local_accuracy_status"] = {
+            "status": local_accuracy.status, "reason": local_accuracy.reason,
+            "source": local_accuracy.source, "formula_id": local_accuracy.formula_id,
+            "coverage": {"scored": local_accuracy.coverage[0],
+                         "total": local_accuracy.coverage[1]},
+            "depth_range": local_accuracy.depth_range,
+            "official": False,
+        }
     coverage = (analysis or {}).get("coverage") or {}
     return {
         "game": dict(game), "line": dict(line), "revision": revision, "moves": moves,
@@ -145,6 +158,12 @@ def load_game_review(repository, game: dict[str, Any]) -> dict[str, Any]:
                      "total": int(coverage.get("total_positions") or (len(moves) + 1))},
         "owner_color": owner_color if owner_color in {"white", "black"} else None,
         "per_side": per_side, "official_accuracy": official_accuracy,
+        "local_game_accuracy": dict(local_accuracy.values),
+        "local_accuracy_status": analysis.get("local_accuracy_status") if analysis else {
+            "status": local_accuracy.status, "reason": local_accuracy.reason,
+            "coverage": {"scored": local_accuracy.coverage[0],
+                         "total": local_accuracy.coverage[1]},
+            "formula_id": local_accuracy.formula_id, "official": False},
         "lichess_backfill_state": server_backfill,
         "notes": repository.list_notes(game_id, line_revision=revision),
     }

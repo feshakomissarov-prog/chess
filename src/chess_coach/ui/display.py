@@ -237,7 +237,7 @@ def source_short(source: Any) -> tuple[str, str]:
     if raw in {"stockfish", "local", "chess_coach"} or "stockfish" in raw:
         return "S", "Stockfish · локальная оценка"
     if raw in {"lichess", "lichess_analysis", "official_lichess", "lichess-pgn",
-               "lichess pgn"}:
+               "lichess pgn", "lichess-json", "lichess json"}:
         return "L", "Lichess · официальный импортированный анализ"
     return "—", "Оценка отсутствует"
 

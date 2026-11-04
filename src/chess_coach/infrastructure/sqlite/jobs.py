@@ -82,6 +82,10 @@ class AnalysisJobsStoreMixin:
             rows = db.execute(f"""
                 SELECT q.account_id,q.game_id,q.line_revision,q.line_hash,
                        q.accuracy_status,q.evals_status,q.attempts,q.last_error,
+                       (q.accuracy_status IN {due} AND
+                        (q.accuracy_next_retry_at IS NULL OR q.accuracy_next_retry_at<=?)) AS check_accuracy,
+                       (q.evals_status IN {due} AND
+                        (q.evals_next_retry_at IS NULL OR q.evals_next_retry_at<=?)) AS check_evals,
                        g.source_game_id,g.status,g.pgn,g.color,
                        ag.player_name,ag.color AS account_color,gr.moves
                 FROM lichess_analysis_backfill q
@@ -89,14 +93,15 @@ class AnalysisJobsStoreMixin:
                 JOIN account_games ag ON ag.account_id=q.account_id AND ag.game_id=q.game_id
                 JOIN game_revisions gr ON gr.game_id=q.game_id
                   AND gr.line_revision=q.line_revision AND gr.is_current=1
-                WHERE q.account_id=? AND (q.accuracy_status IN {due}
-                      OR q.evals_status IN {due})
-                  AND (q.accuracy_next_retry_at IS NULL OR q.accuracy_next_retry_at<=?)
-                  AND (q.evals_next_retry_at IS NULL OR q.evals_next_retry_at<=?)
+                WHERE q.account_id=? AND (
+                  (q.accuracy_status IN {due} AND
+                   (q.accuracy_next_retry_at IS NULL OR q.accuracy_next_retry_at<=?)) OR
+                  (q.evals_status IN {due} AND
+                   (q.evals_next_retry_at IS NULL OR q.evals_next_retry_at<=?)))
                 ORDER BY CASE WHEN q.accuracy_status='queued' OR q.evals_status='queued'
                               THEN 0 ELSE 1 END,
                          g.started_at DESC,q.game_id LIMIT ?
-            """, (account_id, now, now, limit)).fetchall()
+            """, (now, now, account_id, now, now, limit)).fetchall()
         return [dict(row) for row in rows]
 
     def lichess_analysis_backfill_has_due_work(self, account_id: str, *,
@@ -125,19 +130,22 @@ class AnalysisJobsStoreMixin:
 
     def mark_lichess_analysis_backfill_running(self, account_id: str, game_id: str, *,
                                                line_revision: int | None = None,
-                                               line_hash: str | None = None) -> None:
+                                               line_hash: str | None = None,
+                                               check_accuracy: bool = True,
+                                               check_evals: bool = True) -> None:
         revision_guard = " AND line_revision=?" if line_revision is not None else ""
         hash_guard = " AND line_hash=?" if line_hash is not None else ""
-        params = [datetime.now(timezone.utc).isoformat(), account_id, game_id]
+        params = [int(check_accuracy), int(check_evals),
+                  datetime.now(timezone.utc).isoformat(), account_id, game_id]
         if line_revision is not None:
             params.append(int(line_revision))
         if line_hash is not None:
             params.append(str(line_hash))
         with self._connection() as db:
             db.execute("UPDATE lichess_analysis_backfill SET accuracy_status=CASE "
-                       "WHEN accuracy_status IN ('queued','error','rate_limited','no_server_data','partial','stale_line') "
+                       "WHEN ?=1 AND accuracy_status IN ('queued','error','rate_limited','no_server_data','partial','stale_line') "
                        "THEN 'running' ELSE accuracy_status END,evals_status=CASE "
-                       "WHEN evals_status IN ('queued','error','rate_limited','no_server_data','partial','stale_line') "
+                       "WHEN ?=1 AND evals_status IN ('queued','error','rate_limited','no_server_data','partial','stale_line') "
                        "THEN 'running' ELSE evals_status END,attempts=attempts+1,updated_at=? "
                        "WHERE account_id=? AND game_id=?" + revision_guard + hash_guard, params)
 
@@ -146,7 +154,9 @@ class AnalysisJobsStoreMixin:
                                          retry_after_seconds: int = 0,
                                          error: str | None = None,
                                          line_revision: int | None = None,
-                                         line_hash: str | None = None) -> None:
+                                         line_hash: str | None = None,
+                                         check_accuracy: bool = True,
+                                         check_evals: bool = True) -> None:
         allowed = {"queued", "running", "has_data", "no_server_data", "partial",
                    "rate_limited", "error", "stale_line"}
         if accuracy_status not in allowed or evals_status not in allowed:
@@ -157,23 +167,34 @@ class AnalysisJobsStoreMixin:
                  if retry_after_seconds else None)
         revision_guard = " AND line_revision=?" if line_revision is not None else ""
         hash_guard = " AND line_hash=?" if line_hash is not None else ""
-        params = [accuracy_status, evals_status, accuracy_status, checked,
-                  evals_status, checked, accuracy_status, retry, evals_status, retry,
-                  (str(error)[:500] if error else None), checked, account_id, game_id]
+        assignments: list[str] = []
+        params: list[object] = []
+        retry_states = "'no_server_data','partial','rate_limited','error','stale_line'"
+        checked_states = "'has_data','no_server_data','partial'"
+        if check_accuracy:
+            assignments.extend([
+                "accuracy_status=?",
+                f"accuracy_checked_at=CASE WHEN ? IN ({checked_states}) THEN ? ELSE accuracy_checked_at END",
+                f"accuracy_next_retry_at=CASE WHEN ? IN ({retry_states}) THEN ? ELSE NULL END",
+            ])
+            params.extend([accuracy_status, accuracy_status, checked,
+                           accuracy_status, retry])
+        if check_evals:
+            assignments.extend([
+                "evals_status=?",
+                f"evals_checked_at=CASE WHEN ? IN ({checked_states}) THEN ? ELSE evals_checked_at END",
+                f"evals_next_retry_at=CASE WHEN ? IN ({retry_states}) THEN ? ELSE NULL END",
+            ])
+            params.extend([evals_status, evals_status, checked, evals_status, retry])
+        assignments.extend(["last_error=?", "updated_at=?"])
+        params.extend([(str(error)[:500] if error else None), checked, account_id, game_id])
         if line_revision is not None:
             params.append(int(line_revision))
         if line_hash is not None:
             params.append(str(line_hash))
         with self._connection() as db:
-            db.execute("""
-              UPDATE lichess_analysis_backfill SET
-                accuracy_status=?,evals_status=?,
-                accuracy_checked_at=CASE WHEN ? IN ('has_data','no_server_data','partial') THEN ? ELSE accuracy_checked_at END,
-                evals_checked_at=CASE WHEN ? IN ('has_data','no_server_data','partial') THEN ? ELSE evals_checked_at END,
-                accuracy_next_retry_at=CASE WHEN ? IN ('no_server_data','partial','rate_limited','error','stale_line') THEN ? ELSE NULL END,
-                evals_next_retry_at=CASE WHEN ? IN ('no_server_data','partial','rate_limited','error','stale_line') THEN ? ELSE NULL END,
-                last_error=?,updated_at=? WHERE account_id=? AND game_id=?
-            """ + revision_guard + hash_guard, params)
+            db.execute("UPDATE lichess_analysis_backfill SET " + ",".join(assignments) +
+                       " WHERE account_id=? AND game_id=?" + revision_guard + hash_guard, params)
 
     def lichess_analysis_backfill_summary(self, account_id: str) -> dict[str, int | str | None]:
         with self._connection() as db:
@@ -186,13 +207,21 @@ class AnalysisJobsStoreMixin:
                 SUM(accuracy_status='queued' OR evals_status='queued' OR accuracy_status='running' OR evals_status='running') pending,
                 SUM(accuracy_checked_at IS NOT NULL OR evals_checked_at IS NOT NULL) checked,
                 MAX(updated_at) updated_at,
-                MIN(CASE WHEN accuracy_status='no_server_data' THEN accuracy_next_retry_at END) retry_at
+                MIN(accuracy_next_retry_at) accuracy_retry_at,
+                MIN(evals_next_retry_at) evals_retry_at
               FROM lichess_analysis_backfill WHERE account_id=?
             """, (account_id,)).fetchone()
-        return {key: row[key] for key in row.keys()} if row else {
+        summary = {key: row[key] for key in row.keys()} if row else {
             "total": 0, "accuracy": 0, "evals": 0, "no_data": 0,
             "errors": 0, "pending": 0, "checked": 0,
-            "updated_at": None, "retry_at": None}
+            "updated_at": None, "accuracy_retry_at": None, "evals_retry_at": None}
+        retry_values = [str(summary[key]) for key in ("accuracy_retry_at", "evals_retry_at")
+                        if summary.get(key)]
+        account_retry = self.lichess_analysis_retry_after(account_id)
+        if account_retry:
+            retry_values.append(str(account_retry))
+        summary["retry_at"] = min(retry_values) if retry_values else None
+        return summary
 
     def lichess_analysis_backfill_state(self, account_id: str, game_id: str) -> dict | None:
         with self._connection() as db:

@@ -60,6 +60,11 @@ def test_read_model_is_current_revision_source_aware_and_contains_two_sided_coun
         assert view["per_side"]["white"]["assessed"] == 2
         assert view["official_accuracy"]["source"] is None
         assert view["coverage"]["total"] >= 4
+        assert view["local_accuracy_status"]["status"] == "complete"
+        assert view["local_accuracy_status"]["official"] is False
+        assert view["local_game_accuracy"]["white"] is not None
+        assert view["local_game_accuracy"]["black"] is not None
+        assert "lichess-accuracy-2e653ad1-v1" == view["local_accuracy_status"]["formula_id"]
     finally:
         repo.shutdown()
 
@@ -137,6 +142,9 @@ def test_review_moves_graph_and_training_share_position_without_mutating_saved_p
         workspace = GameReviewWorkspace(repo, training_allowed=True)
         qtbot.addWidget(workspace)
         workspace.load_game(game)
+        assert "Точность Lichess · сервер:" in workspace.metrics_label.text()
+        assert "Расчёт Chess Coach (методика Lichess" in workspace.metrics_label.text()
+        assert "неофициально" in workspace.metrics_label.text()
         assert "1–0" in workspace.title.text()
         assert "Stockfish" not in workspace.subtitle.text()
         workspace.moves_list.setCurrentRow(2)

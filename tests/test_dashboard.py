@@ -8,6 +8,17 @@ def _save(repo, game_id, *, color="white", winner="white", status="mate", oppone
                        started_at="2026-11-02T12:00:00Z")
 
 
+def _save_scored(repo, game_id, source):
+    _save(repo, game_id, opponent=f"{source} opponent")
+    line = repo.current_line(game_id)
+    repo.save_analysis(
+        game_id, line_revision=line["line_revision"], line_hash=line["line_hash"],
+        source=source, engine_name="Synthetic" if source == "stockfish" else "Lichess",
+        engine_version="test", parameters={}, status="complete",
+        assessments=[{"ply": ply, "white_cp": 25 * ply} for ply in range(4)],
+        classifications=[])
+
+
 def test_dashboard_empty_database_uses_unknown_labels_not_fake_zero_rates(tmp_path):
     repo = GameRepository(tmp_path / "dashboard-empty.sqlite3")
     try:
@@ -48,6 +59,60 @@ def test_recent_game_card_does_not_invent_result_without_owner_color():
     })
     assert title == "Результат н/д с Unknown color"
     assert "02.11.2026" in detail
+
+
+def test_source_filters_and_dashboard_count_distinct_usable_current_line_games(tmp_path):
+    repo = GameRepository(tmp_path / "source-counts.sqlite3")
+    try:
+        for index in range(10):
+            _save_scored(repo, f"sf-{index}", "stockfish")
+        for index in range(8):
+            _save_scored(repo, f"pgn-{index}", "lichess-pgn")
+        for index in range(4):
+            _save_scored(repo, f"json-{index}", "lichess-json")
+        for index in range(2):
+            _save_scored(repo, f"both-{index}", "stockfish")
+            line = repo.current_line(f"both-{index}")
+            repo.save_analysis(f"both-{index}", line_revision=line["line_revision"],
+                               line_hash=line["line_hash"], source="lichess-pgn",
+                               engine_name="Lichess", engine_version=None, parameters={},
+                               status="complete",
+                               assessments=[{"ply": ply, "white_cp": 10 * ply}
+                                            for ply in range(4)], classifications=[])
+        for index in range(3):
+            _save(repo, f"official-{index}")
+            with repo._connection() as db:
+                db.execute("UPDATE games SET source='lichess_archive',source_game_id=?,"
+                           "lichess_accuracy_white=90,lichess_accuracy_black=80 WHERE game_id=?",
+                           (f"remote-{index}", f"official-{index}"))
+        for index in range(4):
+            _save(repo, f"metadata-empty-{index}")
+        account = repo.ensure_archive_account("metadata-fixture")
+        for index in range(4):
+            game_id = f"metadata-empty-{index}"
+            revision = repo.current_line(game_id)["line_revision"]
+            with repo._connection() as db:
+                db.execute("INSERT INTO lichess_ready_analysis_metadata VALUES (?,?,?,?,?,?,?,?,?,?)",
+                           (account, game_id, revision, "lichess-json", "fixture-v1",
+                            "{}", "{}", "[]", "[]", "2026-11-04T00:00:00Z"))
+        for index in range(3):
+            game_id = f"stale-{index}"
+            _save_scored(repo, game_id, "stockfish")
+            repo.save_snapshot(game_id, "startpos", "d2d4 d7d5 g1f3", "white",
+                               "Changed line", False, "5+0", "mate", "white")
+        _save(repo, "no-data")
+
+        assert repo.search_games(analysis="yes")["total"] == 24
+        assert repo.search_games(analysis_source="stockfish")["total"] == 12
+        assert repo.search_games(analysis_source="lichess")["total"] == 14
+        assert repo.search_games(analysis_source="official_accuracy")["total"] == 3
+        assert repo.search_games(analysis="no")["total"] == 11
+        metrics = {row["key"]: row for row in dashboard_snapshot(repo)["metrics"]}
+        assert metrics["analysis"]["value"] == "24/35 (68.6%)"
+        assert "Stockfish: 12" in metrics["analysis"]["detail"]
+        assert "Lichess с оценками: 14" in metrics["analysis"]["detail"]
+    finally:
+        repo.shutdown()
 
 
 def test_dashboard_account_and_clock_filters_match_sql_scope(tmp_path):

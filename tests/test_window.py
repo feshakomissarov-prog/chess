@@ -4095,6 +4095,32 @@ def test_ready_event_stream_automatically_starts_bounded_old_game_analytics(qtbo
     assert "проверяем до 10" in window.lichess_analysis_status.text()
 
 
+def test_backfill_continues_only_a_full_successful_page_after_quiet_delay(
+        qtbot, tmp_path, monkeypatch):
+    from PySide6.QtCore import QTimer
+
+    window = MainWindow(QSettings(str(tmp_path / "analytics-continuation.ini"),
+                                  QSettings.Format.IniFormat), offline_mode=True)
+    qtbot.addWidget(window)
+
+    class Service:
+        username = "Current"
+        auth_generation = 12
+        def is_auth_generation_current(self, generation): return generation == 12
+
+    window.lichess = Service()
+    window.settings.setValue("lichess/auto_ready_analytics", True)
+    scheduled = []
+    monkeypatch.setattr(QTimer, "singleShot", lambda delay, callback: scheduled.append((delay, callback)))
+    window._lichess_analysis_backfill_finished(12, "Current", 10, 50, 3, 7, 0, 0,
+                                                "проверка завершена")
+    assert [delay for delay, _callback in scheduled] == [60_000]
+    scheduled.clear()
+    window._lichess_analysis_backfill_finished(12, "Current", 10, 50, 3, 7, 0, 1,
+                                                "пауза · HTTP 429")
+    assert scheduled == []
+
+
 def test_analytics_stream_ready_is_ignored_for_offline_or_stale_auth(qtbot, tmp_path):
     window = MainWindow(QSettings(str(tmp_path / "offline-analytics.ini"), QSettings.Format.IniFormat),
                         offline_mode=True)
