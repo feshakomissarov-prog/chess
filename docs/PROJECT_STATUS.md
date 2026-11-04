@@ -1,3 +1,11 @@
+## 04.11.2026 — ARCH-UX-01 independent review: REVIEW-FIX-01
+
+Проверен кодовый [draft PR #44](https://github.com/feshakomissarov-prog/chess/pull/44) на SHA `2b1c724b4503140992ad8d80f8c5044c861eb7cd`; Windows [CI #244](https://github.com/feshakomissarov-prog/chess/actions/runs/41774974147) SUCCESS на этом SHA, handoff сообщает 632 local PASS. **Решение: КОД ПОКА НЕ ПРИНЯТ.** Сформировано [исправляющее ТЗ ARCH-UX-01 REVIEW-FIX-01](specs/ARCH_UX_01_REVIEW_FIX_01.md), RF-01…RF-07: безопасность cached official accuracy, полнота редактора FEN, ephemeral review state, custom clock, игровые даты, async read selectors, финальные UX/lifecycle regression gates. Это **адресная корректировка**, без повторного W0–W9/A0–A12 и без нового кодового PR.
+
+ТЗ размещено в **docs-only draft PR #45**, чтобы сохранить исходный проверенный HEAD кодового PR #44; Codex по прямой передаче владельцем вносит исправления **в существующий PR #44**, затем новый Windows CI на **новом** точном SHA и повторное независимое ревью. Оба PR остаются draft, **не merge**. Физическая проверка Windows/DPI/звука/реального Lichess и Stockfish ещё не выполнялась.
+
+---
+
 ## 04.11.2026 — финальный предпусковой аудит ARCH-UX-01 v1.1
 
 **ГОТОВО ТЗ К ПЕРЕДАЧЕ CODEX, НЕ ГОТОВ К ПРИЁМКЕ КОД:** [единое ARCH-UX-01 v1.1](specs/ARCH_UX_01_UNIFIED_EXECUTION_SPEC.md) полностью перепроверено по согласованным UX и source текущего кодового [PR #44](https://github.com/feshakomissarov-prog/chess/pull/44). [Аудит с 14 адресными находками](reviews/ARCH_UX_01_PRE_FLIGHT_AUDIT.md) фиксирует Final-Game `final_sync_pending`/pending SQLite write, единый fail-closed Fair Play во всех новых views, single-session navigation, обычный premove vs ненужную тренировку, pilot import UI исключения, звуки/QSettings, связность CP/Δ/AdvantageBar, сохранённый 720 размер доски, оконные/Qt boundary и bounded UI data loading. **Никаких обязательных новых benchmark/SLA, Rust или микросервисов**; ADR-0001 сохранён. Опубликованы актуальные AGENTS, PCD, PRD, ROADMAP, PRODUCT_VISION, архитектурный ADR/target, UX документы, README и ТЗ.
