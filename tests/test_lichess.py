@@ -901,6 +901,17 @@ def test_library_search_filters_result_color_and_analysis_in_sql(tmp_path):
     repo.shutdown()
 
 
+def test_library_period_filter_uses_game_date_not_metadata_update_time(tmp_path):
+    repo = GameRepository(tmp_path / "library-period.sqlite3")
+    repo.save_snapshot("old-game", "startpos", "e2e4", "white", "Friend", False,
+                       "600+0", "mate", "white", started_at="2020.01.01")
+    repo.save_snapshot("new-game", "startpos", "d2d4", "white", "Friend", False,
+                       "600+0", "mate", "white", started_at="2026.01.01")
+    assert repo.search_games(updated_after="2025-01-01")["total"] == 1
+    assert repo.search_games(updated_after="2025-01-01")["items"][0]["game_id"] == "new-game"
+    repo.shutdown()
+
+
 def test_m3_migration_rolls_back_schema_and_version_on_backfill_failure(tmp_path, monkeypatch):
     import chess_coach.lichess.repository as repository_module
 

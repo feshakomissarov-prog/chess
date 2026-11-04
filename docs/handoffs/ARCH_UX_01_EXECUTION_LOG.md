@@ -42,6 +42,11 @@ Each stage will be appended here with commit SHA, changed responsibilities, focu
 - During the implementation pass, focused regression run on Windows/Python 3.12: `tests/test_ui_pages.py tests/test_architecture_fix_coordinators.py tests/test_lichess.py tests/test_window.py` — **301 passed**; compileall — PASS. Targeted external PGN/FEN tests — **3 passed**. These results are for the current working tree before this entry's commit; full suite/CI remain pending.
 - Still outstanding in this pass: inline Play form (current mode cards route into existing dialogs), internal library details pane with a safety-gated mini graph, richer global background inspector, full A10 boundary audit, responsive geometry checks across all target sizes, and final 24-group acceptance matrix. No claim that A2–A12 are complete is made yet.
 
+### A6 focused follow-up
+
+- Period filtering now uses `COALESCE(started_at, updated_at)`, so a recent metadata refresh cannot make an old game appear recent. The per-game Lichess refresh control is hidden from the regular catalog; the existing recovery method remains available to a diagnosed recovery flow.
+- Regression: `test_library_period_filter_uses_game_date_not_metadata_update_time` and UI assertion that ordinary catalog does not expose the refresh action — PASS (3 relevant tests).
+
 ### Final coverage matrix — pending implementation
 
 | ID | Route / outcome | Verification |
