@@ -4,12 +4,11 @@ from __future__ import annotations
 
 import re
 import chess
-from .display import format_game_date
+from .display import format_game_activity_time
 
 
 def _game_date_label(game: dict) -> str:
-    return format_game_date(game.get("started_at"),
-                            precision=game.get("game_time_precision"))
+    return format_game_activity_time(game)
 
 
 def _clock_filter_sort_key(value: object) -> tuple:

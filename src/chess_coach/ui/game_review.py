@@ -18,7 +18,7 @@ from ..lichess.game_review import (
     eligible_error_moves, load_game_review, verified_improved_moves,
 )
 from .display import (
-    evaluation_label, format_clock_control, format_game_date, opening_tooltip, phase_label,
+    evaluation_label, format_clock_control, format_game_timeline, opening_tooltip, phase_label,
     russian_opening_name, severity_label, source_short,
 )
 from .move_table import MoveTable
@@ -749,7 +749,7 @@ class GameReviewWorkspace(QWidget):
                   else "1–0" if game.get("winner") == "white"
                   else "0–1" if game.get("winner") == "black" else "результат н/д")
         source = analysis.get("source") or ""
-        game_details = (f"{format_game_date(game.get('started_at'), precision=game.get('game_time_precision'))} · "
+        game_details = (f"{format_game_timeline(game)} · "
                         f"{format_clock_control(game.get('clock'))} · "
                         f"{russian_opening_name(game.get('eco'), game.get('opening_name'))}")
         self.title.setText(f"{white} — {black} · {result} · {game_details}")

@@ -215,6 +215,18 @@ def test_archive_row_presentation_localizes_date_status_and_source():
     assert "mate" not in text
 
 
+def test_archive_row_shows_last_move_date_used_for_recent_order():
+    text, _source = _archive_row_presentation({
+        "started_at": "2026-11-03T12:00:00Z", "game_time_precision": "timestamp",
+        "last_move_at": 1793779200000, "updated_at": "2027-01-01T00:00:00Z",
+        "status": "mate", "source": "lichess_archive", "opponent": "Friend",
+        "white_player": "Me", "black_player": "Friend", "variant": "standard",
+    })
+    assert "Завершена: 04.11.2026" in text
+    assert "Начата: 03.11.2026" in text
+    assert "2027" not in text
+
+
 def test_completed_analysis_uses_unified_review_route_and_inline_notice(qtbot, tmp_path):
     window = MainWindow(QSettings(str(tmp_path / "analysis-notice.ini"),
                                   QSettings.Format.IniFormat), offline_mode=True)

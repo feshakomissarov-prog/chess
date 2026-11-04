@@ -99,6 +99,7 @@ from .ui.analytics_dialogs import (EvaluationGraph, RatingTrendGraph,
                                    StatisticsGameDialog, StatisticsDialog)
 from .ui.dialog_support import (_clock_filter_sort_key, _game_date_label, _result_label)
 from .ui.display import (format_clock_control, format_game_date,
+                         format_game_timeline,
                          format_remaining_clock, opening_tooltip, russian_opening_name,
                          source_short)
 
@@ -270,8 +271,7 @@ def _archive_row_presentation(game: dict) -> tuple[str, str]:
     source = str(game.get("source") or "")
     source_label = ("Локальная" if source == "local" else
                     "Lichess AI" if game.get("opponent_type") == "official_ai" else "Lichess")
-    date_label = format_game_date(game.get("started_at") or game.get("updated_at"),
-                                  precision=game.get("game_time_precision"))
+    date_label = format_game_timeline(game)
     opponent = game.get("account_opponent") or game.get("opponent") or "Соперник неизвестен"
     text = (f"{date_label} · {opponent} · {status} · {source_label}\n"
             f"{game.get('white_player') or 'Белые'} — {game.get('black_player') or 'Чёрные'}")

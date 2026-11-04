@@ -188,7 +188,9 @@ def test_library_detail_reuses_review_graph_and_masks_until_safety_gate(qtbot):
     page = LibraryPage()
     qtbot.addWidget(page)
     game = {"game_id": "synthetic", "opponent": "Synthetic", "color": "white",
-            "status": "mate", "source": "lichess_archive", "clock": "300+0"}
+            "status": "mate", "source": "lichess_archive", "clock": "300+0",
+            "started_at": "2026-11-03T12:00:00Z", "game_time_precision": "timestamp",
+            "last_move_at": 1793779200000}
     review = {
         "analysis": {"assessments": [
             {"ply": 0, "white_cp": 10, "mate_white": None},
@@ -208,6 +210,7 @@ def test_library_detail_reuses_review_graph_and_masks_until_safety_gate(qtbot):
     assert not page.detail_metrics.text()
 
     page.show_game_detail(game, review, safety_allowed=True)
+    assert "Завершена: 04.11.2026" in page.detail_metadata.text()
     assert page.detail_graph._values() == [(0, 10, None), (1, -25, None)]
     assert page.detail_graph.full_ply_count == 1
     assert "95.0 / 90.0" in page.detail_metrics.text()

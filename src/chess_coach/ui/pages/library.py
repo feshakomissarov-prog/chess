@@ -7,7 +7,7 @@ from PySide6.QtWidgets import (
     QComboBox, QFrame, QGridLayout, QHBoxLayout, QLabel, QListWidget, QListWidgetItem,
     QLineEdit, QPushButton, QSplitter, QVBoxLayout, QWidget,
 )
-from ..display import format_clock_control, format_game_date
+from ..display import format_clock_control, format_game_timeline
 from ..game_review import ReviewGraph
 
 
@@ -228,8 +228,7 @@ class LibraryPage(QWidget):
             return
         title = str(game.get("account_opponent") or game.get("opponent") or "Соперник")
         self.detail_title.setText(title)
-        date = format_game_date(game.get("started_at"),
-                                precision=game.get("game_time_precision"))
+        date = format_game_timeline(game)
         result = str(game.get("status") or "Завершена")
         clock = format_clock_control(game.get("clock"))
         self.detail_metadata.setText(f"{date} · {clock} · {result} · {game.get('source') or 'локально'}")

@@ -221,6 +221,57 @@ def test_home_and_library_order_by_game_activity_not_recent_metadata_updates(tmp
         repo.shutdown()
 
 
+def test_chronology_uses_last_move_before_start_and_cards_show_the_ordering_time(tmp_path):
+    from datetime import datetime, timezone
+
+    repo = GameRepository(tmp_path / "last-move-chronology.sqlite3")
+    try:
+        _save_scored(repo, "finished-a", "stockfish")
+        repo.save_snapshot("active-b", "startpos", "e2e4", "white", "Playing", False,
+                           "5+0", "playing", None, white_player="Me", black_player="Playing",
+                           started_at="2026-11-04T09:00:00Z")
+        _save(repo, "date-only-c", opponent="Date only")
+        _save(repo, "unknown-d", opponent="Unknown date")
+        finished_ms = int(datetime(2026, 11, 4, 8, tzinfo=timezone.utc).timestamp() * 1000)
+        with repo._connection() as db:
+            db.execute("UPDATE games SET opponent='Finished yesterday start',"
+                       "started_at='2026-11-03T12:00:00Z',"
+                       "game_time_precision='timestamp',last_move_at=?,updated_at=? "
+                       "WHERE game_id='finished-a'",
+                       (finished_ms, "2026-11-04T23:00:00Z"))
+            db.execute("UPDATE games SET started_at='2026-11-03',game_time_precision='date_only',"
+                       "last_move_at=NULL,updated_at='2026-11-04T22:00:00Z' "
+                       "WHERE game_id='date-only-c'")
+            db.execute("UPDATE games SET started_at=NULL,game_time_precision='unknown',"
+                       "last_move_at=NULL,updated_at='2026-11-04T23:59:00Z' "
+                       "WHERE game_id='unknown-d'")
+        first_page = repo.search_games(order_by_game_time=True, page_size=2)
+        second_page = repo.search_games(order_by_game_time=True, page_size=2, page=1)
+        assert [game["game_id"] for game in first_page["items"]] == ["active-b", "finished-a"]
+        assert [game["game_id"] for game in second_page["items"]] == ["date-only-c", "unknown-d"]
+        # A new analysis write is later than either game event, but must not move
+        # the old game ahead of the later-started active game.
+        line = repo.current_line("finished-a")
+        repo.save_analysis("finished-a", line_revision=line["line_revision"],
+                           line_hash=line["line_hash"], source="stockfish",
+                           engine_name="Fixture", engine_version="test", parameters={},
+                           status="complete", assessments=[{"ply": 1, "white_cp": 10}],
+                           classifications=[])
+        assert [game["game_id"] for game in repo.search_games(
+            order_by_game_time=True, page_size=2)["items"]] == ["active-b", "finished-a"]
+        assert repo.search_games(query="Playing", order_by_game_time=True)["items"][0]["game_id"] == "active-b"
+
+        home = dashboard_snapshot(repo)
+        assert [game["game_id"] for game in home["recent_games"]] == [
+            "finished-a", "date-only-c", "unknown-d"]
+        title, details = game_card_text(home["recent_games"][0])
+        assert title == "Победа с Finished yesterday start"
+        assert "Завершена: 04.11.2026" in details
+        assert "2027" not in details
+    finally:
+        repo.shutdown()
+
+
 def test_dashboard_card_reports_current_analysis_coverage_and_unknown_strong_moves(tmp_path):
     from chess_coach.ui.dashboard import game_card_metrics
 

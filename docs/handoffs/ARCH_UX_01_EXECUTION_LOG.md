@@ -225,3 +225,10 @@ The 24 COV routes and test evidence are listed immediately above. Every automate
 - Dashboard coverage now first aggregates source runs to one row per game. A game with both a full Stockfish run and a partial Lichess run is categorized once as full; source counts may still overlap. Thus `full + partial = analyzed`, and none is the scoped total minus analyzed.
 - Expanded the synthetic SQLite regression to include a classification-only record, an overlapping full+partial game, source overlap, and selected-account scope. Verified Home KPI, library yes/no/source filters and Progress yes/no filters return the same game sets: 24 analyzed / 35 total overall, 24 full / 0 partial; the selected-account scope reports 1/2 and consistent one-game yes/no groups.
 - Targeted `tests/test_dashboard.py` plus the library/statistics SQL-filter regressions: **11 passed**. No personal data or live analysis was used. Full suite and exact-head Windows CI remain pending after RF2-04.
+
+## REVIEW-FIX-02 — RF2-04 chronology and visible timestamps
+
+- Recent-game SQL now orders all known activity timestamps on the same Unix-epoch scale: `last_move_at` when present, otherwise provenance-confirmed timestamp/date-only start. Rows with unknown game time remain last and are not ordered by `updated_at`, which is metadata time rather than a game event.
+- Home cards display the completion/last-move time used for ordering. Library rows and detail/review headers show that activity time and, when known, the separate start time. Date-only and unknown values stay date-only/unknown; neither `updated_at` nor PGN Date is promoted to a fabricated clock time.
+- Added real-SQLite chronology regressions for a game started yesterday and finished today, a newer active game, date-only and unknown rows, pagination/search filters, Home's last-three list, and a later Stockfish metadata write that must not reorder the game. Formatting checks verify local timezone display and no invented `03:00` value.
+- Targeted display/dashboard/library/archive-row Qt regressions: **20 passed**. Full suite and exact-head Windows CI remain pending.

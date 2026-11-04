@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+import math
 import re
 from typing import Any
 
@@ -42,6 +43,51 @@ def format_game_date(value: Any, *, precision: str | None = None) -> str:
         return parsed.astimezone().strftime("%d.%m.%Y · %H:%M")
     except (TypeError, ValueError, OverflowError):
         return "Дата неизвестна"
+
+
+def format_game_activity_time(game: dict[str, Any]) -> str:
+    """Show the same confirmed event timestamp used to order recent games."""
+    last_move = game.get("last_move_at")
+    last_move_ms = _valid_last_move_ms(last_move)
+    if last_move_ms is not None:
+        try:
+            stamp = datetime.fromtimestamp(last_move_ms / 1000, tz=timezone.utc)
+            label = "Последний ход" if game.get("status") in {
+                "created", "started", "started_soon", "playing"} else "Завершена"
+            return f"{label}: {stamp.astimezone().strftime('%d.%m.%Y · %H:%M')}"
+        except (OverflowError, OSError, ValueError):
+            pass
+    precision = game.get("game_time_precision")
+    value = format_game_date(game.get("started_at"), precision=precision)
+    if value.startswith("Дата неизвестна"):
+        return "Дата начала неизвестна"
+    if value.startswith("Время неизвестно"):
+        return "Время начала неизвестно"
+    label = "Начата" if precision == "timestamp" and " · " in value else "Дата начала"
+    return f"{label}: {value}"
+
+
+def format_game_timeline(game: dict[str, Any]) -> str:
+    """Show ordering event and, when known, the distinct start time."""
+    activity = format_game_activity_time(game)
+    if _valid_last_move_ms(game.get("last_move_at")) is None:
+        return activity
+    started = format_game_date(game.get("started_at"), precision=game.get("game_time_precision"))
+    if started.startswith(("Дата неизвестна", "Время неизвестно")):
+        return activity
+    start_label = ("Начата" if game.get("game_time_precision") == "timestamp"
+                   and " · " in started else "Дата начала")
+    return f"{activity} · {start_label}: {started}"
+
+
+def _valid_last_move_ms(value: Any) -> float | None:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    try:
+        numeric = float(value)
+        return numeric if math.isfinite(numeric) and numeric > 0 else None
+    except (OverflowError, ValueError):
+        return None
 
 
 def _seconds(value: int) -> str:

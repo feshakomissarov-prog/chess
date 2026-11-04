@@ -2,7 +2,8 @@ import csv
 from pathlib import Path
 
 from chess_coach.ui.display import (
-    evaluation_label, format_clock_control, format_game_date, format_remaining_clock,
+    evaluation_label, format_clock_control, format_game_activity_time, format_game_date,
+    format_game_timeline, format_remaining_clock,
     russian_opening_name,
     source_short,
 )
@@ -17,6 +18,22 @@ def test_local_timestamp_date_precision_and_invalid_date_are_honest():
     assert format_game_date("2026-08-04T00:00:00+00:00", precision="date_only") == "04.08.2026"
     assert format_game_date("invalid") == "Время неизвестно"
     assert format_game_date(20261102) == "02.11.2026"
+
+
+def test_game_activity_labels_use_last_move_and_never_invent_unknown_start_time():
+    completed = {"status": "mate", "last_move_at": 1793779200000,
+                 "started_at": "2026-11-03T08:00:00Z", "game_time_precision": "timestamp"}
+    assert format_game_activity_time(completed).startswith("Завершена: 04.11.2026")
+    assert format_game_timeline(completed).startswith("Завершена: 04.11.2026")
+    assert "Начата: 03.11.2026" in format_game_timeline(completed)
+    date_only = {"status": "mate", "started_at": "2026-11-03",
+                 "game_time_precision": "date_only", "updated_at": "2026-11-04T03:00:00Z"}
+    assert format_game_activity_time(date_only) == "Дата начала: 03.11.2026"
+    unknown = {"status": "mate", "started_at": None,
+               "game_time_precision": "unknown", "updated_at": "2026-11-04T03:00:00Z"}
+    assert format_game_activity_time(unknown) == "Дата начала неизвестна"
+    unknown["last_move_at"] = 10 ** 1000
+    assert format_game_activity_time(unknown) == "Дата начала неизвестна"
 
 
 def test_clock_labels_preserve_units_for_base_and_increment():

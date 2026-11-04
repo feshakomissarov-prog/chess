@@ -127,13 +127,15 @@ class GamesStoreMixin:
             if account_id:
                 selected += ",ag.opponent AS account_opponent,ag.player_name AS account_player_name,ag.color AS account_color"
             if order_by_game_time:
-                order_sql = (" ORDER BY CASE WHEN g.last_move_at>0 THEN 0 "
-                             "WHEN g.started_at IS NOT NULL AND g.game_time_precision IN "
-                             "('timestamp','date_only') THEN 1 ELSE 2 END,"
-                             "CASE WHEN g.last_move_at>0 THEN g.last_move_at/1000.0 "
-                             "WHEN g.game_time_precision='timestamp' THEN julianday(g.started_at) "
-                             "WHEN g.game_time_precision='date_only' THEN julianday(substr(g.started_at,1,10)) "
-                             "ELSE julianday(g.updated_at) END DESC,g.game_id DESC")
+                activity_epoch = ("CASE WHEN g.last_move_at>0 THEN g.last_move_at/1000.0 "
+                                  "WHEN g.game_time_precision='timestamp' THEN unixepoch(g.started_at) "
+                                  "WHEN g.game_time_precision='date_only' "
+                                  "THEN unixepoch(substr(g.started_at,1,10)) ELSE NULL END")
+                # Compare the actual activity/start timestamps on one epoch scale.
+                # Unknown provenance stays at the end; metadata updated_at is not
+                # a game event and must not reorder a known or undated game.
+                order_sql = (f" ORDER BY ({activity_epoch}) IS NULL,"
+                             f"{activity_epoch} DESC,g.game_id DESC")
             else:
                 order_sql = " ORDER BY g.updated_at DESC,g.game_id DESC"
             rows = db.execute(f"SELECT {selected} FROM games g" + join + where +
