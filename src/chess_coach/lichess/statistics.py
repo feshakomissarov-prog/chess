@@ -304,6 +304,10 @@ class StatisticsService:
         if outer_source_filter:
             clauses.append(f"({outer_source_filter})")
             params.extend(outer_source_params)
+            source_scored_exists, source_scored_params = current_scored_analysis_exists(
+                "g", analysis_source)
+            clauses.append(source_scored_exists)
+            params.extend(source_scored_params)
         ranked_source_filter, ranked_source_params = analysis_run_source_filter("ar", analysis_source)
         ranked_source_clause = (f"AND ({ranked_source_filter}) "
                                 if ranked_source_filter else "")
@@ -619,6 +623,12 @@ class StatisticsService:
             clauses.append("ag.color=?"); params.append(side)
         source_filter, cte_params = analysis_run_source_filter("ar", analysis_source)
         analysis_clause = f"AND ({source_filter}) " if source_filter else ""
+        source_scored_exists = ""
+        source_scored_params: list[object] = []
+        if analysis_source:
+            source_scored_exists, source_scored_params = current_scored_analysis_exists(
+                "g", analysis_source)
+            source_scored_exists = " AND " + source_scored_exists
         scored_run = analysis_run_has_position_scores("ar")
         from .event_detectors import DETECTOR_VERSION
         active_detector = DETECTOR_VERSION + ":%"
@@ -636,6 +646,7 @@ class StatisticsService:
                 "(SELECT * FROM ranked WHERE rank=1), "
                 "game_rows AS (SELECT g.*,ag.color my_color,ar.run_id,ar.status analysis_status,"
                 "CASE WHEN g.started_at IS NULL THEN 'unknown' ELSE substr(g.started_at,1,7) END period,"
+                f"CASE WHEN ar.run_id IS NOT NULL AND {scored_run} THEN 1 ELSE 0 END has_scored_analysis,"
                 "CASE ag.color WHEN 'white' THEN g.lichess_accuracy_white "
                 "WHEN 'black' THEN g.lichess_accuracy_black END official_accuracy,"
                 "(SELECT COUNT(*) FROM move_metrics mm JOIN game_moves gm ON gm.game_id=mm.game_id "
@@ -672,7 +683,7 @@ class StatisticsService:
                 "verified_opportunities_used "
                 "FROM games g JOIN account_games ag ON ag.game_id=g.game_id "
                 "LEFT JOIN chosen ar ON ar.game_id=g.game_id AND ar.line_revision=g.line_revision WHERE "
-                + where + ") "
+                + where + source_scored_exists + ") "
                 "SELECT period,my_color,COUNT(*) games,"
                 "SUM(CASE WHEN winner=my_color THEN 1 ELSE 0 END) wins,"
                 "SUM(CASE WHEN winner IS NOT NULL AND winner<>my_color "
@@ -681,7 +692,8 @@ class StatisticsService:
                 "SUM(CASE WHEN status IN ('draw','stalemate','repetition','50moves','insufficientMaterial') "
                 "OR pgn LIKE '%[Result \"1/2-1/2\"]%' THEN 1 ELSE 0 END) draws,"
                 "AVG(official_accuracy) official_accuracy,COUNT(official_accuracy) accuracy_n,"
-                "COUNT(analysis_status) analyzed_games,SUM(assessed_own_moves) assessed_own_moves,"
+                "COUNT(DISTINCT CASE WHEN has_scored_analysis=1 THEN game_id END) analyzed_games,"
+                "SUM(assessed_own_moves) assessed_own_moves,"
                 "SUM(own_errors) own_errors,SUM(opportunity_candidates) opportunity_candidates,"
                 "SUM(own_inaccuracies) own_inaccuracies,SUM(own_mistakes) own_mistakes,"
                 "SUM(own_blunders) own_blunders,"
@@ -690,7 +702,8 @@ class StatisticsService:
                 "SUM(CASE WHEN started_at IS NULL THEN 1 ELSE 0 END) unknown_date_games "
                 "FROM game_rows GROUP BY period,my_color "
                 "ORDER BY CASE WHEN period='unknown' THEN 1 ELSE 0 END,period,my_color",
-                [*cte_params, active_detector, active_detector, *params]).fetchall()
+                [*cte_params, active_detector, active_detector, *params,
+                 *source_scored_params]).fetchall()
         output = []
         for row in rows:
             item = dict(row)
@@ -786,6 +799,18 @@ class StatisticsService:
                     f"AND gp.line_revision=g.line_revision) AS total_positions, " \
                     f"(SELECT COUNT(*) FROM position_assessments pa WHERE pa.run_id=({latest_run}) " \
                     f"AND (pa.white_cp IS NOT NULL OR pa.mate_white IS NOT NULL)) AS scored_positions, " \
+                    f"(SELECT COUNT(*) FROM move_classifications mc JOIN game_moves gm " \
+                    f"ON gm.game_id=mc.game_id AND gm.line_revision=mc.line_revision AND gm.ply=mc.ply " \
+                    f"WHERE mc.run_id=({latest_run}) AND gm.mover={owner_color} " \
+                    f"AND mc.label='inaccuracy') AS own_classified_inaccuracies, " \
+                    f"(SELECT COUNT(*) FROM move_classifications mc JOIN game_moves gm " \
+                    f"ON gm.game_id=mc.game_id AND gm.line_revision=mc.line_revision AND gm.ply=mc.ply " \
+                    f"WHERE mc.run_id=({latest_run}) AND gm.mover={owner_color} " \
+                    f"AND mc.label='mistake') AS own_classified_mistakes, " \
+                    f"(SELECT COUNT(*) FROM move_classifications mc JOIN game_moves gm " \
+                    f"ON gm.game_id=mc.game_id AND gm.line_revision=mc.line_revision AND gm.ply=mc.ply " \
+                    f"WHERE mc.run_id=({latest_run}) AND gm.mover={owner_color} " \
+                    f"AND mc.label='blunder') AS own_classified_blunders, " \
                     f"(SELECT COUNT(*) FROM game_moves gm WHERE gm.game_id=g.game_id " \
                     f"AND gm.line_revision=g.line_revision AND gm.mover={owner_color}) AS total_own_moves, " \
                     f"(SELECT COUNT(*) FROM move_metrics mm JOIN game_moves gm ON gm.game_id=mm.game_id " \
@@ -806,7 +831,7 @@ class StatisticsService:
                     f"AND mm.severity='blunder') AS own_blunders, " \
                     f"CASE {owner_color} WHEN 'white' THEN g.lichess_accuracy_white " \
                     f"WHEN 'black' THEN g.lichess_accuracy_black END AS owner_lichess_accuracy"
-        page_params = page_source_params * 8 + params
+        page_params = page_source_params * 11 + params
         self.repository._wait_before_read()
         with self.repository._connection() as db:
             total = db.execute(f"SELECT COUNT(DISTINCT g.game_id) FROM games g{join} WHERE {where}",
@@ -816,6 +841,17 @@ class StatisticsService:
                 "ORDER BY CASE WHEN g.started_at IS NULL THEN 1 ELSE 0 END,"
                 "g.started_at DESC,g.game_id LIMIT ? OFFSET ?",
                 [*page_params, page_size, page * page_size]).fetchall()
-        return self._store_cached(cache_key, {"items": [dict(row) for row in rows], "total": total,
+        items = [dict(row) for row in rows]
+        for item in items:
+            scored_positions = int(item.get("scored_positions") or 0)
+            item["has_position_scores"] = scored_positions > 0
+            item["technical_analysis_status"] = item.get("analysis_status")
+            item["technical_analysis_source"] = item.get("selected_analysis_source")
+            if not scored_positions:
+                # Keep the recorded job state available for diagnostics, but do
+                # not expose an empty completed run as an evaluation result.
+                item["analysis_status"] = None
+                item["selected_analysis_source"] = None
+        return self._store_cached(cache_key, {"items": items, "total": total,
                 "page": page, "page_size": page_size,
                 "pages": (total + page_size - 1) // page_size})

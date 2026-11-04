@@ -445,6 +445,7 @@ class MainWindow(QMainWindow):
         self._batch_engine_key: str | None = None
         self._batch_config: tuple[str, int, int] | None = None
         self._statistics_workers: set[threading.Thread] = set()
+        self._statistics_hub_connected = False
         self._dashboard_thread: threading.Thread | None = None
         self._position_eval_generation = 0
         self._position_eval_thread: threading.Thread | None = None
@@ -2460,8 +2461,12 @@ class MainWindow(QMainWindow):
             "Статистика и кэшированные оценки скрыты до свежей проверки безопасного состояния Lichess.",
         )
         dialog.safety_requested.connect(self._request_dashboard_display_safety)
-        dialog.worker_started.connect(self._statistics_worker_started)
-        dialog.worker_finished.connect(self._statistics_worker_finished)
+        # Track workers at application scope, so destroying an embedded page
+        # cannot disconnect the completion path needed by window shutdown.
+        if not self._statistics_hub_connected:
+            dialog._worker_hub.worker_started.connect(self._statistics_worker_started)
+            dialog._worker_hub.worker_finished.connect(self._statistics_worker_finished)
+            self._statistics_hub_connected = True
         dialog.position_requested.connect(self._open_statistics_position)
         dialog.game_requested.connect(lambda game_id: self._open_statistics_game(dialog, game_id))
         dialog.batch_requested.connect(lambda: (

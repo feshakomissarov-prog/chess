@@ -5,6 +5,7 @@ from __future__ import annotations
 import chess
 import json
 import threading
+import uuid
 from datetime import datetime, timedelta, timezone
 from PySide6.QtCore import Qt, QTimer, Signal
 from PySide6.QtGui import QColor, QPainter, QPen
@@ -18,6 +19,7 @@ from ..lichess.repository import GameRepository
 from ..lichess.statistics import StatisticsService
 from .dialog_support import _clock_filter_sort_key, _game_date_label, _result_label
 from .display import format_clock_control, opening_tooltip, russian_opening_name, source_short
+from .statistics_workers import StatisticsWorkerHub
 
 
 class EvaluationGraph(QWidget):
@@ -369,6 +371,9 @@ class StatisticsDialog(QDialog):
         self.setMinimumSize(480, 360)
         self.resize(1040, 820)
         self._generation = 0
+        self._filter_generation = 0
+        self._worker_key = uuid.uuid4().hex
+        self._worker_hub = StatisticsWorkerHub.for_application()
         self._query_thread: threading.Thread | None = None
         self._opening_thread: threading.Thread | None = None
         self._pending_refresh = False
@@ -567,6 +572,8 @@ class StatisticsDialog(QDialog):
         self._refresh_timer.setSingleShot(True)
         self._refresh_timer.setInterval(250)
         self._refresh_timer.timeout.connect(self._refresh_now)
+        self._worker_hub.query_completed.connect(self._worker_query_completed)
+        self._worker_hub.opening_completed.connect(self._worker_opening_completed)
         self.loaded.connect(self._apply_result)
         self.query_finished.connect(self._query_finished)
         self.opening_loaded.connect(self._opening_result)
@@ -681,6 +688,7 @@ class StatisticsDialog(QDialog):
     def _schedule_refresh(self, *_args) -> None:
         if self._close_when_idle:
             return
+        self._filter_generation += 1
         self._page = 0
         self._refresh_timer.start()
 
@@ -697,51 +705,39 @@ class StatisticsDialog(QDialog):
         self._generation += 1
         generation, filters, page = self._generation, self._filters(), self._page
         self.summary_label.setText("Обновляем статистику…")
-
-        def work() -> None:
-            try:
-                summary = self.service.summary(**filters)
-                parties = self.service.game_page(**filters, page=page, page_size=100)
-                if filters["account_id"]:
-                    summary["personal_profile"] = self.service.personal_profile(
-                        account_id=filters["account_id"], clock=filters["clock"],
-                        side=filters["side"], analysis_source=filters["analysis_source"])
-                self.loaded.emit(generation, summary, parties, None)
-            except Exception as exc:
-                self.loaded.emit(generation, None, None, str(exc))
-            finally:
-                self.query_finished.emit(threading.current_thread())
-
-        thread = threading.Thread(target=work, name="chess-coach-statistics", daemon=True)
+        thread = self._worker_hub.submit_query(
+            self._worker_key, generation, self.service, filters, page)
         self._query_thread = thread
         self.worker_started.emit(thread)
-        thread.start()
 
     def _start_opening_refresh(self) -> None:
         if self._opening_thread is not None and self._opening_thread.is_alive():
             return
         filters = self._filters()
+        filter_generation = self._filter_generation
         self.opening_refresh_button.setEnabled(False)
         self.opening_summary.setText("Сопоставляем локальный справочник для 25 последних партий…")
-
-        def work() -> None:
-            try:
-                from ..lichess.opening_matcher import OpeningMatcher
-                matched = OpeningMatcher().match_recent(self.repository, limit=25)
-                phases = self.repository.infer_missing_phase_boundaries(limit=25)
-                groups = StatisticsService(self.repository).opening_statistics(
-                    account_id=filters["account_id"], analysis_source=filters["analysis_source"],
-                    since=filters["since"], until=filters["until"], min_games=1)
-                payload = {"matched": matched, "phases": phases, "groups": groups}
-            except Exception as exc:
-                payload = {"error": str(exc)}
-            self.opening_loaded.emit(payload)
-            self.opening_finished.emit(threading.current_thread())
-
-        thread = threading.Thread(target=work, name="chess-coach-opening-index", daemon=True)
+        thread = self._worker_hub.submit_opening_refresh(
+            self._worker_key, filter_generation, self.repository, filters)
         self._opening_thread = thread
         self.worker_started.emit(thread)
-        thread.start()
+
+    def _worker_query_completed(self, dialog_key: str, generation: int,
+                                summary: object, parties: object, error: object,
+                                thread: object) -> None:
+        if dialog_key != self._worker_key:
+            return
+        if generation == self._generation and not self._close_when_idle:
+            self.loaded.emit(generation, summary, parties, error)
+        self.query_finished.emit(thread)
+
+    def _worker_opening_completed(self, dialog_key: str, generation: int,
+                                  payload: object, thread: object) -> None:
+        if dialog_key != self._worker_key:
+            return
+        if generation == self._filter_generation and not self._close_when_idle:
+            self.opening_loaded.emit(payload)
+        self.opening_finished.emit(thread)
 
     def _opening_result(self, payload: object) -> None:
         if not isinstance(payload, dict):
@@ -784,6 +780,8 @@ class StatisticsDialog(QDialog):
             super().accept()
 
     def _apply_result(self, generation: int, summary: object, parties: object, error: object) -> None:
+        if generation != self._generation or self._close_when_idle:
+            return
         if error:
             self.summary_label.setText(f"Не удалось построить статистику: {error}")
         elif generation == self._generation and isinstance(summary, dict) and isinstance(parties, dict):
@@ -803,12 +801,23 @@ class StatisticsDialog(QDialog):
                 total_own = game.get("total_own_moves")
                 scored = game.get("scored_positions")
                 total_positions = game.get("total_positions")
+                has_scores = bool(game.get("has_position_scores", int(scored or 0) > 0))
                 coverage = (f"Оценено позиций: {scored if scored is not None else '—'}/"
                             f"{total_positions if total_positions is not None else '—'} · "
                             f"моих ходов: {assessed if assessed is not None else '—'}/"
                             f"{total_own if total_own is not None else '—'}"
-                            if game.get("analysis_status") else "Оценки пока нет")
-                if assessed is None:
+                            if has_scores else "Позиционных оценок нет")
+                if not has_scores and game.get("technical_analysis_status"):
+                    coverage += (f" (технический статус run: "
+                                 f"{game['technical_analysis_status']})")
+                classified = (game.get("own_classified_inaccuracies"),
+                              game.get("own_classified_mistakes"),
+                              game.get("own_classified_blunders"))
+                if not has_scores and any(int(value or 0) for value in classified):
+                    error_counts = ("Классификация без позиционных оценок: неточности "
+                                    f"{int(classified[0] or 0)} · ошибки {int(classified[1] or 0)} · "
+                                    f"зевки {int(classified[2] or 0)}")
+                elif assessed is None:
                     error_counts = "Ошибки по моим ходам: нет данных"
                 elif assessed == 0:
                     error_counts = (f"Нет оценённых моих ходов (0/{total_own if total_own is not None else '—'}).")
