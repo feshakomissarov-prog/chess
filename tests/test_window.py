@@ -3251,6 +3251,10 @@ def test_home_dashboard_masks_cached_analysis_when_safety_is_pending_or_human_ga
     }
     window._dashboard_analysis_safety_allowed = False
     window._render_dashboard_snapshot(snapshot)
+    assert window._dashboard_metric_values["accuracy"].text() == "скрыто"
+    assert "Lichess" not in window._dashboard_metric_values["accuracy"].toolTip()
+    assert "Проверка безопасности" in window._dashboard_metric_details["accuracy"].text()
+    assert "100%" not in window._dashboard_metric_details["accuracy"].text()
     assert window._dashboard_metric_values["analysis"].text() == "скрыто"
     assert window._dashboard_metric_details["errors"].text() == (
         "Проверка безопасности Lichess не подтверждена.")
@@ -3259,11 +3263,14 @@ def test_home_dashboard_masks_cached_analysis_when_safety_is_pending_or_human_ga
     assert "1/1" not in card.findChild(QLabel, "dashboardAnalysisCoverage").text()
 
     window._dashboard_analysis_safety_allowed = True
+    window._render_dashboard_snapshot(snapshot)
+    assert window._dashboard_metric_values["accuracy"].text() == "н/д"
     human = LichessGameSession("dashboard-human", window.game_repository)
     human.opponent = "Friend"
     human.status = "playing"
     window.game_sessions.register(human)
     window._render_dashboard_snapshot(snapshot)
+    assert window._dashboard_metric_values["accuracy"].text() == "скрыто"
     assert window._dashboard_metric_values["analysis"].text() == "скрыто"
     assert "ошибки 1" not in window._recent_games_layout.itemAt(0).widget().findChild(
         QLabel, "dashboardAnalysisMetrics").text()

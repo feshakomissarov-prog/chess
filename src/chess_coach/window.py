@@ -1819,13 +1819,17 @@ class MainWindow(QMainWindow):
         analysis_allowed = bool(self.offline_mode or
                                 (self._dashboard_analysis_safety_allowed and not active_human))
         for metric in snapshot["metrics"]:
-            masked = metric["key"] in {"analysis", "errors"} and not analysis_allowed
+            masked = metric["key"] in {"accuracy", "analysis", "errors"} and not analysis_allowed
             self._dashboard_metric_values[metric["key"]].setText(
                 "скрыто" if masked else metric["value"])
             self._dashboard_metric_details[metric["key"]].setText(
                 "Проверка безопасности Lichess не подтверждена." if masked else metric["detail"])
-            self._dashboard_metric_values[metric["key"]].setToolTip(metric["source"])
-            self._dashboard_metric_details[metric["key"]].setToolTip(metric["source"])
+            safe_description = ("Аналитика скрыта до свежего разрешения Fair Play."
+                                if masked else str(metric["source"]))
+            self._dashboard_metric_values[metric["key"]].setToolTip(safe_description)
+            self._dashboard_metric_details[metric["key"]].setToolTip(safe_description)
+            self._dashboard_metric_values[metric["key"]].setAccessibleDescription(safe_description)
+            self._dashboard_metric_details[metric["key"]].setAccessibleDescription(safe_description)
         while self._recent_games_layout.count():
             item = self._recent_games_layout.takeAt(0)
             widget = item.widget()

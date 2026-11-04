@@ -449,7 +449,7 @@ def test_fair_play_revocation_masks_every_rendered_analysis_surface(
         visible_strings.extend((workspace.graph.toolTip(), workspace.graph.accessibleName(),
                                 workspace.graph.accessibleDescription(), QToolTip.text()))
         rendered = "\n".join(value for value in visible_strings if value)
-        for secret in ("+2.5", "ошибок 1", "зевков 1", "неточн. 0",
+        for secret in ("+2.5", "95.0%", "90.0%", "ошибок 1", "зевков 1", "неточн. 0",
                        "Сохранённое продолжение", "Сохранённые варианты", "Зевок",
                        "охват 1/", "Stockfish", "phase coverage"):
             assert secret.casefold() not in rendered.casefold(), (transition, secret, rendered)
@@ -475,6 +475,30 @@ def test_fair_play_revocation_masks_every_rendered_analysis_surface(
             QCoreApplication.processEvents()
             assert "1" in _metrics_text(workspace.side_metrics_summary)
             assert workspace.graph._values()
+    finally:
+        repo.shutdown()
+
+
+def test_ephemeral_review_keeps_identity_and_selected_ply_across_safety_changes(qtbot, tmp_path):
+    repo, game = _review_repo(tmp_path / "ephemeral-safety.sqlite3")
+    try:
+        before = repo.get_game(game["game_id"])
+        workspace = GameReviewWorkspace(repo, training_allowed=False)
+        qtbot.addWidget(workspace)
+        workspace.load_game(game, ephemeral=True)
+        workspace.select_ply(2)
+        workspace.set_safety_pending("Перепроверка")
+        workspace.set_training_safety_result(False, "Доступ не разрешён")
+        assert workspace._ephemeral_study
+        assert workspace.selected_ply == 2
+        assert not workspace.analysis_button.isVisible()
+        assert not workspace.training_button.isVisible()
+        workspace.set_training_safety_result(True)
+        assert workspace._ephemeral_study
+        assert workspace.selected_ply == 2
+        assert not workspace.analysis_button.isVisible()
+        assert not workspace.training_button.isVisible()
+        assert repo.get_game(game["game_id"])["pgn"] == before["pgn"]
     finally:
         repo.shutdown()
 

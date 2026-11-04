@@ -1039,6 +1039,8 @@ class GameReviewWorkspace(QWidget):
         self.graph.update()
 
     def set_training_safety_result(self, allowed: bool, reason: str = ""):
+        ephemeral = self._ephemeral_study
+        selected_ply = self.selected_ply
         self.training_allowed = bool(allowed)
         self.evaluation_allowed = bool(allowed)
         self.training_block_reason = reason
@@ -1052,7 +1054,8 @@ class GameReviewWorkspace(QWidget):
         if self.review:
             game = self.review["game"]
             self.load_game(game, training_allowed=allowed,
-                           training_block_reason=reason)
+                           training_block_reason=reason, ephemeral=ephemeral)
+            self.select_ply(selected_ply)
         self.training_safety_button.setText("Проверить безопасность")
 
     def set_safety_pending(self, reason: str = "Проверяем активные партии; оценки скрыты."):
