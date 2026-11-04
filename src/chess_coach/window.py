@@ -901,15 +901,21 @@ class MainWindow(QMainWindow):
         finished_layout.addWidget(self.finished_saved_label)
         self.finished_review_button = QPushButton("Разобрать партию")
         self.finished_review_button.clicked.connect(self.review_finished_game)
-        self.finished_challenge_button = QPushButton("Вызвать снова")
+        self.finished_review_button.setParent(side)
+        self.finished_review_button.setText("Разобрать")
+        self.finished_challenge_button = QPushButton("Вызвать снова", side)
         self.finished_challenge_button.clicked.connect(self._challenge_again)
-        self.finished_export_button = QPushButton("Экспорт PGN")
+        self.finished_export_button = QPushButton("Экспорт PGN", self.finished_game_card)
         self.finished_export_button.clicked.connect(self.export_current_pgn)
-        for button in (self.finished_review_button, self.finished_challenge_button,
-                       self.finished_export_button):
-            finished_layout.addWidget(button)
+        self.finished_review_button.hide()
+        self.finished_challenge_button.hide()
         self.finished_game_card.setVisible(False)
-        side_layout.addWidget(self.finished_game_card)
+        # Keep the legacy result object as a hidden compatibility surface; the
+        # finished state is presented inline on the same board.
+        self.finished_summary.hide()
+        self.finished_saved_label.hide()
+        side_layout.addWidget(self.finished_review_button)
+        side_layout.addWidget(self.finished_challenge_button)
         self.local_mode_label = QLabel("Режим локальной доски")
         side_layout.addWidget(self.local_mode_label)
         self.local_mode_combo = QComboBox()
@@ -3017,6 +3023,7 @@ class MainWindow(QMainWindow):
             saved_label
         )
         self.result_saved_label.setStyleSheet("color: #39704a;" if saved else "color: #9b3434;")
+        self._finish_save_status = saved_label
         self.result_review_button.setEnabled(bool(session.moves))
         self.result_export_button.setEnabled(
             not session.final_sync_pending and not write_pending
@@ -3024,7 +3031,10 @@ class MainWindow(QMainWindow):
         )
         self.finished_review_button.setEnabled(bool(session.moves))
         self.finished_challenge_button.setEnabled(not self.offline_mode)
-        self.finished_game_card.setVisible(True)
+        self.finished_game_card.setVisible(False)
+        self.finished_review_button.setVisible(True)
+        self.finished_challenge_button.setVisible(True)
+        self.finished_export_button.setVisible(False)
         # A result never replaces the authoritative game board. The selected
         # session, clocks and move history stay attached to their original view.
         self.screen_stack.setCurrentWidget(self.game_page)
@@ -4797,8 +4807,10 @@ class MainWindow(QMainWindow):
         active = (session.status in {"started", "playing"}
                   and self._screen_mode != "review"
                   and not session.awaiting_authoritative_snapshot)
-        finished_view = self._screen_mode == "result" and not active
-        self.finished_game_card.setVisible(finished_view)
+        finished_view = session.status not in {"created", "started", "playing"} and not active
+        self.finished_game_card.setVisible(False)
+        self.finished_review_button.setVisible(finished_view)
+        self.finished_challenge_button.setVisible(finished_view)
         # While a move POST is pending, the optimistic rendering is already one
         # ply ahead. Allow only the dedicated premove gesture on that position;
         # begin_submission still rejects a second real POST until server ACK.
@@ -4812,7 +4824,13 @@ class MainWindow(QMainWindow):
         turn = ("Синхронизация позиции…" if session.awaiting_authoritative_snapshot
                 else "Ваш ход" if session.is_my_turn else "Ход соперника")
         self.turn_label.setText(turn + (" · история" if not live else ""))
-        if message:
+        if finished_view:
+            outcome = _result_label(session.color, session.winner, session.status)
+            save_status = getattr(self, "_finish_save_status", "")
+            self.game_status.setText(
+                f"Партия завершена · {outcome}"
+                + (f" · {save_status}" if save_status else ""))
+        elif message:
             self.game_status.setText(message)
         elif session.awaiting_authoritative_snapshot:
             self.game_status.setText(

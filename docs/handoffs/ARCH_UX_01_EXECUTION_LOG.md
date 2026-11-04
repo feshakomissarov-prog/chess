@@ -28,6 +28,11 @@
 - Added regressions for finish-before-final-state, same-board finish, navigation-away during local write confirmation, and bounded lifecycle tracking. Existing terminal event/session tests still pass.
 - Not yet complete: friendly “call again” contextual routing for the built-in AI/local route; comprehensive event-order/reconnect shutdown matrix is scheduled for A4/A10. No live network was used.
 
+### U4/A5 visual-state correction checkpoint
+
+- Removed the separate visible finished-result card from the game inspector. The same persistent board, frozen clocks and move list remain; the existing game-status line reports the result and final-sync/SQLite-save state. Only the two approved primary post-game actions are shown next to the move list: “Разобрать” and “Вызвать снова”. Legacy result labels remain hidden compatibility fields; export is not exposed as a third primary action in the finished state.
+- No finalization, retry or persistence code changed. Regressions cover finish on the same board, background finish isolation, late active state, delayed final PGN and navigation away during SQLite write: **6 passed**. The result card is confirmed hidden while the two actions are visible. Real Lichess and personal SQLite were not used.
+
 ## A2–A4, A6–A12 — implementation status
 
 Each stage will be appended here with commit SHA, changed responsibilities, focused tests, limitations, and next stage. Coverage IDs COV-01…24 will receive a route and evidence/status in the final acceptance section.

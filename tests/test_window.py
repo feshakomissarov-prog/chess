@@ -2816,7 +2816,10 @@ def test_home_game_result_review_home_and_new_game_flow(qtbot, tmp_path):
         "gameId": "flow-game", "status": {"name": "mate"}, "winner": "white"
     }})
     assert window.screen_stack.currentWidget() is window.game_page
-    assert window.finished_game_card.isVisible()
+    assert not window.finished_game_card.isVisible()
+    assert window.finished_review_button.isVisible()
+    assert window.finished_challenge_button.isVisible()
+    assert not window.finished_export_button.isVisible()
     assert "Победа" in window.result_summary.text()
     assert "ожидаем подтверждённую финальную историю" in window.result_saved_label.text()
     assert not window.resign_button.isVisible()
@@ -3524,6 +3527,7 @@ def test_finish_before_final_state_keeps_result_screen_then_updates_saved_pgn(qt
     assert window._screen_mode == "result"
     assert session.final_sync_pending
     assert "ожидаем подтверждённую финальную историю" in window.result_saved_label.text()
+    assert "Партия завершена" in window.game_status.text()
 
     window._lichess_game_event(session.game_id, {
         "type": "gameState", "moves": "f2f3 e7e5 g2g4 d8h4", "status": "mate", "winner": "black"
