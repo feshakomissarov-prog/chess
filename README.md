@@ -8,6 +8,9 @@ Chess Coach — разрабатываемое настольное прилож
 
 [**Продуктовая цель и образовательные принципы**](docs/PRODUCT_VISION.md) · [**Дорожная карта**](docs/ROADMAP.md) · [**Текущее состояние / handoff**](docs/PROJECT_STATUS.md)
 
+> **Последний статус 04.11.2026:** код ARCH-UX-01 реализован в [draft PR #44](https://github.com/feshakomissarov-prog/chess/pull/44), Windows CI #244 SUCCESS на SHA `2b1c724…`, но **не принят по физической Windows-проверке**. Текущая задача — [единое исправляющее ТЗ REVIEW-FIX-01 v1.2](docs/specs/ARCH_UX_01_REVIEW_FIX_01.md), RF-01…RF-15 по итогам code review и 6 скриншотов: даты, метрики и поиск по архиву, источники Lichess/Stockfish, точность, игровая доска, фон и batch UX. ТЗ хранится в [docs-only draft PR #45](https://github.com/feshakomissarov-prog/chess/pull/45); оба PR не слиты. Старые нижние сообщения о «ещё не реализованном UX» исторические.
+
+
 > **Рабочее решение 04.11.2026:** [ARCH-UX-01 — единое большое ТЗ для desktop Codex](docs/specs/ARCH_UX_01_UNIFIED_EXECUTION_SPEC.md): UX 6 разделов + адаптация уже выполненной в [draft PR #44](https://github.com/feshakomissarov-prog/chess/pull/44) архитектуры модульного монолита, с сохранением Fair Play, данных, звуков, обычных предходов и существующей аналитики. Документация готова в [draft PR #45](https://github.com/feshakomissarov-prog/chess/pull/45). PR #44 и #45 **не слиты**; runtime код этим документом не менялся. Исторические разделы README ниже не являются новыми задачами Codex.
 
 
