@@ -1140,6 +1140,46 @@ def test_sidebar_training_and_progress_navigation_open_real_screens(qtbot, tmp_p
     window.close()
 
 
+def test_batch_queue_and_remote_active_games_stay_inside_workspace(
+    qtbot, tmp_path, monkeypatch
+):
+    window = MainWindow(QSettings(str(tmp_path / "workspace-pages.ini"),
+                                  QSettings.Format.IniFormat))
+    qtbot.addWidget(window)
+    window.show_batch_analysis()
+    batch_page = window._batch_dialog
+    assert window.screen_stack.currentWidget() is batch_page
+    assert batch_page.parentWidget() is window.screen_stack
+    batch_page.reject()
+    assert window.screen_stack.currentWidget() is window.analysis_page
+
+    opened = []
+    monkeypatch.setattr(window, "_online_actions_allowed", lambda: True)
+    monkeypatch.setattr(window, "open_active_game", opened.append)
+
+    class FakeService:
+        def fetch_active_games(self):
+            window._active_games_received([{
+                "gameId": "remote-game", "color": "white", "speed": "blitz",
+                "isMyTurn": True, "opponent": {"username": "Synthetic"},
+            }])
+
+    window.lichess = FakeService()
+    window.show_active_games()
+    qtbot.waitUntil(lambda: hasattr(window, "library_page"), timeout=3000)
+    page = window.library_page
+    assert window.screen_stack.currentWidget() is page
+    assert page.active_games.count() == 1
+    assert "Synthetic" in page.active_games.item(0).text()
+    page._open_active(page.active_games.item(0))
+    assert opened == [{
+        "gameId": "remote-game", "color": "white", "speed": "blitz",
+        "isMyTurn": True, "opponent": {"username": "Synthetic"},
+    }]
+    assert getattr(window, "_active_games_dialog", None) is None
+    window.close()
+
+
 def test_batch_queue_pauses_on_new_human_game_but_not_builtin_ai(qtbot):
     human_window = MainWindow(offline_mode=True)
     qtbot.addWidget(human_window)

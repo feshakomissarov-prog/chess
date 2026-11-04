@@ -61,6 +61,14 @@ Each stage will be appended here with commit SHA, changed responsibilities, focu
 - Regression `test_library_sqlite_query_runs_off_ui_thread_and_ignores_stale_navigation` verifies the actual thread and page behavior. Relevant library route/pinning/filter tests: PASS. Full-suite and static architecture audit remain pending.
 - Remaining A10 work: several historic MainWindow callbacks still own presentation plus use-case orchestration (notably puzzle history, game analysis dialogs, and some sync status). They have not been mechanically split; each remains scheduled for evidence-based scope review.
 
+## A7/A9 — analysis queue and background inspector integration (checkpoint)
+
+- The durable Stockfish batch controls now open as an embedded Analysis workspace page, reusing the existing BatchAnalysisDialog control logic, engine admission, safety checks and queue. The route context remembers whether Back should return to the queue or the Analysis landing page. No new queue or engine instance was introduced.
+- The header's background-operations entry is now an internal page showing the shared work-coordinator snapshot plus the persisted Lichess ready-analysis backfill counters, retry status, pause/resume and manual-check actions. It uses the existing account-scoped repository/service path; it does not create a new HTTP client or poll from the UI thread. Lichess JSON export remains the only automatic ready-analysis source.
+- “Активные партии” now navigates to the existing pinned-game area in My Games and requests the existing server list there; selecting a server-returned item opens that exact session. It no longer opens a separate active-games OS dialog for this route.
+- Puzzle history's compatibility host is a QWidget embedded in the shell; existing task history, account selector, replay/reveal/reset and sync actions are retained. The separate training and pilot UI decisions remain unchanged.
+- Focused page/window regression set: **12 passed**; compileall and git diff --check — PASS. Real service, OAuth, archive and Stockfish were not used. The older compatibility ActiveGamesDialog class remains for direct tests/legacy callers but is not used by the primary shell action.
+
 ### P0 — home analytics visibility gate
 
 - The Home dashboard now masks cached engine-derived analysis/error counts and per-game move metrics unless the process has a fresh successful account-wide `/api/account/playing` snapshot, or the runtime is explicitly isolated `--offline`. It masks immediately when safety becomes pending/unknown/denied, on account/auth changes, and as soon as a human or unknown online game is observed through either `gameStart` or `gameFull/gameState`.

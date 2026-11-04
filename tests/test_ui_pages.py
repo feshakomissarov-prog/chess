@@ -1,8 +1,10 @@
 import ast
 from pathlib import Path
 from PySide6.QtWidgets import QScrollArea
+from types import SimpleNamespace
 
 from chess_coach.ui.pages import LibraryPage, PlayPage, ResultPage
+from chess_coach.ui.pages.background import BackgroundOperationsPage
 
 
 def test_play_page_keeps_each_action_connected_and_reflows_cards(qtbot):
@@ -81,6 +83,27 @@ def test_library_uses_bounded_three_zone_layout_at_laptop_size(qtbot):
     assert page.body_splitter.widget(1).width() >= 320
     assert not isinstance(page, QScrollArea)
     assert page.summary.text().startswith("Завершённые партии")
+
+
+def test_background_operations_page_renders_shared_registry_and_pause_state(qtbot):
+    page = BackgroundOperationsPage()
+    qtbot.addWidget(page)
+    operation = SimpleNamespace(
+        context=SimpleNamespace(kind="archive_sync"),
+        lane=SimpleNamespace(value="network_background"),
+        status=SimpleNamespace(value="running"),
+        progress_done=3, progress_total=8,
+    )
+    page.set_snapshot((operation,), source_summary="Источник: Lichess · 3/8",
+                      backfill_paused=True, can_check=True,
+                      can_pause=True,
+                      retry_status="Retry-After учитывается")
+    assert page.operation_list.count() == 1
+    assert "archive_sync" in page.operation_list.item(0).text()
+    assert "3/8" in page.operation_list.item(0).text()
+    assert page.pause_button.text() == "Возобновить Lichess"
+    assert not page.manual_check_button.isEnabled()
+    assert "Retry-After" in page.retry_status.text()
 
 
 def test_library_detail_reuses_review_graph_and_masks_until_safety_gate(qtbot):

@@ -92,6 +92,7 @@ from .ui.pages.home import HomePage
 from .ui.pages.library import LibraryPage
 from .ui.pages.puzzles import PuzzleHistoryPage
 from .ui.pages.analysis import AnalysisLandingPage
+from .ui.pages.background import BackgroundOperationsPage
 from .ui.dialogs import (OnlineGameDialog, BatchAnalysisDialog, ActiveGamesDialog,
                         LichessConnectionDialog, SettingsDialog)
 from .ui.analytics_dialogs import (EvaluationGraph, RatingTrendGraph,
@@ -114,8 +115,20 @@ class EmbeddedStatisticsPage(StatisticsDialog):
         self.close_requested.emit()
 
 
-class EmbeddedPuzzleHistoryPage(QDialog):
+class EmbeddedPuzzleHistoryPage(QWidget):
     """Compatibility host for the existing puzzle widget inside the shell."""
+
+    close_requested = Signal()
+
+    def accept(self) -> None:
+        self.close_requested.emit()
+
+    def reject(self) -> None:
+        self.close_requested.emit()
+
+
+class EmbeddedBatchAnalysisPage(BatchAnalysisDialog):
+    """Existing durable queue controls embedded in the Analysis workspace."""
 
     close_requested = Signal()
 
@@ -639,53 +652,54 @@ class MainWindow(QMainWindow):
             self.refresh()
 
     def show_background_analytics(self) -> None:
+        page = getattr(self, "_background_operations_page", None)
+        if page is None:
+            page = BackgroundOperationsPage(self)
+            page.pause_requested.connect(self._set_backfill_paused)
+            page.manual_check_requested.connect(self._manual_lichess_analytics_check)
+            page.refresh_requested.connect(self._refresh_background_operations_page)
+            page.close_requested.connect(self.navigate_back)
+            self._background_operations_page = page
+            self.screen_stack.addWidget(page)
+        self._refresh_background_operations_page()
+        self.screen_title.setText("Фоновые операции")
+        self.screen_stack.setCurrentWidget(page)
+
+    def _refresh_background_operations_page(self) -> None:
+        page = getattr(self, "_background_operations_page", None)
+        if page is None:
+            return
         username = str(getattr(self.lichess, "username", "") or "").strip()
         account_id = f"lichess:{username.casefold()}" if username else None
         summary = (self.game_repository.lichess_analysis_backfill_summary(account_id)
                    if account_id else {})
-        dialog = QDialog(self)
-        dialog.setWindowTitle("Фоновые операции Lichess")
-        dialog.setMinimumWidth(440)
-        layout = QVBoxLayout(dialog)
-        layout.addWidget(QLabel("Источник: Lichess · документированный JSON export"))
-        layout.addWidget(QLabel("Задача: получить только уже готовые оценки и официальную точность. "
-                                "Chess Coach не заказывает серверный анализ."))
-        summary_label = QLabel(
-            f"Сохранённых партий в очереди: {summary.get('total', 0)}\n"
-            f"Проверено: {summary.get('checked', 0)} · с точностью: {summary.get('accuracy', 0)} · "
-            f"с оценками ходов: {summary.get('evals', 0)}\n"
-            f"Нет готовых данных: {summary.get('no_data', 0)} · ошибок/ограничений: {summary.get('errors', 0)} · "
-            f"ожидают: {summary.get('pending', 0)}")
-        summary_label.setWordWrap(True)
-        layout.addWidget(summary_label)
-        if summary.get("retry_at"):
-            layout.addWidget(QLabel(f"Следующая проверка партий без данных: {summary['retry_at']}"))
-        controls = QHBoxLayout()
-        self.backfill_pause_button = QPushButton("Приостановить")
-        is_paused = bool(account_id and
-                         self.game_repository.lichess_analysis_backfill_paused(account_id))
-        self.backfill_pause_button.setText("Возобновить" if is_paused else "Приостановить")
-        self.backfill_pause_button.setEnabled(bool(account_id))
-        self.backfill_pause_button.clicked.connect(lambda: self._toggle_lichess_analytics_pause(
-            account_id, not is_paused, dialog))
-        self.backfill_now_button = QPushButton("Проверить сейчас")
-        self.backfill_now_button.setEnabled(bool(
-            self.lichess and self._lichess_connected and
-            self._lichess_stream_ready_generation == getattr(self.lichess, "auth_generation", None)
-            and not is_paused))
-        self.backfill_now_button.setToolTip(
-            "Одна порция до 10 партий; действует общий 429 и суточный лимит.")
-        self.backfill_now_button.clicked.connect(lambda: self._manual_lichess_analytics_check(dialog))
-        controls.addWidget(self.backfill_pause_button)
-        controls.addWidget(self.backfill_now_button)
-        layout.addLayout(controls)
-        close = QPushButton("Закрыть")
-        close.clicked.connect(dialog.accept)
-        layout.addWidget(close)
-        dialog.exec()
+        paused = bool(account_id and
+                      self.game_repository.lichess_analysis_backfill_paused(account_id))
+        available = bool(
+            self.lichess and not self.offline_mode and self._lichess_connected
+            and self._lichess_stream_ready_generation == getattr(
+                self.lichess, "auth_generation", None))
+        source_summary = (
+            "Источник: Lichess · документированный JSON export. "
+            f"Партии: {summary.get('total', 0)} · проверено: {summary.get('checked', 0)} · "
+            f"точность: {summary.get('accuracy', 0)} · оценки: {summary.get('evals', 0)} · "
+            f"нет серверного анализа: {summary.get('no_data', 0)} · "
+            f"ошибки/ограничения: {summary.get('errors', 0)} · ожидают: {summary.get('pending', 0)}. "
+            "Chess Coach не запрашивает создание серверного анализа."
+            if account_id else "Lichess не подключён; локальные фоновые задачи могут работать отдельно.")
+        retry = (f"Следующая проверка: {summary['retry_at']}"
+                 if summary.get("retry_at") else
+                 "Ограничение запросов Lichess и Retry-After учитываются сервисом."
+                 if summary.get("errors") else "")
+        page.set_snapshot(
+            self.runtime.work_coordinator.snapshots(), source_summary=source_summary,
+            backfill_paused=paused, can_check=available and bool(account_id),
+            can_pause=bool(account_id),
+            retry_status=retry)
 
-    def _toggle_lichess_analytics_pause(self, account_id: str | None, paused: bool,
-                                       dialog: QDialog) -> None:
+    def _set_backfill_paused(self, paused: bool) -> None:
+        username = str(getattr(self.lichess, "username", "") or "").strip()
+        account_id = f"lichess:{username.casefold()}" if username else None
         if not account_id:
             return
         self.settings.setValue("lichess/ready_analytics_paused", bool(paused))
@@ -695,15 +709,15 @@ class MainWindow(QMainWindow):
             self.lichess_analysis_status.setText("Lichess · фоновая аналитика приостановлена")
         elif self.lichess and self._lichess_stream_ready_generation == self.lichess.auth_generation:
             self._start_lichess_analysis_backfill(self.lichess.auth_generation)
-        dialog.accept()
+        self._refresh_background_operations_page()
 
-    def _manual_lichess_analytics_check(self, dialog: QDialog) -> None:
+    def _manual_lichess_analytics_check(self) -> None:
         if (not self.lichess or self.offline_mode or not self._lichess_connected
                 or self._lichess_stream_ready_generation != self.lichess.auth_generation):
             return
-        dialog.accept()
         self._start_lichess_analysis_backfill(
             self.lichess.auth_generation, manual=True, force_retry=True)
+        self._refresh_background_operations_page()
 
     def _open_lichess_game_page(self, game_id: str) -> None:
         if not game_id or not re.fullmatch(r"[A-Za-z0-9_-]+", game_id):
@@ -1232,6 +1246,10 @@ class MainWindow(QMainWindow):
                        if current is getattr(self, "review_workspace", None) else None)
         elif current is getattr(self, "analysis_page", None):
             route, context = WorkspaceRoute.ANALYSIS, None
+        elif current is getattr(self, "_batch_dialog", None):
+            route, context = WorkspaceRoute.ANALYSIS, "batch"
+        elif current is getattr(self, "_background_operations_page", None):
+            route, context = WorkspaceRoute.ANALYSIS, "background"
         elif current is getattr(self, "_puzzle_page", None):
             route, context = WorkspaceRoute.TRAINING, None
         elif current is getattr(self, "_statistics_dialog", None):
@@ -1612,7 +1630,10 @@ class MainWindow(QMainWindow):
         elif route is WorkspaceRoute.GAMES:
             target = getattr(self, "library_page", self.home_page)
         elif route is WorkspaceRoute.ANALYSIS:
-            target = self.analysis_page
+            target = (self._batch_dialog if entry.context == "batch" and
+                      self._batch_dialog is not None else
+                      self._background_operations_page if entry.context == "background" and
+                      self._background_operations_page is not None else self.analysis_page)
         elif route is WorkspaceRoute.PROGRESS:
             target = getattr(self, "_statistics_dialog", self.home_page)
         else:
@@ -2146,7 +2167,6 @@ class MainWindow(QMainWindow):
         dialog.batch_requested.connect(lambda: (
             dialog.accept(), QTimer.singleShot(0, self.show_batch_analysis)))
         dialog.close_requested.connect(lambda: self._close_statistics_page(dialog))
-        dialog.setModal(False)
         dialog.setWindowFlags(Qt.WindowType.Widget)
         self.screen_stack.addWidget(dialog)
         self.screen_title.setText("Прогресс")
@@ -2167,9 +2187,10 @@ class MainWindow(QMainWindow):
 
     def show_batch_analysis(self) -> None:
         if self._batch_dialog is not None:
-            self._batch_dialog.show(); self._batch_dialog.raise_(); self._batch_dialog.activateWindow()
+            self.screen_title.setText("Массовый анализ")
+            self.screen_stack.setCurrentWidget(self._batch_dialog)
             return
-        dialog = BatchAnalysisDialog(self)
+        dialog = EmbeddedBatchAnalysisPage(self)
         dialog.nodes.setValue(self.settings.value("batch_analysis_nodes", 20_000, type=int))
         self._batch_dialog = dialog
         self._refresh_batch_readiness()
@@ -2181,8 +2202,13 @@ class MainWindow(QMainWindow):
             lambda: QDesktopServices.openUrl(QUrl.fromLocalFile(str(logs_directory()))))
         dialog.pause_requested.connect(self._pause_batch_analysis)
         dialog.cancel_requested.connect(self._cancel_batch_analysis)
-        dialog.finished.connect(lambda _result: setattr(self, "_batch_dialog", None))
-        dialog.show()
+        dialog.setModal(False)
+        dialog.setWindowFlags(Qt.WindowType.Widget)
+        dialog.close_requested.connect(self.show_analysis)
+        self._batch_dialog = dialog
+        self.screen_stack.addWidget(dialog)
+        self.screen_title.setText("Массовый анализ")
+        self.screen_stack.setCurrentWidget(dialog)
 
     def _start_batch_analysis(self, dialog: BatchAnalysisDialog, limit: int, nodes: int,
                               hash_mb: int, resume: bool, retry_failed: bool = False,
@@ -2799,7 +2825,6 @@ class MainWindow(QMainWindow):
         refresh_account_summary()
         render_page()
         dialog.close_requested.connect(self.show_home)
-        dialog.setModal(False)
         dialog.setWindowFlags(Qt.WindowType.Widget)
         self._puzzle_page = dialog
         self.screen_stack.addWidget(dialog)
@@ -3971,13 +3996,9 @@ class MainWindow(QMainWindow):
         if not self._online_actions_allowed():
             self.home_status.setText("Подключите Lichess, чтобы запросить активные партии.")
             return
-        dialog = ActiveGamesDialog(self)
-        self._active_games_dialog = dialog
-        dialog.refresh_requested.connect(self._request_active_games)
-        dialog.open_requested.connect(self.open_active_game)
-        dialog.refresh_requested.emit()
-        dialog.exec()
-        self._active_games_dialog = None
+        self.show_saved_games()
+        self.home_status.setText("Обновляю список активных партий Lichess…")
+        self.lichess.fetch_active_games()
 
     def _request_active_games(self) -> None:
         dialog = getattr(self, "_active_games_dialog", None)
@@ -3990,6 +4011,8 @@ class MainWindow(QMainWindow):
         dialog = getattr(self, "_active_games_dialog", None)
         if dialog and dialog.isVisible():
             dialog.set_games(games)
+        self._remote_active_games = [dict(game) for game in games if isinstance(game, dict)]
+        self._update_library_active_games()
 
     def _active_games_error(self, message: str) -> None:
         dialog = getattr(self, "_active_games_dialog", None)
@@ -5135,9 +5158,29 @@ class MainWindow(QMainWindow):
                 "color": "белые" if session.color == chess.WHITE else "чёрные",
                 "turn": turn,
             })
+        known = {row["game_id"] for row in rows}
+        for game in getattr(self, "_remote_active_games", ()):
+            game_id = str(game.get("gameId") or "")
+            if not game_id or game_id in known:
+                continue
+            opponent = game.get("opponent") or {}
+            rows.append({
+                "game_id": game_id,
+                "opponent": opponent.get("username") or opponent.get("id") or "Соперник",
+                "clock": game.get("speed") or "без контроля",
+                "color": {"white": "белые", "black": "чёрные"}.get(
+                    game.get("color"), "сторона неизвестна"),
+                "turn": ("ваш ход" if game.get("isMyTurn") is True else
+                         "ход соперника" if game.get("isMyTurn") is False else
+                         "чей ход неизвестен"),
+                "server_payload": game,
+            })
         page.set_active_games(rows)
 
-    def _resume_library_game(self, game_id: str) -> None:
+    def _resume_library_game(self, game_id: str | dict) -> None:
+        if isinstance(game_id, dict):
+            self.open_active_game(game_id)
+            return
         session = self.online_sessions.get(str(game_id))
         if session is None or session.status not in {"created", "started", "playing"}:
             return

@@ -18,7 +18,7 @@ class LibraryPage(QWidget):
     note_requested = Signal(dict, str)
     analyze_requested = Signal(dict)
     refresh_requested = Signal(dict)
-    active_requested = Signal(str)
+    active_requested = Signal(object)
     detail_requested = Signal(dict)
     detail_position_requested = Signal(dict, int)
 
@@ -261,12 +261,16 @@ class LibraryPage(QWidget):
                 f"{session.get('color') or 'сторона неизвестна'} · "
                 f"{session.get('turn') or 'синхронизация'}")
             item.setData(Qt.ItemDataRole.UserRole, str(session["game_id"]))
+            payload = session.get("server_payload")
+            if isinstance(payload, dict):
+                item.setData(Qt.ItemDataRole.UserRole + 1, payload)
             self.active_games.addItem(item)
 
     def _open_active(self, item) -> None:
         game_id = item.data(Qt.ItemDataRole.UserRole) if item is not None else None
         if game_id:
-            self.active_requested.emit(str(game_id))
+            payload = item.data(Qt.ItemDataRole.UserRole + 1)
+            self.active_requested.emit(payload if isinstance(payload, dict) else str(game_id))
 
     def _request_page(self, page: int) -> None:
         self._emit_filters(max(0, min(self._pages - 1, page)))
