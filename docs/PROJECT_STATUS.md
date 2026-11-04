@@ -1,3 +1,11 @@
+## 04.11.2026 — независимое ревью исправлений RF-01…15, дополнительное REVIEW-FIX-02
+
+Проверен фактический SHA **`c93712ab92c6845cd1b0db28832a9f75e4332171`** кодового [draft PR #44](https://github.com/feshakomissarov-prog/chess/pull/44). Hosted Windows [CI #245](https://github.com/feshakomissarov-prog/chess/actions/runs/41879012568) **completed/SUCCESS** на этом SHA: offscreen tests, compileall и isolated offline launch; отчёт Codex сообщает **658 PASS**. От предыдущей проверки RF-01…RF-15 внесены адресные исправления. **Независимая приёмка: ПОКА НЕ ПРИНЯТО.**
+
+Создано [ARCH-UX-01 REVIEW-FIX-02](specs/ARCH_UX_01_REVIEW_FIX_02.md) на четыре дополнительные проверки/исправления **RF2-01…RF2-04**: live Lichess clock при законно накопленном increment; планировщик фоновой загрузки при day reset/Retry-After и отличие cumulative checked от batch checked; недублируемые full/partial KPI + единое определение анализа в фильтре; понятное отличие последнего хода от начала партии в сортировке. Это **не повтор** A0–A12 или RF-01…RF-15. Применить в **том же draft PR #44** с тестами и новым exact-head Windows CI; кодовый HEAD при создании ТЗ не изменяли. Ручной Windows pilot и разрешение merge — позже.
+
+---
+
 ## 04.11.2026 — физический Windows-пилот: REVIEW-FIX-01 v1.2 (актуальнее нижних записей)
 
 Владелец проверил реально запущенный ARCH-UX-01 из [draft PR #44](https://github.com/feshakomissarov-prog/chess/pull/44) (проверяемый SHA `2b1c724b4503140992ad8d80f8c5044c861eb7cd`), прислал шесть скриншотов: Главная (дата и 3 recent, метрики coverage), Игра (доска/часы), Review (отсутствует сравнимая точность), «Мои партии» (хронология, формат времени, поиск Каро-Канн, источники Lichess/Stockfish и прозрачность фонового backfill), Массовый анализ (перегруженная UI-страница). **Код пока НЕ принят**.
