@@ -63,6 +63,8 @@ from .lichess.service import LichessService
 from .bootstrap import ApplicationRuntime, create_runtime
 from .application.app_state import ReviewResumeTarget, WorkspaceSnapshot, WorkspaceStateStore
 from .application.game_sessions import GameSessionCoordinator
+from .application.game_finalization import GameFinalizationCoordinator, FinalizationPhase
+from .application.routes import WorkspaceNavigator, WorkspaceRoute
 from .application.background_work import OperationLane
 from .application.archive_sync import ArchiveSyncCoordinator
 from .application.dashboard import (DashboardQueryCoordinator, dashboard_options,
@@ -279,6 +281,9 @@ class MainWindow(QMainWindow):
         self._online_history_position: chess.Board | None = None
         self.lichess = self.runtime.create_lichess_service(self)
         self.game_sessions: GameSessionCoordinator[LichessGameSession] = GameSessionCoordinator()
+        self.game_finalization = GameFinalizationCoordinator()
+        self.workspace_navigator = WorkspaceNavigator()
+        self._finalization_timers: dict[str, QTimer] = {}
         self.online_sessions = self.game_sessions.sessions
         self.online_session: LichessGameSession | None = None
         self._local_board_mode = "free"
@@ -732,6 +737,28 @@ class MainWindow(QMainWindow):
         self.game_status.setStyleSheet("color: #77766f;")
         status_layout.addWidget(self.game_status)
         side_layout.addWidget(status_card)
+        self.finished_game_card = QFrame()
+        self.finished_game_card.setObjectName("card")
+        finished_layout = QVBoxLayout(self.finished_game_card)
+        finished_layout.setContentsMargins(12, 10, 12, 10)
+        self.finished_summary = QLabel("Партия завершена")
+        self.finished_summary.setWordWrap(True)
+        self.finished_summary.setStyleSheet("font-weight: 700;")
+        finished_layout.addWidget(self.finished_summary)
+        self.finished_saved_label = QLabel()
+        self.finished_saved_label.setWordWrap(True)
+        finished_layout.addWidget(self.finished_saved_label)
+        self.finished_review_button = QPushButton("Разобрать партию")
+        self.finished_review_button.clicked.connect(self.review_finished_game)
+        self.finished_challenge_button = QPushButton("Вызвать снова")
+        self.finished_challenge_button.clicked.connect(self._challenge_again)
+        self.finished_export_button = QPushButton("Экспорт PGN")
+        self.finished_export_button.clicked.connect(self.export_current_pgn)
+        for button in (self.finished_review_button, self.finished_challenge_button,
+                       self.finished_export_button):
+            finished_layout.addWidget(button)
+        self.finished_game_card.setVisible(False)
+        side_layout.addWidget(self.finished_game_card)
         self.local_mode_label = QLabel("Режим локальной доски")
         side_layout.addWidget(self.local_mode_label)
         self.local_mode_combo = QComboBox()
@@ -883,7 +910,6 @@ class MainWindow(QMainWindow):
         self.game_page = game_scroll
         self.screen_stack.addWidget(self.game_page)
         self.result_page = self._build_result_page()
-        self.screen_stack.addWidget(self.result_page)
         self.review_workspace = GameReviewWorkspace(self.game_repository, settings=self.settings,
                                                     parent=self)
         self.review_workspace.return_requested.connect(self.show_home)
@@ -1047,10 +1073,18 @@ class MainWindow(QMainWindow):
             self.game_page, self.result_page, getattr(self, "review_workspace", None))
         current = self.screen_stack.currentWidget()
         self.screen_title.setVisible(current is not self.review_workspace)
-        route = ("games" if current is getattr(self, "review_workspace", None) else
-                 "play" if is_board or current is getattr(self, "play_page", None) else "home")
-        self._active_route = route
-        self._set_active_route(route)
+        if current is getattr(self, "review_workspace", None):
+            route = WorkspaceRoute.GAMES
+            context = (self._review_workspace_identity() or (None,))[0]
+        elif is_board or current is getattr(self, "play_page", None):
+            route = WorkspaceRoute.PLAY
+            context = self.online_session.game_id if self.online_session else None
+        else:
+            route = WorkspaceRoute.HOME
+            context = None
+        self.workspace_navigator.navigate(route, context=context)
+        self._active_route = route.value
+        self._set_active_route(route.value)
         if not self._sidebar_explicit_override:
             self._set_sidebar_collapsed(is_board or self.width() < 1160)
         self._schedule_workspace_save()
@@ -1395,11 +1429,13 @@ class MainWindow(QMainWindow):
             "new": self.show_home,
             "home": self.show_home,
         })
-        self.result_summary = page.summary
-        self.result_saved_label = page.saved_label
-        self.result_review_button = page.review_button
-        self.result_export_button = page.export_button
-        self.result_new_button = page.new_button
+        # Keep the old page object as a compatibility surface for callers, but
+        # the finished state is rendered beside the same persistent game board.
+        self.result_summary = self.finished_summary
+        self.result_saved_label = self.finished_saved_label
+        self.result_review_button = self.finished_review_button
+        self.result_export_button = self.finished_export_button
+        self.result_new_button = self.finished_challenge_button
         self.result_home_button = page.home_button
         return page
 
@@ -2400,10 +2436,13 @@ class MainWindow(QMainWindow):
         self.online_session = session
         self._review_session = None
         self.online_view_ply = None
-        self._screen_mode = "online"
-        self.screen_title.setText("Активная партия")
-        self.screen_stack.setCurrentWidget(self.game_page)
-        self.refresh("Возврат к текущей партии.")
+        if session.status in {"created", "started", "playing"}:
+            self._screen_mode = "online"
+            self.screen_title.setText("Активная партия")
+            self.screen_stack.setCurrentWidget(self.game_page)
+            self.refresh("Возврат к текущей партии.")
+        else:
+            self._show_result(session, not session.final_sync_pending)
 
     def _show_result(self, session: LichessGameSession, saved: bool, detail: str | None = None) -> None:
         self._screen_mode = "result"
@@ -2437,17 +2476,82 @@ class MainWindow(QMainWindow):
             not session.final_sync_pending and not write_pending
             and bool(self.game_repository.export_pgn(session.game_id))
         )
-        self.screen_stack.setCurrentWidget(self.result_page)
+        self.finished_review_button.setEnabled(bool(session.moves))
+        self.finished_challenge_button.setEnabled(not self.offline_mode)
+        self.finished_game_card.setVisible(True)
+        # A result never replaces the authoritative game board. The selected
+        # session, clocks and move history stay attached to their original view.
+        self.screen_stack.setCurrentWidget(self.game_page)
+        self.refresh()
+        self._track_game_finalization(session)
+
+    def _track_game_finalization(self, session: LichessGameSession) -> None:
+        stored = self.game_repository.get_game(session.game_id)
+        confirmed = bool(
+            stored and stored.get("moves") == session.moves
+            and stored.get("status") == session.status
+            and not stored.get("final_sync_pending", 0)
+        )
+        storage_pending = bool(
+            self.game_repository.has_pending_write(session.game_id) or not confirmed
+        )
+        record = self.game_finalization.track(
+            session.game_id, server_sync_pending=session.final_sync_pending,
+            storage_write_pending=storage_pending)
+        if record.phase == FinalizationPhase.LOCAL_WRITE:
+            self._schedule_finalization_check(session.game_id)
+
+    def _schedule_finalization_check(self, game_id: str) -> None:
+        delay = self.game_finalization.storage_check_delay(game_id)
+        if delay is None or self._shutdown_requested:
+            return
+        timer = self._finalization_timers.get(game_id)
+        if timer is None:
+            timer = QTimer(self)
+            timer.setSingleShot(True)
+            timer.timeout.connect(lambda game_id=game_id: self._poll_result_write(game_id))
+            self._finalization_timers[game_id] = timer
+        timer.start(delay)
 
     def _poll_result_write(self, game_id: str) -> None:
         session = self.online_sessions.get(game_id)
-        if (not session or session.final_sync_pending or self._screen_mode != "result"
-                or game_id != self._selected_live_game_id):
+        if not session or session.final_sync_pending:
             return
         if self.game_repository.has_pending_write(game_id):
-            QTimer.singleShot(80, lambda: self._poll_result_write(game_id))
+            self.game_finalization.track(game_id, server_sync_pending=False,
+                                         storage_write_pending=True)
+            self._schedule_finalization_check(game_id)
             return
-        self._show_result(session, True)
+        stored = self.game_repository.get_game(game_id)
+        confirmed = bool(stored and stored.get("moves") == session.moves
+                         and stored.get("status") == session.status
+                         and not stored.get("final_sync_pending", 0))
+        if confirmed:
+            self.game_finalization.track(game_id, server_sync_pending=False,
+                                         storage_write_pending=False)
+            if game_id == self._selected_live_game_id and self.online_session is session:
+                self.result_saved_label.setText("Партия сохранена локально.")
+                self.result_saved_label.setStyleSheet("color: #39704a;")
+                self.result_export_button.setEnabled(bool(self.game_repository.export_pgn(game_id)))
+            return
+        if self.game_repository.write_error(game_id):
+            try:
+                session._save()
+            except Exception:
+                pass
+        self.game_finalization.track(game_id, server_sync_pending=False,
+                                     storage_write_pending=True)
+        if (game_id == self._selected_live_game_id and self.online_session is session
+                and self._screen_mode == "result"):
+            self.result_saved_label.setText(
+                "Сохраняем финальную запись локально; доска и серверная партия остаются доступны.")
+        self._schedule_finalization_check(game_id)
+
+    def _challenge_again(self) -> None:
+        """Start an explicit new challenge through the supported Lichess flow."""
+        if self.offline_mode:
+            return
+        self.challenge_username()
 
     def review_finished_game(self) -> None:
         session = self.online_session
@@ -3930,6 +4034,7 @@ class MainWindow(QMainWindow):
                         session.status = status
                         session.winner = game.get("winner")
                 if session.final_sync_pending:
+                    self._track_game_finalization(session)
                     self.lichess.mark_game_finished(game_id)
                     self.lichess.start_game(game_id)
                 if was_active and game_id == self._selected_live_game_id:
@@ -3999,6 +4104,10 @@ class MainWindow(QMainWindow):
                 else:
                     self.refresh(f"Позиция обновлена с Lichess, но локальная запись не удалась: {exc}")
             return
+        if session.status not in {"started", "playing", "created"}:
+            # Observe durability after every authoritative terminal snapshot,
+            # even when this game is not the currently visible route.
+            self._track_game_finalization(session)
         if (session.status in {"started", "playing"} and not session.is_ai_opponent
                 and getattr(self, "_analysis_stop", None) is not None):
             self._analysis_stop.set()
@@ -4076,6 +4185,8 @@ class MainWindow(QMainWindow):
         active = (session.status in {"started", "playing"}
                   and self._screen_mode != "review"
                   and not session.awaiting_authoritative_snapshot)
+        finished_view = self._screen_mode == "result" and not active
+        self.finished_game_card.setVisible(finished_view)
         # While a move POST is pending, the optimistic rendering is already one
         # ply ahead. Allow only the dedicated premove gesture on that position;
         # begin_submission still rejects a second real POST until server ACK.
@@ -4148,7 +4259,8 @@ class MainWindow(QMainWindow):
         self.claim_draw_button.setEnabled(active and session.board.can_claim_draw())
         self.claim_draw_button.setVisible(active and session.board.can_claim_draw())
         self.leave_game_button.setEnabled(session.status not in {"started", "playing", "created"})
-        self.leave_game_button.setVisible(session.status not in {"started", "playing", "created"})
+        self.leave_game_button.setVisible(
+            session.status not in {"started", "playing", "created"} and not finished_view)
         self.leave_game_button.setText("Главная")
         self.new_game_button.setEnabled(False)
         for button in (self.friend_link_button, self.username_button, self.ai_button):
@@ -4838,6 +4950,8 @@ class MainWindow(QMainWindow):
 
     def closeEvent(self, event) -> None:
         self._workspace_save_timer.stop()
+        for timer in self._finalization_timers.values():
+            timer.stop()
         self._persist_workspace_state()
         self._shutdown_requested = True
         self._position_eval_timer.stop()

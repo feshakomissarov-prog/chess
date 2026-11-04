@@ -2703,7 +2703,8 @@ def test_home_game_result_review_home_and_new_game_flow(qtbot, tmp_path):
     window._lichess_event({"type": "gameFinish", "game": {
         "gameId": "flow-game", "status": {"name": "mate"}, "winner": "white"
     }})
-    assert window.screen_stack.currentWidget() is window.result_page
+    assert window.screen_stack.currentWidget() is window.game_page
+    assert window.finished_game_card.isVisible()
     assert "Победа" in window.result_summary.text()
     assert "ожидаем подтверждённую финальную историю" in window.result_saved_label.text()
     assert not window.resign_button.isVisible()
@@ -2720,6 +2721,42 @@ def test_home_game_result_review_home_and_new_game_flow(qtbot, tmp_path):
     assert window.screen_stack.currentWidget() is window.game_page
     assert window._screen_mode == "local"
     assert window.controller.ply == 0
+
+
+def test_finished_game_write_finalizes_after_navigation_away_from_board(qtbot, tmp_path, monkeypatch):
+    window = MainWindow(QSettings(str(tmp_path / "finish-write-away.ini"), QSettings.Format.IniFormat))
+    qtbot.addWidget(window)
+    session = LichessGameSession("finish-write-away", window.game_repository)
+    session.color = chess.WHITE
+    session.apply_event({"type": "gameFull", "initialFen": "startpos",
+                         "state": {"moves": "e2e4", "status": "started"}})
+    select_online(window, session)
+    monkeypatch.setattr(window.lichess, "mark_game_finished", lambda _game_id: None)
+    monkeypatch.setattr(window.lichess, "start_game", lambda _game_id: None)
+
+    window._lichess_event({"type": "gameFinish", "game": {
+        "gameId": session.game_id, "status": {"name": "mate"}, "winner": "white"
+    }})
+    window._lichess_game_event(session.game_id, {
+        "type": "gameState", "moves": "e2e4 e7e5", "status": "mate", "winner": "white"
+    })
+    assert window.screen_stack.currentWidget() is window.game_page
+    assert session.moves == "e2e4 e7e5"
+
+    real_has_pending = window.game_repository.has_pending_write
+    pending = {"value": True}
+    monkeypatch.setattr(window.game_repository, "has_pending_write",
+                        lambda game_id: pending["value"] or real_has_pending(game_id))
+    window._show_result(session, True)
+    assert window.game_finalization.get(session.game_id).phase == "local_write"
+    window.show_home()
+    pending["value"] = False
+    window._poll_result_write(session.game_id)
+
+    assert window.screen_stack.currentWidget() is window.home_page
+    assert window.game_finalization.get(session.game_id) is None
+    assert "Партия сохранена локально" in window.result_saved_label.text()
+    assert "e7e5" in window.game_repository.get_game(session.game_id)["moves"]
 
 
 def test_online_history_position_stays_selected_until_explicit_live_navigation(qtbot, tmp_path):

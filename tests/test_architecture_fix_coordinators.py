@@ -1,6 +1,10 @@
 from pathlib import Path
 
 from chess_coach.application.archive_sync import ArchiveSyncCoordinator
+from chess_coach.application.routes import WorkspaceNavigator, WorkspaceRoute
+from chess_coach.application.game_finalization import (
+    FinalizationPhase, GameFinalizationCoordinator,
+)
 from chess_coach.application.dashboard import DashboardQueryCoordinator
 from chess_coach.application.engine_analysis import EngineAnalysisCoordinator
 from chess_coach.engine_manager import StockfishManager
@@ -64,3 +68,34 @@ def test_window_delegates_application_queries_archive_and_engine_use_cases():
     assert "CompletedGameAnalyzer(" not in source
     assert "BatchAnalysisRunner(" not in source
     assert "payload = evaluate_position(" not in source
+
+
+def test_workspace_navigator_retains_typed_back_context_without_resetting_sessions():
+    navigator = WorkspaceNavigator()
+    navigator.navigate(WorkspaceRoute.GAMES, context="account=lichess:owner;filter=losses")
+    navigator.navigate(WorkspaceRoute.ANALYSIS, context="game=game-1;ply=24")
+
+    restored = navigator.back()
+
+    assert restored == navigator.current
+    assert restored.route is WorkspaceRoute.GAMES
+    assert restored.context == "account=lichess:owner;filter=losses"
+    assert navigator.back().route is WorkspaceRoute.HOME
+
+
+def test_game_finalization_tracks_server_then_bounded_local_write_checks():
+    coordinator = GameFinalizationCoordinator()
+    record = coordinator.track("game", server_sync_pending=True, storage_write_pending=True)
+    assert record.phase is FinalizationPhase.SERVER_SYNC
+    assert coordinator.storage_check_delay("game") is None
+
+    record = coordinator.track("game", server_sync_pending=False, storage_write_pending=True)
+    assert record.phase is FinalizationPhase.LOCAL_WRITE
+    assert coordinator.storage_check_delay("game") == 100
+    assert coordinator.storage_check_delay("game") == 200
+    while coordinator.storage_check_delay("game") is not None:
+        pass
+    assert coordinator.storage_check_delay("game") is None
+
+    coordinator.track("game", server_sync_pending=False, storage_write_pending=False)
+    assert coordinator.get("game") is None

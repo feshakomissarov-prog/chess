@@ -13,7 +13,22 @@
 - Read the unified spec, all 14 preflight findings, approved UX-B1/A2/GAME-01/COV-01…24 and current working draft. The implementation is an adaptation of ARCH-01, not a rewrite. Critical ordering: final-game durability and Fair Play first; then preserve existing behavior; then route/UX and desktop polish.
 - No code was changed in A0. No real user profile, credential store, SQLite, PGN, OAuth, Lichess endpoint, or Stockfish binary was used.
 
-## A1–A12 — pending
+## A1 — typed navigation and runtime route context (in progress)
+
+- Added `WorkspaceRoute` / `WorkspaceNavigator` as a typed shell route history with context support. `MainWindow` now records shell route transitions and the current game/review identity while preserving the existing Qt screen stack and session coordinator.
+- This is an incremental boundary, not a replacement runtime/service locator. The same `ApplicationRuntime`, session registry, DB repository, Lichess service, Stockfish manager, work coordinator, and safety checks remain the only instances.
+- Offline/manual-connect isolation and route creation are not changed; baseline CLI/runtime tests remain in the full-suite gate.
+- Targeted checks: `pytest tests/test_architecture_fix_coordinators.py tests/test_window.py` — **172 passed**; `compileall src tests scripts` — PASS; `git diff --check` — PASS.
+- Added navigation history regression covering typed route + account/filter context restoration. Further embedded-route integration is staged with A2–A9; route history currently records shell pages only.
+
+## A5 — finished-game lifecycle (critical portion implemented)
+
+- Finished Lichess games stay on the same persistent `game_page`/`BoardView`; `ResultPage` is no longer shown or added to the active stack. The right panel displays the final state, confirmed-save status, and actions for review, explicit new challenge, and PGN export.
+- Added `GameFinalizationCoordinator`. It observes server-sync and SQLite-write phases independently from the active page. An authoritative terminal snapshot updates the session and SQLite; the user may navigate away without stopping reconciliation. Local write checks use bounded exponential delays (maximum 8) and do not invent server moves, resend network commands, or poll forever. Persisted pending sync remains recoverable on next authenticated startup.
+- Added regressions for finish-before-final-state, same-board finish, navigation-away during local write confirmation, and bounded lifecycle tracking. Existing terminal event/session tests still pass.
+- Not yet complete: friendly “call again” contextual routing for the built-in AI/local route; comprehensive event-order/reconnect shutdown matrix is scheduled for A4/A10. No live network was used.
+
+## A2–A4, A6–A12 — pending
 
 Each stage will be appended here with commit SHA, changed responsibilities, focused tests, limitations, and next stage. Coverage IDs COV-01…24 will receive a route and evidence/status in the final acceptance section.
 
