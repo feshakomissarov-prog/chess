@@ -36,6 +36,22 @@ def test_play_page_keeps_each_action_connected_and_reflows_cards(qtbot):
     page.start_button.click()
     assert requests[-1]["mode"] == "ai"
     assert requests[-1]["level"] == 6
+    assert not page.start_button.isEnabled()
+    page.start_button.click()
+    assert len(requests) == 1
+    page.set_status("Ошибка 429: запрос повторите позже.")
+    assert page.start_button.isEnabled()
+    page.clock.setCurrentIndex(page.clock.findText("Свой…"))
+    assert not page.custom_clock_row.isHidden()
+    page.custom_minutes.setValue(7)
+    page.custom_increment.setValue(3)
+    page.start_button.click()
+    assert requests[-1]["clock_limit"] == 420
+    assert requests[-1]["clock_increment"] == 3
+    page.mode_selector.setCurrentIndex(page.mode_selector.findData("local"))
+    assert not page.form_rows["Ваш цвет"].isVisible()
+    assert not page.form_rows["Контроль времени"].isVisible()
+    assert not page.form_rows["Уровень Lichess AI"].isVisible()
     assert page.mode_selector.findData("friend") >= 0
 
 
@@ -121,19 +137,51 @@ def test_position_setup_uses_shared_board_and_emits_ephemeral_fen(qtbot):
     qtbot.addWidget(page)
     page.show()
     page.setChecked(True)
-    page.piece_selector.setCurrentIndex(page.piece_selector.findData("Q"))
-    center = page.board_view._get_square_center(chess.E2)
-    QTest.mouseClick(page.board_view, Qt.MouseButton.LeftButton,
-                     pos=QPoint(round(center.x()), round(center.y())))
-    assert page._board.piece_at(chess.E2) == chess.Piece(chess.QUEEN, chess.WHITE)
-    page.turn_selector.setCurrentIndex(page.turn_selector.findData(chess.BLACK))
     positions = []
     page.position_requested.connect(positions.append)
     page.open_button.click()
-    assert len(positions) == 1
-    assert chess.Board(positions[0]).piece_at(chess.E2) == chess.Piece(chess.QUEEN, chess.WHITE)
-    assert chess.Board(positions[0]).turn == chess.BLACK
+    assert positions[-1] == chess.STARTING_FEN
+    assert chess.Board(positions[-1]).castling_rights == chess.Board().castling_rights
+    page.clear_button.click()
+    page._board.set_piece_at(chess.E1, chess.Piece(chess.KING, chess.WHITE))
+    page._board.set_piece_at(chess.H1, chess.Piece(chess.ROOK, chess.WHITE))
+    page._board.set_piece_at(chess.E8, chess.Piece(chess.KING, chess.BLACK))
+    page._board.set_piece_at(chess.H8, chess.Piece(chess.ROOK, chess.BLACK))
+    page._board.set_piece_at(chess.E4, chess.Piece(chess.PAWN, chess.WHITE))
+    page.castling_controls["Белые K"].setChecked(True)
+    page.castling_controls["Чёрные k"].setChecked(True)
+    page.board_view.set_position(page._board)
+    page.piece_selector.setCurrentIndex(page.piece_selector.findData("Q"))
+    center = page.board_view._get_square_center(chess.D4)
+    QTest.mouseClick(page.board_view, Qt.MouseButton.LeftButton,
+                     pos=QPoint(round(center.x()), round(center.y())))
+    assert page._board.piece_at(chess.D4) == chess.Piece(chess.QUEEN, chess.WHITE)
+    page.turn_selector.setCurrentIndex(page.turn_selector.findData(chess.BLACK))
+    page.open_button.click()
+    assert len(positions) == 2
+    assert chess.Board(positions[-1]).piece_at(chess.D4) == chess.Piece(chess.QUEEN, chess.WHITE)
+    assert chess.Board(positions[-1]).turn == chess.BLACK
+    assert chess.Board(positions[-1]).has_kingside_castling_rights(chess.WHITE)
+    assert chess.Board(positions[-1]).has_kingside_castling_rights(chess.BLACK)
+    page.ep_selector.setCurrentIndex(page.ep_selector.findData(chess.E3))
+    page.open_button.click()
+    assert chess.Board(positions[-1]).ep_square == chess.E3
     page.close()
+
+
+def test_position_setup_rejects_invalid_fen_and_clears_castling_after_rook_removal(qtbot):
+    page = PositionSetupWidget()
+    qtbot.addWidget(page)
+    page.setChecked(True)
+    page.piece_selector.setCurrentIndex(page.piece_selector.findData(""))
+    page._place_selected_piece(chess.H1)
+    assert not page.castling_controls["Белые K"].isChecked()
+    page._clear()
+    positions = []
+    page.position_requested.connect(positions.append)
+    page.open_button.click()
+    assert positions == []
+    assert "некорректна" in page.status.text()
 
 
 def test_library_detail_reuses_review_graph_and_masks_until_safety_gate(qtbot):

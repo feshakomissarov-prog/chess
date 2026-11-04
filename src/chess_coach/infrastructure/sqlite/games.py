@@ -32,7 +32,8 @@ class GamesStoreMixin:
                      account_id: str | None = None, clock: str | None = None,
                      color: str | None = None, outcome: str | None = None,
                      analysis: str | None = None, analysis_source: str | None = None,
-                     updated_after: str | None = None) -> dict:
+                     updated_after: str | None = None,
+                     order_by_game_time: bool = False) -> dict:
         """Search the local library without loading every PGN into a widget."""
         self._wait_before_read()
         page = max(0, int(page))
@@ -62,11 +63,30 @@ class GamesStoreMixin:
             clauses.append(f"{opponent_expr} LIKE ?")
             params.append(f"%{opponent}%")
         if opening:
-            clauses.append("(g.opening_eco LIKE ? OR g.opening_name LIKE ? OR EXISTS ("
-                           "SELECT 1 FROM opening_matches om WHERE om.game_id=g.game_id "
-                           "AND om.line_revision=g.line_revision AND "
-                           "(om.eco LIKE ? OR om.name LIKE ?)))")
-            params.extend([f"%{opening}%"] * 4)
+            folded_opening = " ".join(str(opening).casefold().replace("ё", "е").split())
+            if folded_opening in {"каро", "каро-канн", "каро канн", "caro", "caro-kann",
+                                  "caro kann", "caro-kann defense", "caro-kann defence"}:
+                # The same known family is searchable by the localized label,
+                # source name, or its established B10–B19 ECO range.
+                clauses.append("(g.opening_eco LIKE 'B1_' OR g.opening_name LIKE ? "
+                               "OR g.opening_name LIKE ? OR EXISTS ("
+                               "SELECT 1 FROM opening_matches om WHERE om.game_id=g.game_id "
+                               "AND om.line_revision=g.line_revision AND "
+                               "(om.eco LIKE 'B1_' OR om.name LIKE ? OR om.family LIKE ?)))")
+                params.extend(["%Caro-Kann%", "%Каро-Канн%", "%Caro-Kann%", "%Caro-Kann%"])
+            elif len(folded_opening) == 3 and folded_opening[0] in "ABCDE" and folded_opening[1:].isdigit():
+                eco = folded_opening.upper()
+                clauses.append("(g.opening_eco=? OR EXISTS (SELECT 1 FROM opening_matches om "
+                               "WHERE om.game_id=g.game_id AND om.line_revision=g.line_revision "
+                               "AND om.eco=?))")
+                params.extend([eco, eco])
+            else:
+                pattern = f"%{opening}%"
+                clauses.append("(g.opening_eco LIKE ? OR g.opening_name LIKE ? OR EXISTS ("
+                               "SELECT 1 FROM opening_matches om WHERE om.game_id=g.game_id "
+                               "AND om.line_revision=g.line_revision AND "
+                               "(om.eco LIKE ? OR om.name LIKE ? OR om.family LIKE ?)))")
+                params.extend([pattern] * 5)
         if color in {"white", "black"}:
             clauses.append(f"{color_expr}=?")
             params.append(color)
@@ -85,36 +105,44 @@ class GamesStoreMixin:
             clauses.append("COALESCE(g.started_at,g.updated_at)>=?")
             params.append(updated_after)
         current_analysis = (
-            "EXISTS (SELECT 1 FROM analysis_runs ar WHERE ar.game_id=g.game_id "
-            "AND ar.line_revision=g.line_revision AND ar.status='complete')"
+            "EXISTS (SELECT 1 FROM analysis_runs ar JOIN game_revisions gr "
+            "ON gr.game_id=ar.game_id AND gr.line_revision=ar.line_revision AND gr.is_current=1 "
+            "WHERE ar.game_id=g.game_id AND ar.line_revision=g.line_revision "
+            "AND ar.status IN ('complete','partial') AND (EXISTS (SELECT 1 "
+            "FROM position_assessments pa WHERE pa.run_id=ar.run_id "
+            "AND (pa.white_cp IS NOT NULL OR pa.mate_white IS NOT NULL)) OR EXISTS ("
+            "SELECT 1 FROM move_classifications mc WHERE mc.run_id=ar.run_id "
+            "AND mc.label NOT IN ('unknown','unclassified'))))"
         )
-        lichess_analysis = "EXISTS (SELECT 1 FROM lichess_ready_analysis_metadata lm " \
-                           "WHERE lm.game_id=g.game_id AND lm.line_revision=g.line_revision"
-        if account_id:
-            lichess_analysis += " AND lm.account_id=?"
-        lichess_analysis += ")"
+        lichess_analysis = (
+            "EXISTS (SELECT 1 FROM analysis_runs ar JOIN game_revisions gr "
+            "ON gr.game_id=ar.game_id AND gr.line_revision=ar.line_revision AND gr.is_current=1 "
+            "WHERE ar.game_id=g.game_id AND ar.line_revision=g.line_revision "
+            "AND ar.source IN ('lichess-pgn','lichess-json') AND ar.status IN ('complete','partial') "
+            "AND (EXISTS (SELECT 1 FROM position_assessments pa WHERE pa.run_id=ar.run_id "
+            "AND (pa.white_cp IS NOT NULL OR pa.mate_white IS NOT NULL)) OR EXISTS ("
+            "SELECT 1 FROM move_classifications mc WHERE mc.run_id=ar.run_id "
+            "AND mc.label NOT IN ('unknown','unclassified'))))"
+        )
         if analysis == "yes":
             clauses.append(f"(({current_analysis}) OR ({lichess_analysis}))")
-            if account_id:
-                params.append(account_id)
         elif analysis == "no":
             clauses.append(f"NOT ({current_analysis}) AND NOT ({lichess_analysis})")
-            if account_id:
-                params.append(account_id)
         if analysis_source == "stockfish":
-            clauses.append("EXISTS (SELECT 1 FROM analysis_runs ar WHERE ar.game_id=g.game_id "
-                           "AND ar.line_revision=g.line_revision AND ar.status='complete' "
-                           "AND ar.source='stockfish')")
+            clauses.append("EXISTS (SELECT 1 FROM analysis_runs ar JOIN game_revisions gr "
+                           "ON gr.game_id=ar.game_id AND gr.line_revision=ar.line_revision AND gr.is_current=1 "
+                           "WHERE ar.game_id=g.game_id AND ar.line_revision=g.line_revision "
+                           "AND ar.status IN ('complete','partial') AND ar.source='stockfish' "
+                           "AND (EXISTS (SELECT 1 FROM position_assessments pa WHERE pa.run_id=ar.run_id "
+                           "AND (pa.white_cp IS NOT NULL OR pa.mate_white IS NOT NULL)) OR EXISTS ("
+                           "SELECT 1 FROM move_classifications mc WHERE mc.run_id=ar.run_id "
+                           "AND mc.label NOT IN ('unknown','unclassified'))))")
         elif analysis_source == "lichess":
-            source_clause = (
-                "EXISTS (SELECT 1 FROM lichess_ready_analysis_metadata lm "
-                "WHERE lm.game_id=g.game_id AND lm.line_revision=g.line_revision "
-                "AND lm.source='lichess-json'"
-            )
-            if account_id:
-                source_clause += " AND lm.account_id=?"
-                params.append(account_id)
-            clauses.append(source_clause + ")")
+            clauses.append(lichess_analysis)
+        elif analysis_source == "official_accuracy":
+            accuracy_expr = ("CASE WHEN " + color_expr + "='white' THEN g.lichess_accuracy_white "
+                             "WHEN " + color_expr + "='black' THEN g.lichess_accuracy_black END")
+            clauses.append(f"({accuracy_expr} IS NOT NULL)")
         where = " WHERE " + " AND ".join(clauses) if clauses else ""
         with self._connection() as db:
             total = db.execute("SELECT COUNT(DISTINCT g.game_id) FROM games g" + join + where,
@@ -122,8 +150,18 @@ class GamesStoreMixin:
             selected = "g.*"
             if account_id:
                 selected += ",ag.opponent AS account_opponent,ag.player_name AS account_player_name,ag.color AS account_color"
+            if order_by_game_time:
+                order_sql = (" ORDER BY CASE WHEN g.last_move_at>0 THEN 0 "
+                             "WHEN g.started_at IS NOT NULL AND g.game_time_precision IN "
+                             "('timestamp','date_only') THEN 1 ELSE 2 END,"
+                             "CASE WHEN g.last_move_at>0 THEN g.last_move_at/1000.0 "
+                             "WHEN g.game_time_precision='timestamp' THEN julianday(g.started_at) "
+                             "WHEN g.game_time_precision='date_only' THEN julianday(substr(g.started_at,1,10)) "
+                             "ELSE julianday(g.updated_at) END DESC,g.game_id DESC")
+            else:
+                order_sql = " ORDER BY g.updated_at DESC,g.game_id DESC"
             rows = db.execute(f"SELECT {selected} FROM games g" + join + where +
-                              " ORDER BY g.updated_at DESC, g.game_id LIMIT ? OFFSET ?",
+                              order_sql + " LIMIT ? OFFSET ?",
                               [*params, page_size, page * page_size]).fetchall()
         return {"items": [dict(row) for row in rows], "total": total,
                 "page": page, "page_size": page_size,

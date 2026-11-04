@@ -399,6 +399,8 @@ class MainWindow(QMainWindow):
         self._ephemeral_study = False
         self.archive_sync = ArchiveSyncCoordinator(self.game_repository)
         self.dashboard_queries = DashboardQueryCoordinator(self.game_repository)
+        self._dashboard_options_loaded = False
+        self._library_filter_options_loaded = False
         self.library_queries = GameLibraryQueryCoordinator(self.game_repository)
         self._library_query_generation = 0
         self._library_query_handle = None
@@ -1781,6 +1783,8 @@ class MainWindow(QMainWindow):
             try:
                 result = self.dashboard_queries.snapshot(
                     account_id=account_id, clock=clock, query=dashboard_snapshot)
+                if not self._dashboard_options_loaded:
+                    result["_selector_options"] = dashboard_options(self.game_repository)
                 error = None
             except Exception as exc:
                 result, error = None, exc
@@ -1806,6 +1810,10 @@ class MainWindow(QMainWindow):
                 for detail in self._dashboard_metric_details.values():
                     detail.setText("Не удалось прочитать локальные данные. Повторите обновление.")
             elif isinstance(snapshot, dict):
+                selector_options = snapshot.get("_selector_options")
+                if isinstance(selector_options, dict):
+                    self._home_view.set_selector_options(selector_options)
+                    self._dashboard_options_loaded = True
                 self._render_dashboard_snapshot(snapshot)
         pending = self.dashboard_queries.take_pending()
         if pending is not None and not self._shutdown_requested:
@@ -5144,15 +5152,14 @@ class MainWindow(QMainWindow):
             self._update_library_active_games()
             self._library_reload(existing.current_filters(), existing._page)
             return
-        filter_options = dashboard_options(self.game_repository)
-        page = LibraryPage(self, accounts=filter_options["accounts"],
-                           clocks=filter_options["clocks"])
+        page = LibraryPage(self)
         saved_raw = str(self.settings.value("workspace/library_filters", "", type=str))
         try:
             saved_filters = json.loads(saved_raw) if saved_raw else {}
         except (TypeError, json.JSONDecodeError):
             saved_filters = {}
         if isinstance(saved_filters, dict):
+            page._pending_filter_values = dict(saved_filters)
             page.search.setText(str(saved_filters.get("query") or ""))
             page.opponent_filter.setText(str(saved_filters.get("opponent") or ""))
             page.opening_filter.setText(str(saved_filters.get("opening") or ""))
@@ -5204,6 +5211,8 @@ class MainWindow(QMainWindow):
                     if stop_event.is_set():
                         return
                     result = self.library_queries.search(safe_filters, target_page)
+                    if not self._library_filter_options_loaded:
+                        result["_selector_options"] = dashboard_options(self.game_repository)
                     if stop_event.is_set():
                         return
                     self.library_query_finished.emit(generation, result, None)
@@ -5310,6 +5319,10 @@ class MainWindow(QMainWindow):
         if not isinstance(result, dict):
             page.page_label.setText("Не удалось прочитать список партий.")
             return
+        selector_options = result.get("_selector_options")
+        if isinstance(selector_options, dict):
+            page.set_filter_options(selector_options)
+            self._library_filter_options_loaded = True
         rows = [(game, *_archive_row_presentation(game)) for game in result["items"]]
         page.set_results(rows, page=int(result.get("page", 0)),
                          pages=int(result.get("pages", 1)),

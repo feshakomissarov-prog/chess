@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import chess
 from PySide6.QtCore import Qt, Signal
-from PySide6.QtWidgets import (QComboBox, QGridLayout, QGroupBox, QHBoxLayout,
+from PySide6.QtWidgets import (QCheckBox, QComboBox, QGridLayout, QGroupBox, QHBoxLayout,
                                QLabel, QPushButton, QVBoxLayout)
 
 from ...board_view import BoardView
@@ -56,6 +56,25 @@ class PositionSetupWidget(QGroupBox):
         controls.addWidget(self.turn_selector)
         layout.addLayout(controls)
 
+        fen_rights = QHBoxLayout()
+        fen_rights.addWidget(QLabel("Рокировка"))
+        self.castling_controls: dict[str, QCheckBox] = {}
+        for label, right in (("Белые K", chess.BB_H1), ("Белые Q", chess.BB_A1),
+                             ("Чёрные k", chess.BB_H8), ("Чёрные q", chess.BB_A8)):
+            control = QCheckBox(label)
+            control.setChecked(True)
+            self.castling_controls[label] = control
+            fen_rights.addWidget(control)
+        self.ep_selector = QComboBox()
+        self.ep_selector.setAccessibleName("Поле взятия на проходе")
+        self.ep_selector.addItem("Нет взятия на проходе", None)
+        for rank in ("3", "6"):
+            for file_name in "abcdefgh":
+                square_name = file_name + rank
+                self.ep_selector.addItem(square_name, chess.parse_square(square_name))
+        fen_rights.addWidget(self.ep_selector)
+        layout.addLayout(fen_rights)
+
         self.board_view = _PositionEditorBoard(self._board)
         self.board_view.setFixedSize(320, 320)
         self.board_view.setAccessibleName("Доска расстановки временной позиции")
@@ -95,24 +114,60 @@ class PositionSetupWidget(QGroupBox):
         symbol = str(self.piece_selector.currentData() or "")
         piece = chess.Piece.from_symbol(symbol) if symbol else None
         self._board.set_piece_at(square, piece)
+        self._clear_inconsistent_castling_rights()
         self.board_view.set_position(self._board)
         self.status.setText(f"Изменена клетка {chess.square_name(square)}. Позиция не сохранена.")
+
+    def _clear_inconsistent_castling_rights(self) -> None:
+        required = {
+            "Белые K": ((chess.E1, chess.KING, chess.WHITE),
+                        (chess.H1, chess.ROOK, chess.WHITE)),
+            "Белые Q": ((chess.E1, chess.KING, chess.WHITE),
+                        (chess.A1, chess.ROOK, chess.WHITE)),
+            "Чёрные k": ((chess.E8, chess.KING, chess.BLACK),
+                         (chess.H8, chess.ROOK, chess.BLACK)),
+            "Чёрные q": ((chess.E8, chess.KING, chess.BLACK),
+                         (chess.A8, chess.ROOK, chess.BLACK)),
+        }
+        for label, squares in required.items():
+            if self.castling_controls[label].isChecked() and any(
+                    self._board.piece_at(square) != chess.Piece(piece_type, color)
+                    for square, piece_type, color in squares):
+                self.castling_controls[label].setChecked(False)
 
     def _reset(self) -> None:
         self._board = chess.Board()
         self.turn_selector.setCurrentIndex(0)
+        for control in self.castling_controls.values():
+            control.setChecked(True)
+        self.ep_selector.setCurrentIndex(0)
         self.board_view.set_position(self._board)
         self.status.setText("Начальная позиция восстановлена; запись в архив не выполнялась.")
 
     def _clear(self) -> None:
         self._board = chess.Board(None)
+        for control in self.castling_controls.values():
+            control.setChecked(False)
+        self.ep_selector.setCurrentIndex(0)
         self.board_view.set_position(self._board)
         self.status.setText("Доска очищена. Расставьте фигуры и выберите сторону хода.")
 
     def _open_position(self) -> None:
         self._board.turn = bool(self.turn_selector.currentData())
+        rights_by_label = {
+            "Белые K": chess.BB_H1, "Белые Q": chess.BB_A1,
+            "Чёрные k": chess.BB_H8, "Чёрные q": chess.BB_A8,
+        }
         self._board.castling_rights = chess.BB_EMPTY
-        self._board.ep_square = None
+        for label, right in rights_by_label.items():
+            if self.castling_controls[label].isChecked():
+                self._board.castling_rights |= right
+        self._board.ep_square = self.ep_selector.currentData()
         self._board.halfmove_clock = 0
         self._board.fullmove_number = 1
-        self.position_requested.emit(self._board.fen())
+        if not self._board.is_valid():
+            self.status.setText(
+                "Позиция некорректна. Проверьте королей, пешки, рокировку и поле взятия на проходе.")
+            return
+        self.status.setText("Позиция проверена. Она временная и не сохраняется в архив.")
+        self.position_requested.emit(self._board.fen(en_passant="fen"))

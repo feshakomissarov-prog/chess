@@ -10,10 +10,12 @@ from chess_coach.ui.display import (
 
 def test_local_timestamp_date_precision_and_invalid_date_are_honest():
     assert format_game_date("2026-11-02") == "02.11.2026"
-    assert format_game_date("2026-11-02T12:05:39.123Z").startswith("02.11.2026 · ")
-    assert "+00:00" not in format_game_date("2026-11-02T12:05:39Z")
+    assert format_game_date("2026-11-02T12:05:39.123Z").startswith("Время неизвестно")
+    assert format_game_date("2026-11-02T12:05:39Z", precision="timestamp").startswith("02.11.2026 · ")
+    assert "+00:00" not in format_game_date("2026-11-02T12:05:39Z", precision="timestamp")
     assert format_game_date("2026-11-02T12:05:39Z", precision="date_only") == "02.11.2026"
-    assert format_game_date("invalid") == "Дата неизвестна"
+    assert format_game_date("2026-08-04T00:00:00+00:00", precision="date_only") == "04.08.2026"
+    assert format_game_date("invalid") == "Время неизвестно"
     assert format_game_date(20261102) == "02.11.2026"
 
 

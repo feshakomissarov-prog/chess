@@ -901,6 +901,22 @@ def test_library_search_filters_result_color_and_analysis_in_sql(tmp_path):
     repo.shutdown()
 
 
+def test_caro_kann_is_searchable_by_russian_english_alias_and_eco(tmp_path):
+    repo = GameRepository(tmp_path / "opening-aliases.sqlite3")
+    try:
+        repo.save_snapshot("caro", "startpos", "e2e4 c7c6 d2d4 d7d5", "white", "Friend",
+                           False, "600+0", "mate", "white")
+        with repo._connection() as db:
+            db.execute("UPDATE games SET opening_eco='B12',opening_name='Caro-Kann Defense' "
+                       "WHERE game_id='caro'")
+        for term in ("Каро-Канн", "Caro-Kann", "B12"):
+            result = repo.search_games(opening=term)
+            assert result["total"] == 1, term
+            assert result["items"][0]["game_id"] == "caro"
+    finally:
+        repo.shutdown()
+
+
 def test_library_period_filter_uses_game_date_not_metadata_update_time(tmp_path):
     repo = GameRepository(tmp_path / "library-period.sqlite3")
     repo.save_snapshot("old-game", "startpos", "e2e4", "white", "Friend", False,

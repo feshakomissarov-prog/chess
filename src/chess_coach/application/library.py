@@ -26,4 +26,5 @@ class GameLibraryQueryCoordinator:
             clock=values.get("clock"), color=values.get("color"),
             opponent=values.get("opponent"), opening=values.get("opening"),
             outcome=values.get("outcome"), analysis=values.get("analysis"),
-            analysis_source=values.get("analysis_source"), updated_after=updated_after)
+            analysis_source=values.get("analysis_source"), updated_after=updated_after,
+            order_by_game_time=True)

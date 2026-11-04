@@ -15,7 +15,7 @@ def test_dashboard_empty_database_uses_unknown_labels_not_fake_zero_rates(tmp_pa
         metrics = {row["key"]: row for row in snapshot["metrics"]}
         assert metrics["games"]["value"] == "0"
         assert metrics["accuracy"]["value"] == "н/д"
-        assert metrics["analysis"]["value"] == "н/д"
+        assert metrics["analysis"]["value"] == "0/0 · н/д"
         assert metrics["errors"]["value"] == "н/д"
         assert snapshot["recent_games"] == []
     finally:
@@ -32,7 +32,7 @@ def test_dashboard_aggregates_real_sqlite_results_and_returns_only_three_recent_
         snapshot = dashboard_snapshot(repo)
         metrics = {row["key"]: row for row in snapshot["metrics"]}
         assert metrics["games"]["value"] == "7"
-        assert metrics["analysis"]["value"] == "0/13"
+        assert metrics["analysis"]["value"] == "0/7 (0.0%)"
         assert metrics["errors"]["value"] == "н/д"
         assert len(snapshot["recent_games"]) == 3
         assert all(row.get("game_id") for row in snapshot["recent_games"])
@@ -72,6 +72,30 @@ def test_dashboard_account_and_clock_filters_match_sql_scope(tmp_path):
         assert metrics["accuracy"]["detail"].startswith("Официальная точность: 1/1")
         assert snapshot["filter"] == {"account_id": account, "clock": "5+0"}
         assert [game["game_id"] for game in snapshot["recent_games"]] == ["fast-white"]
+    finally:
+        repo.shutdown()
+
+
+def test_home_and_library_order_by_game_activity_not_recent_metadata_updates(tmp_path):
+    repo = GameRepository(tmp_path / "chronology.sqlite3")
+    try:
+        _save(repo, "played-yesterday", opponent="Yesterday")
+        _save(repo, "started-month-ago", opponent="Month ago")
+        _save(repo, "date-unknown", opponent="Unknown date")
+        with repo._connection() as db:
+            db.execute("UPDATE games SET started_at=?,game_time_precision='timestamp',last_move_at=? "
+                       "WHERE game_id='played-yesterday'",
+                       ("2026-11-03T08:00:00Z", 1793700000000))
+            db.execute("UPDATE games SET started_at=?,game_time_precision='timestamp',"
+                       "last_move_at=NULL,updated_at=? WHERE game_id='started-month-ago'",
+                       ("2026-10-04T10:00:00Z", "2026-11-04T12:00:00Z"))
+            db.execute("UPDATE games SET started_at=NULL,game_time_precision='unknown',"
+                       "last_move_at=NULL,updated_at=? WHERE game_id='date-unknown'",
+                       ("2026-11-04T13:00:00Z",))
+        expected = ["played-yesterday", "started-month-ago", "date-unknown"]
+        assert [g["game_id"] for g in repo.search_games(
+            completed_only=True, order_by_game_time=True)["items"]] == expected
+        assert [g["game_id"] for g in dashboard_snapshot(repo)["recent_games"]] == expected
     finally:
         repo.shutdown()
 

@@ -167,3 +167,14 @@ This matrix records automated code evidence only. Manual physical Windows/DPI/so
 | A12 | Local done; hosted exact-head CI pending | Full local suite at behavioral checkpoint `cf4a650dcf0e3b0169aa3b73f11fca008be026c8`: **632 passed in 156.33s**. Python 3.12.10; Qt offscreen. Final CI must run after the final docs/whitespace commit. |
 
 The 24 COV routes and test evidence are listed immediately above. Every automated run used temporary SQLite, fake HTTP/service/engine fixtures and offscreen Qt. No live Lichess, OAuth/PAT, personal PGN/SQLite or real Stockfish was used. A final hosted CI URL will be attached to PR #44 after the exact final head finishes.
+
+## REVIEW-FIX-01 v1.2 — RF-02/RF-04/RF-05/RF-06/RF-08/RF-11 checkpoint
+
+- Position setup now starts from `chess.STARTING_FEN`, exposes castling and en-passant rights, clears inconsistent castling rights when a rook/king is removed, and refuses invalid positions before emitting the temporary FEN.
+- Online game setup supports custom base time and increment with explicit bounds, hides each whole form row by mode, and disables duplicate submissions until the service returns a non-progress result.
+- Home and library now use a shared SQL chronology: `last_move_at`, then provenance-confirmed `started_at`, with `updated_at` only for unknown game dates. Updating analysis metadata no longer moves a known old game to the top. Library displays the ordering rule.
+- Home selector options and library account/clock filters load on existing worker paths; page construction and navigation no longer synchronously enumerate selector rows on the UI thread.
+- Date formatting no longer infers a precise time from a legacy timestamp with unknown provenance. Caro-Kann can be found by Russian/English family names and ECO B10–B19.
+- Dashboard analysis KPI now counts distinct games with usable scores on the current line, shows full/partial/source coverage, and keeps official Lichess accuracy separate. Fixed SQL connection scope and reserved alias discovered by regression run.
+- Regression evidence: `QT_QPA_PLATFORM=offscreen .venv312/Scripts/python.exe -m pytest tests/test_dashboard.py tests/test_display.py tests/test_lichess.py::test_library_search_filters_result_color_and_analysis_in_sql tests/test_lichess.py::test_caro_kann_is_searchable_by_russian_english_alias_and_eco tests/test_ui_pages.py -q` — **25 passed**.
+- This checkpoint does not yet cover RF-07/RF-09/RF-10/RF-12–RF-15. No personal database or live service was used. Physical Windows layout and server clock behavior remain manual checks.

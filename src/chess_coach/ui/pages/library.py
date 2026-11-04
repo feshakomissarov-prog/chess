@@ -7,7 +7,7 @@ from PySide6.QtWidgets import (
     QComboBox, QFrame, QGridLayout, QHBoxLayout, QLabel, QListWidget, QListWidgetItem,
     QLineEdit, QPushButton, QSplitter, QVBoxLayout, QWidget,
 )
-from ..display import format_clock_control
+from ..display import format_clock_control, format_game_date
 from ..game_review import ReviewGraph
 
 
@@ -42,8 +42,14 @@ class LibraryPage(QWidget):
         layout.addWidget(self.active_games)
         self.summary = QLabel("Завершённые партии · загрузка выборки…")
         self.summary.setObjectName("secondary")
+        self.sort_description = QLabel("Сортировка: последняя дата хода, затем дата начала")
+        self.sort_description.setObjectName("muted")
+        self.sort_description.setToolTip(
+            "Порядок использует lastMoveAt, затем подтверждённое время/дату начала; "
+            "обновление аналитики его не меняет.")
         summary_row = QHBoxLayout()
         summary_row.addWidget(self.summary, 1)
+        summary_row.addWidget(self.sort_description)
         self.sync_button = QPushButton("Синхронизировать")
         self.sync_button.clicked.connect(self.sync_requested.emit)
         self.background_button = QPushButton("Фоновые операции")
@@ -86,7 +92,8 @@ class LibraryPage(QWidget):
             self.analysis_filter.addItem(label, value)
         self.analysis_source_filter = QComboBox()
         for label, value in (("Любой тип оценки", ""), ("Stockfish", "stockfish"),
-                             ("Lichess", "lichess")):
+                             ("Lichess · оценки ходов", "lichess"),
+                             ("Есть официальная точность", "official_accuracy")):
             self.analysis_source_filter.addItem(label, value)
         self.period_filter = QComboBox()
         for label, value in (("Любой период", 0), ("30 дней", 30),
@@ -221,7 +228,8 @@ class LibraryPage(QWidget):
             return
         title = str(game.get("account_opponent") or game.get("opponent") or "Соперник")
         self.detail_title.setText(title)
-        date = str(game.get("started_at") or "Дата неизвестна")
+        date = format_game_date(game.get("started_at"),
+                                precision=game.get("game_time_precision"))
         result = str(game.get("status") or "Завершена")
         clock = format_clock_control(game.get("clock"))
         self.detail_metadata.setText(f"{date} · {clock} · {result} · {game.get('source') or 'локально'}")
@@ -356,6 +364,30 @@ class LibraryPage(QWidget):
 
     def set_sync_status(self, text: str) -> None:
         self.sync_status.setText(str(text))
+
+    def set_filter_options(self, options: dict) -> None:
+        pending = getattr(self, "_pending_filter_values", {})
+        account = pending.get("account_id", self.account_filter.currentData())
+        clock = pending.get("clock", self.clock_filter.currentData())
+        self.account_filter.blockSignals(True)
+        self.clock_filter.blockSignals(True)
+        self.account_filter.clear()
+        self.account_filter.addItem("Все аккаунты", None)
+        for item in options.get("accounts", []):
+            self.account_filter.addItem(str(item["username"]), str(item["account_id"]))
+        self.clock_filter.clear()
+        self.clock_filter.addItem("Любой контроль", "")
+        for value in sorted(set(options.get("clocks", []))):
+            self.clock_filter.addItem(format_clock_control(value), value)
+        account_index = self.account_filter.findData(account)
+        clock_index = self.clock_filter.findData(clock)
+        if account_index >= 0:
+            self.account_filter.setCurrentIndex(account_index)
+        if clock_index >= 0:
+            self.clock_filter.setCurrentIndex(clock_index)
+        self._pending_filter_values = {}
+        self.account_filter.blockSignals(False)
+        self.clock_filter.blockSignals(False)
 
     def _emit_for_selected(self, signal) -> None:
         game = self.selected_game()

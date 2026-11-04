@@ -7,14 +7,12 @@ from PySide6.QtWidgets import (
     QComboBox, QFrame, QGridLayout, QHBoxLayout, QLabel, QPushButton,
     QVBoxLayout, QWidget,
 )
-from ..dashboard import dashboard_options
 from ..display import format_clock_control
 
 
 class HomePage(QWidget):
     def __init__(self, repository, settings, username, actions, filters_changed, parent=None):
         super().__init__(parent)
-        options = dashboard_options(repository)
         layout = QVBoxLayout(self)
         title = QLabel("Ваша шахматная практика")
         title.setObjectName("pageTitle")
@@ -33,20 +31,12 @@ class HomePage(QWidget):
         self.dashboard_clock = QComboBox()
         self.dashboard_clock.setAccessibleName("Контроль времени сводки")
         self.dashboard_clock.addItem("Любой контроль", "")
-        for account in options["accounts"]:
-            self.dashboard_account.addItem(account["username"], account["account_id"])
-        for clock in options["clocks"]:
-            self.dashboard_clock.addItem(format_clock_control(clock), clock)
         preferred_account = str(settings.value("workspace/selected_account", "", type=str))
         if username:
             preferred_account = f"lichess:{username.strip().lower()}"
-        preferred_index = self.dashboard_account.findData(preferred_account)
-        if preferred_index >= 0:
-            self.dashboard_account.setCurrentIndex(preferred_index)
         preferred_clock = str(settings.value("workspace/dashboard_clock", "", type=str))
-        clock_index = self.dashboard_clock.findData(preferred_clock)
-        if clock_index >= 0:
-            self.dashboard_clock.setCurrentIndex(clock_index)
+        self._preferred_account = preferred_account
+        self._preferred_clock = preferred_clock
         scope_row.addWidget(QLabel("Аккаунт"))
         scope_row.addWidget(self.dashboard_account, 1)
         scope_row.addWidget(QLabel("Контроль"))
@@ -63,7 +53,7 @@ class HomePage(QWidget):
         self._dashboard_metric_details = {}
         for index, (key, label) in enumerate((
                 ("games", "Завершённые партии"), ("accuracy", "Точность Lichess"),
-                ("analysis", "Анализ моих ходов"),
+                ("analysis", "Партии с анализом"),
                 ("errors", "Ошибки на 100 оценённых ходов"))):
             card = QFrame()
             card.setObjectName("metricCard")
@@ -178,6 +168,31 @@ class HomePage(QWidget):
             widget.setParent(self._legacy_action_host)
             widget.hide()
         layout.addStretch(1)
+
+    def set_selector_options(self, options: dict) -> None:
+        """Apply a small repository read model delivered by a background worker."""
+        account = self.dashboard_account.currentData()
+        clock = self.dashboard_clock.currentData()
+        self.dashboard_account.blockSignals(True)
+        self.dashboard_clock.blockSignals(True)
+        self.dashboard_account.clear()
+        self.dashboard_account.addItem("Все локальные партии", None)
+        for item in options.get("accounts", []):
+            self.dashboard_account.addItem(str(item["username"]), str(item["account_id"]))
+        self.dashboard_clock.clear()
+        self.dashboard_clock.addItem("Любой контроль", "")
+        for item in options.get("clocks", []):
+            self.dashboard_clock.addItem(format_clock_control(item), item)
+        account_choice = account if account is not None else self._preferred_account
+        account_index = self.dashboard_account.findData(account_choice)
+        if account_index >= 0:
+            self.dashboard_account.setCurrentIndex(account_index)
+        clock_choice = clock or self._preferred_clock
+        clock_index = self.dashboard_clock.findData(clock_choice)
+        if clock_index >= 0:
+            self.dashboard_clock.setCurrentIndex(clock_index)
+        self.dashboard_account.blockSignals(False)
+        self.dashboard_clock.blockSignals(False)
 
     def layout_metrics(self, width: int | None = None) -> None:
         grid = self.dashboard_metrics_grid

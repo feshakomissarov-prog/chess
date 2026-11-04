@@ -96,25 +96,32 @@ def dashboard_snapshot(repository, *, account_id: str | None = None,
 
         analysis_where = " AND ".join(clauses)
         run_params = list(params)
-        status = db.execute(
-            "WITH scoped AS (SELECT DISTINCT g.game_id FROM games g" + join +
-            " WHERE " + analysis_where + "), ranked AS (SELECT ar.game_id,ar.status,"
-            "ROW_NUMBER() OVER(PARTITION BY ar.game_id,ar.line_revision ORDER BY "
-            "CASE WHEN ar.status='complete' THEN 0 ELSE 1 END,ar.finished_at DESC,ar.run_id DESC) rn "
-            "FROM analysis_runs ar JOIN game_revisions gr ON gr.game_id=ar.game_id "
-            "AND gr.line_revision=ar.line_revision AND gr.is_current=1 JOIN scoped s ON s.game_id=ar.game_id "
-            "WHERE ar.status IN ('complete','partial') AND NOT EXISTS (SELECT 1 FROM analysis_jobs aj "
-            "WHERE aj.result_run_id=ar.run_id AND aj.analysis_pass='review')) "
-            "SELECT COUNT(CASE WHEN status='complete' THEN 1 END) complete,"
-            "COUNT(CASE WHEN status='partial' THEN 1 END) partial FROM ranked WHERE rn=1",
-            run_params).fetchone()
+    with repository._connection() as db:
+        coverage = db.execute(
+        "WITH scoped AS (SELECT DISTINCT g.game_id,g.line_revision FROM games g" + join +
+        " WHERE " + analysis_where + "), runs AS (SELECT ar.game_id,ar.source,ar.status,"
+        "COUNT(DISTINCT CASE WHEN pa.white_cp IS NOT NULL OR pa.mate_white IS NOT NULL "
+        "THEN pa.ply END) scored,(SELECT COUNT(*) FROM game_positions gp "
+        "WHERE gp.game_id=ar.game_id AND gp.line_revision=ar.line_revision) total "
+        "FROM analysis_runs ar JOIN game_revisions gr ON gr.game_id=ar.game_id "
+        "AND gr.line_revision=ar.line_revision AND gr.is_current=1 JOIN scoped s "
+        "ON s.game_id=ar.game_id AND s.line_revision=ar.line_revision "
+        "LEFT JOIN position_assessments pa ON pa.run_id=ar.run_id "
+        "WHERE ar.status IN ('complete','partial') GROUP BY ar.run_id) "
+        "SELECT COUNT(DISTINCT CASE WHEN scored>0 THEN game_id END) analyzed,"
+        "COUNT(DISTINCT CASE WHEN scored>0 AND status='complete' AND scored>=total THEN game_id END) complete_count,"
+        "COUNT(DISTINCT CASE WHEN scored>0 AND (status<>'complete' OR scored<total) THEN game_id END) partial,"
+        "COUNT(DISTINCT CASE WHEN scored>0 AND source='stockfish' THEN game_id END) stockfish,"
+        "COUNT(DISTINCT CASE WHEN scored>0 AND source IN ('lichess-pgn','lichess-json') THEN game_id END) lichess "
+            "FROM runs", run_params).fetchone()
 
     summary = StatisticsService(repository).summary(account_id=account_id, clock=clock)
     total = int(row["games"] or 0)
     accuracy_n = int(row["accuracy_games"] or 0)
     accuracy = row["owner_accuracy"]
-    analyzed_complete = int(status["complete"] or 0)
-    analyzed_partial = int(status["partial"] or 0)
+    analyzed_complete = int(coverage["complete_count"] or 0)
+    analyzed_partial = int(coverage["partial"] or 0)
+    analyzed_games = int(coverage["analyzed"] or 0)
     assessed = int(summary["own_assessed_moves"] or 0)
     own_total = int(summary["total_own_moves"] or 0)
     error_rate = summary.get("own_error_rate_per_100")
@@ -129,14 +136,15 @@ def dashboard_snapshot(repository, *, account_id: str | None = None,
          "detail": f"Официальная точность: {accuracy_n}/{total} партий с данными" if total else
          "Нет завершённых партий с официальной оценкой",
          "source": "Lichess accuracy; локальная accuracy не рассчитывается"},
-        {"key": "analysis", "label": "Анализ моих ходов",
-         "value": f"{assessed}/{own_total}" if own_total else "н/д",
-         "detail": (f"Полных партий: {analyzed_complete} · частичных: {analyzed_partial} · "
-                    f"охват собственных решений {round(100 * assessed / own_total)}%"
-                    if own_total else
-                    f"Полных партий: {analyzed_complete} · частичных: {analyzed_partial} · "
-                    "нет известных собственных решений"),
-         "source": "Текущие analysis_runs + move_metrics; собственные decision pairs"},
+        {"key": "analysis", "label": "Партии с анализом",
+         "value": (f"{analyzed_games}/{total} ({100 * analyzed_games / total:.1f}%)"
+                   if total else "0/0 · н/д"),
+         "detail": (f"Полный охват: {analyzed_complete} · частичный: {analyzed_partial} · "
+                    f"Stockfish: {int(coverage['stockfish'] or 0)} · "
+                    f"Lichess с оценками: {int(coverage['lichess'] or 0)} · "
+                    f"оценено моих ходов: {assessed}/{own_total}"
+                    if total else "Нет завершённых партий для расчёта доли анализа"),
+         "source": "Distinct completed games with current-line position scores; source counts may overlap"},
         {"key": "errors", "label": "Ошибки на 100 оценённых ходов",
          "value": f"{float(error_rate):.1f}" if error_rate is not None else "н/д",
          "detail": (f"Ошибки {int(summary['own_error_count'])} / {assessed} оценённых собственных ходов · "
@@ -144,7 +152,8 @@ def dashboard_snapshot(repository, *, account_id: str | None = None,
          "source": "Текущие версии cc-move-metrics-v2; знаменатель: оценённые собственные ходы"},
     ]
     recent = repository.search_games(completed_only=True, page=0, page_size=3,
-                                     account_id=account_id, clock=clock)
+                                     account_id=account_id, clock=clock,
+                                     order_by_game_time=True)
     games = [dict(game) for game in recent["items"]]
     for game in games:
         game["review_metrics"] = game_card_metrics(repository, game)

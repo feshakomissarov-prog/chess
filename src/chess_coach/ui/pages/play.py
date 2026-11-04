@@ -6,7 +6,7 @@ from collections.abc import Callable
 
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (QCheckBox, QComboBox, QFrame, QGridLayout, QHBoxLayout,
-                               QLabel, QLineEdit, QPushButton, QVBoxLayout, QWidget)
+                               QLabel, QLineEdit, QPushButton, QSpinBox, QVBoxLayout, QWidget)
 
 
 class PlayPage(QWidget):
@@ -46,8 +46,24 @@ class PlayPage(QWidget):
         self.clock = QComboBox()
         for label, value in (("Без часов", (None, 0)), ("3 + 2", (180, 2)),
                              ("5 + 0", (300, 0)), ("10 + 0", (600, 0)),
-                             ("15 + 10", (900, 10))):
+                             ("15 + 10", (900, 10)), ("Свой…", ("custom", None))):
             self.clock.addItem(label, value)
+        self.custom_minutes = QSpinBox()
+        self.custom_minutes.setRange(1, 180)
+        self.custom_minutes.setValue(5)
+        self.custom_minutes.setSuffix(" мин")
+        self.custom_minutes.setAccessibleName("Свои минуты на партию")
+        self.custom_increment = QSpinBox()
+        self.custom_increment.setRange(0, 180)
+        self.custom_increment.setValue(0)
+        self.custom_increment.setSuffix(" сек инкремент")
+        self.custom_increment.setAccessibleName("Свой инкремент в секундах")
+        self.custom_clock_row = QWidget()
+        custom_layout = QHBoxLayout(self.custom_clock_row)
+        custom_layout.setContentsMargins(0, 0, 0, 0)
+        custom_layout.addWidget(self.custom_minutes)
+        custom_layout.addWidget(self.custom_increment)
+        self.custom_clock_row.setVisible(False)
         self.level = QComboBox()
         for value in range(1, 9):
             self.level.addItem(f"Уровень {value}", value)
@@ -60,19 +76,27 @@ class PlayPage(QWidget):
         form = QFrame()
         form.setObjectName("metricCard")
         form_layout = QVBoxLayout(form)
+        self.form_rows: dict[str, QWidget] = {}
         for label, widget in (("Режим", self.mode_selector), ("Ваш цвет", self.color),
                               ("Контроль времени", self.clock), ("Уровень Lichess AI", self.level),
                               ("Соперник", self.username)):
+            row_widget = QWidget()
             row = QHBoxLayout()
+            row.setContentsMargins(0, 0, 0, 0)
             row.addWidget(QLabel(label))
             row.addWidget(widget, 1)
-            form_layout.addLayout(row)
+            row_widget.setLayout(row)
+            self.form_rows[label] = row_widget
+            form_layout.addWidget(row_widget)
+        form_layout.addWidget(self.custom_clock_row)
         form_layout.addWidget(self.rated)
         form_layout.addWidget(self.form_status)
         form_layout.addWidget(self.start_button)
         layout.addWidget(form)
         self.mode_selector.currentIndexChanged.connect(self._update_form)
+        self.clock.currentIndexChanged.connect(self._update_form)
         self.start_button.clicked.connect(self._emit_create)
+        self._request_pending = False
         self._update_form()
         self.grid = QGridLayout()
         self.grid.setHorizontalSpacing(12)
@@ -110,9 +134,16 @@ class PlayPage(QWidget):
         online = mode in {"ai", "friend", "challenge"}
         self.color.setVisible(online)
         self.clock.setVisible(online)
+        self.form_rows["Ваш цвет"].setVisible(online)
+        self.form_rows["Контроль времени"].setVisible(online)
+        self.form_rows["Уровень Lichess AI"].setVisible(mode == "ai")
+        self.form_rows["Соперник"].setVisible(mode == "challenge")
         self.level.setVisible(mode == "ai")
         self.rated.setVisible(mode in {"friend", "challenge"})
         self.username.setVisible(mode == "challenge")
+        self.custom_clock_row.setVisible(
+            online and isinstance(self.clock.currentData(), tuple)
+            and self.clock.currentData()[0] == "custom")
         labels = {
             "local": "Начать свободную доску", "ai": "Играть против Lichess AI",
             "friend": "Создать приглашение", "challenge": "Вызвать соперника",
@@ -121,9 +152,26 @@ class PlayPage(QWidget):
         self.start_button.setText(labels.get(mode, "Начать"))
 
     def _emit_create(self) -> None:
-        limit, increment = self.clock.currentData()
+        mode = str(self.mode_selector.currentData() or "local")
+        if self._request_pending:
+            return
+        clock = self.clock.currentData()
+        if isinstance(clock, tuple) and clock[0] == "custom":
+            limit = int(self.custom_minutes.value()) * 60
+            increment = int(self.custom_increment.value())
+        else:
+            limit, increment = clock
+        online = mode in {"ai", "friend", "challenge"}
+        if online and limit is not None and (int(limit) <= 0 or int(limit) > 10_800):
+            self.set_status("Проверьте контроль: начальное время должно быть от 1 секунды до 3 часов.")
+            return
+        if online and not 0 <= int(increment or 0) <= 180:
+            self.set_status("Инкремент должен быть от 0 до 180 секунд.")
+            return
+        if online:
+            self.set_request_pending(True)
         self.create_requested.emit({
-            "mode": self.mode_selector.currentData(),
+            "mode": mode,
             "color": self.color.currentData(), "clock_limit": limit,
             "clock_increment": increment, "level": int(self.level.currentData()),
             "rated": self.rated.isChecked(), "username": self.username.text().strip(),
@@ -131,6 +179,13 @@ class PlayPage(QWidget):
 
     def set_status(self, text: str) -> None:
         self.form_status.setText(str(text))
+        pending = str(text).startswith(("Создаём", "Отправляем"))
+        if not pending:
+            self.set_request_pending(False)
+
+    def set_request_pending(self, pending: bool) -> None:
+        self._request_pending = bool(pending)
+        self.start_button.setEnabled(not self._request_pending)
 
     def layout_modes(self, available_width: int) -> None:
         columns = 1 if int(available_width) < 1100 else 2

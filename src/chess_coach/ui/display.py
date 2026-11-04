@@ -8,7 +8,7 @@ from typing import Any
 
 
 def format_game_date(value: Any, *, precision: str | None = None) -> str:
-    """Format exact timestamps in local time; preserve date-only precision."""
+    """Format only provenance-confirmed timestamps; never infer time from legacy rows."""
     if value is None or value == "":
         return "Дата неизвестна"
     if precision == "date_only":
@@ -33,6 +33,8 @@ def format_game_date(value: Any, *, precision: str | None = None) -> str:
             return datetime.fromisoformat(raw).strftime("%d.%m.%Y")
         except ValueError:
             return "Дата неизвестна"
+    if precision != "timestamp":
+        return "Время неизвестно"
     try:
         parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
         if parsed.tzinfo is None:
