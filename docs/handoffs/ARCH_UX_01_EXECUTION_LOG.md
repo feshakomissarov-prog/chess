@@ -60,6 +60,12 @@ Each stage will be appended here with commit SHA, changed responsibilities, focu
 - The mask is applied to the actual visible metric/card labels, not only the source model. Official Lichess accuracy and non-analytic game metadata remain visible. Existing review-space safety policy remains the single authority; this is a display projection, not a second permission mechanism.
 - Qt regression verifies visible Home labels/card fields under pending/denied-equivalent state and after a human active session, then checks local display restoration only after the test explicitly removes the session in a synthetic fixture. Relevant Fair Play/review/external/library checks: **6 passed**; compileall PASS.
 
+## A3 — embedded game creation form (implemented, pending full regression)
+
+- `PlayPage` now presents one in-shell form for free board, built-in Lichess AI (levels 1–8), friend invite, username challenge, and resume active games. Color, clock, username, level, and rated controls appear only for relevant modes; AI is always casual. Values are submitted as a typed dictionary to the shell; the page itself does not call HTTP or mutate sessions.
+- The shell routes requests through the existing Lichess service façade, keeps duplicate-submit protection, stores existing AI preferences, and displays status in the form. Legacy internal mode buttons remain hidden compatibility hooks; they are not visible user routes.
+- Fake service Qt regression covers AI parameters, online gating/duplicate requests, and friend invite dispatch. Focused page/window tests: **2 passed**. Full regression still pending.
+
 ### Final coverage matrix — pending implementation
 
 | ID | Route / outcome | Verification |

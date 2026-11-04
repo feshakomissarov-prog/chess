@@ -3174,6 +3174,37 @@ def test_library_sqlite_query_runs_off_ui_thread_and_ignores_stale_navigation(
     window.close()
 
 
+def test_embedded_play_form_uses_existing_lichess_facade_and_prevents_duplicate_requests(
+    qtbot, tmp_path, monkeypatch
+):
+    window = MainWindow(QSettings(str(tmp_path / "play-form.ini"),
+                                  QSettings.Format.IniFormat))
+    qtbot.addWidget(window)
+    calls = []
+    monkeypatch.setattr(window, "_online_actions_allowed", lambda: True)
+    monkeypatch.setattr(window.lichess, "create_ai_game", lambda *args: calls.append(("ai", args)))
+    monkeypatch.setattr(window.lichess, "open_friend_game", lambda *args: calls.append(("friend", args)))
+    window.show_play()
+    window._play_mode_page.mode_selector.setCurrentIndex(
+        window._play_mode_page.mode_selector.findData("ai"))
+
+    window._create_play_request({"mode": "ai", "color": "black", "clock_limit": 300,
+                                 "clock_increment": 0, "level": 6, "rated": True})
+    assert calls == [("ai", (6, "black", 300, 0))]
+    assert window._play_mode_page.rated.isHidden()
+    window._play_mode_page.mode_selector.setCurrentIndex(
+        window._play_mode_page.mode_selector.findData("friend"))
+    window._create_play_request({"mode": "friend", "color": "white", "clock_limit": 180,
+                                 "clock_increment": 2, "rated": False})
+    assert len(calls) == 1
+    window._challenge_status("Вызов отменён", False)
+    window._create_play_request({"mode": "friend", "color": "white", "clock_limit": 180,
+                                 "clock_increment": 2, "rated": False})
+    assert calls[-1] == ("friend", ("white", 180, 2, False))
+    assert not window._play_mode_page.rated.isHidden()
+    window.close()
+
+
 def test_ai_dialog_has_russian_controls_and_all_eight_visible_levels(qtbot):
     dialog = OnlineGameDialog("Играть против Lichess AI", include_level=True,
                               defaults={"color": "black", "clock_limit": 600,

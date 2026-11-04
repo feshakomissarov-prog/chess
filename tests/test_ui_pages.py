@@ -21,6 +21,15 @@ def test_play_page_keeps_each_action_connected_and_reflows_cards(qtbot):
     page.layout_modes(1280)
     assert page.grid.getItemPosition(0) == (0, 0, 1, 1)
     assert page.grid.getItemPosition(1) == (0, 1, 1, 1)
+    assert not page.start_button.isHidden()
+    requests = []
+    page.create_requested.connect(requests.append)
+    page.mode_selector.setCurrentIndex(page.mode_selector.findData("ai"))
+    page.level.setCurrentIndex(page.level.findData(6))
+    page.start_button.click()
+    assert requests[-1]["mode"] == "ai"
+    assert requests[-1]["level"] == 6
+    assert page.mode_selector.findData("friend") >= 0
 
 
 def test_result_page_exposes_four_explicit_completion_actions(qtbot):

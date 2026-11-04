@@ -1404,6 +1404,7 @@ class MainWindow(QMainWindow):
             "challenge": self.challenge_username,
             "active": self.show_active_games,
         })
+        page.create_requested.connect(self._create_play_request)
         self._play_mode_page = page
         self._play_mode_columns = page._columns
         self.play_local_button = page.buttons["local"]
@@ -1424,6 +1425,45 @@ class MainWindow(QMainWindow):
         self.screen_title.setText("Играть")
         self.screen_stack.setCurrentWidget(self.play_page)
         self._update_play_mode_availability()
+
+    def _create_play_request(self, options: dict) -> None:
+        """Execute the embedded Play form through the existing Lichess façade."""
+        mode = str(options.get("mode") or "local")
+        if mode == "local":
+            self.start_local_game()
+            return
+        if mode == "active":
+            self.show_active_games()
+            return
+        if not self._online_actions_allowed() or self._awaiting_game_start:
+            self._play_mode_page.set_status(
+                "Подключитесь к Lichess и дождитесь готовности соединения; повторный запрос не отправлен.")
+            return
+        color = options.get("color") or "random"
+        limit = options.get("clock_limit")
+        increment = max(0, int(options.get("clock_increment") or 0))
+        rated = bool(options.get("rated"))
+        if mode == "ai":
+            level = max(1, min(8, int(options.get("level") or 1)))
+            self.settings.setValue("workspace/ai_color", color)
+            self.settings.setValue("workspace/ai_clock_limit", -1 if limit is None else int(limit))
+            self.settings.setValue("workspace/ai_clock_increment", increment)
+            self.settings.setValue("workspace/ai_level", level)
+            self._awaiting_game_start = True
+            self._play_mode_page.set_status("Создаём нерейтинговую партию против Lichess AI…")
+            self.lichess.create_ai_game(level, color, limit, increment)
+        elif mode == "friend":
+            self._awaiting_game_start = True
+            self._play_mode_page.set_status("Создаём ссылку-приглашение…")
+            self.lichess.open_friend_game(color, limit, increment, rated)
+        elif mode == "challenge":
+            username = str(options.get("username") or "").strip()
+            if not username:
+                self._play_mode_page.set_status("Введите имя пользователя Lichess.")
+                return
+            self._awaiting_game_start = True
+            self._play_mode_page.set_status(f"Отправляем вызов игроку {username}…")
+            self.lichess.challenge_username(username, color, limit, increment, rated)
 
     def show_analysis(self) -> None:
         """Show analysis entry points without starting an engine or network job."""
@@ -4315,7 +4355,9 @@ class MainWindow(QMainWindow):
         url = result.get("friendUrl")
         if not url:
             self.game_status.setText("Вызов отправлен; ждём ответ Lichess…")
+            self._play_mode_page.set_status("Вызов отправлен; ждём ответа соперника и сервера.")
             return
+        self._play_mode_page.set_status("Приглашение создано. Скопируйте ссылку и отправьте другу.")
         self._open_challenge_id = result.get("id")
         active_game = self.online_session and self.online_session.status in {"started", "playing"}
         self.cancel_invitation_button.setEnabled(bool(self._open_challenge_id) and not active_game)
@@ -4343,6 +4385,8 @@ class MainWindow(QMainWindow):
         if not can_cancel and any(word in message.casefold() for word in ("отклонил", "отменён", "отменено", "завершено")):
             self._awaiting_game_start = False
         self.game_status.setText(message)
+        if hasattr(self, "_play_mode_page"):
+            self._play_mode_page.set_status(message)
         self.cancel_challenge_button.setEnabled(can_cancel)
         self.cancel_challenge_button.setVisible(can_cancel)
 
