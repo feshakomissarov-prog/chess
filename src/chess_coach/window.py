@@ -1080,6 +1080,7 @@ class MainWindow(QMainWindow):
         self._set_sidebar_collapsed(self.width() < 1160)
         self._apply_header_responsive()
         self._set_active_route("home")
+        self._update_play_mode_availability()
 
     def _board_size_changed(self, _index: int) -> None:
         if not hasattr(self, "board_size_combo"):
@@ -1414,6 +1415,7 @@ class MainWindow(QMainWindow):
             "home_status", "dashboard_account", "dashboard_clock", "dashboard_metrics",
             "dashboard_metrics_grid", "_dashboard_metric_values", "_dashboard_metric_details",
             "home_recent_card", "_recent_games_layout", "home_primary_actions",
+            "home_activity_button", "activity_status",
             "home_play_card", "home_ai_button", "home_local_button", "resume_game_button",
             "home_review_button", "resume_review_button", "home_friend_button",
             "home_username_button", "active_games_button", "home_games_button",

@@ -76,6 +76,12 @@ Each stage will be appended here with commit SHA, changed responsibilities, focu
 - The mask is applied to the actual visible metric/card labels, not only the source model. Official Lichess accuracy and non-analytic game metadata remain visible. Existing review-space safety policy remains the single authority; this is a display projection, not a second permission mechanism.
 - Qt regression verifies visible Home labels/card fields under pending/denied-equivalent state and after a human active session, then checks local display restoration only after the test explicitly removes the session in a synthetic fixture. Relevant Fair Play/review/external/library checks: **6 passed**; compileall PASS.
 
+### A2 — dashboard hierarchy checkpoint
+
+- The visible home content now uses the approved progress/next-activity/recent-games hierarchy. The activity card states that a personalized recommendation needs sufficient evidence and links to the existing saved puzzle history; it does not fabricate a recommended lesson. Three recent completed game cards remain clickable. Global play, games, analysis, learning, progress and settings entry points remain in the shell sidebar.
+- Removed the visible “Другие разделы и синхронизация” drawer and its duplicate navigation/pilot actions. Legacy callback objects remain hidden compatibility hooks only; the primary routes are the six sidebar destinations and the dedicated pages. Free play and AI controls are available in the embedded Play page.
+- Home has no page-level QScrollArea. At 1360×860, the Qt regression checks the two-column content, three synthetic recent cards and visible activity CTA; offline connection gating is checked against the Play page. Focused home/navigation tests: **13 passed**; compileall/diff check PASS. Physical 1280×720 and DPI verification remains in A11/manual review.
+
 ## A3 — embedded game creation form (implemented, pending full regression)
 
 - `PlayPage` now presents one in-shell form for free board, built-in Lichess AI (levels 1–8), friend invite, username challenge, and resume active games. Color, clock, username, level, and rated controls appear only for relevant modes; AI is always casual. Values are submitted as a typed dictionary to the shell; the page itself does not call HTTP or mutate sessions.

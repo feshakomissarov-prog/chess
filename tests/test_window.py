@@ -1474,9 +1474,9 @@ def test_explicit_offline_window_never_constructs_or_uses_lichess_credentials(qt
     assert window.lichess is None
     assert "Офлайн-режим" in window.connection.text()
     assert not window.connect_button.isEnabled()
-    assert not window.home_ai_button.isHidden()
-    assert not window.home_ai_button.isEnabled()
-    assert "Подключите Lichess" in window.home_ai_button.toolTip()
+    assert window.home_ai_button.isHidden()
+    assert not window.play_ai_button.isEnabled()
+    assert "Подключите Lichess" in window.play_ai_button.toolTip()
     offline_dir = Path(window.game_repository.path).parent
     assert offline_dir.name.startswith("chess-coach-offline-")
     assert window.settings is not live_settings
@@ -2750,7 +2750,7 @@ def test_home_game_result_review_home_and_new_game_flow(qtbot, tmp_path):
     window.show_home()
     assert window.screen_stack.currentWidget() is window.home_page
     assert window.online_session is session and session.status == "started"
-    assert window.resume_game_button.isVisible()
+    assert window.return_to_game_button.isVisible()
     window.resume_current_game()
     assert window.screen_stack.currentWidget() is window.game_page
     window._lichess_event({"type": "gameFinish", "game": {
@@ -2920,39 +2920,30 @@ def test_game_finished_while_home_updates_resume_action_without_switching_screen
                          "state": {"moves": "e2e4", "status": "started"}})
     select_online(window, session)
     window.show_home()
-    assert window.resume_game_button.isVisible()
+    assert window.return_to_game_button.isVisible()
     window._lichess_event({"type": "gameFinish", "game": {
         "gameId": session.game_id, "status": {"name": "resign"}, "winner": "black"
     }})
     assert window.screen_stack.currentWidget() is window.home_page
     assert window._screen_mode == "home"
     assert session.status == "resign"
-    assert not window.resume_game_button.isVisible()
+    assert not window.return_to_game_button.isVisible()
 
 
-def test_m46_home_has_play_review_context_and_collapsed_secondary_actions(qtbot, tmp_path):
+def test_m46_home_has_progress_activity_and_no_legacy_action_drawer(qtbot, tmp_path):
     window = MainWindow(QSettings(str(tmp_path / "home-primary.ini"), QSettings.Format.IniFormat))
     qtbot.addWidget(window)
-    assert window.home_ai_button.text() == "Играть против Lichess AI"
-    assert window.home_local_button.text() == "Свободная доска"
-    assert window.home_review_button.text() == "Выбрать партию"
-    assert window.resume_review_button.text() == "Продолжить последний разбор"
-    assert window.home_more_toggle.isCheckable()
-    assert not window.home_more_toggle.isChecked()
-    assert window.home_more_content.isHidden()
+    assert window.home_ai_button.isHidden()
+    assert window.home_local_button.isHidden()
+    assert window.home_activity_button.text() == "Открыть историю задач"
+    assert not window.home_activity_button.isHidden()
     assert {"games", "accuracy", "analysis", "errors"} == set(window.dashboard_metrics)
     assert window.dashboard_account.count() >= 1
     assert window.dashboard_clock.count() >= 1
     assert window.home_friend_button.parentWidget() is not None
-    assert window.home_ai_button.parentWidget() is not None
-    assert window.home_review_button.parentWidget() is window.home_play_card
-    assert window.resume_review_button.parentWidget() is window.home_play_card
-    assert window.home_review_button not in window.home_more_content.findChildren(QPushButton)
-    assert window.resume_review_button not in window.home_more_content.findChildren(QPushButton)
-    assert not window.home_review_button.isHidden()
-    assert window.home_batch_analysis_button.parentWidget() is window.home_more_content
-    window.home_more_toggle.setChecked(True)
-    assert not window.home_more_content.isHidden()
+    assert window.home_activity_button.parentWidget() is window.home_play_card
+    assert window.home_review_button.isHidden()
+    assert window.home_batch_analysis_button.parentWidget() is not window.home_page
     assert window.home_batch_analysis_button.isEnabled()
     window.game_repository.shutdown()
 
@@ -2967,7 +2958,7 @@ def test_home_has_two_columns_and_three_recent_game_cards(qtbot, tmp_path):
     qtbot.waitUntil(lambda: window._dashboard_thread is None, timeout=3000)
     assert window.home_primary_actions.itemAt(0).widget() is window.home_play_card
     assert window.home_primary_actions.itemAt(1).widget() is window.home_recent_card
-    assert window.home_friend_button in window.home_more.findChildren(QPushButton)
+    assert window.home_friend_button.isHidden()
     games = [{
         "game_id": f"synthetic-{index}", "status": "mate", "winner": "white",
         "color": "white", "opponent": f"Opponent {index}",
@@ -2988,9 +2979,8 @@ def test_home_has_two_columns_and_three_recent_game_cards(qtbot, tmp_path):
     window.setFixedSize(1360, 860)
     window.show()
     qtbot.wait(20)
-    assert window.home_review_button.isVisible()
-    assert window.home_review_button.parentWidget() is window.home_play_card
-    assert window.home_review_button.geometry().bottom() <= window.home_play_card.rect().bottom()
+    assert window.home_activity_button.isVisible()
+    assert window.home_activity_button.parentWidget() is window.home_play_card
     assert not isinstance(window.home_page, QScrollArea)
     assert not hasattr(window._home_view, "home_pilot_import_button")
     assert not hasattr(window._home_view, "home_puzzles_pilot_button")

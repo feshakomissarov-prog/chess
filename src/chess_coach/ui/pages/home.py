@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
-    QComboBox, QFrame, QGridLayout, QGroupBox, QHBoxLayout, QLabel, QPushButton,
+    QComboBox, QFrame, QGridLayout, QHBoxLayout, QLabel, QPushButton,
     QVBoxLayout, QWidget,
 )
 from ..dashboard import dashboard_options
@@ -24,7 +24,7 @@ class HomePage(QWidget):
             "Начните локальную партию или подключите Lichess. Сводка и последние партии — ниже.")
         self.home_status.setWordWrap(True)
         self.home_status.setObjectName("secondary")
-        self.home_status.setVisible(False)
+        self.home_status.setMaximumHeight(42)
         layout.addWidget(self.home_status)
         scope_row = QHBoxLayout()
         self.dashboard_account = QComboBox()
@@ -100,48 +100,33 @@ class HomePage(QWidget):
         recent_layout.addLayout(self._recent_games_layout, 1)
         primary_actions = QHBoxLayout()
         self.home_primary_actions = primary_actions
-        play_card = QFrame()
-        self.home_play_card = play_card
-        play_card.setObjectName("metricCard")
-        play_card.setMaximumHeight(230)
-        play_layout = QVBoxLayout(play_card)
-        play_layout.setContentsMargins(12, 10, 12, 10)
-        play_layout.setSpacing(7)
-        play_title = QLabel("Играть")
-        play_title.setStyleSheet("font-size: 20px; font-weight: 700;")
-        play_layout.addWidget(play_title)
-        play_hint = QLabel("Локальная доска или нерейтинговая партия Lichess AI")
-        play_hint.setObjectName("secondary")
-        play_hint.setWordWrap(True)
-        play_layout.addWidget(play_hint)
-        play_buttons = QVBoxLayout()
-        self.home_ai_button = QPushButton("Играть против Lichess AI")
-        self.home_ai_button.setObjectName("primaryAction")
-        self.home_ai_button.clicked.connect(actions["play_ai"])
-        self.home_local_button = QPushButton("Свободная доска")
-        self.home_local_button.clicked.connect(actions["start_local_game"])
-        self.resume_game_button = QPushButton("Вернуться в текущую партию")
-        self.resume_game_button.clicked.connect(actions["resume_current_game"])
-        self.resume_game_button.setVisible(False)
-        play_buttons.addWidget(self.home_ai_button)
-        play_buttons.addWidget(self.home_local_button)
-        play_buttons.addWidget(self.resume_game_button)
-        play_layout.addLayout(play_buttons)
-        primary_actions.addWidget(play_card, 0, Qt.AlignmentFlag.AlignTop)
-        primary_actions.addWidget(recent_card, 3)
-        review_buttons = QHBoxLayout()
-        self.home_review_button = QPushButton("Выбрать партию")
-        self.home_review_button.clicked.connect(actions["show_saved_games"])
-        review_buttons.addWidget(self.home_review_button)
-        self.resume_review_button = QPushButton("Продолжить последний разбор")
-        self.resume_review_button.setObjectName("primaryAction")
-        self.resume_review_button.setAccessibleName("Продолжить разбор последней партии")
-        self.resume_review_button.clicked.connect(actions["resume_saved_review"])
-        self.resume_review_button.setVisible(False)
-        review_buttons.addWidget(self.resume_review_button)
-        play_layout.addLayout(review_buttons)
-        layout.addLayout(primary_actions)
+        activity_card = QFrame()
+        self.home_play_card = activity_card
+        activity_card.setObjectName("metricCard")
+        activity_card.setMaximumHeight(230)
+        activity_layout = QVBoxLayout(activity_card)
+        activity_layout.setContentsMargins(12, 10, 12, 10)
+        activity_layout.setSpacing(8)
+        activity_title = QLabel("Следующее занятие")
+        activity_title.setStyleSheet("font-size: 18px; font-weight: 700;")
+        activity_layout.addWidget(activity_title)
+        self.activity_status = QLabel(
+            "Персональная рекомендация появится при наличии достаточных подтверждённых данных. "
+            "Сохранённая история задач доступна для повторения.")
+        self.activity_status.setObjectName("secondary")
+        self.activity_status.setWordWrap(True)
+        activity_layout.addWidget(self.activity_status, 1)
+        self.home_activity_button = QPushButton("Открыть историю задач")
+        self.home_activity_button.setObjectName("primaryAction")
+        self.home_activity_button.clicked.connect(actions["open_puzzle_history_local"])
+        activity_layout.addWidget(self.home_activity_button)
+        primary_actions.addWidget(activity_card, 1, Qt.AlignmentFlag.AlignTop)
+        primary_actions.addWidget(recent_card, 2)
+        layout.addLayout(primary_actions, 1)
 
+        # Keep legacy action objects as non-visible compatibility hooks for
+        # existing shell callbacks. Their user-facing routes live in the
+        # sidebar and dedicated pages.
         self.home_friend_button = QPushButton("Играть с другом по ссылке")
         self.home_friend_button.clicked.connect(actions["open_friend_game"])
         self.home_username_button = QPushButton("Вызвать игрока Lichess")
@@ -166,36 +151,32 @@ class HomePage(QWidget):
         self.home_puzzles_button.setEnabled(True)
         self.home_settings_button = QPushButton("Настройки")
         self.home_settings_button.clicked.connect(actions["open_settings"])
-        self.home_more_toggle = QPushButton("Другие разделы и синхронизация  ▸")
-        self.home_more_toggle.setCheckable(True)
-        self.home_more_toggle.setAccessibleName("Показать другие разделы и синхронизацию")
-        layout.addWidget(self.home_more_toggle)
-        self.home_more = QGroupBox("Дополнительные разделы и синхронизация")
-        more_layout = QVBoxLayout(self.home_more)
-        for button in (self.home_friend_button, self.home_username_button,
-                       self.active_games_button,
-                       self.home_games_button, self.home_stats_button,
-                       self.home_batch_analysis_button, self.home_puzzles_button,
-                       self.home_settings_button, self.home_archive_status_button,
-                       self.home_archive_button):
-            more_layout.addWidget(button)
-        more_layout_widget = QWidget()
-        more_content = QVBoxLayout(more_layout_widget)
-        more_content.setContentsMargins(0, 0, 0, 0)
-        for index in range(more_layout.count()):
-            item = more_layout.takeAt(0)
-            if item.widget():
-                more_content.addWidget(item.widget())
-        self.home_more_content = more_layout_widget
-        more_layout_widget.setVisible(False)
-        more_layout.addWidget(more_layout_widget)
-        self.home_more.setVisible(False)
-        self.home_more_toggle.toggled.connect(self.home_more.setVisible)
-        self.home_more_toggle.toggled.connect(more_layout_widget.setVisible)
-        self.home_more_toggle.toggled.connect(lambda checked: self.home_more_toggle.setText(
-            "Другие разделы и синхронизация  ▾" if checked else
-            "Другие разделы и синхронизация  ▸"))
-        layout.addWidget(self.home_more)
+        self.home_ai_button = QPushButton("Играть против Lichess AI")
+        self.home_ai_button.clicked.connect(actions["play_ai"])
+        self.home_local_button = QPushButton("Свободная доска")
+        self.home_local_button.clicked.connect(actions["start_local_game"])
+        self.resume_game_button = QPushButton("Вернуться в текущую партию")
+        self.resume_game_button.clicked.connect(actions["resume_current_game"])
+        self.home_review_button = QPushButton("Выбрать партию")
+        self.home_review_button.clicked.connect(actions["show_saved_games"])
+        self.resume_review_button = QPushButton("Продолжить последний разбор")
+        self.resume_review_button.clicked.connect(actions["resume_saved_review"])
+        self.home_more_toggle = QPushButton("Другие разделы")
+        self.home_more_content = QWidget()
+        self.home_more = QWidget()
+        self._legacy_action_host = QWidget(self)
+        self._legacy_action_host.hide()
+        for widget in (self.home_friend_button, self.home_username_button,
+                       self.active_games_button, self.home_games_button,
+                       self.home_archive_status_button, self.home_archive_button,
+                       self.home_stats_button, self.home_batch_analysis_button,
+                       self.home_puzzles_button, self.home_settings_button,
+                       self.home_ai_button, self.home_local_button,
+                       self.resume_game_button, self.home_review_button,
+                       self.resume_review_button, self.home_more_toggle,
+                       self.home_more_content, self.home_more):
+            widget.setParent(self._legacy_action_host)
+            widget.hide()
         layout.addStretch(1)
 
     def layout_metrics(self, width: int | None = None) -> None:
