@@ -232,3 +232,11 @@ The 24 COV routes and test evidence are listed immediately above. Every automate
 - Home cards display the completion/last-move time used for ordering. Library rows and detail/review headers show that activity time and, when known, the separate start time. Date-only and unknown values stay date-only/unknown; neither `updated_at` nor PGN Date is promoted to a fabricated clock time.
 - Added real-SQLite chronology regressions for a game started yesterday and finished today, a newer active game, date-only and unknown rows, pagination/search filters, Home's last-three list, and a later Stockfish metadata write that must not reorder the game. Formatting checks verify local timezone display and no invented `03:00` value.
 - Targeted display/dashboard/library/archive-row Qt regressions: **20 passed**. Full suite and exact-head Windows CI remain pending.
+
+## REVIEW-FIX-02 — финальная локальная проверка
+
+- Полный `QT_QPA_PLATFORM=offscreen .venv312/Scripts/python.exe -m pytest -q`: **666 passed** на Python 3.12.10.
+- `.venv312/Scripts/python.exe -m compileall -q src tests scripts`: PASS.
+- `git diff --check`: PASS.
+- Проверка проводилась на временных SQLite и fake API/fixtures. Живой Lichess/OAuth/PAT, Stockfish и личные данные не использовались. Физическая GUI-проверка владельца ещё не выполнена.
+- Следующий шаг: push текущей ветки и полный hosted Windows CI на точном итоговом SHA; PR #44 остаётся draft и не мержится.
