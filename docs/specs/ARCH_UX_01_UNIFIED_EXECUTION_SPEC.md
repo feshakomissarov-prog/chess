@@ -100,6 +100,21 @@
 
 Каждый async результат обязан содержать **применимые** account/generation/operation/game/revision контексты; для общей задачи без game_id нужны account+generation+operation ID, а не фиктивный game_id. При logout, reconnect, смене аккаунта/маршрута, отмене, закрытии приложения — stale callback не должен менять выбранную игру, UI, БД, допуск анализа или запускать Stockfish. **Смена только маршрута** отменяет устаревшее UI read/presentation, но не нужные серверные сессии, архив или durable job; смена account/auth отменяет соответствующие privileged jobs и leases. Jobs могут жить дольше страницы; закрытие приложения завершает workers. Все callbacks от worker доставлять в Qt main thread через queued signals с проверкой lifetime QObject и generation.
 
+### 2.5. Проверяемое соответствие архитектуры и экранов без дублирования
+
+| Экран / действие | Авторитетное состояние / владелец | Доступ к данным и частота | Запрещённый анти-паттерн |
+| --- | --- | --- | --- |
+| Shell, header, Back, route | `WorkspaceStateStore` + root navigator; selected account/game из `GameSessionCoordinator` | Lazy page creation, навигационный snapshot, восстановление фильтров; **нет HTTP при открытии страницы** | Второй router/selected game и service instance на каждую вкладку |
+| Live game, часы, premove, finish | `GameSessionCoordinator`, Lichess authoritative stream; запись через GameRepository/UnitOfWork | **Одна BoardView**, UI слушает выбранную сессию; clock tick отделён от сети; final_sync не зависит от ResultPage | Повторный stream при возврате, локально подтверждённый онлайн-ход, потеря финальной записи |
+| Главная | `DashboardQueryCoordinator`, bounded account-scoped read models | 3 последние **завершённые** партии и небольшой тренд, отмена stale запросов по account/filter/revision | Full PGN parse/новая DB connection на каждую перерисовку |
+| Мои партии / детали | Существующие thematic stores за GameRepository facade; при необходимости library/detail coordinator | Model/view+pagination/virtualization, debounce фильтров, read-only graph projection по game/revision | Тысячи QWidget, ещё один SQLite file, второй алгоритм CP↔mate |
+| Анализ / review | `EngineAnalysisCoordinator` + единая `application.fair_play`; данные из analysis stores | Общий ReviewGraph/AdvantageBar, явное engine request и source-backed read model | Auto-Stockfish на открытие, cached score до preflight, собственный engine manager |
+| Прогресс | Существующие Statistics/metrics queries, account-scoped source coverage | Lazy tab/query; агрегаты, drill-down в тот же Review | Новый metrics store, выдуманное mastery или смешение L/S accuracy |
+| Обучение → Задачи | Существующие puzzle store/service, puzzle replay и training ошибок | Встроенная оболочка действующей истории попыток/повторения | Второй solver или обещание выдачи любых новых задач |
+| Фоновые операции / Настройки | `BackgroundWorkCoordinator` + штатные durable sync/batch; прежние QSettings | Один inspector, throttled/coalesced Qt status events; user intent запускает операции | Общая блокирующая очередь, новые фоновые jobs при смене route, токены в QSettings |
+
+**Проверка связности и отзывчивости:** UI → application intents/read models → infrastructure, никаких новых UI SQL/HTTP/UCI. Допустимые старые Qt façade-зависимости документировать, постепенно вытеснять на новых путях, не делать бесполезных wrapper-слоёв и десятков пустых DTO. Пагинация должна оставаться account-scoped, индексы/кеш не перестраивать без доказанной необходимости; инвалидация при смене account, game line_revision/hash и обновлении источника анализа. Нужны coalescing/debounce повторных refresh, bounded query/windowing, cancellation, контроль жизни QObject и queued Qt signals: в workers нет живых QWidget/SQLite.Row/connection. **Нельзя запускать новую долговременную операцию из конструктора страницы**. Не вводить обязательные FPS/p95/RAM/SLA, но замеченные зависания и конфликтные resource lanes исправить с воспроизводимым тестом.
+
 ## 3. Неприкосновенные cross-cutting контракты
 
 ### 3.1. Fair Play — P0, никаких компромиссов
@@ -219,18 +234,18 @@ Landing: 3 большие карточки: «Разбор партии / PGN»,
 
 | Этап | Работа | Минимальный gate |
 | --- | --- | --- |
-| **A0** | Проверить PR #44/#45 HEAD, git status; зафиксировать baseline exact SHA, CI, 604 прежних теста как ориентир, а не предположение. Перенести согласованные UX документы из PR #45 без merge, добавить ТЗ/журнал; кратко описать архитектурные границы и diff-to-goals | До изменения — full tests, compileall, diff check, isolated offline Qt init; без реальных данных |
+| **A0** | Проверить PR #44/#45 HEAD, git status; зафиксировать baseline exact SHA, CI, 604 прежних теста как ориентир, а не предположение. Выборочно перенести **эту v1.1** спецификацию, UX и актуальные AGENTS/PRD/PCD/ROADMAP/PROJECT_STATUS из PR #45 без неконтролируемого merge, добавить журнал; описать архитектурные границы, отложенные фичи и diff-to-goals | До изменения — full tests, compileall, diff check, isolated offline Qt init; без реальных данных |
 | **A1** | Уточнить runtime composition, typed route/back stack, page lifecycle, активные sessions и safety masking; shell/sidebar/header, без нового service locator | Offline/manual credentials/network 0, nav не создаёт workers, session сохраняется |
 | **A2** | Новая Главная/четыре зоны и сохранение state/фильтров, source-backed read models, три карточки | No global scroll, корректное n/N и masked home, stale jobs не рисуются |
 | **A3** | Встроенная «Играть» + состояния создания AI/friend/user/free board, cancel challenge | UI events и fake Lichess; no duplicate challenge; без premove-training UI |
 | **A4** | Игровая правая панель и состояния takeback/draw/resign/accept/claim, clock/no-clock, обычный premove, несколько live sessions | Visible controls, phase state matrix, deterministic server authority/reconnect/clock/fairplay tests |
-| **A5** | Окончание игры без ResultPage, тот же board/часы/ходы, «Разобрать» / «Вызвать снова», safe challenge | Same board instance, no auto Stockfish, no auto challenge, no overlay/modal |
+| **A5** | Окончание игры без ResultPage **при сохранении final_sync/pending-write/error-recovery жизненного цикла**, тот же board/часы/ходы, «Разобрать» / «Вызвать снова», safe challenge | Same board instance, подтверждённая запись финальной линии, bounded retry без бесконечного poll, no auto Stockfish, no auto challenge, no overlay/modal |
 | **A6** | «Мои партии» 3 зоны, pinned active, virtualized completed, filters/restoration, подробности с mini score graph, заметка+PGN, recovery-only single refresh | Sparse/mate/missing/unsafe graph tests, thousands synthetic rows, no UI blocking |
 | **A7** | «Анализ» landing, единый PGN/FEN/board review, saved ReviewGraph CP/Δ + AdvantageBar, batch control; честная дебютная точка входа | Same review source/graphs, source coverage, ephemeral PGN not imported, no on-open engine |
 | **A8** | «Прогресс» из existing StatisticsDialog, критические моменты/фазы/фильтры; «Обучение» как тонкий вход в existing puzzle history/replay/error trainer | Без ложных новых учебных фич/метрик; existing puzzle tests и deep links |
 | **A9** | Глобальный background inspector, настройки и sound AS-IS, pilot buttons hidden, recovery paths | No new queues, 429 backoff, same settings/audio selections, no credential leakage |
-| **A10** | Довести UI/application boundaries, unload/destroy semantics, stale callbacks, Qt thread ownership, главные баги интеграции | AST/import/contract checks, no direct UI SQL/HTTP/engine, no regressions W0–W9 |
-| **A11** | Polish desktop и Windows DPI/mouse/focus/clock/game controls/nav/empty states, все 24 функции, ручной checklist | 1280×720/1366×768/1920×1080, icon/.cmd, no missing control, visual smoke |
+| **A10** | Довести UI/application boundaries и общее переиспользование read models, unload/destroy semantics, stale callbacks, Qt thread ownership, ресурсный shutdown, главные баги интеграции | AST/import/contract checks, no direct UI SQL/HTTP/engine, no regressions W0–W9 |
+| **A11** | Polish desktop и Windows DPI/mouse/focus/clock/game controls/nav/empty states, все 24 группы функций, bounded UI data loading и ручной checklist | 1280×720/1366×768/1920×1080, icon/.cmd, no missing control, visual smoke |
 | **A12** | Финальная проверка, diff audit, documentation/handoff, exact-head hosted Windows CI, независимое review, владелец физически проверяет; PR остаётся draft | Все автоматические проверки SUCCESS на exact code SHA, факт/ограничения записаны, **НЕ MERGE** |
 
 **Зависимости:** A4/A5 проходят безопасность до полировки; A6–A9 используют уже работающие domain services. Допускается переставить независимые A6–A9 для производительности, но нельзя сдавать финал с mock кнопками. Если UI / safety конфликт — прерывать опасное действие, не ослаблять guard.
@@ -248,7 +263,7 @@ Landing: 3 большие карточки: «Разбор партии / PGN»,
 9. Mate/resign/draw/timeout/abandon: finish только по authoritative, same board object and selected moves, freeze clocks, no ResultPage; две основные CTA, без banner/overlay/engine.
 10. Нажать «Вызвать снова» один/дважды, дождаться server response, incoming challenge с generation guard; без автоматического соглашения/нового game_id до подтверждения.
 11. Две разные оценки Lichess/Stockfish, sparse graph, mate=0, no data, partial n/N — Home/Details/Review/Progress согласованы; нет фальшивой official accuracy.
-12. Внешний PGN/FEN: только ephemeral study, исходный game/revision/PGN/личная статистика не мутируют; engine не запускается при открытии.
+12. Внешний PGN/FEN: parse/validate (некорректный PGN, несколько партий, FEN side-to-move/castling/en-passant), временный отдельный study без записи в личную БД, исходный game/revision/PGN/личная статистика не мутируют; engine не запускается при открытии. Редактор допускает анализ только валидной позиции; ходы исследовательской линии никогда не отправляются в текущую Lichess-партию.
 13. Archive/page switching во время backfill: действующий фоновый job не создаётся снова; pause/resume/Retry-After/лимиты/429 работают; live move не ждёт конечную NDJSON выгрузку.
 14. Разбор → «Разобрать мои ошибки» → повтор без подсказки → назад: законный verified move, source evidence, gate; никакого второго trainer logic.
 15. Задачи: фоновая история, повтор/сброс/показ ответа, account filter, нет ложной кнопки получения новых произвольных задач, нет pilot controls.
