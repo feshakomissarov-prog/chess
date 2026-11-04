@@ -183,6 +183,59 @@ def test_backfill_due_facets_are_independent_and_cooldown_is_preserved(tmp_path)
     repository.shutdown()
 
 
+def test_backfill_next_eligibility_tracks_due_queue_retry_after_and_daily_reset(tmp_path):
+    from datetime import datetime, timedelta, timezone
+
+    repository = GameRepository(tmp_path / "durable-next-eligibility.sqlite3")
+    game_id = _import_games(repository, 1)[0]
+    repository.enqueue_lichess_analysis_backfill("lichess:me")
+    now = datetime.now(timezone.utc)
+    due = repository.lichess_analysis_backfill_next_eligible_at("lichess:me")
+    assert due is not None and datetime.fromisoformat(due) <= now + timedelta(seconds=1)
+
+    retry_at = (now + timedelta(hours=3)).isoformat()
+    with repository._connection() as db:
+        db.execute("UPDATE lichess_analysis_backfill SET accuracy_status='no_server_data',"
+                   "accuracy_next_retry_at=?,evals_status='has_data',evals_next_retry_at=NULL "
+                   "WHERE account_id='lichess:me' AND game_id=?", (retry_at, game_id))
+    assert repository.lichess_analysis_backfill_next_eligible_at("lichess:me") == retry_at
+    repository.shutdown()
+
+    # Retry eligibility survives closing and reopening the real SQLite file.
+    repository = GameRepository(tmp_path / "durable-next-eligibility.sqlite3")
+    assert repository.lichess_analysis_backfill_next_eligible_at("lichess:me") == retry_at
+    repository.shutdown()
+
+
+def test_backfill_daily_limit_persists_midnight_wakeup_at_last_allowed_request(tmp_path):
+    from datetime import datetime, timezone
+
+    repository = GameRepository(tmp_path / "daily-wakeup.sqlite3")
+    _import_games(repository, 1)
+    repository.enqueue_lichess_analysis_backfill("lichess:me")
+    assert repository.reserve_lichess_analysis_request("lichess:me", daily_limit=1)
+    next_at = repository.lichess_analysis_backfill_next_eligible_at(
+        "lichess:me", daily_limit=1)
+    assert next_at is not None
+    next_dt = datetime.fromisoformat(next_at)
+    assert next_dt.hour == next_dt.minute == next_dt.second == 0
+    assert next_dt.date() > datetime.now(timezone.utc).date()
+    assert not repository.lichess_analysis_backfill_has_due_work(
+        "lichess:me", daily_limit=1)
+    assert repository.lichess_analysis_retry_after("lichess:me") == next_at
+    repository.shutdown()
+
+
+def test_backfill_scheduler_has_no_wakeup_for_empty_or_paused_queue(tmp_path):
+    repository = GameRepository(tmp_path / "empty-pause-wakeup.sqlite3")
+    assert repository.lichess_analysis_backfill_next_eligible_at("lichess:me") is None
+    _import_games(repository, 1)
+    repository.enqueue_lichess_analysis_backfill("lichess:me")
+    repository.set_lichess_analysis_backfill_paused("lichess:me", True)
+    assert repository.lichess_analysis_backfill_next_eligible_at("lichess:me") is None
+    repository.shutdown()
+
+
 def test_preexisting_partial_pgn_evaluations_still_get_metadata_backfill(tmp_path):
     repository = GameRepository(tmp_path / "partial-old.sqlite3")
     game_id = _import_games(repository, 1)[0]

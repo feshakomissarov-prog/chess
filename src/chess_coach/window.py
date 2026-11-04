@@ -428,6 +428,11 @@ class MainWindow(QMainWindow):
         self._lichess_connected = False
         self._event_stream_recovery_pending = False
         self._lichess_stream_ready_generation: int | None = None
+        self._backfill_wakeup_identity: tuple[int, str] | None = None
+        self._backfill_deferred_for_human_game = False
+        self._backfill_wakeup_timer = QTimer(self)
+        self._backfill_wakeup_timer.setSingleShot(True)
+        self._backfill_wakeup_timer.timeout.connect(self._lichess_backfill_wakeup)
         self._archive_progress_dialog: QProgressDialog | None = None
         self._puzzle_progress_dialog: QProgressDialog | None = None
         self._close_retry_scheduled = False
@@ -601,6 +606,7 @@ class MainWindow(QMainWindow):
         self.game_repository.set_lichess_analysis_backfill_paused(
             account_id, self.settings.value("lichess/ready_analytics_paused", False, type=bool))
         if not self.settings.value("lichess/auto_ready_analytics", True, type=bool):
+            self._cancel_lichess_backfill_wakeup()
             self.lichess_analysis_status.setText("Lichess · фоновая аналитика выключена")
             return
         if self.settings.value("lichess/ready_analytics_paused", False, type=bool):
@@ -608,14 +614,19 @@ class MainWindow(QMainWindow):
             return
         if any(session.status in {"started", "playing"} and not session.is_ai_opponent
                for session in self.online_sessions.values()):
+            self._backfill_deferred_for_human_game = True
             self.lichess_analysis_status.setText(
                 "Lichess · проверка отложена до завершения партии с человеком")
             return
+        self._backfill_deferred_for_human_game = False
         self.lichess_analysis_status.setText("Lichess · готовим дозагрузку готовых данных…")
-        QTimer.singleShot(1200, lambda: self._start_lichess_analysis_backfill(generation))
+        self._schedule_lichess_backfill_wakeup(
+            generation, username, (datetime.now(timezone.utc) + timedelta(milliseconds=1200)).isoformat(),
+            debounce_if_due=False)
 
     def _start_lichess_analysis_backfill(self, generation: int, *, manual: bool = False,
                                          force_retry: bool = False) -> None:
+        self._cancel_lichess_backfill_wakeup()
         if (self._shutdown_requested or self.offline_mode
                 or not self._current_lichess_generation(generation)
                 or self._lichess_stream_ready_generation != generation
@@ -643,13 +654,58 @@ class MainWindow(QMainWindow):
                     and str(self.lichess.username or "").casefold() == username.casefold())
 
     def _reset_backfill_status(self, text: str = "Lichess · нет текущей фоновой операции") -> None:
+        self._cancel_lichess_backfill_wakeup()
+        self._backfill_deferred_for_human_game = False
         self.lichess_analysis_status.setText(text)
         self.lichess_analysis_status.setToolTip("")
+
+    def _cancel_lichess_backfill_wakeup(self) -> None:
+        timer = getattr(self, "_backfill_wakeup_timer", None)
+        if timer is not None:
+            timer.stop()
+        self._backfill_wakeup_identity = None
+
+    def _schedule_lichess_backfill_wakeup(self, generation: int, username: str,
+                                          next_eligible_at: str | None, *,
+                                          debounce_if_due: bool = True) -> None:
+        self._cancel_lichess_backfill_wakeup()
+        if (not next_eligible_at or self._shutdown_requested or self.offline_mode
+                or not self._current_lichess_generation(generation)
+                or self._lichess_stream_ready_generation != generation
+                or not self._lichess_connected
+                or not self.settings.value("lichess/auto_ready_analytics", True, type=bool)
+                or self.settings.value("lichess/ready_analytics_paused", False, type=bool)
+                or any(session.status in {"started", "playing"} and not session.is_ai_opponent
+                       for session in self.online_sessions.values())):
+            return
+        try:
+            due_at = datetime.fromisoformat(str(next_eligible_at).replace("Z", "+00:00"))
+            if due_at.tzinfo is None:
+                return
+            delay_ms = int(max(0.0, (due_at - datetime.now(timezone.utc)).total_seconds()) * 1000)
+        except (TypeError, ValueError, OverflowError):
+            return
+        # A still-due batch is resumed after a quiet period. Durable retry and
+        # daily-limit timestamps retain their exact future deadline.
+        if debounce_if_due and delay_ms == 0:
+            delay_ms = 60_000
+        self._backfill_wakeup_identity = (generation, username.casefold())
+        self._backfill_wakeup_timer.start(min(delay_ms, 2_147_000_000))
+
+    def _lichess_backfill_wakeup(self) -> None:
+        identity, self._backfill_wakeup_identity = self._backfill_wakeup_identity, None
+        if identity is None:
+            return
+        generation, expected_username = identity
+        if (not self.lichess or str(self.lichess.username or "").casefold() != expected_username
+                or not self._current_lichess_generation(generation)):
+            return
+        self._start_lichess_analysis_backfill(generation)
 
     def _lichess_analysis_backfill_finished(self, generation: int, username: str,
                                             checked: int, total: int, accuracy: int,
                                             evals: int, no_data: int, errors: int,
-                                            state: str) -> None:
+                                            state: str, next_eligible_at: str | None = None) -> None:
         if not self._accept_backfill_status(generation, username):
             return
         self.lichess_analysis_status.setText(
@@ -660,13 +716,15 @@ class MainWindow(QMainWindow):
             "Локальные оценки Stockfish хранятся отдельно.")
         if not self._shutdown_requested and self._screen_mode == "home":
             self.refresh()
-        # Continue a full bounded page after a quiet delay. The next worker checks
-        # SQLite eligibility and the persistent 429/day budget before any request.
-        # A zero-result or limited batch never schedules another worker.
-        if (checked >= 10 and state == "проверка завершена"
-                and self.settings.value("lichess/auto_ready_analytics", True, type=bool)
-                and not self.settings.value("lichess/ready_analytics_paused", False, type=bool)):
-            QTimer.singleShot(60_000, lambda: self._start_lichess_analysis_backfill(generation))
+        if "человеческая/неизвестная активная партия" in state:
+            self._backfill_deferred_for_human_game = True
+            self._cancel_lichess_backfill_wakeup()
+            return
+        if any(marker in state for marker in ("приостановлено", "отключена", "HTTP 401", "HTTP 403")):
+            self._cancel_lichess_backfill_wakeup()
+            return
+        self._schedule_lichess_backfill_wakeup(
+            generation, username, next_eligible_at, debounce_if_due=True)
 
     def show_background_analytics(self) -> None:
         page = getattr(self, "_background_operations_page", None)
@@ -794,6 +852,7 @@ class MainWindow(QMainWindow):
         self.settings.setValue("lichess/ready_analytics_paused", bool(paused))
         self.game_repository.set_lichess_analysis_backfill_paused(account_id, paused)
         if paused and self.lichess:
+            self._cancel_lichess_backfill_wakeup()
             self.lichess.cancel_lichess_analysis_backfill()
             self.lichess_analysis_status.setText("Lichess · фоновая аналитика приостановлена")
         elif self.lichess and self._lichess_stream_ready_generation == self.lichess.auth_generation:
@@ -3982,9 +4041,11 @@ class MainWindow(QMainWindow):
             paused = self.settings.value("lichess/ready_analytics_paused", False, type=bool)
             self.game_repository.set_lichess_analysis_backfill_paused(account_id, paused)
             if not self.settings.value("lichess/auto_ready_analytics", True, type=bool):
+                self._cancel_lichess_backfill_wakeup()
                 self.lichess.cancel_lichess_analysis_backfill()
                 self.lichess_analysis_status.setText("Lichess · фоновая аналитика выключена")
             elif paused:
+                self._cancel_lichess_backfill_wakeup()
                 self.lichess.cancel_lichess_analysis_backfill()
                 self.lichess_analysis_status.setText("Lichess · фоновая аналитика приостановлена")
             elif (not auto_analytics_was_enabled and self._lichess_connected
@@ -4771,6 +4832,8 @@ class MainWindow(QMainWindow):
             session.set_server_game_identity(game)
             self.game_sessions.register(session)
             if not session.is_ai_opponent:
+                self._cancel_lichess_backfill_wakeup()
+                self._backfill_deferred_for_human_game = True
                 self._dashboard_analysis_safety_allowed = False
                 self._refresh_dashboard_analysis_visibility()
                 self._revoke_review_safety(
@@ -4822,6 +4885,16 @@ class MainWindow(QMainWindow):
                 if was_active and game_id == self._selected_live_game_id:
                     self.sound_player.play_game_end(game_id, len(session.board.move_stack))
                 self._refresh_batch_readiness()
+                if (self._backfill_deferred_for_human_game
+                        and not any(item.status in {"started", "playing"}
+                                    and not item.is_ai_opponent
+                                    for item in self.online_sessions.values())
+                        and self.lichess and self._lichess_connected
+                        and self._lichess_stream_ready_generation == self.lichess.auth_generation):
+                    self._backfill_deferred_for_human_game = False
+                    self._schedule_lichess_backfill_wakeup(
+                        self.lichess.auth_generation, str(self.lichess.username or ""),
+                        datetime.now(timezone.utc).isoformat(), debounce_if_due=False)
                 if (game_id == self._selected_live_game_id
                         and self.online_session is session
                         and self._screen_mode == "online"):
@@ -5985,6 +6058,7 @@ class MainWindow(QMainWindow):
             timer.stop()
         self._persist_workspace_state()
         self._shutdown_requested = True
+        self._cancel_lichess_backfill_wakeup()
         for handle_name in ("_library_query_handle", "_library_detail_handle",
                             "_external_study_handle"):
             handle = getattr(self, handle_name, None)

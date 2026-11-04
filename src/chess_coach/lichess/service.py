@@ -48,7 +48,7 @@ class LichessService(QObject, LichessAuthMixin, LichessSyncMixin, LichessGameAct
     puzzles_finished = Signal(int, str)
     background_sync_finished = Signal(str, str)
     lichess_analysis_backfill_progress = Signal(int, str, int, int, object)
-    lichess_analysis_backfill_finished = Signal(int, str, int, int, int, int, int, int, str)
+    lichess_analysis_backfill_finished = Signal(int, str, int, int, int, int, int, int, str, str)
     puzzle_pilot_progress = Signal(int, int)
     puzzle_pilot_finished = Signal(int, int, str, str)
 

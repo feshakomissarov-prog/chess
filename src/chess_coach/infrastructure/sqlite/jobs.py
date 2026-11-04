@@ -128,6 +128,56 @@ class AnalysisJobsStoreMixin:
         return bool(self.list_lichess_analysis_backfill(
             account_id, limit=1, force_retry=force_retry))
 
+    def lichess_analysis_backfill_next_eligible_at(self, account_id: str, *,
+                                                    daily_limit: int = 25,
+                                                    force_retry: bool = False) -> str | None:
+        """Return the durable earliest eligibility time for queued work, if any."""
+        self.enqueue_lichess_analysis_backfill(account_id)
+        if self.lichess_analysis_backfill_paused(account_id):
+            return None
+        now = datetime.now(timezone.utc)
+        due = "('queued','error','rate_limited','no_server_data','partial','stale_line')"
+        if force_retry:
+            # Match list_lichess_analysis_backfill(force_retry=True): only
+            # transient/no-data results are made immediately eligible.
+            with self._connection() as db:
+                db.execute("UPDATE lichess_analysis_backfill SET "
+                           "accuracy_next_retry_at=CASE WHEN accuracy_status IN "
+                           "('no_server_data','partial','error') THEN NULL ELSE accuracy_next_retry_at END,"
+                           "evals_next_retry_at=CASE WHEN evals_status IN "
+                           "('no_server_data','partial','error') THEN NULL ELSE evals_next_retry_at END "
+                           "WHERE account_id=?", (account_id,))
+        with self._connection() as db:
+            row = db.execute(
+                f"SELECT MIN(CASE WHEN accuracy_status IN {due} THEN "
+                "COALESCE(accuracy_next_retry_at,?) END) accuracy_at,"
+                f"MIN(CASE WHEN evals_status IN {due} THEN "
+                "COALESCE(evals_next_retry_at,?) END) evals_at "
+                "FROM lichess_analysis_backfill WHERE account_id=?",
+                (now.isoformat(), now.isoformat(), account_id)).fetchone()
+            budget = db.execute(
+                "SELECT utc_day,requests,retry_after_at FROM lichess_analysis_backfill_budget "
+                "WHERE account_id=?", (account_id,)).fetchone()
+        facet_times = [str(row[key]) for key in ("accuracy_at", "evals_at")
+                       if row and row[key] is not None]
+        if not facet_times:
+            return None
+        eligible = max([min(facet_times), now.isoformat()])
+        if budget and budget["retry_after_at"]:
+            eligible = max(eligible, str(budget["retry_after_at"]))
+        limit = max(1, min(100, int(daily_limit)))
+        if (budget and budget["utc_day"] == now.date().isoformat()
+                and int(budget["requests"]) >= limit):
+            tomorrow = datetime.combine(now.date() + timedelta(days=1), datetime.min.time(),
+                                        tzinfo=timezone.utc).isoformat()
+            # Persist the reset even if the last request in the batch exactly
+            # reached the budget and no 26th request was attempted.
+            with self._connection() as db:
+                db.execute("UPDATE lichess_analysis_backfill_budget SET retry_after_at=?,updated_at=? "
+                           "WHERE account_id=?", (tomorrow, now.isoformat(), account_id))
+            eligible = max(eligible, tomorrow)
+        return eligible
+
     def mark_lichess_analysis_backfill_running(self, account_id: str, game_id: str, *,
                                                line_revision: int | None = None,
                                                line_hash: str | None = None,
@@ -254,6 +304,11 @@ class AnalysisJobsStoreMixin:
                        "requests=CASE WHEN lichess_analysis_backfill_budget.utc_day=excluded.utc_day "
                        "THEN lichess_analysis_backfill_budget.requests+1 ELSE 1 END,updated_at=excluded.updated_at",
                        (account_id, day, now.isoformat()))
+            if used + 1 >= daily_limit:
+                tomorrow = datetime.combine(now.date() + timedelta(days=1), datetime.min.time(),
+                                            tzinfo=timezone.utc).isoformat()
+                db.execute("UPDATE lichess_analysis_backfill_budget SET retry_after_at=?,updated_at=? "
+                           "WHERE account_id=?", (tomorrow, now.isoformat(), account_id))
             return True
 
     def set_lichess_analysis_backfill_paused(self, account_id: str, paused: bool) -> None:

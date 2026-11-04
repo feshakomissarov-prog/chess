@@ -4294,9 +4294,8 @@ def test_ready_event_stream_automatically_starts_bounded_old_game_analytics(qtbo
     assert "проверяем до 10" in window.lichess_analysis_status.text()
 
 
-def test_backfill_continues_only_a_full_successful_page_after_quiet_delay(
-        qtbot, tmp_path, monkeypatch):
-    from PySide6.QtCore import QTimer
+def test_backfill_wakeup_uses_persisted_due_time_not_cumulative_checked_count(qtbot, tmp_path):
+    from datetime import datetime, timedelta, timezone
 
     window = MainWindow(QSettings(str(tmp_path / "analytics-continuation.ini"),
                                   QSettings.Format.IniFormat), offline_mode=True)
@@ -4305,19 +4304,43 @@ def test_backfill_continues_only_a_full_successful_page_after_quiet_delay(
     class Service:
         username = "Current"
         auth_generation = 12
-        def is_auth_generation_current(self, generation): return generation == 12
+        def is_auth_generation_current(self, generation): return generation == self.auth_generation
 
     window.lichess = Service()
+    window.offline_mode = False
+    window._lichess_connected = True
+    window._lichess_stream_ready_generation = 12
     window.settings.setValue("lichess/auto_ready_analytics", True)
-    scheduled = []
-    monkeypatch.setattr(QTimer, "singleShot", lambda delay, callback: scheduled.append((delay, callback)))
-    window._lichess_analysis_backfill_finished(12, "Current", 10, 50, 3, 7, 0, 0,
-                                                "проверка завершена")
-    assert [delay for delay, _callback in scheduled] == [60_000]
-    scheduled.clear()
+    # A cumulative checked counter cannot trigger another worker when SQLite
+    # reports no due work.
+    window._lichess_analysis_backfill_finished(12, "Current", 50, 50, 3, 7, 40, 0,
+                                                "проверка завершена", None)
+    assert not window._backfill_wakeup_timer.isActive()
+
+    future = (datetime.now(timezone.utc) + timedelta(hours=3)).isoformat()
+    window._lichess_analysis_backfill_finished(12, "Current", 1, 50, 0, 0, 0, 0,
+                                                "пауза · Retry-After", future)
+    assert window._backfill_wakeup_timer.isActive()
+    assert window._backfill_wakeup_timer.remainingTime() > 2 * 60 * 60 * 1000
+
+    # A due page is quiet-coalesced; an API cooldown keeps its future deadline.
+    window._lichess_analysis_backfill_finished(
+        12, "Current", 1, 50, 0, 0, 0, 0, "проверка завершена",
+        datetime.now(timezone.utc).isoformat())
+    assert 59_000 <= window._backfill_wakeup_timer.remainingTime() <= 60_000
+
+    later = (datetime.now(timezone.utc) + timedelta(minutes=5)).isoformat()
     window._lichess_analysis_backfill_finished(12, "Current", 10, 50, 3, 7, 0, 1,
-                                                "пауза · HTTP 429")
-    assert scheduled == []
+                                                "пауза · HTTP 429", later)
+    assert window._backfill_wakeup_timer.remainingTime() > 4 * 60_000
+
+    calls = []
+    window.lichess.refresh_lichess_analysis_background = lambda **kwargs: calls.append(kwargs)
+    window._backfill_wakeup_identity = (12, "current")
+    window.lichess.auth_generation = 13
+    window._lichess_backfill_wakeup()
+    assert calls == []
+    window.close()
 
 
 def test_analytics_stream_ready_is_ignored_for_offline_or_stale_auth(qtbot, tmp_path):

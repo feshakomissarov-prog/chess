@@ -298,6 +298,8 @@ class LichessSyncMixin:
                     # or has already reached its daily request budget.
                     summary = self.repository.lichess_analysis_backfill_summary(account_id)
                     retry_at = self.repository.lichess_analysis_retry_after(account_id)
+                    next_eligible = self.repository.lichess_analysis_backfill_next_eligible_at(
+                        account_id, daily_limit=daily_limit, force_retry=force_retry) or ""
                     message = ("приостановлено" if self.repository.lichess_analysis_backfill_paused(account_id)
                                else "пауза · Retry-After" if retry_at
                                else "очередь готовой аналитики пуста")
@@ -306,16 +308,18 @@ class LichessSyncMixin:
                         int(summary.get("checked") or 0), int(summary.get("total") or 0),
                         int(summary.get("accuracy") or 0), int(summary.get("evals") or 0),
                         int(summary.get("no_data") or 0), int(summary.get("errors") or 0),
-                        message)
+                        message, next_eligible)
                     return
                 active_games = self.client.get_playing_games(token)
                 from .session import classify_lichess_opponent
                 if any(classify_lichess_opponent(game) != "official_ai"
                        for game in active_games):
+                    next_eligible = self.repository.lichess_analysis_backfill_next_eligible_at(
+                        account_id, daily_limit=daily_limit) or ""
                     self.lichess_analysis_backfill_finished.emit(
                         generation, username,
                         0, 0, 0, 0, 0, 0,
-                        "отложено · есть человеческая/неизвестная активная партия")
+                        "отложено · есть человеческая/неизвестная активная партия", next_eligible)
                     return
                 report = ArchiveSync(self.client, self.repository).refresh_ready_analytics(
                     username, token, stop, limit=max(1, min(10, int(limit))),
@@ -339,6 +343,8 @@ class LichessSyncMixin:
                     return
                 summary = self.repository.lichess_analysis_backfill_summary(
                     self.repository.ensure_archive_account(username))
+                next_eligible = self.repository.lichess_analysis_backfill_next_eligible_at(
+                    account_id, daily_limit=daily_limit) or ""
                 message = (f"пауза · HTTP {fatal_status}" if fatal_status in {401, 403} else
                            "пауза · Lichess ограничил запросы" if fatal_status == 429 else
                            "пауза · Lichess ограничил запросы" if int(report.get("errors", 0))
@@ -350,7 +356,7 @@ class LichessSyncMixin:
                     int(summary.get("checked") or 0), int(summary.get("total") or 0),
                     int(summary.get("accuracy") or 0),
                     int(summary.get("evals") or 0), int(summary.get("no_data") or 0),
-                    int(summary.get("errors") or 0), message)
+                    int(summary.get("errors") or 0), message, next_eligible)
             except Exception as exc:
                 if self.is_auth_generation_current(generation):
                     status = getattr(exc, "status", None)
@@ -369,11 +375,14 @@ class LichessSyncMixin:
                     else:
                         message = f"ошибка · {type(exc).__name__}"
                     summary = self.repository.lichess_analysis_backfill_summary(account_id)
+                    next_eligible = self.repository.lichess_analysis_backfill_next_eligible_at(
+                        account_id, daily_limit=daily_limit) or ""
                     self.lichess_analysis_backfill_finished.emit(
                         generation, username,
                         int(summary.get("checked") or 0), int(summary.get("total") or 0),
                         int(summary.get("accuracy") or 0), int(summary.get("evals") or 0),
-                        int(summary.get("no_data") or 0), int(summary.get("errors") or 0), message)
+                        int(summary.get("no_data") or 0), int(summary.get("errors") or 0),
+                        message, next_eligible)
             finally:
                 if self._analysis_backfill_stop is stop:
                     self._analysis_backfill_stop = None

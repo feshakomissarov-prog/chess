@@ -320,7 +320,8 @@ def test_ready_analytics_worker_does_not_poll_playing_when_durable_queue_has_no_
 
     service.refresh_lichess_analysis_background(generation=1)
 
-    assert results and results[0][-1] == "очередь готовой аналитики пуста"
+    assert results and results[0][-2] == "очередь готовой аналитики пуста"
+    assert results[0][-1] == ""
     repository.shutdown()
 
 
