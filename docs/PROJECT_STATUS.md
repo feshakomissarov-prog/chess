@@ -1,3 +1,11 @@
+## 05.11.2026 — independent review of REVIEW-FIX-03 · REVIEW-FIX-04
+
+Проверен [кодовый draft PR #44](https://github.com/feshakomissarov-prog/chess/pull/44) на exact HEAD `e102167d89ff1702756f4d42eaa8d17f4906d410`. [Windows CI #250](https://github.com/feshakomissarov-prog/chess/actions/runs/41908931616) **completed/SUCCESS**, 669 passed, compileall и isolated offline window; **1 подтверждённое PytestUnhandledThreadExceptionWarning** в stats worker (`Signal source has been deleted`), видно в настоящем CI log. **RF3-01/RF3-02 реализованы. PR #44 пока не принят.**
+
+Создано [адресное ТЗ REVIEW-FIX-04](specs/ARCH_UX_01_REVIEW_FIX_04.md): **RF4-01** — source-filtered historical timeline и дебютные срезы должны иметь те же current-line CP/mate game counts, что Home/Library/Progress, без посторонних source и empty completed runs; **RF4-02** — исправить реальную гонку закрытия `StatisticsDialog`/MainWindow и фонового `chess-coach-statistics`/opening worker, не подавляя сигнал-ошибку. Codex продолжает только текущий draft PR #44, тесты + новый Windows exact-head CI, затем независимое ревью и ручная Windows-приёмка. ТЗ — docs-only draft PR #45. Ничего не слито.
+
+---
+
 ## 04.11.2026 — повторное независимое ревью RF2, REVIEW-FIX-03
 
 Кодовый [draft PR #44](https://github.com/feshakomissarov-prog/chess/pull/44) на SHA `97785aa8a2d6697d06c0e012480f26b8103a104f`: hosted Windows [CI #247](https://github.com/feshakomissarov-prog/chess/actions/runs/41887011647) **SUCCESS** (666 passed, compileall и isolated offline window). По коду RF2-01…RF2-04 внедрены, но независимая приёмка **пока не дана**: в `StatisticsDialog` источник «Lichess» всё ещё жёстко означает `lichess-pgn`, без `lichess-json`, а `StatisticsService.summary` рассчитывает `analysis_games` по completed/partial runs, не требуя CP/mate, в отличие от каталога/Home. Сохранён адресный [REVIEW-FIX-03](specs/ARCH_UX_01_REVIEW_FIX_03.md), RF3-01…RF3-02. Поправить в том же draft PR #44 с регрессиями и новым exact-head Windows CI; прежние этапы не повторять, main и пользовательские данные не менять. Физический Windows pilot владельца — после успешного ревью. Docs-only PR #45 не сливать.
