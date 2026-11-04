@@ -40,12 +40,18 @@ Each stage will be appended here with commit SHA, changed responsibilities, focu
 - Statistics and puzzle history are placed in the shell stack using compatibility wrappers over the existing implementations; existing model, filters, replay, and safety owners are reused.
 - External PGN/FEN input uses a bounded (4 MiB) worker task through `BackgroundWorkCoordinator`; parse result is accepted only while Analysis remains active. The temporary review uses a read-only in-memory adapter, hides persisted-analysis/engine controls, and is excluded from resume persistence. PGN/FEN parse tests cover standard lines, invalid input, multiple games, custom FEN, no SQLite write, no engine process, and stale navigation.
 - During the implementation pass, focused regression run on Windows/Python 3.12: `tests/test_ui_pages.py tests/test_architecture_fix_coordinators.py tests/test_lichess.py tests/test_window.py` — **301 passed**; compileall — PASS. Targeted external PGN/FEN tests — **3 passed**. These results are for the current working tree before this entry's commit; full suite/CI remain pending.
-- Still outstanding in this pass: inline Play form (current mode cards route into existing dialogs), internal library details pane with a safety-gated mini graph, richer global background inspector, full A10 boundary audit, responsive geometry checks across all target sizes, and final 24-group acceptance matrix. No claim that A2–A12 are complete is made yet.
+- At this checkpoint, inline Play form and safety-gated internal library details are implemented. Still outstanding: richer global background inspector, remaining A7/A8 integration and route details, full A10 boundary audit, responsive geometry checks across all target sizes, and final 24-group acceptance matrix. No claim that A2–A12 are complete is made yet.
 
 ### A6 focused follow-up
 
 - Period filtering now uses `COALESCE(started_at, updated_at)`, so a recent metadata refresh cannot make an old game appear recent. The per-game Lichess refresh control is hidden from the regular catalog; the existing recovery method remains available to a diagnosed recovery flow.
 - Regression: `test_library_period_filter_uses_game_date_not_metadata_update_time` and UI assertion that ordinary catalog does not expose the refresh action — PASS (3 relevant tests).
+
+### A6 internal details pane checkpoint
+
+- Added a split catalog/details layout inside the existing library page. Selection loads `load_game_review` through the existing `BackgroundWorkCoordinator` INTERACTIVE lane; it reuses the established `ReviewGraph` and game review read model. The graph exposes whole-line score/source/coverage data and emits a selected ply back to the existing game/review route. No new metrics calculation, SQLite, service, or engine manager was added.
+- Safety is checked before the worker starts and again before rendering. On safety revoke or route exit, the request is cancelled/generation-invalidated and the actual graph values, markers and metric labels are cleared. Official accuracy remains separately labeled from local engine assessment.
+- Regressions: `test_library_detail_reuses_review_graph_and_masks_until_safety_gate`, `test_library_detail_loads_in_worker_only_after_safety_and_masks_on_revoke`, and the worker-backed library query/stale-navigation test — **3 passed**. `compileall` and `git diff --check` — PASS. GUI geometry remains subject to the later A11 review and physical owner acceptance.
 
 ## A10 — bounded library read boundary (partial)
 

@@ -73,6 +73,7 @@ from .application.library import GameLibraryQueryCoordinator
 from .application.dashboard import (DashboardQueryCoordinator, dashboard_options,
                                     dashboard_snapshot)
 from .lichess.session import LichessGameSession, classify_lichess_opponent
+from .lichess.game_review import load_game_review
 from .lichess.statistics import StatisticsService
 from .diagnostics import anonymized_report, log_event, logs_directory
 from .ui.theme import TOKENS, stylesheet as desktop_stylesheet
@@ -318,6 +319,7 @@ class MainWindow(QMainWindow):
     position_eval_update = Signal(int, object)
     dashboard_finished = Signal(int, object, object, object)
     library_query_finished = Signal(int, object, object)
+    library_detail_finished = Signal(int, str, object, object)
     external_study_finished = Signal(int, object, object)
 
     @property
@@ -384,6 +386,8 @@ class MainWindow(QMainWindow):
         self.library_queries = GameLibraryQueryCoordinator(self.game_repository)
         self._library_query_generation = 0
         self._library_query_handle = None
+        self._library_detail_generation = 0
+        self._library_detail_handle = None
         self.sound_player = self.runtime.create_sound_player(self)
         self._online_history_game_id: str | None = None
         self._online_history_moves: tuple[chess.Move, ...] = ()
@@ -462,6 +466,7 @@ class MainWindow(QMainWindow):
         self.position_eval_update.connect(self._position_eval_update)
         self.dashboard_finished.connect(self._dashboard_result_ready)
         self.library_query_finished.connect(self._library_query_result_ready)
+        self.library_detail_finished.connect(self._library_detail_result_ready)
         self.external_study_finished.connect(self._external_study_parse_finished)
         self._external_study_generation = 0
         self.setWindowTitle("Chess Coach")
@@ -1204,6 +1209,10 @@ class MainWindow(QMainWindow):
             if handle is not None and handle.is_alive():
                 self._library_query_generation += 1
                 handle.cancel("session_replaced")
+            detail_handle = getattr(self, "_library_detail_handle", None)
+            if detail_handle is not None and detail_handle.is_alive():
+                self._library_detail_generation += 1
+                detail_handle.cancel("session_replaced")
         if (self.screen_stack.currentWidget() is not self.review_workspace
                 and self._review_safety_request_id is not None):
             self._review_safety_request_id = None
@@ -1766,6 +1775,9 @@ class MainWindow(QMainWindow):
         snapshot = self._latest_dashboard_snapshot
         if snapshot is not None:
             self._render_dashboard_snapshot(snapshot)
+        library_page = getattr(self, "library_page", None)
+        if library_page is not None and library_page.selected_game() is not None:
+            self._load_library_game_detail(library_page.selected_game())
 
     def _dashboard_filter_changed(self, *_args) -> None:
         if hasattr(self, "dashboard_account"):
@@ -4897,6 +4909,8 @@ class MainWindow(QMainWindow):
                     widget.setCurrentIndex(index)
         page.refresh_game.setEnabled(bool(self._lichess_connected and not self.offline_mode))
         page.active_requested.connect(self._resume_library_game)
+        page.detail_requested.connect(self._load_library_game_detail)
+        page.detail_position_requested.connect(self._open_library_position)
 
         def selected_game():
             return page.selected_game()
@@ -5032,6 +5046,73 @@ class MainWindow(QMainWindow):
         page.set_results(rows, page=int(result.get("page", 0)),
                          pages=int(result.get("pages", 1)),
                          total=int(result.get("total", 0)))
+
+    def _library_detail_safety_allowed(self) -> bool:
+        active_human = any(
+            session.status in {"started", "playing"} and not session.is_ai_opponent
+            for session in self.online_sessions.values())
+        return bool(self.offline_mode or
+                    (self._dashboard_analysis_safety_allowed and not active_human))
+
+    def _load_library_game_detail(self, game: dict) -> None:
+        page = getattr(self, "library_page", None)
+        if page is None or not isinstance(game, dict):
+            return
+        page.show_game_detail(game, safety_allowed=self._library_detail_safety_allowed())
+        if not self._library_detail_safety_allowed():
+            handle = self._library_detail_handle
+            self._library_detail_generation += 1
+            if handle is not None and handle.is_alive():
+                handle.cancel("safety_revoked")
+            return
+        previous = self._library_detail_handle
+        if previous is not None and previous.is_alive():
+            previous.cancel("session_replaced")
+        self._library_detail_generation += 1
+        generation = self._library_detail_generation
+        game_id = str(game.get("game_id") or "")
+        if not game_id:
+            return
+        stop_event = threading.Event()
+
+        def worker() -> None:
+            try:
+                if stop_event.is_set():
+                    return
+                review = load_game_review(self.game_repository, game)
+                if not stop_event.is_set():
+                    self.library_detail_finished.emit(generation, game_id, review, None)
+            except Exception as exc:
+                if not stop_event.is_set():
+                    self.library_detail_finished.emit(
+                        generation, game_id, None,
+                        f"Не удалось загрузить детали ({type(exc).__name__}).")
+
+        self._library_detail_handle = self._start_registered_work(
+            worker, kind="library_detail", lane=OperationLane.INTERACTIVE,
+            thread_name="cc-library-detail", stop_event=stop_event)
+
+    def _library_detail_result_ready(self, generation: int, game_id: str,
+                                     review: object, error: object) -> None:
+        page = getattr(self, "library_page", None)
+        if (page is None or generation != self._library_detail_generation
+                or page.selected_game() is None
+                or str(page.selected_game().get("game_id")) != str(game_id)):
+            return
+        if not self._library_detail_safety_allowed():
+            page.show_game_detail(page.selected_game(), safety_allowed=False)
+            return
+        if error or not isinstance(review, dict):
+            page.detail_status.setText(str(error or "Данные партии недоступны."))
+            page.detail_metrics.clear()
+            page.detail_graph.setVisible(False)
+            return
+        page.show_game_detail(page.selected_game(), review, safety_allowed=True)
+
+    def _open_library_position(self, game: dict, ply: int) -> None:
+        if self._open_saved_game(game):
+            self.review_workspace.select_ply(
+                max(0, min(len(self.review_workspace.review["moves"]), int(ply))))
 
     def _update_library_active_games(self) -> None:
         if hasattr(self, "return_to_game_button"):
@@ -5509,7 +5590,8 @@ class MainWindow(QMainWindow):
             timer.stop()
         self._persist_workspace_state()
         self._shutdown_requested = True
-        for handle_name in ("_library_query_handle", "_external_study_handle"):
+        for handle_name in ("_library_query_handle", "_library_detail_handle",
+                            "_external_study_handle"):
             handle = getattr(self, handle_name, None)
             if handle is not None and handle.is_alive():
                 handle.cancel("shutdown")

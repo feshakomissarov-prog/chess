@@ -4,10 +4,11 @@ from __future__ import annotations
 
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
-    QComboBox, QHBoxLayout, QLabel, QListWidget, QListWidgetItem, QLineEdit,
-    QPushButton, QVBoxLayout, QWidget,
+    QComboBox, QFrame, QHBoxLayout, QLabel, QListWidget, QListWidgetItem, QLineEdit,
+    QPushButton, QSplitter, QVBoxLayout, QWidget,
 )
 from ..display import format_clock_control
+from ..game_review import ReviewGraph
 
 
 class LibraryPage(QWidget):
@@ -18,6 +19,8 @@ class LibraryPage(QWidget):
     analyze_requested = Signal(dict)
     refresh_requested = Signal(dict)
     active_requested = Signal(str)
+    detail_requested = Signal(dict)
+    detail_position_requested = Signal(dict, int)
 
     def __init__(self, parent=None, *, accounts: list[dict] | None = None,
                  clocks: list[str] | None = None) -> None:
@@ -77,8 +80,40 @@ class LibraryPage(QWidget):
             filters.addWidget(widget, 1)
             widget.currentIndexChanged.connect(self._emit_filters)
         layout.addLayout(filters)
+        body = QSplitter(Qt.Orientation.Horizontal)
         self.games = QListWidget()
-        layout.addWidget(self.games, 1)
+        body.addWidget(self.games)
+        self.detail_panel = QFrame()
+        self.detail_panel.setObjectName("metricCard")
+        detail_layout = QVBoxLayout(self.detail_panel)
+        self.detail_title = QLabel("Выберите партию")
+        self.detail_title.setStyleSheet("font-size: 16px; font-weight: 700;")
+        self.detail_title.setWordWrap(True)
+        detail_layout.addWidget(self.detail_title)
+        self.detail_metadata = QLabel("Детали и оценки отображаются здесь.")
+        self.detail_metadata.setObjectName("secondary")
+        self.detail_metadata.setWordWrap(True)
+        detail_layout.addWidget(self.detail_metadata)
+        self.detail_status = QLabel("Оценки требуют актуальной проверки безопасности.")
+        self.detail_status.setObjectName("secondary")
+        self.detail_status.setWordWrap(True)
+        detail_layout.addWidget(self.detail_status)
+        self.detail_metrics = QLabel("")
+        self.detail_metrics.setWordWrap(True)
+        detail_layout.addWidget(self.detail_metrics)
+        self.detail_graph = ReviewGraph([], [])
+        self.detail_graph.setMinimumWidth(0)
+        self.detail_graph.setMaximumHeight(130)
+        self.detail_graph.setMinimumHeight(100)
+        self.detail_graph.setVisible(False)
+        detail_layout.addWidget(self.detail_graph)
+        self.detail_open = QPushButton("Открыть разбор")
+        self.detail_open.clicked.connect(lambda: self._emit_for_selected(self.open_requested))
+        detail_layout.addWidget(self.detail_open)
+        body.addWidget(self.detail_panel)
+        body.setStretchFactor(0, 3)
+        body.setStretchFactor(1, 2)
+        layout.addWidget(body, 1)
         page_row = QHBoxLayout()
         self.previous = QPushButton("← Назад")
         self.page_label = QLabel()
@@ -120,6 +155,76 @@ class LibraryPage(QWidget):
         self.refresh_game.clicked.connect(lambda _checked=False: self._emit_for_selected(
             self.refresh_requested))
         self.games.currentItemChanged.connect(self._selection_changed)
+        self.detail_graph.selected_ply.connect(self._detail_graph_selected)
+        self._detail_game: dict | None = None
+
+    def show_game_detail(self, game: dict | None, review: dict | None = None, *,
+                         safety_allowed: bool = False) -> None:
+        self._detail_game = dict(game) if game else None
+        if not game:
+            self.detail_title.setText("Выберите партию")
+            self.detail_metadata.setText("Детали партии появятся здесь.")
+            self.detail_status.setText("Оценки требуют актуальной проверки безопасности.")
+            self.detail_metrics.clear()
+            self.detail_graph.setVisible(False)
+            self.detail_graph.set_safety_gate(False, "Выберите партию")
+            self.detail_open.setEnabled(False)
+            return
+        title = str(game.get("account_opponent") or game.get("opponent") or "Соперник")
+        self.detail_title.setText(title)
+        date = str(game.get("started_at") or "Дата неизвестна")
+        result = str(game.get("status") or "Завершена")
+        clock = format_clock_control(game.get("clock"))
+        self.detail_metadata.setText(f"{date} · {clock} · {result} · {game.get('source') or 'локально'}")
+        self.detail_open.setEnabled(True)
+        if not safety_allowed:
+            self.detail_status.setText("Оценки и график скрыты до подтверждения безопасности Lichess.")
+            self.detail_metrics.clear()
+            self.detail_graph.assessments = []
+            self.detail_graph.markers = {}
+            self.detail_graph.set_safety_gate(False, "Оценки скрыты правилами Fair Play")
+            self.detail_graph.setVisible(True)
+            self.detail_graph.update()
+            return
+        if review is None:
+            self.detail_status.setText("Загружаю сохранённые данные партии…")
+            self.detail_metrics.clear()
+            self.detail_graph.setVisible(False)
+            return
+        analysis = review.get("analysis") or {}
+        assessments = list(analysis.get("assessments") or [])
+        markers = list(analysis.get("move_metrics") or [])
+        self.detail_status.setText(
+            f"{analysis.get('source') or 'нет данных'} · {analysis.get('status') or 'без анализа'} · "
+            f"охват {review.get('coverage', {}).get('scored', 0)}/"
+            f"{review.get('coverage', {}).get('total', 0)} позиций")
+        sides = review.get("per_side") or {}
+        owner = review.get("owner_color")
+        own = sides.get(owner, {}) if owner in {"white", "black"} else {}
+        accuracy = review.get("official_accuracy") or {}
+        self.detail_metrics.setText(
+            f"Белые: {sides.get('white', {}).get('assessed', 0)} оценено · "
+            f"чёрные: {sides.get('black', {}).get('assessed', 0)} оценено · "
+            f"точность Lichess Б/Ч: {accuracy.get('white') if accuracy.get('white') is not None else 'н/д'} / "
+            f"{accuracy.get('black') if accuracy.get('black') is not None else 'н/д'} · "
+            f"ошибки своей стороны: {own.get('mistake', 0) + own.get('blunder', 0)}")
+        self.detail_graph.assessments = assessments
+        self.detail_graph.markers = {int(row["ply"]): row for row in markers}
+        self.detail_graph.full_ply_count = len(review.get("moves") or [])
+        self.detail_graph.analysis_source = str(analysis.get("source") or "")
+        self.detail_graph.analysis_status = str(analysis.get("status") or "")
+        self.detail_graph.coverage_text = self.detail_status.text()
+        self.detail_graph.move_san = {int(move.ply): str(move.san)
+                                      for move in review.get("moves") or []}
+        self.detail_graph.set_markers_visible(True)
+        self.detail_graph.set_safety_gate(True)
+        self.detail_graph.setVisible(True)
+        self.detail_graph.update()
+
+    def _detail_graph_selected(self, ply: int) -> None:
+        game = self._detail_game
+        if game is not None:
+            self.detail_position_requested.emit(dict(game), int(ply))
 
     def set_active_games(self, sessions: list[dict]) -> None:
         self.active_games.clear()
@@ -210,3 +315,9 @@ class LibraryPage(QWidget):
         enabled = current is not None and self.selected_game() is not None
         for button in (self.open_game, self.export_game, self.analyze_game):
             button.setEnabled(enabled)
+        game = self.selected_game()
+        if game is None:
+            self.show_game_detail(None)
+        else:
+            self.show_game_detail(game)
+            self.detail_requested.emit(game)

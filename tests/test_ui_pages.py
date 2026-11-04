@@ -66,6 +66,39 @@ def test_library_page_emits_selected_game_actions_and_pagination(qtbot):
     assert page.current_filters()["period_days"] == 0
 
 
+def test_library_detail_reuses_review_graph_and_masks_until_safety_gate(qtbot):
+    page = LibraryPage()
+    qtbot.addWidget(page)
+    game = {"game_id": "synthetic", "opponent": "Synthetic", "color": "white",
+            "status": "mate", "source": "lichess_archive", "clock": "300+0"}
+    review = {
+        "analysis": {"assessments": [
+            {"ply": 0, "white_cp": 10, "mate_white": None},
+            {"ply": 1, "white_cp": -25, "mate_white": None},
+        ], "move_metrics": [{"ply": 1, "severity": "inaccuracy"}],
+            "source": "lichess", "status": "complete"},
+        "coverage": {"scored": 2, "total": 2},
+        "per_side": {"white": {"assessed": 1, "mistake": 0, "blunder": 0},
+                     "black": {"assessed": 1}},
+        "moves": [type("Move", (), {"ply": 1, "san": "e4"})()],
+        "owner_color": "white",
+        "official_accuracy": {"white": 95.0, "black": 90.0},
+    }
+    page.show_game_detail(game, review, safety_allowed=False)
+    assert not page.detail_graph._values()
+    assert "скрыты" in page.detail_status.text()
+    assert not page.detail_metrics.text()
+
+    page.show_game_detail(game, review, safety_allowed=True)
+    assert page.detail_graph._values() == [(0, 10, None), (1, -25, None)]
+    assert page.detail_graph.full_ply_count == 1
+    assert "95.0 / 90.0" in page.detail_metrics.text()
+    positions = []
+    page.detail_position_requested.connect(lambda selected, ply: positions.append((selected, ply)))
+    page.detail_graph.selected_ply.emit(1)
+    assert positions == [(game, 1)]
+
+
 def test_legacy_window_imports_are_compatibility_reexports():
     from chess_coach import window
     from chess_coach.ui import analytics_dialogs, dialogs

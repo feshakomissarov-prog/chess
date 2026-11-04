@@ -3174,6 +3174,41 @@ def test_library_sqlite_query_runs_off_ui_thread_and_ignores_stale_navigation(
     window.close()
 
 
+def test_library_detail_loads_in_worker_only_after_safety_and_masks_on_revoke(
+    qtbot, tmp_path, monkeypatch
+):
+    window = MainWindow(QSettings(str(tmp_path / "library-detail.ini"),
+                                  QSettings.Format.IniFormat))
+    qtbot.addWidget(window)
+    window.game_repository.save_snapshot("detail-safe-game", "startpos", "e2e4", "white",
+        "Synthetic", False, "300+0", "mate", "white")
+    detail_threads = []
+    fake_review = {
+        "analysis": {"assessments": [{"ply": 1, "white_cp": 40, "mate_white": None}],
+                     "move_metrics": [], "source": "stockfish", "status": "complete"},
+        "coverage": {"scored": 1, "total": 2},
+        "per_side": {"white": {"assessed": 1}, "black": {"assessed": 0}},
+        "moves": [], "owner_color": "white", "official_accuracy": {},
+    }
+    def load_review(_repository, _game):
+        detail_threads.append(threading.current_thread())
+        return fake_review
+    monkeypatch.setattr("chess_coach.window.load_game_review", load_review)
+    window._dashboard_analysis_safety_allowed = True
+    window.show_saved_games()
+    qtbot.waitUntil(lambda: window.library_page.detail_graph.assessments ==
+                    fake_review["analysis"]["assessments"], timeout=5000)
+    assert detail_threads and detail_threads[0] is not threading.main_thread()
+    assert window.library_page.detail_graph.safety_allowed
+
+    window._dashboard_analysis_safety_allowed = False
+    window._refresh_dashboard_analysis_visibility()
+    assert not window.library_page.detail_graph.safety_allowed
+    assert not window.library_page.detail_graph._values()
+    assert not window.library_page.detail_metrics.text()
+    window.close()
+
+
 def test_embedded_play_form_uses_existing_lichess_facade_and_prevents_duplicate_requests(
     qtbot, tmp_path, monkeypatch
 ):
