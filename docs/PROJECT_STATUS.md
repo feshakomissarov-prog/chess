@@ -1,3 +1,15 @@
+## 04.11.2026 — физический Windows-пилот: REVIEW-FIX-01 v1.2 (актуальнее нижних записей)
+
+Владелец проверил реально запущенный ARCH-UX-01 из [draft PR #44](https://github.com/feshakomissarov-prog/chess/pull/44) (проверяемый SHA `2b1c724b4503140992ad8d80f8c5044c861eb7cd`), прислал шесть скриншотов: Главная (дата и 3 recent, метрики coverage), Игра (доска/часы), Review (отсутствует сравнимая точность), «Мои партии» (хронология, формат времени, поиск Каро-Канн, источники Lichess/Stockfish и прозрачность фонового backfill), Массовый анализ (перегруженная UI-страница). **Код пока НЕ принят**.
+
+Уточнено **единое исполняемое корректирующее ТЗ [ARCH-UX-01 REVIEW-FIX-01 v1.2](specs/ARCH_UX_01_REVIEW_FIX_01.md)**: прежние RF-01…RF-07 + RF-08…RF-15 с точными проверками дат/архивных счетчиков, доли *партий* с анализом, игрового viewport/clock provenance, локализованного открытия, stockfish vs lichess-pgn vs lichess-json, тихого resumable backfill, source-backed точности по опубликованной Lichess формуле (включая мат и неполный охват), компактного batch UX и общей cross-screen консистентности. Это точечные правки **одного существующего кодового PR #44**, а не запуск нового A0–A12 / переписывание монолита.
+
+**Важно:** 3 карточки Home — согласованный лимит, не доказательство отсутствующих партий. Данные `3302/3304` и `1122/156448` требуют проверки определений, account scope и актуальности; никаких утверждений о потере данных без SQLite/архивного read-only аудита. Готовые Lichess позиции/official accuracy нельзя автоматически получить для всех 3302 игр, их существующий backfill оставлять rate-limited, не запускать server-side анализ. Для точности различать *официальную серверную* и *неофициальный локальный расчёт по методике Lichess*, с охватом и Fair Play gate.
+
+Документ обновлён в **docs-only draft PR #45**, runtime код не тронут; [CI #244](https://github.com/feshakomissarov-prog/chess/actions/runs/41774974147) подтверждает **старый** кодовый HEAD, после Codex требуется новый exact-head Windows CI, новые тесты, повторное независимое ревью и физическая Windows-проверка владельцем. PR #44 и #45 не сливать без отдельного разрешения.
+
+---
+
 ## 04.11.2026 — ARCH-UX-01 independent review: REVIEW-FIX-01
 
 Проверен кодовый [draft PR #44](https://github.com/feshakomissarov-prog/chess/pull/44) на SHA `2b1c724b4503140992ad8d80f8c5044c861eb7cd`; Windows [CI #244](https://github.com/feshakomissarov-prog/chess/actions/runs/41774974147) SUCCESS на этом SHA, handoff сообщает 632 local PASS. **Решение: КОД ПОКА НЕ ПРИНЯТ.** Сформировано [исправляющее ТЗ ARCH-UX-01 REVIEW-FIX-01](specs/ARCH_UX_01_REVIEW_FIX_01.md), RF-01…RF-07: безопасность cached official accuracy, полнота редактора FEN, ephemeral review state, custom clock, игровые даты, async read selectors, финальные UX/lifecycle regression gates. Это **адресная корректировка**, без повторного W0–W9/A0–A12 и без нового кодового PR.
