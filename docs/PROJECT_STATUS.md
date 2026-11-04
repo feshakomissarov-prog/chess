@@ -1,3 +1,11 @@
+## 05.11.2026 — независимая проверка RF4: код принят к физической Windows-проверке
+
+Проверен итоговый SHA кодового [draft PR #44](https://github.com/feshakomissarov-prog/chess/pull/44): `f957f994275933e0b6eb19134fa8cb34c39286e3`. Hosted [Windows CI #253](https://github.com/feshakomissarov-prog/chess/actions/runs/41922206819) **completed/SUCCESS**, **675 PASS**, compileall и isolated offline window; прежнего предупреждения `PytestUnhandledThreadExceptionWarning` в полном логе нет. Независимо просмотрены source-filtered historical/opening current-line score контракты, отдельные состояния пустых технических анализов, app-owned `StatisticsWorkerHub`, generation/close guards, барьерные тесты и ожидание потоков при закрытии MainWindow. **RF4-01/02 принимаются по коду и CI; новых подтверждённых блокирующих дефектов не найдено.** Статус кодового PR: **разрешена ручная физическая Windows-приёмка владельца, не merge**.
+
+До окончательного разрешения владельца остаются реальные Lichess/OAuth, персональная SQLite (только владельцем), физический UI/DPI, кликабельность доски, часы и завершение партии, звук, настоящий Stockfish, синхронизация/оценки и согласованность шести разделов. PR #44 и docs-only PR #45 сохраняются draft. `main` не изменялся; **никакого автоматического merge**.
+
+---
+
 ## 05.11.2026 — independent review of REVIEW-FIX-03 · REVIEW-FIX-04
 
 Проверен [кодовый draft PR #44](https://github.com/feshakomissarov-prog/chess/pull/44) на exact HEAD `e102167d89ff1702756f4d42eaa8d17f4906d410`. [Windows CI #250](https://github.com/feshakomissarov-prog/chess/actions/runs/41908931616) **completed/SUCCESS**, 669 passed, compileall и isolated offline window; **1 подтверждённое PytestUnhandledThreadExceptionWarning** в stats worker (`Signal source has been deleted`), видно в настоящем CI log. **RF3-01/RF3-02 реализованы. PR #44 пока не принят.**
