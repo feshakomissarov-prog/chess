@@ -1,5 +1,7 @@
 # Chess Coach — целевая архитектура модульного монолита
 
+> **Дополнение 04.11.2026 — архитектура под утверждённый UX:** W0–W9 и ARCH-FIX-01…04 уже выполнены в [draft PR #44](https://github.com/feshakomissarov-prog/chess/pull/44) (SHA 9a59b21; Windows CI 604 PASS), **не слиты**. Новое единое исполняемое ТЗ: [ARCH-UX-01](../specs/ARCH_UX_01_UNIFIED_EXECUTION_SPEC.md), которое **заменяет требование не менять GUI в следующем цикле**, не ослабляя архитектурные и safety инварианты. Ниже — целевая архитектура и исторический план ARCH-01. Продолжаем модульный монолит, не микросервисы.
+
 **Статус:** архитектурное решение владельца, 03.11.2026 · **следующий отдельный этап после M4.6**. Этот документ определяет направление и инварианты. Исполняемое ТЗ для Codex — [ARCHITECTURE_REFACTOR_EXECUTION_SPEC.md](ARCHITECTURE_REFACTOR_EXECUTION_SPEC.md). Не путать архитектурный этап с будущими продуктовыми фичами.
 
 **Базовая версия:** PR #41, кодовый SHA `2c3ccbd99c0c33526fb2bd996ab777a0ec5c8d31`, Windows CI #41625429734, 553 PASS; merged в main как `27b42d3dc482efeff3c64ad3399f96bc74fcb041`. Модель компетенций и девять исследовательских направлений фиксируются отдельно в PR #42. До запуска Codex брать актуальный `main`, а не хардкодить старый SHA.
@@ -189,3 +191,15 @@ Queued → Running → Completed / Paused / Cancelled / RateLimited / Failed / S
 Любой глобальный визуальный редизайн, смена языка, Python версия, переписывание Qt на веб, microservices, cloud deployment, Rust/C++ FFI, распределённая база, новый формат PGN/SQLite без обоснования, обязательная производительность/нагрузочные тесты, продуктовый AI tutor/voice, новое дебютное дерево, внешнее ML, массовая загрузка персональных данных и изменения ROADMAP.
 
 Этот документ — критерий **будущей структуры**. Непосредственные шаги, acceptance и последовательность реализации см. [исполняемое ТЗ](ARCHITECTURE_REFACTOR_EXECUTION_SPEC.md).
+
+## 13. Интеграция с утверждённым UX — решение 04.11.2026
+
+**Единственное исполняемое ТЗ нового цикла** — [ARCH-UX-01](../specs/ARCH_UX_01_UNIFIED_EXECUTION_SPEC.md), а не повторное выполнение W0–W9. Оно вводит новые пользовательские маршруты, сохраняя одну существующую архитектуру.
+
+- **UI shell:** шесть разделов Главная/Играть/Мои партии/Анализ/Обучение/Прогресс и Настройки снизу; один Qt process, маршрутизация и сохранение выбранной live game/review/filters. MainWindow может содержать presentation handlers/сигналы, но не вторые owners SQL/HTTP/Stockfish/Fair Play.
+- **Application coordinators:** один источник выбора сессии, game result/clock/premove, library+mini graph, review, progress, фоновых статусов. UI вызывает intents, получает immutable scoped read models, не создаёт новое подключение/очередь/движок при переключении страницы.
+- **Game workspace:** один view и BoardView для active→finished; справа видимы takeback/draw/ответы/resign и другие разрешённые команды; после authoritative finish остаётся та же доска, вместо команд две CTA «Разобрать»/«Вызвать снова», без ResultPage/auto engine. Старые premove-training и pilot import в новом пользовательском UI не нужны, **обычный premove сохраняется**.
+- **Реиспользование:** Games mini graph и ReviewGraph/AdvantageBar потребляют одни saved assessments/provenance; Progress — существующие versioned aggregates; Training — существующие puzzle history/replay/error drill, пока без новых учебных алгоритмов. Фоновые операции — один inspector существующих независимых lanes, не новая очередь.
+- **Границы:** нет новой SQLite/schema, нет микросервисов, движок один с controlled admission, live gameplay не ждёт долгие загрузки, fail-closed Fair Play маскирует аналитические view при неизвестном/human-active состоянии. Все 24 функциональные группы проверяются по [UX coverage audit](../ux/EXISTING_FEATURES_TO_UX_COVERAGE_AUDIT.md), с явно согласованными исключениями из интерфейса.
+
+**Исполнение:** одна кодовая ветка/draft PR, предпочтительно продолжение PR #44 (пока он не слит); работа этапами A0–A12, exact-head Windows CI и отдельная физическая приёмка владельца, без автоматического merge.
