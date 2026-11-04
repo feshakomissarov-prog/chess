@@ -121,6 +121,8 @@
 
 ## 7. АНАЛИЗ — ЧАСТИЧНО УТВЕРЖДЕНО, два сценария ОТКРЫТЫ
 
+**Варианты полного desktop-сценария без фото/OCR:** [ANALYSIS_WORKSPACE_DESIGN_OPTIONS.md](ANALYSIS_WORKSPACE_DESIGN_OPTIONS.md) — две компоновки с ASCII-макетами, работа с сохранёнными и внешними PGN, FEN, ручным редактором. **Ни один не утверждён.**
+
 **Landing:** компактные actionable модули или tabs. Целевые группы:
 1. **Разбор партии:** выбор из каталога (или импорт PGN), board+move list+graph+two-sided metrics+critical moves; engine only after safety preflight, не дублируем "Мои партии". Путь «Мои партии → Разобрать» открывает этот же экран, выбранную партию.
 2. **Анализ позиции:** доска/FEN, расстановка фигур, история линий, сохранение локальной позиции (будущая функция), запуск verified Stockfish по разрешению, PV/cp/mate с source/time/depth. Режим изучения не подключается к активному human online game; запрет position hints сохраняется.
