@@ -107,13 +107,20 @@ def dashboard_snapshot(repository, *, account_id: str | None = None,
         "AND gr.line_revision=ar.line_revision AND gr.is_current=1 JOIN scoped s "
         "ON s.game_id=ar.game_id AND s.line_revision=ar.line_revision "
         "LEFT JOIN position_assessments pa ON pa.run_id=ar.run_id "
-        "WHERE ar.status IN ('complete','partial') GROUP BY ar.run_id) "
-        "SELECT COUNT(DISTINCT CASE WHEN scored>0 THEN game_id END) analyzed,"
-        "COUNT(DISTINCT CASE WHEN scored>0 AND status='complete' AND scored>=total THEN game_id END) complete_count,"
-        "COUNT(DISTINCT CASE WHEN scored>0 AND (status<>'complete' OR scored<total) THEN game_id END) partial,"
-        "COUNT(DISTINCT CASE WHEN scored>0 AND source='stockfish' THEN game_id END) stockfish,"
-        "COUNT(DISTINCT CASE WHEN scored>0 AND source IN ('lichess-pgn','lichess-json') THEN game_id END) lichess "
-            "FROM runs", run_params).fetchone()
+        "WHERE ar.status IN ('complete','partial') AND NOT EXISTS ("
+        "SELECT 1 FROM analysis_jobs aj WHERE aj.result_run_id=ar.run_id "
+        "AND aj.analysis_pass='review') GROUP BY ar.run_id), "
+        "game_coverage AS (SELECT game_id,MAX(scored>0) has_scores,"
+        "MAX(scored>0 AND status='complete' AND scored>=total) is_full,"
+        "MAX(scored>0 AND source='stockfish') has_stockfish,"
+        "MAX(scored>0 AND source IN ('lichess-pgn','lichess-json')) has_lichess "
+        "FROM runs GROUP BY game_id) "
+        "SELECT COUNT(CASE WHEN has_scores THEN 1 END) analyzed,"
+        "COUNT(CASE WHEN is_full THEN 1 END) complete_count,"
+        "COUNT(CASE WHEN has_scores AND NOT is_full THEN 1 END) partial,"
+        "COUNT(CASE WHEN has_stockfish THEN 1 END) stockfish,"
+        "COUNT(CASE WHEN has_lichess THEN 1 END) lichess "
+            "FROM game_coverage", run_params).fetchone()
 
     summary = StatisticsService(repository).summary(account_id=account_id, clock=clock)
     activity_trend = (repository.puzzle_rating_trend(account_id, limit=6)

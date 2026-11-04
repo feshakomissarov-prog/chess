@@ -13,6 +13,7 @@ import chess.pgn
 
 from .constants import DEFAULT_PAGE_SIZE, MAX_PAGE_SIZE
 from .line import _insert_position, _line_hash, _pgn_date, _time_precision
+from ...domain.analysis_scope import current_scored_analysis_exists
 
 class GamesStoreMixin:
 
@@ -104,39 +105,14 @@ class GamesStoreMixin:
         if updated_after:
             clauses.append("COALESCE(g.started_at,g.updated_at)>=?")
             params.append(updated_after)
-        current_analysis = (
-            "EXISTS (SELECT 1 FROM analysis_runs ar JOIN game_revisions gr "
-            "ON gr.game_id=ar.game_id AND gr.line_revision=ar.line_revision AND gr.is_current=1 "
-            "WHERE ar.game_id=g.game_id AND ar.line_revision=g.line_revision "
-            "AND ar.status IN ('complete','partial') AND (EXISTS (SELECT 1 "
-            "FROM position_assessments pa WHERE pa.run_id=ar.run_id "
-            "AND (pa.white_cp IS NOT NULL OR pa.mate_white IS NOT NULL)) OR EXISTS ("
-            "SELECT 1 FROM move_classifications mc WHERE mc.run_id=ar.run_id "
-            "AND mc.label NOT IN ('unknown','unclassified'))))"
-        )
-        lichess_analysis = (
-            "EXISTS (SELECT 1 FROM analysis_runs ar JOIN game_revisions gr "
-            "ON gr.game_id=ar.game_id AND gr.line_revision=ar.line_revision AND gr.is_current=1 "
-            "WHERE ar.game_id=g.game_id AND ar.line_revision=g.line_revision "
-            "AND ar.source IN ('lichess-pgn','lichess-json') AND ar.status IN ('complete','partial') "
-            "AND (EXISTS (SELECT 1 FROM position_assessments pa WHERE pa.run_id=ar.run_id "
-            "AND (pa.white_cp IS NOT NULL OR pa.mate_white IS NOT NULL)) OR EXISTS ("
-            "SELECT 1 FROM move_classifications mc WHERE mc.run_id=ar.run_id "
-            "AND mc.label NOT IN ('unknown','unclassified'))))"
-        )
+        current_analysis = current_scored_analysis_exists()
+        lichess_analysis = current_scored_analysis_exists(source="lichess")
         if analysis == "yes":
             clauses.append(f"(({current_analysis}) OR ({lichess_analysis}))")
         elif analysis == "no":
             clauses.append(f"NOT ({current_analysis}) AND NOT ({lichess_analysis})")
         if analysis_source == "stockfish":
-            clauses.append("EXISTS (SELECT 1 FROM analysis_runs ar JOIN game_revisions gr "
-                           "ON gr.game_id=ar.game_id AND gr.line_revision=ar.line_revision AND gr.is_current=1 "
-                           "WHERE ar.game_id=g.game_id AND ar.line_revision=g.line_revision "
-                           "AND ar.status IN ('complete','partial') AND ar.source='stockfish' "
-                           "AND (EXISTS (SELECT 1 FROM position_assessments pa WHERE pa.run_id=ar.run_id "
-                           "AND (pa.white_cp IS NOT NULL OR pa.mate_white IS NOT NULL)) OR EXISTS ("
-                           "SELECT 1 FROM move_classifications mc WHERE mc.run_id=ar.run_id "
-                           "AND mc.label NOT IN ('unknown','unclassified'))))")
+            clauses.append(current_scored_analysis_exists(source="stockfish"))
         elif analysis_source == "lichess":
             clauses.append(lichess_analysis)
         elif analysis_source == "official_accuracy":

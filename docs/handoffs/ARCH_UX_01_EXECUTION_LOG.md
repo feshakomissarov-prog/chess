@@ -218,3 +218,10 @@ The 24 COV routes and test evidence are listed immediately above. Every automate
 - Authentication generation and username are revalidated when the timer fires. The worker still applies the existing persisted preflight, queue, Fair Play, 429 and daily-budget checks before HTTP; waking the timer does not bypass those gates.
 - Added temporary-SQLite tests for earliest retry across restart, daily-limit midnight persistence on the last allowed request, and no wakeup for empty/paused queues. Qt tests verify that large cumulative `checked` does not wake an empty queue, a due page is coalesced, a future Retry-After is honored, and a stale auth generation cannot run.
 - Targeted regression run: **7 passed**. No live Lichess, OAuth/PAT or personal SQLite was used. Full suite and exact-head Windows CI remain pending after RF2-03/RF2-04.
+
+## REVIEW-FIX-02 — RF2-03 single current-score coverage contract
+
+- Added one shared SQL predicate for “analyzed”: a completed/partial, current-line run with at least one CP/mate position score, excluding review-only result runs. Classification rows, Lichess metadata and official accuracy alone do not qualify. Library and Progress filters now use this exact contract, including Stockfish/Lichess source filters.
+- Dashboard coverage now first aggregates source runs to one row per game. A game with both a full Stockfish run and a partial Lichess run is categorized once as full; source counts may still overlap. Thus `full + partial = analyzed`, and none is the scoped total minus analyzed.
+- Expanded the synthetic SQLite regression to include a classification-only record, an overlapping full+partial game, source overlap, and selected-account scope. Verified Home KPI, library yes/no/source filters and Progress yes/no filters return the same game sets: 24 analyzed / 35 total overall, 24 full / 0 partial; the selected-account scope reports 1/2 and consistent one-game yes/no groups.
+- Targeted `tests/test_dashboard.py` plus the library/statistics SQL-filter regressions: **11 passed**. No personal data or live analysis was used. Full suite and exact-head Windows CI remain pending after RF2-04.

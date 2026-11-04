@@ -7,6 +7,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from .repository import GameRepository
+from ..domain.analysis_scope import current_scored_analysis_exists
 
 
 class StatisticsService:
@@ -88,26 +89,15 @@ class StatisticsService:
             clauses.append("g.winner IS NULL AND g.status NOT IN "
                            "('draw','stalemate','repetition','50moves','insufficientMaterial') "
                            "AND g.pgn NOT LIKE '%[Result \"1/2-1/2\"]%'")
-        analysis_exists = ("EXISTS (SELECT 1 FROM analysis_runs ar JOIN game_revisions gr "
-                           "ON gr.game_id=ar.game_id AND gr.line_revision=ar.line_revision "
-                           "WHERE ar.game_id=g.game_id AND gr.is_current=1 "
-                           "AND ar.status IN ('complete','partial') "
-                           "AND NOT EXISTS (SELECT 1 FROM analysis_jobs aj "
-                           "WHERE aj.result_run_id=ar.run_id AND aj.analysis_pass='review') "
-                           + ("AND ar.source=? " if analysis_source else "") + ")")
+        analysis_exists = current_scored_analysis_exists(source=analysis_source)
         if analyzed == "yes":
             clauses.append(analysis_exists)
-            if analysis_source:
-                params.append(analysis_source)
         elif analyzed == "no":
             clauses.append(f"NOT {analysis_exists}")
-            if analysis_source:
-                params.append(analysis_source)
         elif analysis_source:
             # A chosen source always constrains the game set, even when the GUI's
             # analyzed selector is set to its default "any" value.
             clauses.append(analysis_exists)
-            params.append(analysis_source)
         return join, " AND ".join(clauses), params
 
     @staticmethod

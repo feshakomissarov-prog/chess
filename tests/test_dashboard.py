@@ -76,9 +76,8 @@ def test_source_filters_and_dashboard_count_distinct_usable_current_line_games(t
             repo.save_analysis(f"both-{index}", line_revision=line["line_revision"],
                                line_hash=line["line_hash"], source="lichess-pgn",
                                engine_name="Lichess", engine_version=None, parameters={},
-                               status="complete",
-                               assessments=[{"ply": ply, "white_cp": 10 * ply}
-                                            for ply in range(4)], classifications=[])
+                               status="partial",
+                               assessments=[{"ply": 1, "white_cp": 10}], classifications=[])
         for index in range(3):
             _save(repo, f"official-{index}")
             with repo._connection() as db:
@@ -95,6 +94,14 @@ def test_source_filters_and_dashboard_count_distinct_usable_current_line_games(t
                 db.execute("INSERT INTO lichess_ready_analysis_metadata VALUES (?,?,?,?,?,?,?,?,?,?)",
                            (account, game_id, revision, "lichess-json", "fixture-v1",
                             "{}", "{}", "[]", "[]", "2026-11-04T00:00:00Z"))
+        classification_game = "metadata-empty-0"
+        classification_line = repo.current_line(classification_game)
+        repo.save_analysis(
+            classification_game, line_revision=classification_line["line_revision"],
+            line_hash=classification_line["line_hash"], source="stockfish",
+            engine_name="Fixture", engine_version="test", parameters={}, status="complete",
+            assessments=[], classifications=[{"ply": 1, "mover": "white",
+                                                "label": "mistake", "eval_loss_cp": 120}])
         for index in range(3):
             game_id = f"stale-{index}"
             _save_scored(repo, game_id, "stockfish")
@@ -102,13 +109,38 @@ def test_source_filters_and_dashboard_count_distinct_usable_current_line_games(t
                                "Changed line", False, "5+0", "mate", "white")
         _save(repo, "no-data")
 
+        scoped_account = repo.ensure_archive_account("analysis-scope-fixture")
+        with repo._connection() as db:
+            for game_id in ("sf-0", classification_game):
+                db.execute("INSERT INTO account_games(account_id,game_id,remote_id,imported_at,color,opponent) "
+                           "VALUES (?,?,?,?,?,?)",
+                           (scoped_account, game_id, game_id, "fixture", "white", "Opponent"))
+
         assert repo.search_games(analysis="yes")["total"] == 24
         assert repo.search_games(analysis_source="stockfish")["total"] == 12
         assert repo.search_games(analysis_source="lichess")["total"] == 14
         assert repo.search_games(analysis_source="official_accuracy")["total"] == 3
         assert repo.search_games(analysis="no")["total"] == 11
+        assert repo.search_games(analysis="yes", analysis_source="stockfish")["total"] == 12
+        assert repo.search_games(analysis="yes", analysis_source="lichess")["total"] == 14
+        assert repo.search_games(analysis="yes")["total"] == 24
+        assert repo.search_games(analysis="no")["total"] == 11
+        from chess_coach.lichess.statistics import StatisticsService
+        assert StatisticsService(repo).summary(analyzed="yes")["games"] == 24
+        assert StatisticsService(repo).summary(analyzed="no")["games"] == 11
+        assert repo.search_games(account_id=scoped_account, analysis="yes")["total"] == 1
+        assert repo.search_games(account_id=scoped_account, analysis="no")["total"] == 1
+        assert StatisticsService(repo).summary(
+            account_id=scoped_account, analyzed="yes")["games"] == 1
+        assert StatisticsService(repo).summary(
+            account_id=scoped_account, analyzed="no")["games"] == 1
+        scoped_metrics = {row["key"]: row for row in dashboard_snapshot(
+            repo, account_id=scoped_account)["metrics"]}
+        assert scoped_metrics["analysis"]["value"] == "1/2 (50.0%)"
+        assert "Полный охват: 1 · частичный: 0" in scoped_metrics["analysis"]["detail"]
         metrics = {row["key"]: row for row in dashboard_snapshot(repo)["metrics"]}
         assert metrics["analysis"]["value"] == "24/35 (68.6%)"
+        assert "Полный охват: 24 · частичный: 0" in metrics["analysis"]["detail"]
         assert "Stockfish: 12" in metrics["analysis"]["detail"]
         assert "Lichess с оценками: 14" in metrics["analysis"]["detail"]
     finally:
