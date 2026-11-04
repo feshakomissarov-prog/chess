@@ -25,6 +25,7 @@ LICHESS_PLAYER_TITLES = frozenset({
 _MAX_CLOCK_MS = 365 * 24 * 60 * 60 * 1000
 _MAX_INCREMENT_MS = 3 * 60 * 60 * 1000
 _UNKNOWN_CONTROL_SAFE_MS = 24 * 60 * 60 * 1000
+_CLOCK_EVENT_TOLERANCE_MS = 2_000
 
 
 def classify_lichess_opponent(game: Any) -> str:
@@ -108,6 +109,7 @@ class LichessGameSession:
         self.clock_initial = 0
         self.clock_control = "-"
         self.clock_state_valid: bool | None = None
+        self._clock_ply_seen: int | None = None
         self.rated = False
         self.winner = None
         self.final_sync_pending = False
@@ -251,6 +253,14 @@ class LichessGameSession:
         if kind in {"gameState", "gameFull"}:
             self.status = state.get("status", self.status)
             self.moves = " ".join(incoming_moves)
+            if kind == "gameFull" and not any(key in state for key in ("wtime", "btime")):
+                self.white_ms = self.black_ms = None
+                self.clock_state_valid = None
+                self._clock_ply_seen = None
+            if is_shorter:
+                # A server-confirmed takeback starts a new clock-line baseline.
+                self._clock_ply_seen = None
+                self.clock_state_valid = None
             self._apply_clock_state(state)
             self.winner = state.get("winner", self.winner)
             own_draw_flag = "bdraw" if self.color == chess.WHITE else "wdraw"
@@ -331,8 +341,6 @@ class LichessGameSession:
     def _apply_game_full_metadata(self, event: dict, incoming_fen: str) -> None:
         self.initial_fen = incoming_fen
         self.rated = bool(event.get("rated", False))
-        self.white_ms = self.black_ms = None
-        self.clock_state_valid = None
         created_at = event.get("createdAt") or event.get("created_at")
         if created_at and not self.started_at:
             try:
@@ -351,13 +359,15 @@ class LichessGameSession:
             self.clock_control = f"{initial // 1000}+{increment // 1000}"
         elif initial is None and increment is None:
             self.clock_control = "-"
+            self.white_ms = self.black_ms = None
             self.clock_state_valid = None
         else:
             self.clock_control = "-"
+            self.white_ms = self.black_ms = None
             self.clock_state_valid = False
 
     def _apply_clock_state(self, state: dict) -> None:
-        """Accept only plausible millisecond clock snapshots; never clamp bad data."""
+        """Validate live millisecond snapshots against the confirmed line and increments."""
         supplied = {"wtime": state.get("wtime", self.white_ms),
                     "btime": state.get("btime", self.black_ms),
                     "winc": state.get("winc", self.white_inc),
@@ -375,14 +385,44 @@ class LichessGameSession:
                for value in increments):
             self.clock_state_valid = False
             return
-        upper = (self.clock_initial + max(increments) + 2_000
-                 if self.clock_initial else _UNKNOWN_CONTROL_SAFE_MS)
-        if any(value > upper for value in times):
+        plies = len(self.moves.split())
+        white_moves = (plies + 1) // 2
+        black_moves = plies // 2
+        if self.clock_initial:
+            white_upper = min(_MAX_CLOCK_MS, self.clock_initial
+                              + self.white_inc * white_moves + _CLOCK_EVENT_TOLERANCE_MS)
+            black_upper = min(_MAX_CLOCK_MS, self.clock_initial
+                              + self.black_inc * black_moves + _CLOCK_EVENT_TOLERANCE_MS)
+        else:
+            white_upper = black_upper = _UNKNOWN_CONTROL_SAFE_MS
+        if times[0] > white_upper or times[1] > black_upper:
             self.clock_state_valid = False
             return
+
+        # Repeated / delayed stream frames may carry an older clock snapshot for
+        # the same line. Keep the latest accepted values; do not mark a valid game
+        # as corrupt just because a stale frame arrived after it.
+        previous_ply = self._clock_ply_seen
+        if (self.clock_state_valid is True and previous_ply is not None
+                and self.white_ms is not None and self.black_ms is not None):
+            if plies < previous_ply:
+                return
+            if plies == previous_ply:
+                if (times[0] > self.white_ms + _CLOCK_EVENT_TOLERANCE_MS
+                        or times[1] > self.black_ms + _CLOCK_EVENT_TOLERANCE_MS):
+                    return
+            else:
+                white_advanced = (plies + 1) // 2 - (previous_ply + 1) // 2
+                black_advanced = plies // 2 - previous_ply // 2
+                white_gain = self.white_inc * white_advanced
+                black_gain = self.black_inc * black_advanced
+                if (times[0] > self.white_ms + white_gain + _CLOCK_EVENT_TOLERANCE_MS
+                        or times[1] > self.black_ms + black_gain + _CLOCK_EVENT_TOLERANCE_MS):
+                    return
         self.white_ms, self.black_ms = times
         self.white_inc, self.black_inc = increments
         self.clock_state_valid = True
+        self._clock_ply_seen = plies
 
     def _apply_final_sync_event(self, event: dict, kind: str, state: dict,
                                 incoming_fen: str, incoming_moves: tuple[str, ...],

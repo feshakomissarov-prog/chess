@@ -3052,6 +3052,82 @@ def test_server_clock_accepts_correspondence_units_and_rejects_corruption(tmp_pa
     assert session.clock_state_valid is None
 
 
+def test_live_clock_budget_accumulates_each_confirmed_increment_and_keeps_latest_frame(tmp_path):
+    session = LichessGameSession("increment-bank", GameRepository(tmp_path / "increment-bank.sqlite3"))
+    session.apply_event({
+        "type": "gameFull", "initialFen": "startpos",
+        "clock": {"initial": 180_000, "increment": 2_000},
+        "state": {"moves": "", "status": "started", "wtime": 180_000,
+                  "btime": 180_000, "winc": 2_000, "binc": 2_000},
+    })
+    six_plies = "e2e4 d7d5 g1f3 g8f6 d2d4 e7e6"
+    session.apply_event({"type": "gameState", "moves": six_plies, "status": "started",
+                         "wtime": 186_000, "btime": 186_000,
+                         "winc": 2_000, "binc": 2_000})
+    assert session.clock_state_valid is True
+    assert (session.white_ms, session.black_ms) == (186_000, 186_000)
+
+    eight_plies = six_plies + " b1c3 c7c5"
+    session.apply_event({"type": "gameState", "moves": eight_plies, "status": "started",
+                         "wtime": 188_000, "btime": 188_000,
+                         "winc": 2_000, "binc": 2_000})
+    assert session.clock_state_valid is True
+    assert (session.white_ms, session.black_ms) == (188_000, 188_000)
+
+    # A delayed shorter line cannot roll back either the board or clock display.
+    session.apply_event({"type": "gameState", "moves": six_plies, "status": "started",
+                         "wtime": 184_000, "btime": 184_000,
+                         "winc": 2_000, "binc": 2_000})
+    assert len(session.moves.split()) == 8
+    assert (session.white_ms, session.black_ms) == (188_000, 188_000)
+    # A duplicate snapshot is idempotent.
+    session.apply_event({"type": "gameState", "moves": eight_plies, "status": "started",
+                         "wtime": 188_000, "btime": 188_000,
+                         "winc": 2_000, "binc": 2_000})
+    assert session.clock_state_valid is True
+
+
+def test_live_clock_increment_bounds_cover_both_colors_and_reject_bad_payloads(tmp_path):
+    repo = GameRepository(tmp_path / "clock-bounds.sqlite3")
+    session = LichessGameSession("clock-bounds", repo)
+    session.apply_event({
+        "type": "gameFull", "initialFen": "startpos",
+        "clock": {"initial": 900_000, "increment": 10_000},
+        "state": {"moves": "", "status": "started", "wtime": 900_000,
+                  "btime": 900_000, "winc": 10_000, "binc": 10_000},
+    })
+    session.apply_event({"type": "gameState", "moves": "e2e4 d7d5 g1f3", "status": "started",
+                         "wtime": 920_000, "btime": 910_000,
+                         "winc": 10_000, "binc": 10_000})
+    assert session.clock_state_valid is True
+    assert (session.white_ms, session.black_ms) == (920_000, 910_000)
+
+    no_increment = LichessGameSession("ten-zero", repo)
+    no_increment.apply_event({"type": "gameFull", "initialFen": "startpos",
+                              "clock": {"initial": 600_000, "increment": 0},
+                              "state": {"moves": "", "status": "started",
+                                        "wtime": 600_000, "btime": 600_000,
+                                        "winc": 0, "binc": 0}})
+    no_increment.apply_event({"type": "gameState", "moves": "e2e4 d7d5", "status": "started",
+                              "wtime": 590_000, "btime": 590_000, "winc": 0, "binc": 0})
+    assert no_increment.clock_state_valid is True
+    no_increment.apply_event({"type": "gameState", "moves": "e2e4 d7d5 g1f3", "status": "started",
+                              "wtime": 604_000, "btime": 580_000, "winc": 0, "binc": 0})
+    assert no_increment.clock_state_valid is False
+    assert no_increment.white_ms == 590_000
+
+    # Missing initial control is conservative and does not guess units.
+    unknown = LichessGameSession("unknown-control", repo)
+    unknown.apply_event({"type": "gameFull", "initialFen": "startpos",
+                         "state": {"moves": "", "status": "started", "wtime": 60_000,
+                                   "btime": 60_000, "winc": 0, "binc": 0}})
+    assert unknown.clock_control == "-" and unknown.clock_state_valid is True
+    unknown.apply_event({"type": "gameState", "moves": "", "status": "started",
+                         "wtime": "60000", "btime": 59_000, "winc": 0, "binc": 0})
+    assert unknown.clock_state_valid is False
+    assert unknown.white_ms == 60_000
+
+
 def test_disconnect_cancels_archive_and_puzzle_background_workers(monkeypatch):
     service = LichessService(client=object(), token_store=object())
     service._archive_stop = threading.Event()
