@@ -334,6 +334,7 @@ class MainWindow(QMainWindow):
     library_query_finished = Signal(int, object, object)
     library_detail_finished = Signal(int, str, object, object)
     external_study_finished = Signal(int, object, object)
+    background_status_finished = Signal(int, object)
 
     @property
     def _selected_live_game_id(self) -> str | None:
@@ -483,7 +484,10 @@ class MainWindow(QMainWindow):
         self.library_query_finished.connect(self._library_query_result_ready)
         self.library_detail_finished.connect(self._library_detail_result_ready)
         self.external_study_finished.connect(self._external_study_parse_finished)
+        self.background_status_finished.connect(self._background_operations_result_ready)
         self._external_study_generation = 0
+        self._background_status_generation = 0
+        self._background_status_handle = None
         self.setWindowTitle("Chess Coach")
         self.setMinimumSize(500, 360)
         self.resize(1360, 860)
@@ -582,6 +586,8 @@ class MainWindow(QMainWindow):
     def _lichess_session_authenticated(self, generation: int, username: str) -> None:
         if self._current_lichess_generation(generation):
             self._lichess_authenticated(username)
+            if getattr(self, "_background_operations_page", None) is not None:
+                self._refresh_background_operations_page()
 
     def _lichess_event_stream_ready(self, generation: int, username: str) -> None:
         if (not self._current_lichess_generation(generation) or self.offline_mode
@@ -673,31 +679,102 @@ class MainWindow(QMainWindow):
             return
         username = str(getattr(self.lichess, "username", "") or "").strip()
         account_id = f"lichess:{username.casefold()}" if username else None
-        summary = (self.game_repository.lichess_analysis_backfill_summary(account_id)
-                   if account_id else {})
-        paused = bool(account_id and
-                      self.game_repository.lichess_analysis_backfill_paused(account_id))
         available = bool(
             self.lichess and not self.offline_mode and self._lichess_connected
             and self._lichess_stream_ready_generation == getattr(
                 self.lichess, "auth_generation", None))
-        source_summary = (
-            "Источник: Lichess · документированный JSON export. "
-            f"Партии: {summary.get('total', 0)} · проверено: {summary.get('checked', 0)} · "
-            f"точность: {summary.get('accuracy', 0)} · оценки: {summary.get('evals', 0)} · "
-            f"нет серверного анализа: {summary.get('no_data', 0)} · "
-            f"ошибки/ограничения: {summary.get('errors', 0)} · ожидают: {summary.get('pending', 0)}. "
-            "Chess Coach не запрашивает создание серверного анализа."
-            if account_id else "Lichess не подключён; локальные фоновые задачи могут работать отдельно.")
-        retry = (f"Следующая проверка: {summary['retry_at']}"
-                 if summary.get("retry_at") else
-                 "Ограничение запросов Lichess и Retry-After учитываются сервисом."
-                 if summary.get("errors") else "")
-        page.set_snapshot(
-            self.runtime.work_coordinator.snapshots(), source_summary=source_summary,
-            backfill_paused=paused, can_check=available and bool(account_id),
-            can_pause=bool(account_id),
-            retry_status=retry)
+        self._background_status_generation += 1
+        generation = self._background_status_generation
+        previous = self._background_status_handle
+        if previous is not None:
+            previous.cancel("status_refresh_superseded")
+        stop_event = threading.Event()
+        repository = self.game_repository
+        operations = self.runtime.work_coordinator.snapshots()
+
+        def worker() -> None:
+            try:
+                if stop_event.is_set():
+                    return
+                archive = repository.archive_sync_state(account_id) if account_id else {}
+                puzzles = repository.puzzle_sync_state(account_id) if account_id else {}
+                summary = (repository.lichess_analysis_backfill_summary(account_id)
+                           if account_id else {})
+                paused = bool(account_id and
+                              repository.lichess_analysis_backfill_paused(account_id))
+                if stop_event.is_set():
+                    return
+                self.background_status_finished.emit(generation, {
+                    "account_id": account_id, "username": username, "available": available,
+                    "archive": archive, "puzzles": puzzles, "summary": summary,
+                    "paused": paused, "operations": operations,
+                })
+            except Exception as exc:
+                if not stop_event.is_set():
+                    self.background_status_finished.emit(generation, {
+                        "account_id": account_id, "username": username, "available": available,
+                        "failure_code": type(exc).__name__, "operations": operations,
+                    })
+
+        page.summary.setText("Читаю сохранённый статус фоновых операций…")
+        self._background_status_handle = self._start_registered_work(
+            worker, kind="background_status_read", lane=OperationLane.INTERACTIVE,
+            thread_name="cc-background-status", stop_event=stop_event)
+
+    def _background_operations_result_ready(self, generation: int, payload: object) -> None:
+        if (generation != self._background_status_generation
+                or not isinstance(payload, dict)
+                or getattr(self, "_background_operations_page", None) is None):
+            return
+        username = str(getattr(self.lichess, "username", "") or "").strip()
+        account_id = f"lichess:{username.casefold()}" if username else None
+        if payload.get("account_id") != account_id:
+            return
+        summary = payload.get("summary") or {}
+        statuses: list[str] = []
+        if payload.get("failure_code"):
+            statuses.append(f"SQLite · статус недоступен ({payload['failure_code']})")
+        else:
+            archive = payload.get("archive") or {}
+            if account_id:
+                archive_phase = ("полный архив загружен" if archive.get("backfill_complete")
+                                 else "первичная загрузка/продолжение не завершены")
+                archive_last = archive.get("last_success_at") or "ещё не синхронизирован"
+                archive_problem = " · ошибка синхронизации" if archive.get("last_error") else ""
+                statuses.append(
+                    f"Архив Lichess · сохранено {archive.get('imported_count', 0)} · "
+                    f"{archive_phase} · последнее успешное обновление: {archive_last}"
+                    f"{archive_problem}")
+                puzzles = payload.get("puzzles") or {}
+                puzzle_phase = ("история полностью загружена" if puzzles.get("backfill_complete")
+                                else "история/продолжение не завершены")
+                puzzle_last = puzzles.get("last_success_at") or "ещё не синхронизирована"
+                puzzle_problem = " · ошибка синхронизации" if puzzles.get("last_error") else ""
+                statuses.append(
+                    f"Задачи Lichess · сохранено {puzzles.get('imported_count', 0)} попыток · "
+                    f"{puzzle_phase} · последнее успешное обновление: {puzzle_last}"
+                    f"{puzzle_problem}")
+            source_summary = (
+                "Источник: Lichess · документированный JSON export. "
+                f"Партии: {summary.get('total', 0)} · проверено: {summary.get('checked', 0)} · "
+                f"точность: {summary.get('accuracy', 0)} · оценки: {summary.get('evals', 0)} · "
+                f"нет серверного анализа: {summary.get('no_data', 0)} · "
+                f"ошибки/ограничения: {summary.get('errors', 0)} · ожидают: {summary.get('pending', 0)}. "
+                "Chess Coach не запрашивает создание серверного анализа."
+                if account_id else
+                "Lichess не подключён; локальные фоновые задачи могут работать отдельно.")
+            retry = (f"Следующая проверка: {summary['retry_at']}"
+                     if summary.get("retry_at") else
+                     "Ограничение запросов Lichess и Retry-After учитываются сервисом."
+                     if summary.get("errors") else "")
+            if not account_id:
+                statuses.append("Архив и задачи Lichess · аккаунт не выбран; личные данные не запрашивались")
+            self._background_operations_page.set_snapshot(
+                payload.get("operations", ()), source_summary=source_summary,
+                backfill_paused=bool(payload.get("paused")),
+                can_check=bool(payload.get("available") and account_id),
+                can_pause=bool(account_id), retry_status=retry,
+                durable_statuses=statuses)
 
     def _set_backfill_paused(self, paused: bool) -> None:
         username = str(getattr(self.lichess, "username", "") or "").strip()
@@ -4079,6 +4156,8 @@ class MainWindow(QMainWindow):
         self._pause_batch_analysis()
         if self.lichess:
             self.lichess.disconnect_account()
+        if getattr(self, "_background_operations_page", None) is not None:
+            self._refresh_background_operations_page()
 
     def _invalidate_analysis_preflight(self) -> None:
         """Fail closed and stop pending/running post-game work on trust changes."""

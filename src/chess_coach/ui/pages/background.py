@@ -53,7 +53,8 @@ class BackgroundOperationsPage(QWidget):
 
     def set_snapshot(self, operations, *, source_summary: str,
                      backfill_paused: bool, can_check: bool, can_pause: bool,
-                     retry_status: str = "") -> None:
+                     retry_status: str = "", durable_statuses=()) -> None:
+        durable_statuses = tuple(durable_statuses)
         self.operation_list.clear()
         for operation in operations:
             context = operation.context
@@ -63,10 +64,13 @@ class BackgroundOperationsPage(QWidget):
             self.operation_list.addItem(
                 f"{context.kind if context else operation.lane.value} · "
                 f"{operation.status.value}{progress}")
+        for status in durable_statuses:
+            self.operation_list.addItem(str(status))
         if self.operation_list.count() == 0:
             self.operation_list.addItem("Активных фоновых операций нет.")
         self.summary.setText(
-            f"Активных операций: {len(operations)}. Онлайн-ходы и проверки безопасности "
+            f"Активных операций: {len(operations)} · сохранённых статусов: "
+            f"{len(tuple(durable_statuses))}. Онлайн-ходы и проверки безопасности "
             "используют отдельные приоритетные ресурсы.")
         self.source_summary.setText(source_summary)
         self.retry_status.setText(retry_status)

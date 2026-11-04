@@ -419,6 +419,75 @@ def test_progress_safety_lease_refreshes_only_when_display_becomes_allowed(
     dialog.close()
 
 
+def test_background_inspector_reads_archive_and_puzzle_checkpoints_off_ui(
+        qtbot, tmp_path):
+    window = MainWindow(QSettings(str(tmp_path / "background-checkpoints.ini"),
+                                  QSettings.Format.IniFormat), offline_mode=True)
+    qtbot.addWidget(window)
+    account_id = window.game_repository.ensure_archive_account("SyntheticAccount")
+    window.game_repository.record_puzzle_error(account_id, "synthetic-secret-error")
+    gui_thread = threading.get_ident()
+    read_threads = []
+    original = window.game_repository.archive_sync_state
+
+    def traced(account):
+        read_threads.append(threading.get_ident())
+        return original(account)
+
+    window.game_repository.archive_sync_state = traced
+
+    class FakeService:
+        username = "SyntheticAccount"
+        auth_generation = 2
+
+    window.lichess = FakeService()
+    window.show_background_analytics()
+    page = window._background_operations_page
+    qtbot.waitUntil(lambda: any("Задачи Lichess" in page.operation_list.item(i).text()
+                                for i in range(page.operation_list.count())), timeout=5000)
+    rows = [page.operation_list.item(i).text() for i in range(page.operation_list.count())]
+    assert any("Архив Lichess" in row for row in rows)
+    assert any("Задачи Lichess · сохранено 0 попыток" in row for row in rows)
+    assert all("synthetic-secret-error" not in row for row in rows)
+    assert "сохранённых статусов: 2" in page.summary.text()
+    assert read_threads and read_threads[0] != gui_thread
+    window.close()
+
+
+def test_background_inspector_discards_status_for_previous_account(
+        qtbot, tmp_path, monkeypatch):
+    window = MainWindow(QSettings(str(tmp_path / "background-stale-account.ini"),
+                                  QSettings.Format.IniFormat), offline_mode=True)
+    qtbot.addWidget(window)
+    window.game_repository.ensure_archive_account("OldAccount")
+    entered, release = threading.Event(), threading.Event()
+    original = window.game_repository.archive_sync_state
+
+    def delayed(account_id):
+        entered.set()
+        release.wait(3)
+        return original(account_id)
+
+    monkeypatch.setattr(window.game_repository, "archive_sync_state", delayed)
+
+    class FakeService:
+        username = "OldAccount"
+        auth_generation = 1
+
+    service = FakeService()
+    window.lichess = service
+    window.show_background_analytics()
+    assert entered.wait(2)
+    service.username = "NewAccount"
+    release.set()
+    qtbot.waitUntil(lambda: not window._background_status_handle.is_alive(), timeout=5000)
+    rows = [window._background_operations_page.operation_list.item(i).text()
+            for i in range(window._background_operations_page.operation_list.count())]
+    assert not any("OldAccount" in row for row in rows)
+    assert not any("Архив Lichess" in row for row in rows)
+    window.close()
+
+
 @pytest.mark.parametrize(("games", "allowed"), [
     ([{"source": "ai", "opponent": {"ai": 3, "id": None}}], True),
     ([{"source": "friend", "opponent": {"id": "human"}}], False),

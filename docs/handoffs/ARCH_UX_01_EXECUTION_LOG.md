@@ -95,11 +95,50 @@ Each stage will be appended here with commit SHA, changed responsibilities, focu
 - The shell routes requests through the existing Lichess service façade, keeps duplicate-submit protection, stores existing AI preferences, and displays status in the form. Legacy internal mode buttons remain hidden compatibility hooks; they are not visible user routes.
 - Fake service Qt regression covers AI parameters, online gating/duplicate requests, and friend invite dispatch. Focused page/window tests: **2 passed**. Full regression still pending.
 
-### Final coverage matrix — pending implementation
+### Coverage matrix — checkpoint placeholder, superseded by final matrix below
 
 | ID | Route / outcome | Verification |
 |---|---|---|
-| COV-01…24 | To be completed stage-by-stage | To be completed |
+| COV-01…24 | See final route/evidence matrix below | Full final Windows CI pending |
+
+### A9/A10 — persistent sync status and asynchronous read checkpoint
+
+- The shared background inspector now combines active `BackgroundWorkCoordinator` jobs with account-scoped persisted archive and puzzle sync checkpoints and the existing ready-analysis backfill summary. It remains a read-only projection; it adds no queue, HTTP client, retry loop or data store. Archive/puzzle errors are shown only as a status flag, not raw exception text.
+- Status reads run in a registered interactive worker instead of the Qt thread. Generation and account-id checks discard late results after refresh or account switch; authentication/disconnect refresh the view when it is mounted. A fake/temp-SQLite regression verifies the worker thread, archive/puzzle status, and that a synthetic secret-like error string is not rendered; a delayed old-account response is ignored.
+- Targeted result: the inspector/account stale set together with page, backfill-status, viewport, position-editor and safety-refresh regressions — **16 passed**; `compileall src tests scripts` — PASS; `git diff --check` — PASS. Full suite and hosted CI on the final SHA remain pending.
+
+### Final coverage matrix — implementation route and automated evidence
+
+`reused` means the existing capability/source of truth remains; `moved` means its primary entry is now in the shell. Rows marked `excluded` are explicit owner decisions, not missing functions.
+
+| ID | Route / disposition | Automated evidence |
+|---|---|---|
+| COV-01 | Sidebar/profile → Lichess settings; offline/manual guards reused | `test_manual_connect_defers_lichess_and_credentials_until_button`, `test_normal_window_starts_async_restore_for_selected_auth_method`, `test_explicit_offline_window_never_constructs_or_uses_lichess_credentials` |
+| COV-02 | Home metrics, activity, three recent games; moved | `test_m46_home_has_progress_activity_and_no_legacy_action_drawer`, `test_home_has_two_columns_and_three_recent_game_cards`, dashboard stale-generation tests |
+| COV-03 | Play page: local/AI/friend/username/active; moved | `test_play_page_keeps_each_action_connected_and_reflows_cards`, `test_embedded_play_form_uses_existing_lichess_facade_and_prevents_duplicate_requests` |
+| COV-04 | My Games → pinned active games and resume exact selection; moved | `test_library_pins_active_games_and_resumes_only_selected_session`, `test_batch_queue_and_remote_active_games_stay_inside_workspace` |
+| COV-05 | Live game right controls, ordinary premove, takeback/draw/resign; reused | `test_takeback_offer_ui_accept_and_server_rewind_refresh_history_and_pgn`, `test_online_premove_is_available_on_opponent_turn_and_sent_once_after_state`, `test_human_takeback_button_remains_an_offer_and_429_is_explicit` |
+| COV-06 | Free board/undo retained; standalone premove-training/test-move UI excluded by owner | `test_free_local_board_moves_both_sides_by_clicks_and_drag`, `test_cancel_premove_button_clears_queued_intent`, `test_local_training_own_piece_click_cancels_premove_without_playing_a_move` |
+| COV-07 | Board annotations/history navigation reused | `test_visual_preferences_persist_in_qsettings`, `test_online_history_refresh_is_incremental_and_handles_takeback`, `test_browsing_move_history_does_not_emit_sounds` |
+| COV-08 | Same board on finish; no automatic ResultPage; moved inline | `test_home_game_result_review_home_and_new_game_flow`, `test_finish_before_final_state_keeps_result_screen_then_updates_saved_pgn`, `test_finished_game_write_finalizes_after_navigation_away_from_board` |
+| COV-09 | Full/incremental archive sync retained; pilot controls excluded from main UX | `test_archive_status_discloses_offline_database_and_local_count_on_request`; archive checkpoint/sync tests in `tests/test_lichess.py` |
+| COV-10 | Ready Lichess accuracy/evals backfill retained with account status and backoff | `test_ready_event_stream_automatically_starts_bounded_old_game_analytics`, `test_queued_backfill_status_from_previous_account_is_ignored`, fake-transport tests in `tests/test_lichess.py` |
+| COV-11 | My Games catalog/details/PGN/notes/recovery path; moved | `test_library_opponent_and_opening_filters_query_current_sqlite_line`, `test_library_detail_loads_in_worker_only_after_safety_and_masks_on_revoke`, archive presentation tests |
+| COV-12 | Existing ReviewWorkspace, AdvantageBar and CP/Δ graph reused | `tests/test_game_review.py`, `test_library_detail_reuses_review_graph_and_masks_until_safety_gate` |
+| COV-13 | “Разобрать мои ошибки” remains within the existing review/training logic | Review training safety/verified-move regressions in `tests/test_window.py` and `tests/test_game_review.py` |
+| COV-14 | Settings → Stockfish; same manager/admission/cancel and custom node budgets | `tests/test_engine_manager.py`, `test_stockfish_settings_persist_without_launching_engine`, `test_saved_custom_node_limit_survives_settings_reopen_and_preset_changes_are_explicit` |
+| COV-15 | Analysis → existing durable batch control page | `test_batch_analysis_controls_are_explicit_and_resume_after_pause`, `test_batch_dialog_readiness_tracks_account_429_and_removed_engine`, fake engine safety tests |
+| COV-16 | Progress → existing filtered statistics and critical-moment tabs; safety gated | `test_statistics_screen_filters_asynchronously_and_resets`, `test_progress_cached_analytics_is_visually_masked_until_fresh_safety_snapshot`, SQLite statistics tests |
+| COV-17 | Training → existing puzzle history/replay/reveal/reset; arbitrary new-task/pilot UI excluded | `test_puzzle_replay_is_local_legal_and_does_not_change_history_or_send_requests`, puzzle history/sync tests in `tests/test_lichess.py` |
+| COV-18 | Sound settings/catalog/defaults/preview/QSettings unchanged | `test_online_move_sound_waits_for_authoritative_ack_and_deduplicates_replays`, `test_online_game_start_sound_plays_only_for_new_challenge_start`, local sound dedup tests |
+| COV-19 | OAuth/PAT slots and account restore/revoke reused | Auth isolation tests in `tests/test_window.py`, `tests/test_lichess.py`, `tests/test_lichess_credentials.py` |
+| COV-20 | Privacy-safe diagnostics and explicit local diagnostics access reused | `tests/test_diagnostics.py`, diagnostics settings/log tests |
+| COV-21 | Workspace geometry, selected route, review ply/filter persistence reused | `test_workspace_review_resumes_same_revision_ply_and_inspector_tab`, `test_workspace_changed_line_falls_back_to_start_and_restores_visible_geometry`, `tests/test_single_instance.py` |
+| COV-22 | Verified opening matcher, localization, phase/event source retained | `tests/test_m45_openings.py`, statistics opening/phase and archive presentation tests |
+| COV-23 | One inspector projects active registry + durable archive/puzzle/backfill state; batch remains in its own control page | `test_background_operations_page_renders_shared_registry_and_pause_state`, `test_background_inspector_reads_archive_and_puzzle_checkpoints_off_ui`, stale-account inspector test |
+| COV-24 | External PGN/FEN and temporary mouse setup feed the existing safe review path; no automatic engine | `test_position_setup_uses_shared_board_and_emits_ephemeral_fen`, `test_external_pgn_and_fen_are_parsed_offline_without_database_or_engine_work`, `test_external_study_invalid_input_and_stale_response_do_not_open_review` |
+
+This matrix records automated code evidence only. Manual physical Windows/DPI/sound/live game checks remain owner acceptance; CI does not establish those results.
 
 ## A11/A12 — adaptive game viewport and temporary board setup checkpoint
 
