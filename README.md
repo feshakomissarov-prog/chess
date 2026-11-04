@@ -8,7 +8,7 @@ Chess Coach — разрабатываемое настольное прилож
 
 [**Продуктовая цель и образовательные принципы**](docs/PRODUCT_VISION.md) · [**Дорожная карта**](docs/ROADMAP.md) · [**Текущее состояние / handoff**](docs/PROJECT_STATUS.md)
 
-**Сейчас проектируем новый интерфейс:** [рабочий UX-документ — страницы, карточки, навигация](docs/ux/CHESS_COACH_FULL_INTERFACE_WORKING_DRAFT.md) (04.11.2026; обсуждение, не ТЗ Codex и не готовый код). Дизайн не смешивается с архитектурным draft PR #44.
+**Сейчас проектируем новый интерфейс:** [рабочий UX-документ — страницы, карточки, навигация](docs/ux/CHESS_COACH_FULL_INTERFACE_WORKING_DRAFT.md) (04.11.2026; обсуждение, не ТЗ Codex и не готовый код); [**утверждённая UX-B1 основа и макеты**](docs/ux/UX_APPROVED_BASELINE_V1.md). Дизайн не смешивается с архитектурным draft PR #44.
 
 **Актуально на 03.11.2026:** M4.6 [PR #41](https://github.com/feshakomissarov-prog/chess/pull/41) объединён в `main` после Windows CI 553 PASS и ручной проверки владельца; утверждённая модель компетенций — [PR #42](https://github.com/feshakomissarov-prog/chess/pull/42). **Следующий отдельный этап — архитектурный рефакторинг без изменения функций:** [целевая архитектура](docs/architecture/CHESS_COACH_TARGET_ARCHITECTURE.md) · [подробное ТЗ ARCH-01](docs/architecture/ARCHITECTURE_REFACTOR_EXECUTION_SPEC.md) · [ADR](docs/architecture/ADR-0001-MODULAR-MONOLITH.md). Таблица ниже сохраняет исторический срез на 01.11.2026.
 
