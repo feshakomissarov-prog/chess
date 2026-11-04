@@ -8,6 +8,9 @@ Chess Coach — разрабатываемое настольное прилож
 
 [**Продуктовая цель и образовательные принципы**](docs/PRODUCT_VISION.md) · [**Дорожная карта**](docs/ROADMAP.md) · [**Текущее состояние / handoff**](docs/PROJECT_STATUS.md)
 
+> **Состояние на 05.11.2026:** код ARCH-UX-01 в [draft PR #44](https://github.com/feshakomissarov-prog/chess/pull/44) прошёл предыдущий Windows CI #253 (675 PASS), **но физический Windows-пилот показал UX и Lichess-соединение не готовы к приёмке**. Новое исполняемое [**REVIEW-FIX-05**](docs/specs/ARCH_UX_01_REVIEW_FIX_05_WINDOWS_UX_LICHESS.md) — исправить корневую навигацию и лишние фильтры Главной, обрезанную шапку, корректное состояние аккаунта и безопасную проверку аналитики, 2–3 KPI/занятие/последние игры, пройти все шесть экранов в native GUI на Windows. Доработка только в draft PR #44, документы draft PR #45, **main не трогать, не merge**. Старые абзацы ниже — исторические.
+
+
 > **Последний статус 04.11.2026:** код ARCH-UX-01 реализован в [draft PR #44](https://github.com/feshakomissarov-prog/chess/pull/44), Windows CI #244 SUCCESS на SHA `2b1c724…`, но **не принят по физической Windows-проверке**. Текущая задача — [единое исправляющее ТЗ REVIEW-FIX-01 v1.2](docs/specs/ARCH_UX_01_REVIEW_FIX_01.md), RF-01…RF-15 по итогам code review и 6 скриншотов: даты, метрики и поиск по архиву, источники Lichess/Stockfish, точность, игровая доска, фон и batch UX. ТЗ хранится в [docs-only draft PR #45](https://github.com/feshakomissarov-prog/chess/pull/45); оба PR не слиты. Старые нижние сообщения о «ещё не реализованном UX» исторические.
 
 
