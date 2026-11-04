@@ -1,5 +1,6 @@
 import ast
 from pathlib import Path
+from PySide6.QtWidgets import QScrollArea
 
 from chess_coach.ui.pages import LibraryPage, PlayPage, ResultPage
 
@@ -64,6 +65,22 @@ def test_library_page_emits_selected_game_actions_and_pagination(qtbot):
     ]
     assert page.refresh_game.isHidden()
     assert page.current_filters()["period_days"] == 0
+
+
+def test_library_uses_bounded_three_zone_layout_at_laptop_size(qtbot):
+    page = LibraryPage()
+    qtbot.addWidget(page)
+    page.resize(1280, 720)
+    page.show()
+    qtbot.wait(30)
+
+    assert page.body_splitter.count() == 2
+    assert page.filter_panel.parentWidget() is page.body_splitter.widget(1)
+    assert page.detail_panel.parentWidget() is page.body_splitter.widget(1)
+    assert page.body_splitter.widget(0).width() >= 420
+    assert page.body_splitter.widget(1).width() >= 320
+    assert not isinstance(page, QScrollArea)
+    assert page.summary.text().startswith("Завершённые партии")
 
 
 def test_library_detail_reuses_review_graph_and_masks_until_safety_gate(qtbot):

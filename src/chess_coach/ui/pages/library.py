@@ -4,8 +4,8 @@ from __future__ import annotations
 
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
-    QComboBox, QFrame, QHBoxLayout, QLabel, QListWidget, QListWidgetItem, QLineEdit,
-    QPushButton, QSplitter, QVBoxLayout, QWidget,
+    QComboBox, QFrame, QGridLayout, QHBoxLayout, QLabel, QListWidget, QListWidgetItem,
+    QLineEdit, QPushButton, QSplitter, QVBoxLayout, QWidget,
 )
 from ..display import format_clock_control
 from ..game_review import ReviewGraph
@@ -37,10 +37,11 @@ class LibraryPage(QWidget):
         self.active_games.itemClicked.connect(self._open_active)
         self.active_games.itemDoubleClicked.connect(self._open_active)
         layout.addWidget(self.active_games)
+        self.summary = QLabel("Завершённые партии · загрузка выборки…")
+        self.summary.setObjectName("secondary")
+        layout.addWidget(self.summary)
         self.search = QLineEdit()
         self.search.setPlaceholderText("Поиск по сопернику, игроку, ID или статусу")
-        layout.addWidget(self.search)
-        filters = QHBoxLayout()
         self.account_filter = QComboBox()
         self.account_filter.addItem("Все аккаунты", None)
         for account in accounts or []:
@@ -74,15 +75,37 @@ class LibraryPage(QWidget):
         for label, value in (("Любой период", 0), ("30 дней", 30),
                              ("90 дней", 90), ("1 год", 365)):
             self.period_filter.addItem(label, value)
-        for widget in (self.account_filter, self.side_filter, self.result_filter,
-                       self.source_filter, self.clock_filter, self.analysis_filter,
-                       self.analysis_source_filter, self.period_filter):
-            filters.addWidget(widget, 1)
+        filter_panel = QFrame()
+        self.filter_panel = filter_panel
+        filter_panel.setObjectName("metricCard")
+        filter_layout = QVBoxLayout(filter_panel)
+        filter_layout.setContentsMargins(8, 8, 8, 8)
+        filter_layout.setSpacing(6)
+        filter_title = QLabel("Фильтры")
+        filter_title.setStyleSheet("font-weight: 700;")
+        filter_layout.addWidget(filter_title)
+        filter_layout.addWidget(self.search)
+        filter_grid = QGridLayout()
+        filter_grid.setContentsMargins(0, 0, 0, 0)
+        filter_grid.setHorizontalSpacing(6)
+        filter_grid.setVerticalSpacing(5)
+        filter_widgets = (self.account_filter, self.side_filter, self.result_filter,
+                          self.source_filter, self.clock_filter, self.analysis_filter,
+                          self.analysis_source_filter, self.period_filter)
+        for index, widget in enumerate(filter_widgets):
+            filter_grid.addWidget(widget, index // 2, index % 2)
             widget.currentIndexChanged.connect(self._emit_filters)
-        layout.addLayout(filters)
+        filter_layout.addLayout(filter_grid)
         body = QSplitter(Qt.Orientation.Horizontal)
+        body.setChildrenCollapsible(False)
+        self.body_splitter = body
         self.games = QListWidget()
         body.addWidget(self.games)
+        aside = QWidget()
+        aside_layout = QVBoxLayout(aside)
+        aside_layout.setContentsMargins(0, 0, 0, 0)
+        aside_layout.setSpacing(8)
+        aside_layout.addWidget(filter_panel)
         self.detail_panel = QFrame()
         self.detail_panel.setObjectName("metricCard")
         detail_layout = QVBoxLayout(self.detail_panel)
@@ -110,7 +133,8 @@ class LibraryPage(QWidget):
         self.detail_open = QPushButton("Открыть разбор")
         self.detail_open.clicked.connect(lambda: self._emit_for_selected(self.open_requested))
         detail_layout.addWidget(self.detail_open)
-        body.addWidget(self.detail_panel)
+        aside_layout.addWidget(self.detail_panel, 1)
+        body.addWidget(aside)
         body.setStretchFactor(0, 3)
         body.setStretchFactor(1, 2)
         layout.addWidget(body, 1)
@@ -289,6 +313,7 @@ class LibraryPage(QWidget):
         elif rows:
             self.games.setCurrentRow(0)
         self.games.verticalScrollBar().setValue(scroll)
+        self.summary.setText(f"Завершённые партии · {max(0, int(total))} в текущей выборке")
         self.previous.setEnabled(self._page > 0)
         self.following.setEnabled(self._page + 1 < self._pages)
         self._selection_changed(self.games.currentItem(), None)
