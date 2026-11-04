@@ -68,6 +68,7 @@ from .application.game_sessions import GameSessionCoordinator
 from .application.game_finalization import GameFinalizationCoordinator, FinalizationPhase
 from .application.routes import WorkspaceNavigator, WorkspaceRoute
 from .application.background_work import OperationLane
+from .application.fair_play import playing_snapshot_allows_analysis
 from .application.archive_sync import ArchiveSyncCoordinator
 from .application.library import GameLibraryQueryCoordinator
 from .application.dashboard import (DashboardQueryCoordinator, dashboard_options,
@@ -385,6 +386,8 @@ class MainWindow(QMainWindow):
         # a fresh account-wide Lichess safety result. Isolated offline mode is
         # already protected from live play and network access.
         self._dashboard_analysis_safety_allowed = bool(self.offline_mode)
+        self._dashboard_display_safety_request_id: str | None = None
+        self._dashboard_display_safety_context: dict | None = None
         self._latest_dashboard_snapshot: dict | None = None
         selected_auth_method = self.settings.value("lichess/selected_auth_method", "oauth", type=str)
         if selected_auth_method not in {"oauth", "personal_token"}:
@@ -1799,12 +1802,99 @@ class MainWindow(QMainWindow):
             self._recent_games_layout.addWidget(card)
 
     def _refresh_dashboard_analysis_visibility(self) -> None:
+        safety_allowed = self._library_detail_safety_allowed()
         snapshot = self._latest_dashboard_snapshot
         if snapshot is not None:
             self._render_dashboard_snapshot(snapshot)
         library_page = getattr(self, "library_page", None)
         if library_page is not None and library_page.selected_game() is not None:
             self._load_library_game_detail(library_page.selected_game())
+        statistics_page = getattr(self, "_statistics_dialog", None)
+        if statistics_page is not None:
+            statistics_page.set_safety_display_allowed(
+                safety_allowed,
+                "Статистика и кэшированные оценки скрыты: подтвердите безопасное состояние Lichess.",
+            )
+
+    def _request_dashboard_display_safety(self) -> None:
+        if self.offline_mode and self.lichess is None:
+            self._dashboard_analysis_safety_allowed = True
+            self._refresh_dashboard_analysis_visibility()
+            return
+        service = self.lichess
+        username = str(getattr(service, "username", "") or "").strip().casefold()
+        if not service or not username or not self._online_actions_allowed():
+            self._dashboard_analysis_safety_allowed = False
+            self._refresh_dashboard_analysis_visibility()
+            page = getattr(self, "_statistics_dialog", None)
+            if page is not None:
+                page.analysis_mask_label.setText(
+                    "Нужны подключённый аккаунт Lichess и доступное сетевое соединение. "
+                    "Оценки остаются скрыты.")
+            return
+        request_id = uuid.uuid4().hex
+        self._dashboard_display_safety_request_id = request_id
+        self._dashboard_display_safety_context = {
+            "service": service,
+            "generation": self._analysis_session_generation,
+            "username": username,
+        }
+        self._dashboard_analysis_safety_allowed = False
+        self._refresh_dashboard_analysis_visibility()
+        page = getattr(self, "_statistics_dialog", None)
+        if page is not None:
+            page.analysis_safety_button.setEnabled(False)
+            page.analysis_mask_label.setText("Проверяем полный список активных партий Lichess…")
+        try:
+            service.check_active_games_for_analysis(request_id)
+        except Exception as exc:
+            self._dashboard_display_safety_error(request_id, type(exc).__name__)
+
+    def _dashboard_display_safety_is_current(self, request_id: str) -> bool:
+        context = self._dashboard_display_safety_context
+        username = str(getattr(self.lichess, "username", "") or "").strip().casefold()
+        return bool(
+            request_id == self._dashboard_display_safety_request_id and context
+            and context["service"] is self.lichess
+            and context["generation"] == self._analysis_session_generation
+            and context["username"] == username
+            and self._lichess_connected and self._online_actions_allowed())
+
+    def _dashboard_display_safety_reply(self, request_id: str, games: object) -> bool:
+        if request_id != self._dashboard_display_safety_request_id:
+            return False
+        if not self._dashboard_display_safety_is_current(request_id):
+            self._dashboard_display_safety_request_id = None
+            self._dashboard_display_safety_context = None
+            return True
+        active_human = any(
+            session.status in {"started", "playing"} and not session.is_ai_opponent
+            for session in self.online_sessions.values())
+        result = playing_snapshot_allows_analysis(games, active_human_session=active_human)
+        self._dashboard_display_safety_request_id = None
+        self._dashboard_display_safety_context = None
+        self._dashboard_analysis_safety_allowed = result is True
+        self._refresh_dashboard_analysis_visibility()
+        page = getattr(self, "_statistics_dialog", None)
+        if page is not None and result is not True:
+            page.analysis_mask_label.setText(
+                "Список активных партий неполон, неизвестен или содержит игру против человека. "
+                "Кэшированная аналитика остаётся скрыта.")
+        return True
+
+    def _dashboard_display_safety_error(self, request_id: str, error_code: str) -> bool:
+        if request_id != self._dashboard_display_safety_request_id:
+            return False
+        if self._dashboard_display_safety_is_current(request_id):
+            self._dashboard_display_safety_request_id = None
+            self._dashboard_display_safety_context = None
+            self._dashboard_analysis_safety_allowed = False
+            self._refresh_dashboard_analysis_visibility()
+            page = getattr(self, "_statistics_dialog", None)
+            if page is not None:
+                page.analysis_mask_label.setText(
+                    f"Проверка Lichess не выполнена ({error_code}); оценки остаются скрыты.")
+        return True
 
     def _dashboard_filter_changed(self, *_args) -> None:
         if hasattr(self, "dashboard_account"):
@@ -2166,6 +2256,11 @@ class MainWindow(QMainWindow):
             self.game_repository, self,
             saved_filters=saved_filters if isinstance(saved_filters, dict) else {})
         self._statistics_dialog = dialog
+        dialog.set_safety_display_allowed(
+            self._library_detail_safety_allowed(),
+            "Статистика и кэшированные оценки скрыты до свежей проверки безопасного состояния Lichess.",
+        )
+        dialog.safety_requested.connect(self._request_dashboard_display_safety)
         dialog.worker_started.connect(self._statistics_worker_started)
         dialog.worker_finished.connect(self._statistics_worker_finished)
         dialog.position_requested.connect(self._open_statistics_position)
@@ -3978,6 +4073,8 @@ class MainWindow(QMainWindow):
         """Fail closed and stop pending/running post-game work on trust changes."""
         self._analysis_session_generation += 1
         if not self.offline_mode:
+            self._dashboard_display_safety_request_id = None
+            self._dashboard_display_safety_context = None
             self._dashboard_analysis_safety_allowed = False
             self._refresh_dashboard_analysis_visibility()
         self._revoke_review_safety(
@@ -5351,6 +5448,8 @@ class MainWindow(QMainWindow):
         return classify_lichess_opponent(game) != "official_ai"
 
     def _analysis_safety_games_received(self, request_id: str, games: list[dict]) -> None:
+        if self._dashboard_display_safety_reply(request_id, games):
+            return
         if self._review_safety_games_received(request_id, games):
             return
         if request_id == self._position_eval_preflight_id:
@@ -5399,6 +5498,8 @@ class MainWindow(QMainWindow):
                                    request_id=request_id)
 
     def _analysis_safety_error(self, request_id: str, message: str) -> None:
+        if self._dashboard_display_safety_error(request_id, type(message).__name__):
+            return
         if self._review_safety_error_received(request_id, message):
             return
         if request_id == self._position_eval_preflight_id:

@@ -1199,6 +1199,65 @@ def test_settings_open_inside_shell_and_cancel_discards_edits(qtbot, tmp_path):
     window.close()
 
 
+def test_progress_cached_analytics_is_visually_masked_until_fresh_safety_snapshot(
+    qtbot, tmp_path, monkeypatch
+):
+    window = MainWindow(offline_mode=True)
+    qtbot.addWidget(window)
+    # Use the isolated temporary runtime as a shell fixture while simulating a
+    # connected session through a fake service only.
+    window.offline_mode = False
+    window._dashboard_analysis_safety_allowed = False
+    requests = []
+
+    class FakeService:
+        username = "synthetic"
+        auth_generation = 7
+        def check_active_games_for_analysis(self, request_id):
+            requests.append(request_id)
+
+    window.lichess = FakeService()
+    window._lichess_connected = True
+    window._lichess_stream_ready_generation = 7
+    monkeypatch.setattr(window, "_online_actions_allowed", lambda: True)
+    window.show_statistics()
+    page = window._statistics_dialog
+    window.show()
+    qtbot.wait(25)
+    page.summary_label.setText("Cached Stockfish assessment: synthetic-secret-metric")
+    page.critical_summary.setText("Cached blunder count: 42")
+    page.set_safety_display_allowed(False, "Fresh Lichess check required.")
+    qtbot.wait(20)
+    assert page.tabs.isHidden()
+    assert page.analysis_mask.isVisible()
+    assert not page.summary_label.isVisibleTo(page)
+    assert not page.critical_summary.isVisibleTo(page)
+
+    page.analysis_safety_button.click()
+    assert len(requests) == 1
+    window._analysis_safety_games_received(requests[-1], [])
+    assert window._dashboard_analysis_safety_allowed
+    assert page.tabs.isVisible()
+
+    human = LichessGameSession("synthetic-human", window.game_repository)
+    human.status = "playing"
+    window.online_sessions[human.game_id] = human
+    window._refresh_dashboard_analysis_visibility()
+    assert page.tabs.isHidden()
+    assert not page.summary_label.isVisibleTo(page)
+
+    window.online_sessions.clear()
+    page.set_safety_display_allowed(False, "Rechecking.")
+    page.analysis_safety_button.setEnabled(True)
+    page.analysis_safety_button.click()
+    stale_request = requests[-1]
+    window._analysis_session_generation += 1
+    window._analysis_safety_games_received(stale_request, [])
+    assert not window._dashboard_analysis_safety_allowed
+    assert page.tabs.isHidden()
+    window.close()
+
+
 def test_batch_queue_pauses_on_new_human_game_but_not_builtin_ai(qtbot):
     human_window = MainWindow(offline_mode=True)
     qtbot.addWidget(human_window)

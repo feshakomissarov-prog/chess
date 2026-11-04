@@ -358,6 +358,7 @@ class StatisticsDialog(QDialog):
     position_requested = Signal(str, int)
     game_requested = Signal(str)
     batch_requested = Signal()
+    safety_requested = Signal()
 
     def __init__(self, repository: GameRepository, parent=None,
                  saved_filters: dict | None = None) -> None:
@@ -376,6 +377,18 @@ class StatisticsDialog(QDialog):
         root = QVBoxLayout(self)
         self.tabs = QTabWidget(self)
         root.addWidget(self.tabs, 1)
+        self.analysis_mask = QWidget(self)
+        mask_layout = QVBoxLayout(self.analysis_mask)
+        self.analysis_mask_label = QLabel(
+            "Аналитика временно скрыта до свежей проверки состояния Lichess.")
+        self.analysis_mask_label.setWordWrap(True)
+        mask_layout.addWidget(self.analysis_mask_label)
+        self.analysis_safety_button = QPushButton("Проверить безопасность и открыть данные")
+        self.analysis_safety_button.clicked.connect(self.safety_requested.emit)
+        mask_layout.addWidget(self.analysis_safety_button, 0, Qt.AlignmentFlag.AlignLeft)
+        mask_layout.addStretch(1)
+        self.analysis_mask.hide()
+        root.addWidget(self.analysis_mask, 1)
         overview_page = QWidget(self)
         overview_layout = QVBoxLayout(overview_page)
         games_page = QWidget(self)
@@ -570,6 +583,17 @@ class StatisticsDialog(QDialog):
         self.previous_page.clicked.connect(lambda: self._set_page(max(0, self._page - 1)))
         self.next_page.clicked.connect(lambda: self._set_page(self._page + 1))
         self._schedule_refresh()
+
+    def set_safety_display_allowed(self, allowed: bool, reason: str = "") -> None:
+        """Hide every cached statistics tab until the shared safety lease is current."""
+        permitted = bool(allowed)
+        self.tabs.setVisible(permitted)
+        self.analysis_mask.setVisible(not permitted)
+        self.analysis_safety_button.setEnabled(not permitted)
+        if reason:
+            self.analysis_mask_label.setText(str(reason))
+        if permitted:
+            self._schedule_refresh()
 
     @staticmethod
     def _scroll_tab(page: QWidget) -> QScrollArea:
