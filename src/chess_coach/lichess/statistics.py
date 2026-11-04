@@ -7,7 +7,9 @@ from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from .repository import GameRepository
-from ..domain.analysis_scope import current_scored_analysis_exists
+from ..domain.analysis_scope import (analysis_run_has_position_scores,
+                                     analysis_run_source_filter,
+                                     current_scored_analysis_exists)
 
 
 class StatisticsService:
@@ -89,15 +91,19 @@ class StatisticsService:
             clauses.append("g.winner IS NULL AND g.status NOT IN "
                            "('draw','stalemate','repetition','50moves','insufficientMaterial') "
                            "AND g.pgn NOT LIKE '%[Result \"1/2-1/2\"]%'")
-        analysis_exists = current_scored_analysis_exists(source=analysis_source)
+        analysis_exists, analysis_source_params = current_scored_analysis_exists(
+            source=analysis_source)
         if analyzed == "yes":
             clauses.append(analysis_exists)
+            params.extend(analysis_source_params)
         elif analyzed == "no":
             clauses.append(f"NOT {analysis_exists}")
+            params.extend(analysis_source_params)
         elif analysis_source:
             # A chosen source always constrains the game set, even when the GUI's
             # analyzed selector is set to its default "any" value.
             clauses.append(analysis_exists)
+            params.extend(analysis_source_params)
         return join, " AND ".join(clauses), params
 
     @staticmethod
@@ -105,7 +111,7 @@ class StatisticsService:
         color = "ag.color" if account_id else "g.color"
         rating = "ag.player_rating" if account_id else (
             "CASE g.color WHEN 'white' THEN g.white_rating ELSE g.black_rating END")
-        return ("WITH filtered_games AS (SELECT DISTINCT g.game_id,g.status,g.winner,g.pgn,"
+        return ("WITH filtered_games AS (SELECT DISTINCT g.game_id,g.line_revision,g.status,g.winner,g.pgn,"
                 "g.started_at,g.game_time_precision,g.white_rating,g.black_rating,"
                 "g.lichess_accuracy_white,g.lichess_accuracy_black,g.source,g.clock,"
                 f"{color} AS my_color,{rating} AS my_rating FROM games g{join} WHERE {where})")
@@ -128,9 +134,13 @@ class StatisticsService:
             rating_min=rating_min, rating_max=rating_max, opening=opening,
             result=result, analyzed=analyzed)
         filtered = self._filtered_cte(join, where, account_id)
+        run_source_filter, source_params = analysis_run_source_filter("ar", analysis_source)
+        source_clause = f" AND ({run_source_filter})" if run_source_filter else ""
+        scored_run = analysis_run_has_position_scores("ar")
         latest = (", latest AS (SELECT ar.game_id,ar.line_revision,ar.run_id,"
                   "ROW_NUMBER() OVER (PARTITION BY ar.game_id,ar.line_revision "
-                  "ORDER BY CASE WHEN ar.status='complete' THEN 0 ELSE 1 END,"
+                  f"ORDER BY CASE WHEN {scored_run} THEN 0 ELSE 1 END,"
+                  "CASE WHEN ar.status='complete' THEN 0 ELSE 1 END,"
                   "ar.finished_at DESC,ar.run_id DESC) AS rank "
                   "FROM analysis_runs ar JOIN game_revisions gr "
                   "ON gr.game_id=ar.game_id AND gr.line_revision=ar.line_revision "
@@ -138,8 +148,7 @@ class StatisticsService:
                   "WHERE gr.is_current=1 AND ar.status IN ('complete','partial') "
                   "AND NOT EXISTS (SELECT 1 FROM analysis_jobs aj "
                   "WHERE aj.result_run_id=ar.run_id AND aj.analysis_pass='review') "
-                  + ("AND ar.source=? " if analysis_source else "") + ")")
-        source_params = [analysis_source] if analysis_source else []
+                  + source_clause + ")")
         selected = filtered + latest + ", chosen AS (SELECT * FROM latest WHERE rank=1)"
         self.repository._wait_before_read()
         with self.repository._connection() as db:
@@ -161,7 +170,12 @@ class StatisticsService:
             move_count = db.execute(filtered + " SELECT COUNT(*) FROM game_moves gm "
                 "JOIN game_revisions gr ON gr.game_id=gm.game_id AND gr.line_revision=gm.line_revision "
                 "JOIN filtered_games fg ON fg.game_id=gm.game_id WHERE gr.is_current=1", params).fetchone()[0]
-            analysis_count = db.execute(selected + " SELECT COUNT(*) FROM chosen", [*params, *source_params]).fetchone()[0]
+            scored_game_exists, scored_game_source_params = current_scored_analysis_exists(
+                "fg", analysis_source)
+            analysis_count = db.execute(
+                filtered + " SELECT COUNT(DISTINCT fg.game_id) FROM filtered_games fg "
+                "WHERE " + scored_game_exists,
+                [*params, *scored_game_source_params]).fetchone()[0]
             scored_position_count = db.execute(selected + " SELECT COUNT(*) FROM chosen c "
                 "JOIN position_assessments pa ON pa.run_id=c.run_id "
                 "WHERE pa.white_cp IS NOT NULL OR pa.mate_white IS NOT NULL",
@@ -250,7 +264,7 @@ class StatisticsService:
                  "lichess_accuracy": {
                      "white": round(float(base['accuracy_white']), 1) if base['accuracy_white'] is not None else None,
                      "black": round(float(base['accuracy_black']), 1) if base['accuracy_black'] is not None else None},
-                 "analysis_coverage": round(100 * analysis_count / games_count, 1) if games_count else 0.0,
+                 "analysis_coverage": round(100 * analysis_count / games_count, 1) if games_count else None,
                  "classifications_by_phase": phases, "rating_trend": rating_trend}
         return self._store_cached(cache_key, stats)
 
@@ -286,22 +300,28 @@ class StatisticsService:
         if until:
             clauses.append("g.started_at<?")
             params.append(until)
-        if analysis_source:
-            clauses.append("ar.source=?")
-            params.append(analysis_source)
+        outer_source_filter, outer_source_params = analysis_run_source_filter("ar", analysis_source)
+        if outer_source_filter:
+            clauses.append(f"({outer_source_filter})")
+            params.extend(outer_source_params)
+        ranked_source_filter, ranked_source_params = analysis_run_source_filter("ar", analysis_source)
+        ranked_source_clause = (f"AND ({ranked_source_filter}) "
+                                if ranked_source_filter else "")
+        ranked_score = analysis_run_has_position_scores("ar")
         # Local games have no account_games row; use their stored perspective. Account
         # aggregates use the account-specific color, avoiding mixed-account attribution.
         self.repository._wait_before_read()
         with self.repository._connection() as db:
             rows = db.execute(
                 "WITH ranked AS (SELECT ar.*,ROW_NUMBER() OVER(PARTITION BY ar.game_id,"
-                "ar.line_revision ORDER BY CASE WHEN ar.status='complete' THEN 0 ELSE 1 END,"
+                "ar.line_revision ORDER BY " + f"CASE WHEN {ranked_score} THEN 0 ELSE 1 END," +
+                "CASE WHEN ar.status='complete' THEN 0 ELSE 1 END,"
                 "ar.finished_at DESC,ar.run_id DESC) AS rank FROM analysis_runs ar "
                 "JOIN game_revisions rr ON rr.game_id=ar.game_id AND rr.line_revision=ar.line_revision "
                  "WHERE rr.is_current=1 AND ar.status IN ('complete','partial') "
                  "AND NOT EXISTS (SELECT 1 FROM analysis_jobs aj WHERE aj.result_run_id=ar.run_id "
                  "AND aj.analysis_pass='review') "
-                + ("AND ar.source=? " if analysis_source else "") + "), chosen AS ("
+                 + ranked_source_clause + "), chosen AS ("
                 "SELECT * FROM ranked WHERE rank=1) "
                 "SELECT COALESCE(om.eco,g.opening_eco,'unknown') AS eco,"
                 "COALESCE(om.name,g.opening_name,'unknown') AS opening,"
@@ -337,7 +357,7 @@ class StatisticsService:
                 "WHEN g.opening_eco IS NOT NULL THEN 'lichess' ELSE 'unknown' END,"
                 "COALESCE(ag.color,g.color),g.source,COALESCE(ag.account_id,'local') "
                 "ORDER BY games DESC,eco,opening,my_color,account_scope "
-                , [*([analysis_source] if analysis_source else []), *params]).fetchall()
+                , [*ranked_source_params, *params]).fetchall()
         output = []
         for row in rows:
             item = dict(row)
@@ -469,16 +489,20 @@ class StatisticsService:
         params: list[object] = [account_id, side, since, until]
         if clock:
             clauses.append("g.clock=?"); params.append(clock)
+        source_filter, source_params = analysis_run_source_filter("ar", analysis_source)
+        source_clause = f"AND ({source_filter}) " if source_filter else ""
+        scored_run = analysis_run_has_position_scores("ar")
         with self.repository._connection() as db:
             row = db.execute(
                 "WITH ranked AS (SELECT ar.game_id,ar.line_revision,ar.run_id,"
                 "ROW_NUMBER() OVER(PARTITION BY ar.game_id,ar.line_revision ORDER BY "
+                f"CASE WHEN {scored_run} THEN 0 ELSE 1 END,"
                 "CASE WHEN ar.status='complete' THEN 0 ELSE 1 END,ar.finished_at DESC,ar.run_id DESC) rn "
                 "FROM analysis_runs ar JOIN game_revisions rr ON rr.game_id=ar.game_id "
                 "AND rr.line_revision=ar.line_revision WHERE rr.is_current=1 "
                 "AND ar.status IN ('complete','partial') AND NOT EXISTS (SELECT 1 FROM analysis_jobs aj "
                 "WHERE aj.result_run_id=ar.run_id AND aj.analysis_pass='review') " +
-                ("AND ar.source=? " if analysis_source else "") + "), chosen AS (SELECT * FROM ranked WHERE rn=1) "
+                source_clause + "), chosen AS (SELECT * FROM ranked WHERE rn=1) "
                 "SELECT COUNT(*) FROM games g JOIN account_games ag ON ag.game_id=g.game_id "
                 "JOIN game_revisions gr ON gr.game_id=g.game_id AND gr.line_revision=g.line_revision "
                 "JOIN chosen c ON c.game_id=g.game_id AND c.line_revision=g.line_revision "
@@ -491,7 +515,7 @@ class StatisticsService:
                 "AND mm.metric_version='cc-move-metrics-v2' AND gm.mover=ag.color "
                 "AND mm.cp_loss IS NOT NULL)=(SELECT COUNT(*) FROM game_moves gm WHERE gm.game_id=g.game_id "
                 "AND gm.line_revision=g.line_revision AND gm.mover=ag.color)",
-                ([analysis_source] if analysis_source else []) + params).fetchone()
+                [*source_params, *params]).fetchone()
         return int(row[0] or 0)
 
     def _personal_diagnostics(self, *, account_id: str, since: str, until: str,
@@ -505,10 +529,12 @@ class StatisticsService:
         if clock:
             clauses.append("g.clock=?")
             params.append(clock)
-        source_clause = "AND ar.source=? " if analysis_source else ""
-        source_params: list[object] = [analysis_source] if analysis_source else []
+        source_filter, source_params = analysis_run_source_filter("ar", analysis_source)
+        source_clause = f"AND ({source_filter}) " if source_filter else ""
+        scored_run = analysis_run_has_position_scores("ar")
         cte = ("WITH ranked AS (SELECT ar.*,ROW_NUMBER() OVER(PARTITION BY ar.game_id,ar.line_revision "
-                "ORDER BY CASE WHEN ar.status='complete' THEN 0 ELSE 1 END,ar.finished_at DESC,ar.run_id DESC) rn "
+                f"ORDER BY CASE WHEN {scored_run} THEN 0 ELSE 1 END,"
+                "CASE WHEN ar.status='complete' THEN 0 ELSE 1 END,ar.finished_at DESC,ar.run_id DESC) rn "
                 "FROM analysis_runs ar JOIN game_revisions rr ON rr.game_id=ar.game_id "
                 "AND rr.line_revision=ar.line_revision WHERE rr.is_current=1 AND ar.status IN ('complete','partial') "
                 "AND NOT EXISTS (SELECT 1 FROM analysis_jobs aj WHERE aj.result_run_id=ar.run_id "
@@ -591,8 +617,9 @@ class StatisticsService:
             clauses.append("g.clock=?"); params.append(clock)
         if side in {"white", "black"}:
             clauses.append("ag.color=?"); params.append(side)
-        analysis_clause = "AND ar.source=? " if analysis_source else ""
-        cte_params: list[object] = [analysis_source] if analysis_source else []
+        source_filter, cte_params = analysis_run_source_filter("ar", analysis_source)
+        analysis_clause = f"AND ({source_filter}) " if source_filter else ""
+        scored_run = analysis_run_has_position_scores("ar")
         from .event_detectors import DETECTOR_VERSION
         active_detector = DETECTOR_VERSION + ":%"
         where = " AND ".join(clauses)
@@ -600,7 +627,8 @@ class StatisticsService:
         with self.repository._connection() as db:
             rows = db.execute(
                 "WITH ranked AS (SELECT ar.*,ROW_NUMBER() OVER(PARTITION BY ar.game_id,ar.line_revision "
-                "ORDER BY CASE WHEN ar.status='complete' THEN 0 ELSE 1 END,ar.finished_at DESC,ar.run_id DESC) rank "
+                f"ORDER BY CASE WHEN {scored_run} THEN 0 ELSE 1 END,"
+                "CASE WHEN ar.status='complete' THEN 0 ELSE 1 END,ar.finished_at DESC,ar.run_id DESC) rank "
                 "FROM analysis_runs ar JOIN game_revisions rr ON rr.game_id=ar.game_id "
                 "AND rr.line_revision=ar.line_revision WHERE rr.is_current=1 "
                 "AND ar.status IN ('complete','partial') AND NOT EXISTS (SELECT 1 FROM analysis_jobs aj "
@@ -738,14 +766,18 @@ class StatisticsService:
         if account_id:
             selected += ",ag.account_id AS account_id,ag.opponent AS account_opponent,ag.player_name AS account_player_name,ag.color AS account_color"
         owner_color = "ag.color" if account_id else "g.color"
+        page_source_filter, page_source_params = analysis_run_source_filter("ar", analysis_source)
+        page_source_clause = f"AND ({page_source_filter}) " if page_source_filter else ""
+        scored_run = analysis_run_has_position_scores("ar")
         latest_run = ("SELECT ar.run_id FROM analysis_runs ar JOIN game_revisions rr "
                       "ON rr.game_id=ar.game_id AND rr.line_revision=ar.line_revision "
                       "WHERE ar.game_id=g.game_id AND ar.line_revision=g.line_revision "
                       "AND rr.is_current=1 AND ar.status IN ('complete','partial') "
                  "AND NOT EXISTS (SELECT 1 FROM analysis_jobs aj WHERE aj.result_run_id=ar.run_id "
                  "AND aj.analysis_pass='review') "
-                      + ("AND ar.source=? " if analysis_source else "") +
-                      "ORDER BY CASE WHEN ar.status='complete' THEN 0 ELSE 1 END,"
+                      + page_source_clause +
+                      f"ORDER BY CASE WHEN {scored_run} THEN 0 ELSE 1 END,"
+                      "CASE WHEN ar.status='complete' THEN 0 ELSE 1 END,"
                       "ar.finished_at DESC,ar.run_id DESC LIMIT 1")
         selected += f", ({latest_run}) AS latest_run_id, " \
                     f"(SELECT ar.status FROM analysis_runs ar WHERE ar.run_id=({latest_run})) AS analysis_status, " \
@@ -774,7 +806,7 @@ class StatisticsService:
                     f"AND mm.severity='blunder') AS own_blunders, " \
                     f"CASE {owner_color} WHEN 'white' THEN g.lichess_accuracy_white " \
                     f"WHEN 'black' THEN g.lichess_accuracy_black END AS owner_lichess_accuracy"
-        page_params = ([analysis_source] * 8 if analysis_source else []) + [*params]
+        page_params = page_source_params * 8 + params
         self.repository._wait_before_read()
         with self.repository._connection() as db:
             total = db.execute(f"SELECT COUNT(DISTINCT g.game_id) FROM games g{join} WHERE {where}",

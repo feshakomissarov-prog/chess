@@ -456,7 +456,7 @@ class StatisticsDialog(QDialog):
         self.analysis_source = QComboBox()
         self._fill_combo(self.analysis_source, (("Любой источник оценки", ""),
                                                  ("Stockfish", "stockfish"),
-                                                 ("Lichess", "lichess-pgn")))
+                                                 ("Lichess · PGN + JSON", "lichess")))
         fields = (("Аккаунт", self.account), ("Период", self.period),
                   ("Контроль", self.clock), ("Цвет", self.side),
                   ("Результат", self.result_filter), ("Источник партии", self.game_source),
@@ -856,10 +856,14 @@ class StatisticsDialog(QDialog):
                      if not self.account.currentData() else
                      f"Аккаунт: {self.account.currentText()}")
             self.mixed_warning.setText(scope)
+            analysis_text = (f"Анализ с оценками есть у {summary['analysis_games']}/{total} партий"
+                             if total else "Анализ с оценками: н/д (нет партий)")
+            if int(summary.get("analysis_games") or 0) == 0 and total:
+                analysis_text += " · нет подтверждённых оценок позиций"
             self.summary_label.setText(
                 f"Партии: {total} · победы {summary['wins']} · ничьи {summary['draws']} · "
                 f"поражения {summary['losses']}\n"
-                f"Анализ есть у {summary['analysis_games']}/{total} партий · {coverage_text}\n"
+                f"{analysis_text} · {coverage_text}\n"
                 f"{classified_text} · ошибки на 100 оценённых моих ходов: "
                 f"{summary['own_error_rate_per_100'] if summary['own_error_rate_per_100'] is not None else 'нет данных'}\n"
                 f"Официальная точность Lichess: белые {accuracy['white'] if accuracy['white'] is not None else 'нет данных'}, "

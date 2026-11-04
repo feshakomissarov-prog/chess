@@ -105,16 +105,21 @@ class GamesStoreMixin:
         if updated_after:
             clauses.append("COALESCE(g.started_at,g.updated_at)>=?")
             params.append(updated_after)
-        current_analysis = current_scored_analysis_exists()
-        lichess_analysis = current_scored_analysis_exists(source="lichess")
+        current_analysis, _current_source_params = current_scored_analysis_exists()
+        lichess_analysis, lichess_source_params = current_scored_analysis_exists(source="lichess")
         if analysis == "yes":
             clauses.append(f"(({current_analysis}) OR ({lichess_analysis}))")
+            params.extend(lichess_source_params)
         elif analysis == "no":
             clauses.append(f"NOT ({current_analysis}) AND NOT ({lichess_analysis})")
+            params.extend(lichess_source_params)
         if analysis_source == "stockfish":
-            clauses.append(current_scored_analysis_exists(source="stockfish"))
+            stockfish_analysis, stockfish_params = current_scored_analysis_exists(source="stockfish")
+            clauses.append(stockfish_analysis)
+            params.extend(stockfish_params)
         elif analysis_source == "lichess":
             clauses.append(lichess_analysis)
+            params.extend(lichess_source_params)
         elif analysis_source == "official_accuracy":
             accuracy_expr = ("CASE WHEN " + color_expr + "='white' THEN g.lichess_accuracy_white "
                              "WHEN " + color_expr + "='black' THEN g.lichess_accuracy_black END")
