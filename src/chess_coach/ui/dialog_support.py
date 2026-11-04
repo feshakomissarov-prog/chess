@@ -32,4 +32,3 @@ def _result_label(color: chess.Color, winner: str | None, status: str) -> str:
         return "Партия прервана"
     won = (winner == "white") == color
     return "Победа" if won else "Поражение"
-

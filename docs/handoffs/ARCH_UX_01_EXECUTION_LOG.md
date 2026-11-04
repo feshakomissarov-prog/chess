@@ -147,3 +147,23 @@ This matrix records automated code evidence only. Manual physical Windows/DPI/so
 - Prevented redundant Statistics/Progress refreshes when the same safe display lease is re-applied; a transition from masked to permitted still triggers a refresh.
 - Regression coverage: game workspace geometry/live action visibility at 1280×720, 1366×768 and 1920×1080; Qt mouse placement/temporary FEN; duplicate safety-state delivery. Focused suite: **16 passed** including existing rendered-clock and P0 visibility tests; compileall PASS; `git diff --check` PASS. This is offscreen Qt geometry verification only, not physical Windows DPI acceptance.
 - Risks/limits: position editor uses the existing BoardView coordinate mapper and the standard temporary FEN validation; it is intentionally not a free-form chess variant editor. Full-suite/CI and the final 24-ID trace remain pending.
+
+## A0–A12 — final local status and handoff (newer than earlier pending notes)
+
+| Stage | Status | Evidence and remaining verification |
+|---|---|---|
+| A0 | Done | PR/base/worktree verified; UX docs selectively copied; 604-test baseline recorded; `.venv312/` preserved. |
+| A1 | Done | Typed shell routes, route/session reuse and offline/manual CLI→runtime→MainWindow tests; no credential/network access in those modes. |
+| A2 | Done | Home hierarchy, true-data fallbacks, 3 recent cards and no page scroll; Qt page tests. |
+| A3 | Done | Embedded game creation for local/AI/friend/username/active; fake Lichess and duplicate-submit tests. |
+| A4 | Reused + tested | Same BoardView/live sessions, right-side commands, clocks, ordinary premove/takeback/draw/resign and safety; event/Qt regression tests. |
+| A5 | Done | Finish lifecycle is route independent; same board and bounded/recoverable final sync+SQLite confirmation tests. |
+| A6 | Done | Bounded async library search, active-game pinning, filters/detail/mini graph and safety revoke; temporary-SQLite/thread tests. |
+| A7 | Done | Existing review graphs/AdvantageBar and batch queue; async ephemeral PGN/FEN plus collapsed mouse setup, no storage or engine auto-start. |
+| A8 | Done | Existing statistics/critical moments and puzzle history/replay moved into shell; shared Fair Play mask. |
+| A9 | Done | Background inspector, account-scoped archive/puzzle/backfill summaries, internal settings; sounds untouched. |
+| A10 | Integration boundary done | Existing application coordinators own dashboard/library/finalization/routes/safety and registered reads. MainWindow remains the Qt composition/signal/presentation adapter and retains legacy callbacks where moving them would duplicate existing capabilities; no duplicate DB/service/manager/policy/queue. |
+| A11 | Automated checks done | Game controls and no full-page scroll verified at 1280×720, 1366×768 and 1920×1080; home/library structural checks. Physical DPI, audio and visual acceptance remain with owner. |
+| A12 | Local done; hosted exact-head CI pending | Full local suite at behavioral checkpoint `cf4a650dcf0e3b0169aa3b73f11fca008be026c8`: **632 passed in 156.33s**. Python 3.12.10; Qt offscreen. Final CI must run after the final docs/whitespace commit. |
+
+The 24 COV routes and test evidence are listed immediately above. Every automated run used temporary SQLite, fake HTTP/service/engine fixtures and offscreen Qt. No live Lichess, OAuth/PAT, personal PGN/SQLite or real Stockfish was used. A final hosted CI URL will be attached to PR #44 after the exact final head finishes.

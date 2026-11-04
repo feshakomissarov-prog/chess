@@ -1005,4 +1005,3 @@ class StatisticsDialog(QDialog):
             self.summary_label.setText("Завершаем текущую выборку перед закрытием экрана.")
             return
         super().accept()
-

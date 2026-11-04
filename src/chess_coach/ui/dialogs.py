@@ -898,4 +898,3 @@ class SettingsDialog(QDialog):
             except Exception:
                 pass
         thread.join(timeout=0.25)
-
