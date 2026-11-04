@@ -1,3 +1,9 @@
+## 04.11.2026 — ARCH-UX-01 REVIEW-FIX-03 локальная проверка
+
+В draft PR #44, ветка `codex/arch-01-modular-refactor`, реализованы RF3-01/RF3-02. Прогресс Lichess теперь фильтрует объединение `lichess-pgn` + `lichess-json` через общий параметризованный контракт, сохраняя физический источник; `analysis_games` и покрытие требуют хотя бы одну актуальную CP/mate-оценку на текущей линии. Выбор лучшего run предпочитает scored-результат перед более новым пустым complete run. В Progress 0/0 показано как `н/д`, а отсутствие подтверждённых оценок отмечено явно.
+
+Новые временные SQLite/Qt регрессии покрывают источники PGN/JSON/Stockfish, accuracy-only, metadata-only, stale-line, classification-only, несколько аккаунтов, совпадение множества партий Library/Progress, выбор scored run и Fair Play revoke visibility. Целевые проверки — 7 PASS; полный Python 3.12.10 offscreen pytest — 669 PASS (один warning `PytestUnhandledThreadExceptionWarning` в существующем `test_single_instance.py` при позднем emit после удаления Qt-объекта). Compileall, diff check и Windows CI exact-head ожидаются после публикации итогового коммита. Реальные Lichess/OAuth/PAT, Stockfish и пользовательская SQLite/PGN не использовались. PR #44 остаётся draft; merge не выполнять.
+
 ## 04.11.2026 — ARCH-UX-01 REVIEW-FIX-02 выполнено локально
 
 В draft PR #44, ветка `codex/arch-01-modular-refactor`, выполнены RF2-01–RF2-04. На кодовом checkpoint `fab76f8a4f05a2672748525b26d8fffc171d4f0b` закоммичены проверки live-clock по числу подтверждённых ходов, durable wakeups очереди готовой Lichess аналитики, общий контракт фильтра «есть позиционные оценки» и согласование отображаемых дат с хронологией Home/Library. Добавлены регрессии для обеих сторон часов, 429/Retry-After/UTC reset, очереди после перезапуска, classification-only и перекрывающихся анализов, аккаунтных фильтров, last-move/start/date-only/unknown chronology и поздней записи Stockfish.
