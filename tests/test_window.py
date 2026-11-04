@@ -205,6 +205,7 @@ def test_statistics_empty_states_and_account_action_are_truthful(qtbot, tmp_path
 def test_archive_row_presentation_localizes_date_status_and_source():
     text, source = _archive_row_presentation({
         "started_at": "2026-11-02T12:30:00Z", "status": "mate",
+        "game_time_precision": "timestamp",
         "source": "lichess_archive", "opponent_type": "official_ai",
         "account_opponent": "Lichess AI level 3", "white_player": "Me",
         "black_player": "Lichess AI level 3", "variant": "standard",
@@ -3069,6 +3070,60 @@ def test_background_finished_game_sync_waits_for_sqlite_without_stealing_active_
     assert "сохранена локально" not in window.result_saved_label.text().lower()
 
     pending[background.game_id] = False
+    window._poll_result_write(background.game_id)
+    assert window.game_finalization.get(background.game_id) is None
+    assert window.game_repository.get_game(background.game_id)["moves"] == "e2e4 e7e5 g1f3"
+    assert sync_calls == [("mark", background.game_id), ("start", background.game_id)]
+    assert window.online_session is active
+
+
+def test_background_final_sqlite_error_is_retried_without_reposting_finish(qtbot, tmp_path, monkeypatch):
+    window = MainWindow(QSettings(str(tmp_path / "background-finish-error.ini"),
+                                  QSettings.Format.IniFormat), offline_mode=True)
+    qtbot.addWidget(window)
+    active = LichessGameSession("still-active", window.game_repository)
+    active.apply_event({"type": "gameFull", "initialFen": "startpos",
+                        "state": {"moves": "d2d4", "status": "started"}})
+    background = LichessGameSession("sqlite-retry-game", window.game_repository)
+    background.apply_event({"type": "gameFull", "initialFen": "startpos",
+                            "state": {"moves": "e2e4 e7e5", "status": "started"}})
+    window.online_sessions.update({active.game_id: active, background.game_id: background})
+    window.online_session = active
+    window._selected_live_game_id = active.game_id
+    window._screen_mode = "online"
+    window.screen_stack.setCurrentWidget(window.game_page)
+    sync_calls = []
+    class FakeClient:
+        rate_limit_remaining = 0
+    class FakeService:
+        username = "SyntheticAccount"
+        client = FakeClient()
+        def mark_game_finished(self, game_id): sync_calls.append(("mark", game_id))
+        def start_game(self, game_id): sync_calls.append(("start", game_id))
+    window.lichess = FakeService()
+    window.offline_mode = False
+    window._lichess_connected = True
+
+    failures = {"remaining": 2}
+    save_snapshot = window.game_repository.save_snapshot
+    def fail_terminal_write_once_per_event(*args, **kwargs):
+        if args[7] == "mate" and failures["remaining"]:
+            failures["remaining"] -= 1
+            raise OSError("synthetic temporary SQLite write failure")
+        return save_snapshot(*args, **kwargs)
+    monkeypatch.setattr(window.game_repository, "save_snapshot", fail_terminal_write_once_per_event)
+
+    window._lichess_event({"type": "gameFinish", "game": {
+        "gameId": background.game_id, "status": {"name": "mate"}, "winner": "white"}})
+    window.show_analysis()
+    window._lichess_game_event(background.game_id, {
+        "type": "gameState", "moves": "e2e4 e7e5 g1f3", "status": "mate", "winner": "white"})
+    assert failures["remaining"] == 0
+    assert window.online_session is active
+    assert window.game_finalization.get(background.game_id).phase.value == "local_write"
+    assert "сохранена локально" not in window.result_saved_label.text().lower()
+    assert sync_calls == [("mark", background.game_id), ("start", background.game_id)]
+
     window._poll_result_write(background.game_id)
     assert window.game_finalization.get(background.game_id) is None
     assert window.game_repository.get_game(background.game_id)["moves"] == "e2e4 e7e5 g1f3"

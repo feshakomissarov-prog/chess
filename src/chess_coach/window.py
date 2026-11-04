@@ -3196,8 +3196,21 @@ class MainWindow(QMainWindow):
         timer = self._finalization_timers.get(game_id)
         if timer is not None and timer.isActive():
             return
+        if self._shutdown_requested:
+            return
         delay = self.game_finalization.storage_check_delay(game_id)
-        if delay is None or self._shutdown_requested:
+        if delay is None:
+            record = self.game_finalization.get(game_id)
+            session = self.online_sessions.get(game_id)
+            if (record is not None and record.phase == FinalizationPhase.LOCAL_WRITE
+                    and session is not None and game_id == self._selected_live_game_id
+                    and self.online_session is session):
+                detail = self.game_repository.write_error(game_id)
+                self.result_saved_label.setText(
+                    "Не удалось подтвердить запись партии в SQLite после нескольких попыток. "
+                    "Данные останутся ожидающими восстановления при следующем запуске."
+                    + (f" Причина: {detail}" if detail else ""))
+                self.result_saved_label.setStyleSheet("color: #9b3434;")
             return
         if timer is None:
             timer = QTimer(self)
@@ -3215,11 +3228,13 @@ class MainWindow(QMainWindow):
                                          storage_write_pending=True)
             self._schedule_finalization_check(game_id)
             return
-        stored = self.game_repository.get_game(game_id)
-        confirmed = bool(stored and stored.get("moves") == session.moves
-                         and stored.get("status") == session.status
-                         and not stored.get("final_sync_pending", 0))
-        if confirmed:
+        def is_persisted() -> bool:
+            stored = self.game_repository.get_game(game_id)
+            return bool(stored and stored.get("moves") == session.moves
+                        and stored.get("status") == session.status
+                        and not stored.get("final_sync_pending", 0))
+
+        if is_persisted():
             self.game_finalization.track(game_id, server_sync_pending=False,
                                          storage_write_pending=False)
             if game_id == self._selected_live_game_id and self.online_session is session:
@@ -3227,11 +3242,25 @@ class MainWindow(QMainWindow):
                 self.result_saved_label.setStyleSheet("color: #39704a;")
                 self.result_export_button.setEnabled(bool(self.game_repository.export_pgn(game_id)))
             return
-        if self.game_repository.write_error(game_id):
-            try:
-                session._save()
-            except Exception:
-                pass
+        try:
+            # Retry the authoritative terminal snapshot even when a synchronous
+            # writer did not leave an asynchronous write_error marker.
+            session._save()
+        except Exception:
+            pass
+        if self.game_repository.has_pending_write(game_id):
+            self.game_finalization.track(game_id, server_sync_pending=False,
+                                         storage_write_pending=True)
+            self._schedule_finalization_check(game_id)
+            return
+        if is_persisted():
+            self.game_finalization.track(game_id, server_sync_pending=False,
+                                         storage_write_pending=False)
+            if game_id == self._selected_live_game_id and self.online_session is session:
+                self.result_saved_label.setText("Партия сохранена локально.")
+                self.result_saved_label.setStyleSheet("color: #39704a;")
+                self.result_export_button.setEnabled(bool(self.game_repository.export_pgn(game_id)))
+            return
         self.game_finalization.track(game_id, server_sync_pending=False,
                                      storage_write_pending=True)
         if (game_id == self._selected_live_game_id and self.online_session is session
@@ -4850,6 +4879,10 @@ class MainWindow(QMainWindow):
             self._lichess_error(f"Не удалось синхронизировать позицию Lichess: {exc}")
             return
         except Exception as exc:
+            if session.status not in {"started", "playing", "created"}:
+                # The terminal event mutates the authoritative in-memory state
+                # before a synchronous SQLite failure can escape from _save().
+                self._track_game_finalization(session)
             if (game_id == self._selected_live_game_id and self.online_session is session
                     and self._screen_mode == "online"):
                 if session.status not in {"started", "playing", "created"}:
