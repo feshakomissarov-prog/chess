@@ -1,3 +1,9 @@
+## 04.11.2026 — повторное независимое ревью RF2, REVIEW-FIX-03
+
+Кодовый [draft PR #44](https://github.com/feshakomissarov-prog/chess/pull/44) на SHA `97785aa8a2d6697d06c0e012480f26b8103a104f`: hosted Windows [CI #247](https://github.com/feshakomissarov-prog/chess/actions/runs/41887011647) **SUCCESS** (666 passed, compileall и isolated offline window). По коду RF2-01…RF2-04 внедрены, но независимая приёмка **пока не дана**: в `StatisticsDialog` источник «Lichess» всё ещё жёстко означает `lichess-pgn`, без `lichess-json`, а `StatisticsService.summary` рассчитывает `analysis_games` по completed/partial runs, не требуя CP/mate, в отличие от каталога/Home. Сохранён адресный [REVIEW-FIX-03](specs/ARCH_UX_01_REVIEW_FIX_03.md), RF3-01…RF3-02. Поправить в том же draft PR #44 с регрессиями и новым exact-head Windows CI; прежние этапы не повторять, main и пользовательские данные не менять. Физический Windows pilot владельца — после успешного ревью. Docs-only PR #45 не сливать.
+
+---
+
 ## 04.11.2026 — независимое ревью исправлений RF-01…15, дополнительное REVIEW-FIX-02
 
 Проверен фактический SHA **`c93712ab92c6845cd1b0db28832a9f75e4332171`** кодового [draft PR #44](https://github.com/feshakomissarov-prog/chess/pull/44). Hosted Windows [CI #245](https://github.com/feshakomissarov-prog/chess/actions/runs/41879012568) **completed/SUCCESS** на этом SHA: offscreen tests, compileall и isolated offline launch; отчёт Codex сообщает **658 PASS**. От предыдущей проверки RF-01…RF-15 внесены адресные исправления. **Независимая приёмка: ПОКА НЕ ПРИНЯТО.**
