@@ -28,9 +28,19 @@
 - Added regressions for finish-before-final-state, same-board finish, navigation-away during local write confirmation, and bounded lifecycle tracking. Existing terminal event/session tests still pass.
 - Not yet complete: friendly “call again” contextual routing for the built-in AI/local route; comprehensive event-order/reconnect shutdown matrix is scheduled for A4/A10. No live network was used.
 
-## A2–A4, A6–A12 — pending
+## A2–A4, A6–A12 — implementation status
 
 Each stage will be appended here with commit SHA, changed responsibilities, focused tests, limitations, and next stage. Coverage IDs COV-01…24 will receive a route and evidence/status in the final acceptance section.
+
+## A2/A3/A4/A6/A7/A8 — shell/page integration pass (in progress)
+
+- Added an in-shell Analysis landing page and six-route navigation (`home`, `play`, `games`, `analysis`, `training`, `progress`) with a Back action and a persistent “Вернуться к партии” action. The existing runtime/services/session registry remain reused; page changes do not create another SQLite, Stockfish manager, Lichess service, or background coordinator.
+- Home is now a `QWidget` rather than a global `QScrollArea`; its existing metric cards, recent completed games, and actions are retained. Pilot buttons were removed from the visible home shell. The separate local premove-training selector is hidden while ordinary online premoves and their cancel path remain in code.
+- The library filter read path now applies side, result, analysis presence/source, and period predicates in SQLite; page/selection/scroll state is restored when refreshing. Active Lichess sessions are pinned in a distinct list and resume only the selected game. Per-game refresh is no longer shown as a normal library action.
+- Statistics and puzzle history are placed in the shell stack using compatibility wrappers over the existing implementations; existing model, filters, replay, and safety owners are reused.
+- External PGN/FEN input uses a bounded (4 MiB) worker task through `BackgroundWorkCoordinator`; parse result is accepted only while Analysis remains active. The temporary review uses a read-only in-memory adapter, hides persisted-analysis/engine controls, and is excluded from resume persistence. PGN/FEN parse tests cover standard lines, invalid input, multiple games, custom FEN, no SQLite write, no engine process, and stale navigation.
+- During the implementation pass, focused regression run on Windows/Python 3.12: `tests/test_ui_pages.py tests/test_architecture_fix_coordinators.py tests/test_lichess.py tests/test_window.py` — **301 passed**; compileall — PASS. Targeted external PGN/FEN tests — **3 passed**. These results are for the current working tree before this entry's commit; full suite/CI remain pending.
+- Still outstanding in this pass: inline Play form (current mode cards route into existing dialogs), internal library details pane with a safety-gated mini graph, richer global background inspector, full A10 boundary audit, responsive geometry checks across all target sizes, and final 24-group acceptance matrix. No claim that A2–A12 are complete is made yet.
 
 ### Final coverage matrix — pending implementation
 

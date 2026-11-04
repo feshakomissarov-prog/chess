@@ -695,7 +695,9 @@ class GameReviewWorkspace(QWidget):
             self.review_board.setFixedSize(side, side)
 
     def load_game(self, game: dict, *, training_allowed: bool | None = None,
-                  training_block_reason: str | None = None) -> None:
+                  training_block_reason: str | None = None,
+                  ephemeral: bool = False) -> None:
+        self._ephemeral_study = bool(ephemeral)
         self.review = load_game_review(self.repository, game)
         if training_allowed is not None:
             self.training_allowed = training_allowed
@@ -713,7 +715,7 @@ class GameReviewWorkspace(QWidget):
         has_engine_analysis = (self.evaluation_allowed and
                                analysis.get("source") == "stockfish" and
                                analysis.get("status") == "complete")
-        self.analysis_button.setVisible(game_finished)
+        self.analysis_button.setVisible(game_finished and not self._ephemeral_study)
         self.analysis_button.setText("Повторить анализ Stockfish" if has_engine_analysis
                                      else "Проанализировать Stockfish")
         white = game.get("white_player") or "Белые"
@@ -857,7 +859,8 @@ class GameReviewWorkspace(QWidget):
             self.graph_legend.setToolTip("")
             self.graph_legend.setAccessibleDescription("Аналитика скрыта до свежей проверки Fair Play.")
             self.graph.setAccessibleDescription("Оценки и классификация скрыты правилами Fair Play.")
-        self.open_lichess_button.setVisible(bool(game.get("source_game_id")))
+        self.open_lichess_button.setVisible(
+            bool(game.get("source_game_id")) and not self._ephemeral_study)
         self.graph.select_ply(0)
         self._refresh_selected_ply_events()
         eligible = eligible_error_moves(self.review) if self.evaluation_allowed else []
@@ -873,10 +876,13 @@ class GameReviewWorkspace(QWidget):
             analysis.get("alternatives")))
         allowed = self.training_allowed and has_errors
         self.training_button.setEnabled(allowed)
+        self.training_button.setVisible(not self._ephemeral_study)
         self.training_button.setToolTip(reason if not self.training_allowed else
             "Нет завершённых собственных ошибок с проверенным улучшенным ходом." if not eligible else "")
-        self.training_safety_button.setVisible(game_finished and not self.training_allowed)
-        self.training_safety_button.setEnabled(game_finished and not self.training_allowed)
+        self.training_safety_button.setVisible(
+            game_finished and not self.training_allowed and not self._ephemeral_study)
+        self.training_safety_button.setEnabled(
+            game_finished and not self.training_allowed and not self._ephemeral_study)
         self.training_safety_button.setToolTip(reason or "Проверить текущие активные партии Lichess.")
         self.training_status.setText("" if allowed else reason or (
             "Нет ошибок, для которых сохранённые оценки позволяют проверить улучшение."))

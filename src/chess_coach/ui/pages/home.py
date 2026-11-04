@@ -5,18 +5,17 @@ from __future__ import annotations
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
     QComboBox, QFrame, QGridLayout, QGroupBox, QHBoxLayout, QLabel, QPushButton,
-    QScrollArea, QVBoxLayout, QWidget,
+    QVBoxLayout, QWidget,
 )
 from ..dashboard import dashboard_options
 from ..display import format_clock_control
 
 
-class HomePage(QScrollArea):
+class HomePage(QWidget):
     def __init__(self, repository, settings, username, actions, filters_changed, parent=None):
         super().__init__(parent)
         options = dashboard_options(repository)
-        page = QWidget()
-        layout = QVBoxLayout(page)
+        layout = QVBoxLayout(self)
         title = QLabel("Ваша шахматная практика")
         title.setObjectName("pageTitle")
         title.setVisible(False)
@@ -154,9 +153,6 @@ class HomePage(QScrollArea):
         self.home_games_button.clicked.connect(actions["show_saved_games"])
         self.home_archive_status_button = QPushButton("Хранилище и статус архива")
         self.home_archive_status_button.clicked.connect(actions["show_archive_status"])
-        self.home_pilot_import_button = QPushButton("Пробно импортировать 5–10 последних партий")
-        self.home_pilot_import_button.clicked.connect(actions["start_archive_pilot"])
-        self.home_pilot_import_button.setEnabled(False)
         self.home_archive_button = QPushButton("Полная синхронизация архива Lichess")
         self.home_archive_button.clicked.connect(actions["start_archive_sync"])
         self.home_archive_button.setEnabled(False)
@@ -168,9 +164,6 @@ class HomePage(QScrollArea):
         self.home_puzzles_button = QPushButton("Моя история задач Lichess")
         self.home_puzzles_button.clicked.connect(actions["open_puzzle_history_local"])
         self.home_puzzles_button.setEnabled(True)
-        self.home_puzzles_pilot_button = QPushButton("Пробно загрузить 5–10 попыток задач")
-        self.home_puzzles_pilot_button.clicked.connect(actions["start_puzzle_pilot"])
-        self.home_puzzles_pilot_button.setEnabled(False)
         self.home_settings_button = QPushButton("Настройки")
         self.home_settings_button.clicked.connect(actions["open_settings"])
         self.home_more_toggle = QPushButton("Другие разделы и синхронизация  ▸")
@@ -184,7 +177,7 @@ class HomePage(QScrollArea):
                        self.home_games_button, self.home_stats_button,
                        self.home_batch_analysis_button, self.home_puzzles_button,
                        self.home_settings_button, self.home_archive_status_button,
-                       self.home_pilot_import_button, self.home_archive_button):
+                       self.home_archive_button):
             more_layout.addWidget(button)
         more_layout_widget = QWidget()
         more_content = QVBoxLayout(more_layout_widget)
@@ -204,9 +197,6 @@ class HomePage(QScrollArea):
             "Другие разделы и синхронизация  ▸"))
         layout.addWidget(self.home_more)
         layout.addStretch(1)
-        self.setWidgetResizable(True)
-        self.setFrameShape(QFrame.Shape.NoFrame)
-        self.setWidget(page)
 
     def layout_metrics(self, width: int | None = None) -> None:
         grid = self.dashboard_metrics_grid

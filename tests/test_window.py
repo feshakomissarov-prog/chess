@@ -14,7 +14,7 @@ from chess_coach.window import (ActiveGamesDialog, BatchAnalysisDialog, Evaluati
                                 OnlineGameDialog,
                                 SettingsDialog, StatisticsDialog, StatisticsGameDialog,
                                 _archive_row_presentation, _clock_filter_sort_key,
-                                _puzzle_attempt_summary)
+                                _parse_external_study_text, _puzzle_attempt_summary)
 from chess_coach.lichess.session import LichessGameSession
 from chess_coach.lichess.repository import GameRepository
 from chess_coach.application.fair_play import playing_snapshot_allows_analysis as _batch_safety_from_games
@@ -303,7 +303,8 @@ def test_m46_shell_has_stable_routes_and_collapses_for_board_screens(qtbot, tmp_
                                   QSettings.Format.IniFormat), offline_mode=True)
     qtbot.addWidget(window)
     assert window.sidebar.width() == (60 if window.width() < 1160 else 212)
-    assert set(window._nav_buttons) == {"home", "play", "games", "analytics", "puzzles"}
+    assert set(window._nav_buttons) == {
+        "home", "play", "games", "analysis", "training", "progress"}
     assert window._nav_buttons["home"].property("active") is True
     window.start_local_game()
     assert window.sidebar.width() == 60
@@ -1126,16 +1127,16 @@ def test_offline_window_never_enables_or_starts_batch_engine(qtbot, tmp_path):
     assert window._batch_thread is None
 
 
-def test_sidebar_analytics_and_puzzles_navigation_open_real_screens(qtbot, tmp_path, monkeypatch):
+def test_sidebar_training_and_progress_navigation_open_real_screens(qtbot, tmp_path, monkeypatch):
     window = MainWindow(offline_mode=True)
     qtbot.addWidget(window)
     window.show()
     calls = []
-    monkeypatch.setattr(window, "show_statistics", lambda: calls.append("analytics"))
+    monkeypatch.setattr(window, "show_statistics", lambda: calls.append("progress"))
     monkeypatch.setattr(window, "open_puzzle_history_local", lambda: calls.append("training"))
-    qtbot.mouseClick(window._nav_buttons["analytics"], Qt.MouseButton.LeftButton)
-    qtbot.mouseClick(window._nav_buttons["puzzles"], Qt.MouseButton.LeftButton)
-    assert calls == ["analytics", "training"]
+    qtbot.mouseClick(window._nav_buttons["progress"], Qt.MouseButton.LeftButton)
+    qtbot.mouseClick(window._nav_buttons["training"], Qt.MouseButton.LeftButton)
+    assert calls == ["progress", "training"]
     window.close()
 
 
@@ -1970,16 +1971,9 @@ def test_puzzle_history_falls_back_from_empty_connected_account_and_has_local_se
         "close": lambda self, timeout=None: True,
     })()
     window._lichess_connected = True
-    seen = {}
-    def capture_exec(dialog):
-        seen["selector"] = next(widget for widget in dialog.findChildren(QComboBox)
-                                if widget.count() == 1
-                                and str(widget.itemData(0)) == "lichess:olderuser")
-        seen["summary"] = dialog.findChildren(QLabel)
-        return QDialog.DialogCode.Accepted
-    monkeypatch.setattr(QDialog, "exec", capture_exec)
     window.open_puzzle_history_local()
-    selector = seen["selector"]
+    page = window._puzzle_page
+    selector = page.findChild(QComboBox)
     assert selector.currentData() == "lichess:olderuser"
     assert selector.count() == 1  # no implicit mixing or empty-account fallback to online data
     assert window._puzzle_progress_dialog is None
@@ -2035,8 +2029,8 @@ def test_puzzle_replay_is_local_legal_and_does_not_change_history_or_send_reques
         assert not board._interaction_enabled
         return QDialog.DialogCode.Accepted
 
-    monkeypatch.setattr(QDialog, "exec", exercise)
     window.show_puzzle_history("lichess:replayuser")
+    exercise(window._puzzle_page)
     assert window.game_repository.puzzle_statistics("lichess:replayuser")["attempts"] == before
     assert not calls
     window.close()
@@ -2926,7 +2920,7 @@ def test_home_has_two_columns_and_three_recent_game_cards(qtbot, tmp_path):
     window._render_dashboard_snapshot({"metrics": [], "recent_games": games})
     assert window._recent_games_layout.count() == 3
     cards = [window._recent_games_layout.itemAt(i).widget() for i in range(3)]
-    from PySide6.QtWidgets import QLabel, QWidget
+    from PySide6.QtWidgets import QLabel, QScrollArea, QWidget
     headings = [card.findChild(QLabel).text() for card in cards]
     assert all("Победа с Opponent" in heading for heading in headings)
     assert all("Queen's Pawn Game" not in heading for heading in headings)
@@ -2938,10 +2932,11 @@ def test_home_has_two_columns_and_three_recent_game_cards(qtbot, tmp_path):
     assert window.home_review_button.isVisible()
     assert window.home_review_button.parentWidget() is window.home_play_card
     assert window.home_review_button.geometry().bottom() <= window.home_play_card.rect().bottom()
-    assert window.home_page.horizontalScrollBar().maximum() == 0
-    # The page can keep a small vertical safety margin at this logical size;
-    # the three cards remain compact and do not introduce horizontal scrolling.
-    assert window.home_page.verticalScrollBar().maximum() <= 100
+    assert not isinstance(window.home_page, QScrollArea)
+    assert not hasattr(window._home_view, "home_pilot_import_button")
+    assert not hasattr(window._home_view, "home_puzzles_pilot_button")
+    assert not window.local_mode_label.isVisible()
+    assert not window.local_mode_combo.isVisible()
     assert all(card.sizeHint().height() <= 200 for card in cards)
     assert window.home_play_card.maximumHeight() <= 230
     opened = []
@@ -2974,6 +2969,128 @@ def test_sidebar_play_opens_mode_picker_without_resetting_local_game(qtbot, tmp_
     window.setFixedSize(1360, 860)
     window._layout_play_mode_cards()
     assert window._play_mode_columns == 2
+    window.close()
+
+
+def test_shell_has_six_typed_routes_and_games_analysis_progress_are_in_stack(qtbot, tmp_path):
+    window = MainWindow(QSettings(str(tmp_path / "typed-routes.ini"),
+                                  QSettings.Format.IniFormat), offline_mode=True)
+    qtbot.addWidget(window)
+    assert list(window._nav_buttons) == [
+        "home", "play", "games", "analysis", "training", "progress"]
+
+    window.show_saved_games()
+    assert window.screen_stack.currentWidget() is window.library_page
+    window.show_analysis()
+    assert window.screen_stack.currentWidget() is window.analysis_page
+    assert window.workspace_navigator.current.route.value == "analysis"
+    window.navigate_back()
+    assert window.screen_stack.currentWidget() is window.library_page
+
+    window.show_statistics()
+    assert window.screen_stack.currentWidget() is window._statistics_dialog
+    assert window.workspace_navigator.current.route.value == "progress"
+    window._statistics_dialog.accept()
+    assert window.screen_stack.currentWidget() is window.home_page
+    assert window.settings.value("workspace/statistics_filters", "", type=str) is not None
+    window.close()
+
+
+def test_external_pgn_and_fen_are_parsed_offline_without_database_or_engine_work(
+    qtbot, tmp_path, monkeypatch
+):
+    window = MainWindow(QSettings(str(tmp_path / "external-study.ini"),
+                                  QSettings.Format.IniFormat), offline_mode=True)
+    qtbot.addWidget(window)
+    window.show_analysis()
+    before = window.game_repository.get_game("external:does-not-exist")
+    engine_calls = []
+    monkeypatch.setattr(window.stockfish_manager, "open_engine",
+                        lambda *args, **kwargs: engine_calls.append((args, kwargs)))
+
+    assert window.open_external_study_text("1. e4 e5 2. Nf3 Nc6")
+    qtbot.waitUntil(lambda: window.screen_stack.currentWidget() is window.review_workspace,
+                    timeout=5000)
+    game_id = window.review_workspace.review["game"]["game_id"]
+    assert game_id.startswith("external:")
+    assert window.review_workspace.review["line"]["moves"] == "e2e4 e7e5 g1f3 b8c6"
+    assert window.game_repository.get_game(game_id) is None
+    assert window._ephemeral_study
+    assert not engine_calls
+    window._return_from_review()
+    assert window.screen_stack.currentWidget() is window.analysis_page
+
+    assert window.open_external_study_text(chess.STARTING_FEN)
+    qtbot.waitUntil(lambda: window.screen_stack.currentWidget() is window.review_workspace,
+                    timeout=5000)
+    assert window.review_workspace.review["line"]["moves"] == ""
+    assert window.review_workspace.review["game"]["initial_fen"] == chess.STARTING_FEN
+    assert window.game_repository.get_game("external:does-not-exist") == before
+    assert not engine_calls
+    window.close()
+
+
+def test_external_study_invalid_input_and_stale_response_do_not_open_review(
+    qtbot, tmp_path, monkeypatch
+):
+    window = MainWindow(QSettings(str(tmp_path / "external-stale.ini"),
+                                  QSettings.Format.IniFormat), offline_mode=True)
+    qtbot.addWidget(window)
+    window.show_analysis()
+    assert window.open_external_study_text("not a valid FEN or PGN")
+    qtbot.waitUntil(lambda: window.analysis_page.external_status.text().startswith(
+        "Не удалось открыть PGN/FEN"), timeout=5000)
+    assert window.screen_stack.currentWidget() is window.analysis_page
+
+    entered = threading.Event()
+    release = threading.Event()
+    original = __import__("chess_coach.window", fromlist=["_parse_external_study_text"])
+    monkeypatch.setattr(original, "_parse_external_study_text", lambda _text: (
+        entered.set(), release.wait(2), {"initial_fen": "startpos", "moves": [], "headers": {}}
+    )[-1])
+    assert window.open_external_study_text("1. e4 e5")
+    assert entered.wait(2)
+    window.show_play()
+    release.set()
+    qtbot.waitUntil(lambda: not window._external_study_handle.is_alive(), timeout=5000)
+    assert window.screen_stack.currentWidget() is window.play_page
+    assert window.review_workspace.review is None
+    window.close()
+
+
+def test_external_study_parser_accepts_custom_fen_and_rejects_multiple_games():
+    fen = "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1"
+    assert _parse_external_study_text(fen)["initial_fen"] == chess.STARTING_FEN
+    with pytest.raises(ValueError, match="одна партия"):
+        _parse_external_study_text("1. e4 e5\n\n1. d4 d5")
+
+
+def test_library_pins_active_games_and_resumes_only_selected_session(qtbot, tmp_path):
+    window = MainWindow(QSettings(str(tmp_path / "library-active.ini"),
+                                  QSettings.Format.IniFormat), offline_mode=True)
+    qtbot.addWidget(window)
+    first = LichessGameSession("active-first", window.game_repository)
+    first.opponent = "Friend"
+    first.color = chess.WHITE
+    first.apply_event({"type": "gameFull", "initialFen": "startpos",
+                       "state": {"moves": "e2e4", "status": "started"}})
+    second = LichessGameSession("active-second", window.game_repository)
+    second.opponent = "Second"
+    second.color = chess.BLACK
+    second.apply_event({"type": "gameFull", "initialFen": "startpos",
+                        "state": {"moves": "d2d4", "status": "playing"}})
+    window.game_sessions.register(first)
+    window.game_sessions.register(second)
+
+    window.show_saved_games()
+    page = window.library_page
+    assert page.active_games.count() == 2
+    page.active_games.setCurrentRow(1)
+    page.active_games.itemClicked.emit(page.active_games.item(1))
+    selected_id = page.active_games.item(1).data(Qt.ItemDataRole.UserRole)
+    assert window._selected_live_game_id == selected_id
+    assert window.screen_stack.currentWidget() is window.game_page
+    assert window.online_session.game_id == selected_id
     window.close()
 
 

@@ -28,7 +28,10 @@ class GamesStoreMixin:
     def search_games(self, query: str = "", *, page: int = 0,
                      page_size: int = DEFAULT_PAGE_SIZE, completed_only: bool = False,
                      source: str | None = None, opponent: str | None = None,
-                     account_id: str | None = None, clock: str | None = None) -> dict:
+                     account_id: str | None = None, clock: str | None = None,
+                     color: str | None = None, outcome: str | None = None,
+                     analysis: str | None = None, analysis_source: str | None = None,
+                     updated_after: str | None = None) -> dict:
         """Search the local library without loading every PGN into a widget."""
         self._wait_before_read()
         page = max(0, int(page))
@@ -40,6 +43,7 @@ class GamesStoreMixin:
             clauses.append("ag.account_id=?")
             params.append(account_id)
         opponent_expr = "COALESCE(ag.opponent,g.opponent)" if account_id else "g.opponent"
+        color_expr = "COALESCE(ag.color,g.color)" if account_id else "g.color"
         term = query.strip()
         if term:
             clauses.append(f"(g.game_id LIKE ? OR {opponent_expr} LIKE ? OR g.white_player LIKE ? "
@@ -56,6 +60,54 @@ class GamesStoreMixin:
         if opponent:
             clauses.append(f"{opponent_expr} LIKE ?")
             params.append(f"%{opponent}%")
+        if color in {"white", "black"}:
+            clauses.append(f"{color_expr}=?")
+            params.append(color)
+        if outcome in {"win", "draw", "loss", "unknown"}:
+            if outcome == "win":
+                clauses.append(f"g.winner={color_expr}")
+            elif outcome == "draw":
+                clauses.append("g.winner IS NULL AND g.status IN "
+                               "('draw','stalemate','repetition','50moves','insufficientMaterial')")
+            elif outcome == "loss":
+                clauses.append(f"g.winner IS NOT NULL AND g.winner<>{color_expr}")
+            else:
+                clauses.append("g.winner IS NULL AND g.status NOT IN "
+                               "('draw','stalemate','repetition','50moves','insufficientMaterial')")
+        if updated_after:
+            clauses.append("COALESCE(g.started_at,g.updated_at)>=?")
+            params.append(updated_after)
+        current_analysis = (
+            "EXISTS (SELECT 1 FROM analysis_runs ar WHERE ar.game_id=g.game_id "
+            "AND ar.line_revision=g.line_revision AND ar.status='complete')"
+        )
+        lichess_analysis = "EXISTS (SELECT 1 FROM lichess_ready_analysis_metadata lm " \
+                           "WHERE lm.game_id=g.game_id AND lm.line_revision=g.line_revision"
+        if account_id:
+            lichess_analysis += " AND lm.account_id=?"
+        lichess_analysis += ")"
+        if analysis == "yes":
+            clauses.append(f"(({current_analysis}) OR ({lichess_analysis}))")
+            if account_id:
+                params.append(account_id)
+        elif analysis == "no":
+            clauses.append(f"NOT ({current_analysis}) AND NOT ({lichess_analysis})")
+            if account_id:
+                params.append(account_id)
+        if analysis_source == "stockfish":
+            clauses.append("EXISTS (SELECT 1 FROM analysis_runs ar WHERE ar.game_id=g.game_id "
+                           "AND ar.line_revision=g.line_revision AND ar.status='complete' "
+                           "AND ar.source='stockfish')")
+        elif analysis_source == "lichess":
+            source_clause = (
+                "EXISTS (SELECT 1 FROM lichess_ready_analysis_metadata lm "
+                "WHERE lm.game_id=g.game_id AND lm.line_revision=g.line_revision "
+                "AND lm.source='lichess-json'"
+            )
+            if account_id:
+                source_clause += " AND lm.account_id=?"
+                params.append(account_id)
+            clauses.append(source_clause + ")")
         where = " WHERE " + " AND ".join(clauses) if clauses else ""
         with self._connection() as db:
             total = db.execute("SELECT COUNT(DISTINCT g.game_id) FROM games g" + join + where,

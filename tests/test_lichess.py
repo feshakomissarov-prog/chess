@@ -881,6 +881,26 @@ def test_m3_paginated_search_and_note_crud(tmp_path):
     assert repo.list_notes("g01") == []
 
 
+def test_library_search_filters_result_color_and_analysis_in_sql(tmp_path):
+    repo = GameRepository(tmp_path / "library-filters.sqlite3")
+    repo.save_snapshot("won", "startpos", "e2e4", "white", "Friend", False,
+                       "300+3", "mate", "white")
+    repo.save_snapshot("lost", "startpos", "e2e4", "black", "Friend", False,
+                       "300+3", "mate", "white")
+    repo.save_snapshot("drawn", "startpos", "e2e4", "white", "Friend", False,
+                       "600+0", "draw", None)
+
+    assert repo.search_games(outcome="win")["items"][0]["game_id"] == "won"
+    assert repo.search_games(outcome="loss")["items"][0]["game_id"] == "lost"
+    assert repo.search_games(outcome="draw")["items"][0]["game_id"] == "drawn"
+    assert repo.search_games(color="black")["items"][0]["game_id"] == "lost"
+    assert repo.search_games(clock="600+0")["items"][0]["game_id"] == "drawn"
+    assert repo.search_games(analysis="no")["total"] == 3
+    assert repo.search_games(analysis="yes")["total"] == 0
+    assert repo.search_games(analysis_source="stockfish")["total"] == 0
+    repo.shutdown()
+
+
 def test_m3_migration_rolls_back_schema_and_version_on_backfill_failure(tmp_path, monkeypatch):
     import chess_coach.lichess.repository as repository_module
 

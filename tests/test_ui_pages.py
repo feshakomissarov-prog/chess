@@ -49,7 +49,12 @@ def test_library_page_emits_selected_game_actions_and_pagination(qtbot):
     assert selected == [game]
     page.search.setText("synthetic")
     page.following.click()
-    assert page_requests[-2:] == [("synthetic", 0), ("synthetic", 2)]
+    assert page_requests[-2:] == [
+        ({**page.current_filters(), "query": "synthetic"}, 0),
+        ({**page.current_filters(), "query": "synthetic"}, 2),
+    ]
+    assert page.refresh_game.isHidden()
+    assert page.current_filters()["period_days"] == 0
 
 
 def test_legacy_window_imports_are_compatibility_reexports():
