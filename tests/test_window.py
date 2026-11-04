@@ -2996,6 +2996,55 @@ def test_shell_has_six_typed_routes_and_games_analysis_progress_are_in_stack(qtb
     window.close()
 
 
+def test_home_dashboard_masks_cached_analysis_when_safety_is_pending_or_human_game_starts(
+    qtbot, tmp_path
+):
+    window = MainWindow(QSettings(str(tmp_path / "dashboard-fairplay.ini"),
+                                  QSettings.Format.IniFormat))
+    qtbot.addWidget(window)
+    snapshot = {
+        "metrics": [
+            {"key": "games", "value": "1", "detail": "synthetic", "source": "SQLite"},
+            {"key": "accuracy", "value": "н/д", "detail": "none", "source": "Lichess"},
+            {"key": "analysis", "value": "1/1", "detail": "100%", "source": "Stockfish"},
+            {"key": "errors", "value": "42", "detail": "synthetic error count", "source": "Stockfish"},
+        ],
+        "recent_games": [{
+            "game_id": "synthetic-dashboard", "opponent": "Synthetic", "color": "white",
+            "winner": "white", "status": "mate", "started_at": None,
+            "game_time_precision": "unknown", "clock": "300+0", "eco": None,
+            "opening_name": None,
+            "review_metrics": {"source": "Stockfish", "owner_inaccuracies": "0",
+                "owner_mistakes": "1", "owner_blunders": "0", "opponent_inaccuracies": "0",
+                "opponent_mistakes": "0", "opponent_blunders": "0", "coverage": "1/1",
+                "opponent_coverage": "0/0", "status": "complete"},
+        }],
+    }
+    window._dashboard_analysis_safety_allowed = False
+    window._render_dashboard_snapshot(snapshot)
+    assert window._dashboard_metric_values["analysis"].text() == "скрыто"
+    assert window._dashboard_metric_details["errors"].text() == (
+        "Проверка безопасности Lichess не подтверждена.")
+    card = window._recent_games_layout.itemAt(0).widget()
+    assert "1" not in card.findChild(QLabel, "dashboardAnalysisMetrics").text()
+    assert "1/1" not in card.findChild(QLabel, "dashboardAnalysisCoverage").text()
+
+    window._dashboard_analysis_safety_allowed = True
+    human = LichessGameSession("dashboard-human", window.game_repository)
+    human.opponent = "Friend"
+    human.status = "playing"
+    window.game_sessions.register(human)
+    window._render_dashboard_snapshot(snapshot)
+    assert window._dashboard_metric_values["analysis"].text() == "скрыто"
+    assert "ошибки 1" not in window._recent_games_layout.itemAt(0).widget().findChild(
+        QLabel, "dashboardAnalysisMetrics").text()
+    human.status = "mate"
+    window.online_sessions.pop(human.game_id)
+    window._render_dashboard_snapshot(snapshot)
+    assert window._dashboard_metric_values["analysis"].text() == "1/1"
+    window.close()
+
+
 def test_external_pgn_and_fen_are_parsed_offline_without_database_or_engine_work(
     qtbot, tmp_path, monkeypatch
 ):

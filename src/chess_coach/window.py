@@ -366,6 +366,11 @@ class MainWindow(QMainWindow):
         self.workspace_state = WorkspaceStateStore(self.settings)
         self.offline_mode = self.runtime.offline_mode
         self.manual_connect_mode = self.runtime.manual_connect_mode
+        # Cached engine-derived dashboard data is hidden until this process has
+        # a fresh account-wide Lichess safety result. Isolated offline mode is
+        # already protected from live play and network access.
+        self._dashboard_analysis_safety_allowed = bool(self.offline_mode)
+        self._latest_dashboard_snapshot: dict | None = None
         selected_auth_method = self.settings.value("lichess/selected_auth_method", "oauth", type=str)
         if selected_auth_method not in {"oauth", "personal_token"}:
             selected_auth_method = "oauth"
@@ -1644,10 +1649,18 @@ class MainWindow(QMainWindow):
             self._launch_dashboard_snapshot(*pending)
 
     def _render_dashboard_snapshot(self, snapshot: dict) -> None:
+        self._latest_dashboard_snapshot = snapshot
+        active_human = any(
+            session.status in {"started", "playing"} and not session.is_ai_opponent
+            for session in self.online_sessions.values())
+        analysis_allowed = bool(self.offline_mode or
+                                (self._dashboard_analysis_safety_allowed and not active_human))
         for metric in snapshot["metrics"]:
-            self._dashboard_metric_values[metric["key"]].setText(metric["value"])
+            masked = metric["key"] in {"analysis", "errors"} and not analysis_allowed
+            self._dashboard_metric_values[metric["key"]].setText(
+                "скрыто" if masked else metric["value"])
             self._dashboard_metric_details[metric["key"]].setText(
-                metric["detail"])
+                "Проверка безопасности Lichess не подтверждена." if masked else metric["detail"])
             self._dashboard_metric_values[metric["key"]].setToolTip(metric["source"])
             self._dashboard_metric_details[metric["key"]].setToolTip(metric["source"])
         while self._recent_games_layout.count():
@@ -1686,23 +1699,33 @@ class MainWindow(QMainWindow):
             def count(key):
                 return str(metrics.get(key, "н/д"))
             comparison = QLabel(
-                f"Я: неточн. {count('owner_inaccuracies')} · ошибки {count('owner_mistakes')} · "
-                f"зевки {count('owner_blunders')}     │     "
-                f"Соперник: {count('opponent_inaccuracies')} · {count('opponent_mistakes')} · "
-                f"{count('opponent_blunders')}")
+                ("Аналитика скрыта до подтверждения безопасности Lichess." if not analysis_allowed else
+                 f"Я: неточн. {count('owner_inaccuracies')} · ошибки {count('owner_mistakes')} · "
+                 f"зевки {count('owner_blunders')}     │     "
+                 f"Соперник: {count('opponent_inaccuracies')} · {count('opponent_mistakes')} · "
+                 f"{count('opponent_blunders')}"))
+            comparison.setObjectName("dashboardAnalysisMetrics")
             comparison.setWordWrap(True)
             comparison.setMaximumHeight(40)
             comparison.setToolTip("Неточности · ошибки · зевки; подробности доступны в разборе.")
             card_layout.addWidget(comparison)
-            coverage_text = ("анализа пока нет" if metrics.get("status") == "без анализа" else
+            coverage_text = ("скрыто" if not analysis_allowed else
+                             "анализа пока нет" if metrics.get("status") == "без анализа" else
                              f"{metrics.get('coverage', 'н/д')} / {metrics.get('opponent_coverage', 'н/д')}")
-            coverage = QLabel(f"{source_code} · охват Я / соперник: {coverage_text}")
+            coverage = QLabel("Оценки скрыты до проверки безопасности." if not analysis_allowed else
+                              f"{source_code} · охват Я / соперник: {coverage_text}")
+            coverage.setObjectName("dashboardAnalysisCoverage")
             coverage.setToolTip(source_short(metrics.get("source"))[1])
             coverage.setAccessibleName(f"Источник оценки: {source_short(metrics.get('source'))[1]}")
             card_layout.addWidget(coverage)
             card.activated.connect(lambda item=dict(game): self._open_saved_game(item))
             card.watch_children()
             self._recent_games_layout.addWidget(card)
+
+    def _refresh_dashboard_analysis_visibility(self) -> None:
+        snapshot = self._latest_dashboard_snapshot
+        if snapshot is not None:
+            self._render_dashboard_snapshot(snapshot)
 
     def _dashboard_filter_changed(self, *_args) -> None:
         if hasattr(self, "dashboard_account"):
@@ -2971,6 +2994,8 @@ class MainWindow(QMainWindow):
                 "Заблокировано: у вас есть активная партия с человеком.")
             return
         request_id = uuid.uuid4().hex
+        self._dashboard_analysis_safety_allowed = False
+        self._refresh_dashboard_analysis_visibility()
         self._review_safety_request_id = request_id
         self._review_safety_context = {
             "generation": self._analysis_session_generation,
@@ -3026,6 +3051,8 @@ class MainWindow(QMainWindow):
         context = self._review_safety_context
         self._review_safety_request_id = None
         self._review_safety_context = None
+        self._dashboard_analysis_safety_allowed = bool(safe)
+        self._refresh_dashboard_analysis_visibility()
         if context and self._review_workspace_identity() == (
                 context["game_id"], context["line_revision"], context["line_hash"]):
             self.review_workspace.set_training_safety_result(safe, reason)
@@ -3037,6 +3064,8 @@ class MainWindow(QMainWindow):
         if self._review_safety_reply_is_current(request_id):
             self._review_safety_request_id = None
             self._review_safety_context = None
+            self._dashboard_analysis_safety_allowed = False
+            self._refresh_dashboard_analysis_visibility()
             self._revoke_review_safety(
                 f"Заблокировано: проверка Lichess не выполнена ({message}).")
         return True
@@ -3826,6 +3855,8 @@ class MainWindow(QMainWindow):
 
     def disconnect_lichess(self) -> None:
         self._invalidate_analysis_preflight()
+        self._dashboard_analysis_safety_allowed = bool(self.offline_mode)
+        self._refresh_dashboard_analysis_visibility()
         self._lichess_connected = False
         self._reset_backfill_status("Lichess · отключено")
         self._pause_batch_analysis()
@@ -3835,6 +3866,9 @@ class MainWindow(QMainWindow):
     def _invalidate_analysis_preflight(self) -> None:
         """Fail closed and stop pending/running post-game work on trust changes."""
         self._analysis_session_generation += 1
+        if not self.offline_mode:
+            self._dashboard_analysis_safety_allowed = False
+            self._refresh_dashboard_analysis_visibility()
         self._revoke_review_safety(
             "Заблокировано: изменилось состояние подключения; проверьте безопасность повторно.",
             preserve_offline=True)
@@ -4076,6 +4110,8 @@ class MainWindow(QMainWindow):
         if not self.lichess or self.lichess.username != username:
             return
         self._invalidate_analysis_preflight()
+        self._dashboard_analysis_safety_allowed = False
+        self._refresh_dashboard_analysis_visibility()
         self._lichess_connected = True
         self._event_stream_recovery_pending = False
         self.lichess_analysis_status.setText(
@@ -4349,6 +4385,8 @@ class MainWindow(QMainWindow):
             session.set_server_game_identity(game)
             self.game_sessions.register(session)
             if not session.is_ai_opponent:
+                self._dashboard_analysis_safety_allowed = False
+                self._refresh_dashboard_analysis_visibility()
                 self._revoke_review_safety(
                     "Заблокировано: началась человеческая/непроверенная онлайн-партия.")
             self._refresh_batch_readiness()
@@ -4462,6 +4500,11 @@ class MainWindow(QMainWindow):
                 else:
                     self.refresh(f"Позиция обновлена с Lichess, но локальная запись не удалась: {exc}")
             return
+        if (session.status in {"started", "playing"} and not session.is_ai_opponent):
+            self._dashboard_analysis_safety_allowed = False
+            self._refresh_dashboard_analysis_visibility()
+            self._revoke_review_safety(
+                "Заблокировано: активная партия с человеком или неизвестным соперником.")
         if session.status not in {"started", "playing", "created"}:
             # Observe durability after every authoritative terminal snapshot,
             # even when this game is not the currently visible route.
@@ -5023,6 +5066,8 @@ class MainWindow(QMainWindow):
             self.home_status.setText("Stockfish заблокирован: подключение или Retry-After не готовы.")
             return
         request_id = uuid.uuid4().hex
+        self._dashboard_analysis_safety_allowed = False
+        self._refresh_dashboard_analysis_visibility()
         account_id = str(getattr(self.lichess, "username", "") or "").strip().casefold()
         if not account_id:
             self.home_status.setText("Не удалось определить подключённый аккаунт; анализ не запущен.")
@@ -5112,6 +5157,8 @@ class MainWindow(QMainWindow):
         if not self._analysis_safety_reply_is_current(request_id):
             return
         if not isinstance(games, list) or len(games) >= 50:
+            self._dashboard_analysis_safety_allowed = False
+            self._refresh_dashboard_analysis_visibility()
             self._analysis_safety_error(
                 request_id, "Снимок активных партий некорректный или может быть усечён."
             )
@@ -5126,6 +5173,8 @@ class MainWindow(QMainWindow):
         active_human_ids = {session.game_id for session in self.online_sessions.values()
                             if session.status in {"started", "playing"} and not session.is_ai_opponent}
         if any(self._active_game_blocks_engine(game) for game in games) or active_human_ids:
+            self._dashboard_analysis_safety_allowed = False
+            self._refresh_dashboard_analysis_visibility()
             stop.set()
             if self._analysis_dialog:
                 self._analysis_dialog.close()
@@ -5137,6 +5186,8 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "Stockfish заблокирован",
                 "У аккаунта есть активная партия с человеком. Анализ Stockfish не запущен.")
             return
+        self._dashboard_analysis_safety_allowed = True
+        self._refresh_dashboard_analysis_visibility()
         _request, game_id, engine_path, options, _generation, _account_id, _service = context
         self._analysis_safety_phase = "running"
         if self._analysis_dialog is not None:
@@ -5156,6 +5207,8 @@ class MainWindow(QMainWindow):
         self._analysis_safety_request_id = None
         self._analysis_safety_context = None
         self._analysis_safety_phase = None
+        self._dashboard_analysis_safety_allowed = False
+        self._refresh_dashboard_analysis_visibility()
         if self._analysis_stop is not None:
             self._analysis_stop.set()
             self._analysis_stop = None

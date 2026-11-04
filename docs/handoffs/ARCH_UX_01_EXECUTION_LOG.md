@@ -54,6 +54,12 @@ Each stage will be appended here with commit SHA, changed responsibilities, focu
 - Regression `test_library_sqlite_query_runs_off_ui_thread_and_ignores_stale_navigation` verifies the actual thread and page behavior. Relevant library route/pinning/filter tests: PASS. Full-suite and static architecture audit remain pending.
 - Remaining A10 work: several historic MainWindow callbacks still own presentation plus use-case orchestration (notably puzzle history, game analysis dialogs, and some sync status). They have not been mechanically split; each remains scheduled for evidence-based scope review.
 
+### P0 — home analytics visibility gate
+
+- The Home dashboard now masks cached engine-derived analysis/error counts and per-game move metrics unless the process has a fresh successful account-wide `/api/account/playing` snapshot, or the runtime is explicitly isolated `--offline`. It masks immediately when safety becomes pending/unknown/denied, on account/auth changes, and as soon as a human or unknown online game is observed through either `gameStart` or `gameFull/gameState`.
+- The mask is applied to the actual visible metric/card labels, not only the source model. Official Lichess accuracy and non-analytic game metadata remain visible. Existing review-space safety policy remains the single authority; this is a display projection, not a second permission mechanism.
+- Qt regression verifies visible Home labels/card fields under pending/denied-equivalent state and after a human active session, then checks local display restoration only after the test explicitly removes the session in a synthetic fixture. Relevant Fair Play/review/external/library checks: **6 passed**; compileall PASS.
+
 ### Final coverage matrix — pending implementation
 
 | ID | Route / outcome | Verification |
