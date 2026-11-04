@@ -3094,6 +3094,37 @@ def test_library_pins_active_games_and_resumes_only_selected_session(qtbot, tmp_
     window.close()
 
 
+def test_library_sqlite_query_runs_off_ui_thread_and_ignores_stale_navigation(
+    qtbot, tmp_path, monkeypatch
+):
+    window = MainWindow(QSettings(str(tmp_path / "library-worker.ini"),
+                                  QSettings.Format.IniFormat), offline_mode=True)
+    qtbot.addWidget(window)
+    window.game_repository.save_snapshot("library-worker-game", "startpos", "e2e4", "white",
+        "Synthetic", False, "300+0", "mate", "white")
+    query_threads = []
+    original_search = window.library_queries.search
+
+    def observed_search(filters, page=0):
+        query_threads.append(threading.current_thread())
+        return original_search(filters, page)
+
+    monkeypatch.setattr(window.library_queries, "search", observed_search)
+    window.show_saved_games()
+    qtbot.waitUntil(lambda: window.library_page.page_label.text().startswith("Страница"),
+                    timeout=5000)
+    assert window.library_page.games.count() == 1
+    assert window.library_page.selected_game()["game_id"] == "library-worker-game"
+    assert query_threads and query_threads[0] is not threading.main_thread()
+
+    window.library_page.search.setText("no match")
+    query_handle = window._library_query_handle
+    window.show_play()
+    qtbot.waitUntil(lambda: not query_handle.is_alive(), timeout=5000)
+    assert window.screen_stack.currentWidget() is window.play_page
+    window.close()
+
+
 def test_ai_dialog_has_russian_controls_and_all_eight_visible_levels(qtbot):
     dialog = OnlineGameDialog("Играть против Lichess AI", include_level=True,
                               defaults={"color": "black", "clock_limit": 600,

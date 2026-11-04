@@ -47,6 +47,13 @@ Each stage will be appended here with commit SHA, changed responsibilities, focu
 - Period filtering now uses `COALESCE(started_at, updated_at)`, so a recent metadata refresh cannot make an old game appear recent. The per-game Lichess refresh control is hidden from the regular catalog; the existing recovery method remains available to a diagnosed recovery flow.
 - Regression: `test_library_period_filter_uses_game_date_not_metadata_update_time` and UI assertion that ordinary catalog does not expose the refresh action — PASS (3 relevant tests).
 
+## A10 — bounded library read boundary (partial)
+
+- Added `application.library.GameLibraryQueryCoordinator` to build the existing repository query from account-scoped filters and clamp page size. The application still uses the same repository facade and SQLite file.
+- Library SQL now runs on a registered `INTERACTIVE` worker through the existing `BackgroundWorkCoordinator`; changing route cancels the active request, generation checks reject stale replies, and the Qt slot only renders the bounded result page. No extra executor/queue was introduced.
+- Regression `test_library_sqlite_query_runs_off_ui_thread_and_ignores_stale_navigation` verifies the actual thread and page behavior. Relevant library route/pinning/filter tests: PASS. Full-suite and static architecture audit remain pending.
+- Remaining A10 work: several historic MainWindow callbacks still own presentation plus use-case orchestration (notably puzzle history, game analysis dialogs, and some sync status). They have not been mechanically split; each remains scheduled for evidence-based scope review.
+
 ### Final coverage matrix — pending implementation
 
 | ID | Route / outcome | Verification |

@@ -181,6 +181,8 @@ class LibraryPage(QWidget):
             f"Страница {self._page + 1} из {self._pages}  ·  {max(0, int(total))} партий")
         if selected_item is not None:
             self.games.setCurrentItem(selected_item)
+        elif rows:
+            self.games.setCurrentRow(0)
         self.games.verticalScrollBar().setValue(scroll)
         self.previous.setEnabled(self._page > 0)
         self.following.setEnabled(self._page + 1 < self._pages)

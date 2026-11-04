@@ -69,6 +69,7 @@ from .application.game_finalization import GameFinalizationCoordinator, Finaliza
 from .application.routes import WorkspaceNavigator, WorkspaceRoute
 from .application.background_work import OperationLane
 from .application.archive_sync import ArchiveSyncCoordinator
+from .application.library import GameLibraryQueryCoordinator
 from .application.dashboard import (DashboardQueryCoordinator, dashboard_options,
                                     dashboard_snapshot)
 from .lichess.session import LichessGameSession, classify_lichess_opponent
@@ -316,6 +317,7 @@ class MainWindow(QMainWindow):
     position_eval_finished = Signal(int, object, object)
     position_eval_update = Signal(int, object)
     dashboard_finished = Signal(int, object, object, object)
+    library_query_finished = Signal(int, object, object)
     external_study_finished = Signal(int, object, object)
 
     @property
@@ -374,6 +376,9 @@ class MainWindow(QMainWindow):
         self._ephemeral_study = False
         self.archive_sync = ArchiveSyncCoordinator(self.game_repository)
         self.dashboard_queries = DashboardQueryCoordinator(self.game_repository)
+        self.library_queries = GameLibraryQueryCoordinator(self.game_repository)
+        self._library_query_generation = 0
+        self._library_query_handle = None
         self.sound_player = self.runtime.create_sound_player(self)
         self._online_history_game_id: str | None = None
         self._online_history_moves: tuple[chess.Move, ...] = ()
@@ -451,6 +456,7 @@ class MainWindow(QMainWindow):
         self.position_eval_finished.connect(self._position_eval_finished)
         self.position_eval_update.connect(self._position_eval_update)
         self.dashboard_finished.connect(self._dashboard_result_ready)
+        self.library_query_finished.connect(self._library_query_result_ready)
         self.external_study_finished.connect(self._external_study_parse_finished)
         self._external_study_generation = 0
         self.setWindowTitle("Chess Coach")
@@ -1187,6 +1193,11 @@ class MainWindow(QMainWindow):
             handle = getattr(self, "_external_study_handle", None)
             if handle is not None and handle.is_alive():
                 self._external_study_generation += 1
+                handle.cancel("session_replaced")
+        if self.screen_stack.currentWidget() is not getattr(self, "library_page", None):
+            handle = getattr(self, "_library_query_handle", None)
+            if handle is not None and handle.is_alive():
+                self._library_query_generation += 1
                 handle.cancel("session_replaced")
         if (self.screen_stack.currentWidget() is not self.review_workspace
                 and self._review_safety_request_id is not None):
@@ -4808,20 +4819,34 @@ class MainWindow(QMainWindow):
             self.settings.setValue("workspace/library_filters",
                                    json.dumps(filters, ensure_ascii=False))
             self.settings.setValue("workspace/library_page", max(0, int(page_number)))
-            result = self.game_repository.search_games(
-                filters.get("query", page.search.text()),
-                page=max(0, int(page_number)), page_size=50, completed_only=True,
-                account_id=filters.get("account_id"),
-                source=filters.get("source"), clock=filters.get("clock"),
-                color=filters.get("color"), outcome=filters.get("outcome"),
-                analysis=filters.get("analysis"),
-                analysis_source=filters.get("analysis_source"),
-                updated_after=(datetime.now(timezone.utc) - timedelta(
-                    days=max(0, int(filters.get("period_days") or 0)))).isoformat()
-                    if int(filters.get("period_days") or 0) > 0 else None)
-            rows = [(game, *_archive_row_presentation(game)) for game in result["items"]]
-            page.set_results(rows, page=max(0, int(page_number)), pages=result["pages"],
-                             total=result["total"])
+            safe_filters = dict(filters)
+            safe_filters.setdefault("query", page.search.text())
+            previous = self._library_query_handle
+            if previous is not None and previous.is_alive():
+                previous.cancel("session_replaced")
+            self._library_query_generation += 1
+            generation = self._library_query_generation
+            target_page = max(0, int(page_number))
+            page.page_label.setText("Загружаю страницу…")
+            stop_event = threading.Event()
+
+            def worker() -> None:
+                try:
+                    if stop_event.is_set():
+                        return
+                    result = self.library_queries.search(safe_filters, target_page)
+                    if stop_event.is_set():
+                        return
+                    self.library_query_finished.emit(generation, result, None)
+                except Exception as exc:
+                    if not stop_event.is_set():
+                        self.library_query_finished.emit(
+                            generation, None,
+                            f"Не удалось загрузить партии ({type(exc).__name__}).")
+
+            self._library_query_handle = self._start_registered_work(
+                worker, kind="library_query", lane=OperationLane.INTERACTIVE,
+                thread_name="cc-library-query", stop_event=stop_event)
 
         def open_selected(game=None):
             game = game or selected_game()
@@ -4902,6 +4927,24 @@ class MainWindow(QMainWindow):
         self._update_library_active_games()
         self.screen_stack.addWidget(page)
         self.screen_stack.setCurrentWidget(page)
+
+    def _library_query_result_ready(self, generation: int, result: object,
+                                    error: object) -> None:
+        if generation != self._library_query_generation:
+            return
+        page = getattr(self, "library_page", None)
+        if page is None:
+            return
+        if error:
+            page.page_label.setText(str(error))
+            return
+        if not isinstance(result, dict):
+            page.page_label.setText("Не удалось прочитать список партий.")
+            return
+        rows = [(game, *_archive_row_presentation(game)) for game in result["items"]]
+        page.set_results(rows, page=int(result.get("page", 0)),
+                         pages=int(result.get("pages", 1)),
+                         total=int(result.get("total", 0)))
 
     def _update_library_active_games(self) -> None:
         if hasattr(self, "return_to_game_button"):
@@ -5369,6 +5412,10 @@ class MainWindow(QMainWindow):
             timer.stop()
         self._persist_workspace_state()
         self._shutdown_requested = True
+        for handle_name in ("_library_query_handle", "_external_study_handle"):
+            handle = getattr(self, handle_name, None)
+            if handle is not None and handle.is_alive():
+                handle.cancel("shutdown")
         self._position_eval_timer.stop()
         if self._position_eval_thread is not None:
             self._cancel_position_evaluation("Останавливаем локальную оценку перед закрытием…")
