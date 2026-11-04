@@ -1250,6 +1250,8 @@ class MainWindow(QMainWindow):
             route, context = WorkspaceRoute.ANALYSIS, "batch"
         elif current is getattr(self, "_background_operations_page", None):
             route, context = WorkspaceRoute.ANALYSIS, "background"
+        elif current is getattr(self, "_settings_dialog", None):
+            route, context = WorkspaceRoute.SETTINGS, None
         elif current is getattr(self, "_puzzle_page", None):
             route, context = WorkspaceRoute.TRAINING, None
         elif current is getattr(self, "_statistics_dialog", None):
@@ -1636,6 +1638,8 @@ class MainWindow(QMainWindow):
                       self._background_operations_page is not None else self.analysis_page)
         elif route is WorkspaceRoute.PROGRESS:
             target = getattr(self, "_statistics_dialog", self.home_page)
+        elif route is WorkspaceRoute.SETTINGS:
+            target = getattr(self, "_settings_dialog", self.home_page)
         else:
             target = getattr(self, "_puzzle_page", self.home_page)
         self.screen_stack.setCurrentWidget(target)
@@ -3664,47 +3668,75 @@ class MainWindow(QMainWindow):
             self._position_eval_timer.start(300)
 
     def open_settings(self) -> None:
-        auto_analytics_was_enabled = self.settings.value(
-            "lichess/auto_ready_analytics", True, type=bool)
+        current = getattr(self, "_settings_dialog", None)
+        if current is not None:
+            self.screen_stack.setCurrentWidget(current)
+            return
         dialog = SettingsDialog(self.settings, self, repository=self.game_repository)
+        dialog._auto_analytics_was_enabled = self.settings.value(
+            "lichess/auto_ready_analytics", True, type=bool)
         dialog.sound_preview_requested.connect(
             lambda cue: self.sound_player.preview(cue, dialog.sound_selection(cue)))
         dialog.install_requested.connect(
             lambda current=dialog: self._install_official_stockfish(current))
         dialog.finished.connect(lambda _result: self._cancel_stockfish_install())
-        if dialog.exec() == QDialog.DialogCode.Accepted:
-            dialog.save(self.settings)
-            username = str(getattr(self.lichess, "username", "") or "").strip()
-            if username and not self.offline_mode:
-                account_id = self.game_repository.ensure_archive_account(username)
-                paused = self.settings.value("lichess/ready_analytics_paused", False, type=bool)
-                self.game_repository.set_lichess_analysis_backfill_paused(account_id, paused)
-                if not self.settings.value("lichess/auto_ready_analytics", True, type=bool):
-                    self.lichess.cancel_lichess_analysis_backfill()
-                    self.lichess_analysis_status.setText("Lichess · фоновая аналитика выключена")
-                elif paused:
-                    self.lichess.cancel_lichess_analysis_backfill()
-                    self.lichess_analysis_status.setText("Lichess · фоновая аналитика приостановлена")
-                elif (not auto_analytics_was_enabled and self._lichess_connected
-                      and self._lichess_stream_ready_generation == getattr(
-                          self.lichess, "auth_generation", None)):
-                    self._start_lichess_analysis_backfill(
-                        self.lichess.auth_generation, manual=False)
-            self.sound_player.configure(
-                moves_enabled=self.settings.value("sound_moves_enabled", True, type=bool),
-                notifications_enabled=self.settings.value("sound_notifications_enabled", True, type=bool),
-                history_enabled=self.settings.value("sound_history_enabled", False, type=bool),
-                volume=self.settings.value("sound_volume", 45, type=int),
-                selections={
-                    cue: self.settings.value(f"sound_selection_{cue}", default_id, type=str)
-                    for cue, default_id in DEFAULT_SOUND_SELECTIONS.items()
-                })
-            new_color = chess.Color(int(self.settings.value("player_color", chess.WHITE)))
-            self.controller.player_color = new_color
-            if not self.settings.value("allow_premoves", True, type=bool):
-                self.cancel_premove()
-            self.refresh("Настройки сохранены.")
+        dialog.accepted.connect(lambda current=dialog: self._save_settings_dialog(current))
+        dialog.rejected.connect(lambda current=dialog: self._close_settings_page(current))
+        dialog.setModal(False)
+        dialog.setWindowFlags(Qt.WindowType.Widget)
+        self._settings_dialog = dialog
+        self.screen_stack.addWidget(dialog)
+        self.screen_title.setText("Настройки")
+        self.screen_stack.setCurrentWidget(dialog)
+
+    def _close_settings_page(self, dialog: SettingsDialog) -> None:
+        if getattr(self, "_settings_dialog", None) is not dialog:
+            return
+        # Move first: removing the current QStackedWidget page would select a
+        # fallback widget and accidentally record that transient route as Back.
+        self.navigate_back()
+        self.screen_stack.removeWidget(dialog)
+        dialog.deleteLater()
+        self._settings_dialog = None
+
+    def _save_settings_dialog(self, dialog: SettingsDialog) -> None:
+        if getattr(self, "_settings_dialog", None) is not dialog:
+            return
+        auto_analytics_was_enabled = bool(
+            getattr(dialog, "_auto_analytics_was_enabled", True))
+        dialog.save(self.settings)
+        username = str(getattr(self.lichess, "username", "") or "").strip()
+        if username and not self.offline_mode:
+            account_id = self.game_repository.ensure_archive_account(username)
+            paused = self.settings.value("lichess/ready_analytics_paused", False, type=bool)
+            self.game_repository.set_lichess_analysis_backfill_paused(account_id, paused)
+            if not self.settings.value("lichess/auto_ready_analytics", True, type=bool):
+                self.lichess.cancel_lichess_analysis_backfill()
+                self.lichess_analysis_status.setText("Lichess · фоновая аналитика выключена")
+            elif paused:
+                self.lichess.cancel_lichess_analysis_backfill()
+                self.lichess_analysis_status.setText("Lichess · фоновая аналитика приостановлена")
+            elif (not auto_analytics_was_enabled and self._lichess_connected
+                  and self._lichess_stream_ready_generation == getattr(
+                      self.lichess, "auth_generation", None)):
+                self._start_lichess_analysis_backfill(
+                    self.lichess.auth_generation, manual=False)
+        self.sound_player.configure(
+            moves_enabled=self.settings.value("sound_moves_enabled", True, type=bool),
+            notifications_enabled=self.settings.value("sound_notifications_enabled", True, type=bool),
+            history_enabled=self.settings.value("sound_history_enabled", False, type=bool),
+            volume=self.settings.value("sound_volume", 45, type=int),
+            selections={
+                cue: self.settings.value(f"sound_selection_{cue}", default_id, type=str)
+                for cue, default_id in DEFAULT_SOUND_SELECTIONS.items()
+            })
+        new_color = chess.Color(int(self.settings.value("player_color", chess.WHITE)))
+        self.controller.player_color = new_color
+        if not self.settings.value("allow_premoves", True, type=bool):
+            self.cancel_premove()
+        self.refresh("Настройки сохранены.")
         self._refresh_batch_readiness()
+        self._close_settings_page(dialog)
 
     def _cancel_stockfish_install(self) -> None:
         if self._engine_install_stop is not None:

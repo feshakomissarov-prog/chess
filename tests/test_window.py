@@ -1180,6 +1180,25 @@ def test_batch_queue_and_remote_active_games_stay_inside_workspace(
     window.close()
 
 
+def test_settings_open_inside_shell_and_cancel_discards_edits(qtbot, tmp_path):
+    settings = QSettings(str(tmp_path / "settings-shell.ini"), QSettings.Format.IniFormat)
+    settings.setValue("sound_volume", 45)
+    window = MainWindow(settings, offline_mode=True)
+    qtbot.addWidget(window)
+    previous = window.screen_stack.currentWidget()
+    window.open_settings()
+    page = window._settings_dialog
+    assert page is not None
+    assert window.screen_stack.currentWidget() is page
+    assert page.parentWidget() is window.screen_stack
+    page.sound_volume.setValue(82)
+    page.reject()
+    assert settings.value("sound_volume", type=int) == 45
+    assert window.screen_stack.currentWidget() is previous
+    assert getattr(window, "_settings_dialog", None) is None
+    window.close()
+
+
 def test_batch_queue_pauses_on_new_human_game_but_not_builtin_ai(qtbot):
     human_window = MainWindow(offline_mode=True)
     qtbot.addWidget(human_window)

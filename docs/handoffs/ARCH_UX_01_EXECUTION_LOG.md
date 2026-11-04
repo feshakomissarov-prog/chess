@@ -68,6 +68,7 @@ Each stage will be appended here with commit SHA, changed responsibilities, focu
 - “Активные партии” now navigates to the existing pinned-game area in My Games and requests the existing server list there; selecting a server-returned item opens that exact session. It no longer opens a separate active-games OS dialog for this route.
 - Puzzle history's compatibility host is a QWidget embedded in the shell; existing task history, account selector, replay/reveal/reset and sync actions are retained. The separate training and pilot UI decisions remain unchanged.
 - Focused page/window regression set: **12 passed**; compileall and git diff --check — PASS. Real service, OAuth, archive and Stockfish were not used. The older compatibility ActiveGamesDialog class remains for direct tests/legacy callers but is not used by the primary shell action.
+- Settings now opens as a non-modal internal stack page, using the existing tabbed SettingsDialog implementation and existing QSettings/credential handlers. Save commits through the former application flow; Cancel/Back discards widget edits, and the previous route is selected before the page is removed to avoid transient route-history corruption. Sound assets, IDs, defaults, volume behavior and QSettings keys are unchanged. Regression `test_settings_open_inside_shell_and_cancel_discards_edits` — PASS.
 
 ### P0 — home analytics visibility gate
 
