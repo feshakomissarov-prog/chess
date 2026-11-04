@@ -1,5 +1,7 @@
 # Chess Coach — UX-GAME-01: одна игровая доска, часы и завершение без перехода
 
+> **Статус 04.11.2026 (новее исторических указаний ниже):** после дальнейшего согласования владелец поручил подготовить **[одно единое ARCH-UX-01 ТЗ для desktop Codex](../specs/ARCH_UX_01_UNIFIED_EXECUTION_SPEC.md)**. Оно готово и нормативно для будущего исполнения; исторические фразы «ТЗ нет / не передавать Codex до будущего ТЗ» заменены им. **Код не изменён, Codex не запущен; передачу ТЗ делает владелец. PR #44 и #45 остаются draft, без merge.**
+
 **04.11.2026 · Статус:** решение владельца по игровому поведению **УТВЕРЖДЕНО**; конкретная плотность/цвет/геометрия элементов — wireframe для будущего единого UX-ТЗ. **Сейчас код НЕ менять, Codex НЕ отправлять.** Реализация PR #44 изучена: `window.py::_show_result` сейчас переключается на `ResultPage` — в будущем UX это должно исчезнуть как автоматический маршрут.
 
 **Связанные документы:** [утверждённый UX-B1](UX_APPROVED_BASELINE_V1.md), [Анализ UX-A2](UX_ANALYSIS_APPROVED_V2.md), [source-backed coverage аудит](EXISTING_FEATURES_TO_UX_COVERAGE_AUDIT.md). Game state и Fair Play остаются из актуальной архитектуры.
@@ -110,4 +112,4 @@
 - Проверка реального кодового пути `_show_result`: **не должен менять stack page**; видимы те же board instance, clocks, right history и только новые CTA. Не создавать лишний `ResultPage`. В активной игре side controls для takeback, предложения/ответа на ничью, сдачи находятся на виду; fake tests доступности/disabled/confirm для human, AI, no-clock и reconnect. Не прятать в «···».
 - Автотесты: AI/human and timed/no-clock, finish by mate/resign/draw/timeout, different source generations, no after-game Stockfish, late events ignored, challenge again single-click, real account reconnect fake, saved state and navigation return. Fake Lichess/engine/SQLite only.
 - UI pixel/geometry at standard Windows DPI; physical user pilot on real computer, sound audibility and rematch only if API supports it. No CI real OAuth/PAT/Stockfish.
-- **Не реализовывать сейчас:** это часть большого итогового UX-ТЗ после согласования остальных экранов и принятия решений о PR #44.
+- **Реализация:** этот контракт включён в единое [ARCH-UX-01](../specs/ARCH_UX_01_UNIFIED_EXECUTION_SPEC.md); запуск Codex только после передачи владельцем, без самостоятельного merge.
