@@ -1,3 +1,9 @@
+## 05.11.2026 — ARCH-UX-01 REVIEW-FIX-04 локальная реализация
+
+В существующем draft PR #44 на ветке `codex/arch-01-modular-refactor` реализуются только RF4-01/RF4-02. Исторические ленты и дебютные срезы при выборе источника теперь требуют distinct current-line scored CP/mate, а общий исторический W/D/L без фильтра сохраняет полный объём. `game_page` разделяет технический статус пустого run и подтверждённое наличие оценок, сохраняет отдельные move classifications и не показывает empty complete как анализ. Qt statistics/opening workers отвязаны от QObject страницы через app-owned dispatcher и потокобезопасную очередь; stale replies отбрасываются, handles отслеживаются для безопасного закрытия MainWindow.
+
+Добавлены барьерные тесты удаления страницы/окна/двух независимых профилей, включая OpeningMatcher, и синтетическая SQLite-сверка выборок с JSON/PGN/Stockfish, classification-only, empty-complete, accuracy-only, stale-line, review-only, аккаунтами и периодами. Целевой набор с `-W error::pytest.PytestUnhandledThreadExceptionWarning` — **13 PASS**; полный Python 3.12 offscreen pytest — **675 PASS**; compileall и `git diff --check` — PASS. Exact-head Windows CI запускается после публикации итогового SHA. Реальные Lichess/OAuth/PAT, Stockfish и пользовательская SQLite не запускались. PR остаётся draft; main не менять, merge не выполнять.
+
 ## 04.11.2026 — ARCH-UX-01 REVIEW-FIX-03 локальная проверка
 
 В draft PR #44, ветка `codex/arch-01-modular-refactor`, реализованы RF3-01/RF3-02. Прогресс Lichess теперь фильтрует объединение `lichess-pgn` + `lichess-json` через общий параметризованный контракт, сохраняя физический источник; `analysis_games` и покрытие требуют хотя бы одну актуальную CP/mate-оценку на текущей линии. Выбор лучшего run предпочитает scored-результат перед более новым пустым complete run. В Progress 0/0 показано как `н/д`, а отсутствие подтверждённых оценок отмечено явно.
