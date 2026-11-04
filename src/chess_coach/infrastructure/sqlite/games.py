@@ -28,6 +28,7 @@ class GamesStoreMixin:
     def search_games(self, query: str = "", *, page: int = 0,
                      page_size: int = DEFAULT_PAGE_SIZE, completed_only: bool = False,
                      source: str | None = None, opponent: str | None = None,
+                     opening: str | None = None,
                      account_id: str | None = None, clock: str | None = None,
                      color: str | None = None, outcome: str | None = None,
                      analysis: str | None = None, analysis_source: str | None = None,
@@ -60,6 +61,12 @@ class GamesStoreMixin:
         if opponent:
             clauses.append(f"{opponent_expr} LIKE ?")
             params.append(f"%{opponent}%")
+        if opening:
+            clauses.append("(g.opening_eco LIKE ? OR g.opening_name LIKE ? OR EXISTS ("
+                           "SELECT 1 FROM opening_matches om WHERE om.game_id=g.game_id "
+                           "AND om.line_revision=g.line_revision AND "
+                           "(om.eco LIKE ? OR om.name LIKE ?)))")
+            params.extend([f"%{opening}%"] * 4)
         if color in {"white", "black"}:
             clauses.append(f"{color_expr}=?")
             params.append(color)

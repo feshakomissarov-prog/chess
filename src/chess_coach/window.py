@@ -5070,6 +5070,8 @@ class MainWindow(QMainWindow):
             saved_filters = {}
         if isinstance(saved_filters, dict):
             page.search.setText(str(saved_filters.get("query") or ""))
+            page.opponent_filter.setText(str(saved_filters.get("opponent") or ""))
+            page.opening_filter.setText(str(saved_filters.get("opening") or ""))
             for name, widget in (("account_id", page.account_filter), ("color", page.side_filter),
                                  ("outcome", page.result_filter), ("source", page.source_filter),
                                  ("clock", page.clock_filter), ("analysis", page.analysis_filter),
@@ -5083,6 +5085,16 @@ class MainWindow(QMainWindow):
         page.active_requested.connect(self._resume_library_game)
         page.detail_requested.connect(self._load_library_game_detail)
         page.detail_position_requested.connect(self._open_library_position)
+        page.sync_requested.connect(self.start_archive_sync)
+        page.background_requested.connect(self.show_background_analytics)
+        page.settings_requested.connect(self.open_settings)
+        username = str(getattr(self.lichess, "username", "") or "").strip()
+        page.set_sync_status(
+            (f"Lichess · {username} · "
+             f"{'подключено' if self._lichess_connected else 'не подключено'} · "
+             "автоматическая готовая аналитика и ручная синхронизация используют общую очередь."
+             if username else
+             "Локальная библиотека доступна без подключения; синхронизация Lichess появится после авторизации."))
 
         def selected_game():
             return page.selected_game()

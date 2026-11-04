@@ -60,6 +60,8 @@ def test_library_page_emits_selected_game_actions_and_pagination(qtbot):
     page.open_game.click()
     assert selected == [game]
     page.search.setText("synthetic")
+    page.opponent_filter.setText("Alpha")
+    page.opening_filter.setText("B20")
     page.following.click()
     assert page_requests[-2:] == [
         ({**page.current_filters(), "query": "synthetic"}, 0),
@@ -67,6 +69,10 @@ def test_library_page_emits_selected_game_actions_and_pagination(qtbot):
     ]
     assert page.refresh_game.isHidden()
     assert page.current_filters()["period_days"] == 0
+    assert page.current_filters()["opponent"] == "Alpha"
+    assert page.current_filters()["opening"] == "B20"
+    assert page.sync_button.text() == "Синхронизировать"
+    assert page.background_button.text() == "Фоновые операции"
 
 
 def test_library_uses_bounded_three_zone_layout_at_laptop_size(qtbot):

@@ -24,5 +24,6 @@ class GameLibraryQueryCoordinator:
             page_size=self.page_size, completed_only=True,
             account_id=values.get("account_id"), source=values.get("source"),
             clock=values.get("clock"), color=values.get("color"),
+            opponent=values.get("opponent"), opening=values.get("opening"),
             outcome=values.get("outcome"), analysis=values.get("analysis"),
             analysis_source=values.get("analysis_source"), updated_after=updated_after)

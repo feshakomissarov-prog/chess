@@ -3320,6 +3320,34 @@ def test_library_detail_loads_in_worker_only_after_safety_and_masks_on_revoke(
     window.close()
 
 
+def test_library_opponent_and_opening_filters_query_current_sqlite_line(
+    qtbot, tmp_path
+):
+    window = MainWindow(offline_mode=True)
+    qtbot.addWidget(window)
+    window.game_repository.save_snapshot(
+        "opening-filter-a", "startpos", "e2e4", "white", "Alpha Player",
+        False, "300+0", "mate", "white")
+    window.game_repository.save_snapshot(
+        "opening-filter-b", "startpos", "d2d4", "white", "Beta Player",
+        False, "300+0", "mate", "white")
+    opening_fields = {
+        "dataset_revision": "synthetic-v1", "algorithm_version": "test",
+        "family": "Sicilian", "variation": None, "matched_ply": 1,
+    }
+    window.game_repository.save_opening_match(
+        "opening-filter-a", 1, {**opening_fields, "eco": "B20", "name": "Sicilian Defense"})
+    window.game_repository.save_opening_match(
+        "opening-filter-b", 1, {**opening_fields, "eco": "D10", "name": "Queen's Gambit"})
+    result = window.library_queries.search(
+        {"opponent": "Alpha", "opening": "B20"}, page=0)
+    assert result["total"] == 1
+    assert result["items"][0]["game_id"] == "opening-filter-a"
+    assert window.library_queries.search({"opening": "D10"})["items"][0]["game_id"] == (
+        "opening-filter-b")
+    window.close()
+
+
 def test_embedded_play_form_uses_existing_lichess_facade_and_prevents_duplicate_requests(
     qtbot, tmp_path, monkeypatch
 ):

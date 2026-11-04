@@ -21,6 +21,9 @@ class LibraryPage(QWidget):
     active_requested = Signal(object)
     detail_requested = Signal(dict)
     detail_position_requested = Signal(dict, int)
+    sync_requested = Signal()
+    background_requested = Signal()
+    settings_requested = Signal()
 
     def __init__(self, parent=None, *, accounts: list[dict] | None = None,
                  clocks: list[str] | None = None) -> None:
@@ -39,7 +42,21 @@ class LibraryPage(QWidget):
         layout.addWidget(self.active_games)
         self.summary = QLabel("Завершённые партии · загрузка выборки…")
         self.summary.setObjectName("secondary")
-        layout.addWidget(self.summary)
+        summary_row = QHBoxLayout()
+        summary_row.addWidget(self.summary, 1)
+        self.sync_button = QPushButton("Синхронизировать")
+        self.sync_button.clicked.connect(self.sync_requested.emit)
+        self.background_button = QPushButton("Фоновые операции")
+        self.background_button.clicked.connect(self.background_requested.emit)
+        self.settings_button = QPushButton("Настройки загрузки")
+        self.settings_button.clicked.connect(self.settings_requested.emit)
+        for button in (self.sync_button, self.background_button, self.settings_button):
+            summary_row.addWidget(button)
+        layout.addLayout(summary_row)
+        self.sync_status = QLabel("")
+        self.sync_status.setWordWrap(True)
+        self.sync_status.setObjectName("secondary")
+        layout.addWidget(self.sync_status)
         self.search = QLineEdit()
         self.search.setPlaceholderText("Поиск по сопернику, игроку, ID или статусу")
         self.account_filter = QComboBox()
@@ -85,6 +102,12 @@ class LibraryPage(QWidget):
         filter_title.setStyleSheet("font-weight: 700;")
         filter_layout.addWidget(filter_title)
         filter_layout.addWidget(self.search)
+        self.opponent_filter = QLineEdit()
+        self.opponent_filter.setPlaceholderText("Соперник")
+        filter_layout.addWidget(self.opponent_filter)
+        self.opening_filter = QLineEdit()
+        self.opening_filter.setPlaceholderText("Дебют / ECO")
+        filter_layout.addWidget(self.opening_filter)
         filter_grid = QGridLayout()
         filter_grid.setContentsMargins(0, 0, 0, 0)
         filter_grid.setHorizontalSpacing(6)
@@ -167,6 +190,8 @@ class LibraryPage(QWidget):
             actions.addWidget(button)
         layout.addLayout(actions)
         self.search.textChanged.connect(lambda _value: self._emit_filters())
+        self.opponent_filter.textChanged.connect(lambda _value: self._emit_filters())
+        self.opening_filter.textChanged.connect(lambda _value: self._emit_filters())
         self.previous.clicked.connect(lambda _checked=False: self._request_page(self._page - 1))
         self.following.clicked.connect(lambda _checked=False: self._request_page(self._page + 1))
         self.games.itemDoubleClicked.connect(lambda _item: self._open_selected())
@@ -278,6 +303,8 @@ class LibraryPage(QWidget):
     def current_filters(self) -> dict:
         return {
             "query": self.search.text(),
+            "opponent": self.opponent_filter.text().strip(),
+            "opening": self.opening_filter.text().strip(),
             "account_id": self.account_filter.currentData(),
             "color": self.side_filter.currentData() or None,
             "outcome": self.result_filter.currentData() or None,
@@ -326,6 +353,9 @@ class LibraryPage(QWidget):
         item = self.games.currentItem()
         value = item.data(Qt.ItemDataRole.UserRole) if item is not None else None
         return value if isinstance(value, dict) else None
+
+    def set_sync_status(self, text: str) -> None:
+        self.sync_status.setText(str(text))
 
     def _emit_for_selected(self, signal) -> None:
         game = self.selected_game()
