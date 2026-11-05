@@ -1,5 +1,16 @@
 # Chess Coach — дорожная карта
 
+## ВЕРХНИЙ GATE 05.11.2026 — независимое RF5 ревью / REVIEW-FIX-06
+
+Кодовый [draft PR #44](https://github.com/feshakomissarov-prog/chess/pull/44) на SHA `881a8d8f49c2cbdae7ffb1f5c4d79d0f091bafc9`: [Windows CI #41945044572](https://github.com/feshakomissarov-prog/chess/actions/runs/41945044572) **completed/SUCCESS, 687 tests**, и Codex сообщает о native synthetic GUI-проверке. **Несмотря на CI, независимое ревью выявило функциональные недочёты: RF5 пока НЕ ПРИНЯТ.**
+
+**Новое текущее задание** — [ARCH-UX-01 REVIEW-FIX-06 (RF6-01…08)](specs/ARCH_UX_01_REVIEW_FIX_06_INDEPENDENT_REVIEW.md): (P0) фоновые 401/403 не должны ложно разлогинивать игровую сессию, Disconnect должен работать во время pending/reconnect/429, (P1) Home не смешивает аккаунты, открывает нужные Recent details вопреки предыдущим фильтрам, прежние automatic archive/puzzle sync не должны исчезать, safety GET должен быть восстанавливаем после 429, (P2) collapsed sidebar и provenance tooltip. Тесты с реальными временными профилями, восстановление UI и exact-head CI. **Без ослабления Fair Play, без сети/личных токенов, без merge.**
+
+Нижестоящие материалы RF5 и старше — baseline/история, а не активное задание. Код исправлять только в существующем draft PR #44, документация в draft PR #45.
+
+---
+
+
 ## АКТУАЛЬНО 05.11.2026 — REVIEW-FIX-05 / блокер принятия desktop UX
 
 **Внешний Windows-пилот показал проблемы после успешного CI:** code [draft PR #44](https://github.com/feshakomissarov-prog/chess/pull/44) SHA `f957f994275933e0b6eb19134fa8cb34c39286e3`, CI #253 675 PASS, **но продукт НЕ ПРИНЯТ**. Следующий и единственный активный кодовый цикл — **[ARCH-UX-01 REVIEW-FIX-05](specs/ARCH_UX_01_REVIEW_FIX_05_WINDOWS_UX_LICHESS.md)** (RF5-00…RF5-12). Утверждённая Главная/глобальная навигация, статус Lichess/PAT и Fair Play, реальная игра, native GUI всех шести разделов должны быть доведены до ручной приёмки. Старые RF-01…04 и A0–A12 **не выполнять повторно**.
