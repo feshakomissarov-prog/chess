@@ -1,5 +1,14 @@
 # Chess Coach — дорожная карта
 
+## 05.11.2026 — ГЛАВНОЕ ЗАДАНИЕ: объединённый source-аудит Блок I + Блок II, одно исполнение
+
+По поручению владельца **останавливается выпуск узких RF-заданий на 2–5 замечаний**. После двух независимых проходов source GitHub code draft PR #44 на SHA `7a3a6775a0a27e60c0bea7cfbcd4f28d734e939b` оформлено [**ARCH-UX-01 FULL SYSTEM AUDIT MASTER**](specs/ARCH_UX_01_FULL_SYSTEM_AUDIT_MASTER_2026_11_05.md), сейчас **единое активное ТЗ**: **11 CORE + 11 UI замечаний и проверок, все 24 UX-COV с кнопками/логикой, сквозной release-gate**. P0 — гонка 401, generation/credential-fencing действий и изоляция игровых сессий между аккаунтами. P1 — live Progress/scope, неверные increment units, точное createdAt, GUI SQLite, командные POST idempotency, кнопки Play/finished/Library notes, статусы задач и др. P2/verification — FEN 720px, пустые выборки, tooltips/typing, audio settings unchanged. Предыдущее [RF9](specs/ARCH_UX_01_REVIEW_FIX_09_PROGRESS_LIVE_REFRESH_AND_SCOPE.md) включено в MASTER как CORE-03/04 **без отдельного цикла**.
+
+Базовый [CI #286](https://github.com/feshakomissarov-prog/chess/actions/runs/42005438175) **750 PASS/SUCCESS** относится к старому коду, не к исправлениям MASTER. Код менять **только в существующем draft PR #44** одной большой задачей; новое полное Qt/Windows/native synthetic GUI и exact-head CI; после — **единое** независимое повторное ревью по всей матрице и физическая приёмка владельца. Нет merge/main, нет реальных токенов/личной SQLite и Engine во время human live.
+
+---
+
+
 ## Текущий gate 05.11.2026 — REVIEW-FIX-09 / Progress UI после RF8
 
 В [code draft PR #44](https://github.com/feshakomissarov-prog/chess/pull/44) `7a3a6775a0a27e60c0bea7cfbcd4f28d734e939b` завершён RF8: legacy v2→v3 всех scored sources, bounded app-owned batch, scored-before-empty Review и native synthetic GUI smoke. [Windows CI #286](https://github.com/feshakomissarov-prog/chess/actions/runs/42005438175) **completed/SUCCESS, 750 PASS**. **Код пока не разрешён к merge**: не хватает живого обновления открытого Progress после материализации и отдельного per-account миграционного status scope Progress (сейчас зависит от dashboard_account Главной). Исполняемое ТЗ: [**REVIEW-FIX-09 RF9-01…03**](specs/ARCH_UX_01_REVIEW_FIX_09_PROGRESS_LIVE_REFRESH_AND_SCOPE.md), красные→зелёные Qt-тесты с открытым Progress и A/B профилями, native synthetic Windows PASS, exact-head CI, без переделки архитектуры.
