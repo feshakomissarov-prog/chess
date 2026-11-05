@@ -96,15 +96,15 @@
 
 **Полное верифицированное исследование + алгоритм + current-code map + golden fixtures + технический контракт:** [LICHESS_STOCKFISH_ACCURACY_MATE_V1](LICHESS_STOCKFISH_ACCURACY_MATE_V1.md). Приоритет этого документа над старой неофициальной аппроксимацией accuracy, если есть конфликт. Источники: официальная страница lichess.org/page/accuracy, свежие lila AccuracyPercent.scala/Advice.scala/tree eval, scalachess WinPercent и python-chess engine.Score. Исторический formula_id сохраняется как версия старых вычислений; новая реализация явно фиксирует исходный blob SHA Lichess.
 
-### RF6-09 — P1: проверить и завершить локальный game accuracy по текущему коду Lichess
+## RF6-09 — P1: проверить и завершить локальный game accuracy по текущему коду Lichess
 
 Проверить существующий domain/accuracy.py и integration lichess/game_review.py (они УЖЕ рассчитывают локальный процент по сохранённой полной линии). Привести golden parity к текущей Scala: Win% sigmoid, ±1000 CP cap для вероятности, accuracy с бонусом +1, взвешенное по волатильности + гармоническое среднее, POV каждого игрока, startColor, окно 2–8, Mate(0), proof of terminal checkmate. Локальный расчёт — «методика Lichess», **никогда не официальный процент Lichess**. Никаких значений при incomplete/stale/untrusted/unknown depth и никаких UCI/network при простом показе. Не создавать второй accuracy engine.
 
-### RF6-10 — P1: Stockfish mate ≠ CP, восстановить точность отдельных ходов
+## RF6-10 — P1: Stockfish mate ≠ CP, восстановить точность отдельных ходов
 
 Сейчас move_metrics.py оставляет accuracy=None для ВСЕХ отдельных ходов, а при мате дополнительно severity=unknown; position_analysis.py на quick eval использует искусственный score(mate_score=100000). Выполнить typed CP|Mate|MateGiven|Unknown с белым POV/позицией, **передавать CP=None при мате** и отдельно M±n, считать локальную accuracy для каждой достоверной пары before/after CP и/или Mate через Win% (не CPI surrogate); сохранять accuracy_source/formula_id/line_revision/hash. Отдельно доказательные события: упущен свой мат, допущен мат соперника, мат сохранён, мат уже поставлен; M5→M3 того же победителя не становится ошибкой только по расстоянию. CPL при матовом переходе остаётся NULL; mate events и per-move accuracy самостоятельны. Мат 0 только от корректного досочного терминала. Классификация по текущему Advice.scala лишь когда подходят условия.
 
-### RF6-11 — P1: Review, вертикальная шкала, Progress и тесты
+## RF6-11 — P1: Review, вертикальная шкала, Progress и тесты
 
 В GameReview сейчас вертикальный advantage bar получает None при любом mate — сделать осмысленную сторону/процент при matе **без выдуманного CP**, сохранённый текст M±n и осмысленная динамика матовой угрозы вместо всегда «Δ н/д». В summary отдельных ходов вывести доказанный per-move accuracy/матовую последовательность; для полной партии — оба локальных процента с формулой/глубиной/coverage и пометкой «неофициально», официальный Lichess не менять. В Progress локальный процент показывать отдельно от official и CPL только при подтверждённом источнике. Coverage n/N, source и Fair Play masking во всех text/tooltip/accessibility. Native Qt synthetic mate screenshots. Golden tests CP, оба POV, Mat(0), lost mate, same-side M5→M3, terminal checkmate without engine score, missing/incomplete/stale/line switches; full pytest/compileall/diff check и **новый exact-head Windows CI**. Никакого живого Stockfish в human online и автоматической UCI-дозагрузки личных архивов.
 
