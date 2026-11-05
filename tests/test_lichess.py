@@ -128,23 +128,26 @@ def test_unlimited_open_challenge_omits_clock_and_premoves_never_change_server_s
     assert b"clock.limit" not in (fake.calls[0][3] or b"")
 
 
-def test_open_link_is_accepted_only_after_server_confirms_unlimited_and_color_url():
+def test_open_link_is_accepted_only_after_server_confirms_unlimited_and_color_url(qtbot):
     service = LichessService(client=FakeChallengeClient({
         "id": "invite", "timeControl": {"type": "unlimited"},
         "whiteUrl": "https://lichess.org/white", "blackUrl": "https://lichess.org/black",
         "rated": False,
-    }), token_store=object())
-    result = service._create_open("token", "white", None, 0, False)
+    }), token_store=type("Store", (), {"get": lambda self: "token"})())
+    with qtbot.waitSignal(service.session_challenge_ready) as ready:
+        service.open_friend_game("white", None)
+    result = ready.args[2]
     assert result["friendUrl"] == "https://lichess.org/black"
     assert [call[0] for call in service.client.calls] == ["create", "accept"]
 
 
-def test_open_link_cancels_instead_of_silently_creating_correspondence():
+def test_open_link_cancels_instead_of_silently_creating_correspondence(qtbot):
     service = LichessService(client=FakeChallengeClient({
         "id": "invite", "timeControl": {"type": "correspondence"},
-    }), token_store=object())
-    with __import__("pytest").raises(LichessError, match="часов"):
-        service._create_open("token", "white", None, 0, False)
+    }), token_store=type("Store", (), {"get": lambda self: "token"})())
+    with qtbot.waitSignal(service.session_challenge_ready) as ready:
+        service.open_friend_game("white", None)
+    assert ready.args[2]["cancelled"]
     assert [call[0] for call in service.client.calls] == ["create", "cancel"]
 
 

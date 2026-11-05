@@ -194,7 +194,7 @@ class PlayPage(QWidget):
             self.set_status("Инкремент должен быть от 0 до 180 секунд.")
             return
         if online:
-            self.set_request_pending(True, cancellable=(mode == "challenge"))
+            self.set_request_pending(True, cancellable=mode in {"friend", "challenge"})
         self.create_requested.emit({
             "mode": mode,
             "color": self.color.currentData(), "clock_limit": limit,
@@ -204,9 +204,6 @@ class PlayPage(QWidget):
 
     def set_status(self, text: str) -> None:
         self.form_status.setText(str(text))
-        pending = str(text).startswith(("Создаём", "Отправляем"))
-        if not pending:
-            self.set_request_pending(False)
 
     def set_request_pending(self, pending: bool, *, cancellable: bool = False) -> None:
         self._request_pending = bool(pending)

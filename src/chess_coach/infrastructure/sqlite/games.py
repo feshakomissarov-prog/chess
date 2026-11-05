@@ -128,7 +128,8 @@ class GamesStoreMixin:
         with self._connection() as db:
             total = db.execute("SELECT COUNT(DISTINCT g.game_id) FROM games g" + join + where,
                                params).fetchone()[0]
-            selected = "g.*"
+            selected = ("g.*, (SELECT r.line_hash FROM game_revisions r "
+                        "WHERE r.game_id=g.game_id AND r.is_current=1) AS line_hash")
             if account_id:
                 selected += ",ag.opponent AS account_opponent,ag.player_name AS account_player_name,ag.color AS account_color"
             if order_by_game_time:
@@ -220,7 +221,10 @@ class GamesStoreMixin:
     def get_game(self, game_id: str) -> dict | None:
         self._wait_before_read(game_id)
         with self._connection() as db:
-            row = db.execute("SELECT * FROM games WHERE game_id=?", (game_id,)).fetchone()
+            row = db.execute(
+                "SELECT g.*, (SELECT r.line_hash FROM game_revisions r "
+                "WHERE r.game_id=g.game_id AND r.is_current=1) AS line_hash "
+                "FROM games g WHERE g.game_id=?", (game_id,)).fetchone()
             if not row:
                 return None
             result = dict(row)
@@ -259,6 +263,29 @@ class GamesStoreMixin:
     def export_pgn(self, game_id: str) -> str | None:
         game = self.get_game(game_id)
         return (game.get("raw_pgn") or game["pgn"]) if game else None
+
+    @staticmethod
+    def _read_pgn_export(db: sqlite3.Connection, game_id: str) -> dict | None:
+        row = db.execute(
+            "SELECT g.line_revision, g.source, g.raw_checksum, r.line_hash, "
+            "COALESCE(NULLIF(g.raw_pgn,''), g.pgn) AS pgn FROM games g "
+            "LEFT JOIN game_revisions r ON r.game_id=g.game_id AND r.is_current=1 "
+            "WHERE g.game_id=?", (game_id,)).fetchone()
+        return dict(row) if row else None
+
+    def pgn_export_snapshot(self, game_id: str) -> dict | None:
+        self._wait_before_read(game_id)
+        with self._connection() as db:
+            return self._read_pgn_export(db, game_id)
+
+    def publish_pgn_export(self, game_id: str, snapshot: dict, publish: Callable[[], None]) -> None:
+        # Serialize the final identity check and atomic rename with SQLite writers.
+        # The potentially large file has already been written outside this transaction.
+        with self._connection() as db:
+            db.execute("BEGIN IMMEDIATE")
+            if self._read_pgn_export(db, game_id) != snapshot:
+                raise ValueError("Партия изменилась во время экспорта. Выберите её снова.")
+            publish()
 
     def _save_snapshot_sync(self, game_id: str, initial_fen: str, moves: str, color: str,
                             opponent: str, rated: bool, clock: str, status: str,

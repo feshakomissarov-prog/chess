@@ -41,7 +41,9 @@ def test_play_page_keeps_each_action_connected_and_reflows_cards(qtbot):
     assert not page.start_button.isEnabled()
     page.start_button.click()
     assert len(requests) == 1
-    page.set_status("Ошибка 429: запрос повторите позже.")
+    page.set_status("Ошибка 429: исход запроса неизвестен.")
+    assert not page.start_button.isEnabled()
+    page.set_request_pending(False)
     assert page.start_button.isEnabled()
     page.clock.setCurrentIndex(page.clock.findText("Свой…"))
     assert not page.custom_clock_row.isHidden()

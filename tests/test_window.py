@@ -4134,9 +4134,11 @@ def test_saved_game_pgn_export_repository_read_does_not_block_qt_heartbeat(
         started.set()
         observed_while_reading.append(heartbeat.wait(0.5))
         release.wait(2)
-        return "[Event \"Synthetic\"]\n\n1. e4 *"
+        return {"line_revision": 1, "source": "local", "pgn": "1. e4 *"}
 
-    monkeypatch.setattr(window.game_repository, "export_pgn", slow_export)
+    monkeypatch.setattr(window.game_repository, "pgn_export_snapshot", slow_export)
+    monkeypatch.setattr(window.game_repository, "publish_pgn_export",
+                        lambda _game_id, _snapshot, publish: publish())
     QTimer.singleShot(0, heartbeat.set)
     page.export_requested.emit(game)
     qtbot.waitUntil(started.is_set, timeout=1000)
@@ -4144,7 +4146,7 @@ def test_saved_game_pgn_export_repository_read_does_not_block_qt_heartbeat(
     assert observed_while_reading == [True]
     release.set()
     qtbot.waitUntil(output.exists, timeout=3000)
-    assert output.read_text(encoding="utf-8").endswith("1. e4 *\n")
+    assert output.read_text(encoding="utf-8").endswith("1. e4 *")
     window.close()
 
 
@@ -5873,3 +5875,159 @@ def test_fair_play_revocation_stops_running_game_analysis_and_discards_late_succ
     assert "Анализ остановлен" in window.home_status.text()
     assert window.game_repository.list_analyses("finished-game") == []
     assert window.close() is True
+
+
+def test_rv2_pending_render_survives_accepted_status_before_game_start(qtbot, tmp_path):
+    window = MainWindow(QSettings(str(tmp_path / "rv2.ini"), QSettings.Format.IniFormat),
+                        offline_mode=True)
+    qtbot.addWidget(window)
+    window._awaiting_game_start = True
+    window._track_play_request("home-request", "challenge")
+    window.show_play()
+    window._challenge_status("Вызов принят; партия запускается…", False)
+    assert not window._play_mode_page.start_button.isEnabled()
+    window.close()
+
+
+def test_rv2_late_note_failure_cannot_enable_empty_selection(qtbot, tmp_path):
+    window = MainWindow(QSettings(str(tmp_path / "note-rv2.ini"), QSettings.Format.IniFormat),
+                        offline_mode=True)
+    qtbot.addWidget(window)
+    window.show_saved_games()
+    page = window.library_page
+    window._note_save_requests["old"] = ("draft", "old-game", page, 1)
+    assert not page.save_note.isEnabled()
+    window._note_save_result_ready("old", "old-game", "old error")
+    assert not page.save_note.isEnabled()
+    assert page.save_note.toolTip() != "old error"
+    window.close()
+
+
+@pytest.mark.parametrize("failure", ["revision", "replace", None])
+def test_rv2_export_preserves_destination_and_exact_pgn(qtbot, tmp_path, monkeypatch, failure):
+    import os
+    window = MainWindow(QSettings(str(tmp_path / "pgn-rv2.ini"), QSettings.Format.IniFormat),
+                        offline_mode=True)
+    qtbot.addWidget(window)
+    repo = window.game_repository
+    repo.save_snapshot("export", "startpos", "e2e4", "white", "Synthetic", False, "-", "resign")
+    game = repo.get_game("export")
+    output = tmp_path / "existing.pgn"
+    output.write_bytes(b"existing file")
+    monkeypatch.setattr("chess_coach.window.QFileDialog.getSaveFileName",
+                        lambda *args: (str(output), ""))
+    original = repo.publish_pgn_export
+    if failure == "revision":
+        def publish(game_id, snapshot, replace):
+            repo.save_snapshot("export", "startpos", "e2e4 e7e5", "white",
+                               "Synthetic", False, "-", "resign")
+            original(game_id, snapshot, replace)
+        monkeypatch.setattr(repo, "publish_pgn_export", publish)
+    elif failure == "replace":
+        def replace(*args):
+            raise OSError("synthetic disk error")
+        monkeypatch.setattr(os, "replace", replace)
+    window.show_saved_games()
+    with qtbot.waitSignal(window.pgn_export_finished) as completed:
+        window.library_page.export_requested.emit(game)
+    assert bool(completed.args[3]) == bool(failure)
+    assert output.read_bytes() == (b"existing file" if failure else game["pgn"].encode("utf8"))
+    assert not list(tmp_path.glob(".chess-coach-*.tmp"))
+    window.close()
+
+
+def test_rv2_game_post_reconciles_only_applied_owner_snapshot(qtbot, tmp_path):
+    from chess_coach.lichess.service import LichessService
+
+    class Store:
+        def get(self):
+            return "synthetic"
+
+    class Client:
+        def __init__(self):
+            self.posts = []
+        def handle_draw(self, token, game_id, accept):
+            self.posts.append((game_id, accept))
+
+    window = MainWindow(QSettings(str(tmp_path / "rv2-game.ini"), QSettings.Format.IniFormat),
+                        offline_mode=True)
+    qtbot.addWidget(window)
+    client = Client()
+    service = LichessService(client=client, token_store=Store())
+    window.lichess = service
+    service.username = "Synthetic"
+    service.session_game_event_received.connect(window._lichess_session_game_event)
+    generation = service.auth_generation
+
+    def state(moves, **data):
+        service._emit_session_game_event(generation, "draw-test", {
+            "type": "gameState", "status": "started", "moves": moves, **data})
+
+    state("e2e4")
+    with qtbot.waitSignal(service.session_action_completed):
+        first = service.draw("draw-test", True)
+    state("e2e5", wdraw=True)
+    state("", wdraw=True)
+    state("e2e4", bdraw=True)
+    assert service.has_pending_action("draw-test", "offer_draw")
+    assert service.draw("draw-test", True) == first
+    assert client.posts == [("draw-test", True)]
+    state("e2e4", wdraw=True)
+    assert not service.has_pending_action("draw-test", "offer_draw")
+    window.close()
+
+
+def test_rv2_delayed_puzzle_account_read_cannot_reopen_training(qtbot, tmp_path, monkeypatch):
+    window = MainWindow(QSettings(str(tmp_path / "rv2-training.ini"), QSettings.Format.IniFormat),
+                        offline_mode=True)
+    qtbot.addWidget(window)
+    entered, release = threading.Event(), threading.Event()
+
+    def list_accounts():
+        entered.set()
+        assert release.wait(2)
+        return []
+
+    monkeypatch.setattr(window.game_repository, "list_puzzle_accounts", list_accounts)
+    try:
+        window.open_puzzle_history_local()
+        assert entered.wait(1)
+        window.show_statistics()
+        current = window.screen_stack.currentWidget()
+        with qtbot.waitSignal(window.puzzle_history_finished):
+            release.set()
+        assert window.screen_stack.currentWidget() is current
+    finally:
+        release.set()
+        window.close()
+
+
+def test_rv2_export_rejects_revision_changed_before_worker_read(qtbot, tmp_path, monkeypatch):
+    window = MainWindow(QSettings(str(tmp_path / "rv2-export-read.ini"), QSettings.Format.IniFormat),
+                        offline_mode=True)
+    qtbot.addWidget(window)
+    repo = window.game_repository
+    repo.save_snapshot("export", "startpos", "e2e4", "white", "Synthetic", False, "-", "resign")
+    selected = repo.get_game("export")
+    target = tmp_path / "export.pgn"
+    target.write_bytes(b"existing file")
+    monkeypatch.setattr("chess_coach.window.QFileDialog.getSaveFileName",
+                        lambda *args: (str(target), ""))
+    original_start = window._start_registered_work
+
+    def start(worker, **options):
+        if options["kind"] == "pgn_export":
+            def change_then_export():
+                repo.save_snapshot("export", "startpos", "e2e4 e7e5", "white",
+                                   "Synthetic", False, "-", "resign")
+                worker()
+            return original_start(change_then_export, **options)
+        return original_start(worker, **options)
+
+    monkeypatch.setattr(window, "_start_registered_work", start)
+    window.show_saved_games()
+    with qtbot.waitSignal(window.pgn_export_finished) as completed:
+        window.library_page.export_requested.emit(selected)
+    assert completed.args[3]
+    assert target.read_bytes() == b"existing file"
+    window.close()

@@ -281,11 +281,10 @@ class LichessAuthMixin:
         with self._auth_lock:
             if generation != self._auth_generation:
                 return False
-            if hasattr(self, "reconcile_game_actions"):
-                self.reconcile_game_actions(game_id, event, generation)
-            self.session_game_event_received.emit(generation, game_id, event)
+        self.session_game_event_received.emit(generation, game_id, event)
+        if self.is_auth_generation_current(generation):
             self.game_event_received.emit(game_id, event)
-            return True
+        return self.is_auth_generation_current(generation)
 
     def _start_event_stream(self, token: str | None,
                             expected_generation: int | None = None) -> None:
@@ -388,6 +387,11 @@ class LichessAuthMixin:
                 self._puzzle_stop.set()
             if self._username_challenge_stop:
                 self._username_challenge_stop.set()
+            with self._pending_action_lock:
+                self._pending_actions.clear()
+                self._pending_action_states.clear()
+                self._pending_friend_challenges.clear()
+                self._game_authoritative_state.clear()
             with self._event_lock:
                 self._event_stream_started = False
                 for stop in self._game_stops.values():

@@ -229,6 +229,8 @@ class LichessGameSession:
                 pass
         return shown
 
+    accepted_snapshot_sequence = 0
+
     def apply_event(self, event: dict) -> GameSnapshot:
         kind = event.get("type")
         if kind not in {"gameState", "gameFull"}:
@@ -244,7 +246,9 @@ class LichessGameSession:
         if self.moves and incoming_fen != self.initial_fen:
             return self.snapshot()
         state = event.get("state", event)
-        incoming_moves = tuple(state.get("moves", self.moves).split())
+        if not isinstance(state, dict) or not isinstance(state.get("moves"), str):
+            raise ValueError("Lichess не прислал список ходов.")
+        incoming_moves = tuple(state["moves"].split())
         confirmed_moves = tuple(self.moves.split())
         if self.final_sync_pending:
             return self._apply_final_sync_event(event, kind, state, incoming_fen,
@@ -281,6 +285,14 @@ class LichessGameSession:
                 return self.snapshot()
         elif confirmed_moves and not is_extension:
             return self.snapshot()
+        if incoming_fen == self.initial_fen and not is_shorter and is_extension:
+            board = self.board.copy(stack=True)
+            remaining = incoming_moves[len(confirmed_moves):]
+        else:
+            board = chess.Board() if incoming_fen == "startpos" else chess.Board(incoming_fen)
+            remaining = incoming_moves
+        for uci in remaining:
+            board.push_uci(uci)
         if kind == "gameFull":
             self._apply_game_full_metadata(event, incoming_fen)
         if kind in {"gameState", "gameFull"}:
@@ -334,7 +346,7 @@ class LichessGameSession:
                 self.takeback_accept_pending = False
                 self.takeback_request_id = None
                 self._takeback_anchor = ()
-            self._rebuild_board()
+            self.board = board
             if kind == "gameFull":
                 self.awaiting_authoritative_snapshot = False
             if self.pending_uci and self._pending_ply is not None:
@@ -355,6 +367,7 @@ class LichessGameSession:
                     self.premove = None
                 elif self.status not in {"started", "created", "playing"}:
                     self._clear_pending()
+            self.accepted_snapshot_sequence += 1
             self._save()
         self._last_clock_at = time.monotonic()
         return self.snapshot()
@@ -485,6 +498,7 @@ class LichessGameSession:
         self._clear_pending()
         self.premove = None
         self._last_clock_at = time.monotonic()
+        self.accepted_snapshot_sequence += 1
         self._save()
         return self.snapshot()
 
