@@ -1,5 +1,14 @@
 # Chess Coach — дорожная карта
 
+## Текущий gate 05.11.2026 — REVIEW-FIX-09 / Progress UI после RF8
+
+В [code draft PR #44](https://github.com/feshakomissarov-prog/chess/pull/44) `7a3a6775a0a27e60c0bea7cfbcd4f28d734e939b` завершён RF8: legacy v2→v3 всех scored sources, bounded app-owned batch, scored-before-empty Review и native synthetic GUI smoke. [Windows CI #286](https://github.com/feshakomissarov-prog/chess/actions/runs/42005438175) **completed/SUCCESS, 750 PASS**. **Код пока не разрешён к merge**: не хватает живого обновления открытого Progress после материализации и отдельного per-account миграционного status scope Progress (сейчас зависит от dashboard_account Главной). Исполняемое ТЗ: [**REVIEW-FIX-09 RF9-01…03**](specs/ARCH_UX_01_REVIEW_FIX_09_PROGRESS_LIVE_REFRESH_AND_SCOPE.md), красные→зелёные Qt-тесты с открытым Progress и A/B профилями, native synthetic Windows PASS, exact-head CI, без переделки архитектуры.
+
+Прежние RF8 и ранние задания ниже — реализованная база/история. Не повторять. Fair Play, no engine/network на сохранённых данных, main/merge запрещены.
+
+---
+
+
 ## Текущий gate 05.11.2026 — REVIEW-FIX-08 после RF7
 
 Кодовый [draft PR #44](https://github.com/feshakomissarov-prog/chess/pull/44), SHA `41b35221ac58d61c6c205933190b4d5449c8f778`: [CI #279](https://github.com/feshakomissarov-prog/chess/actions/runs/41989708089) **completed/SUCCESS, 744 PASS**, compileall/offline-window PASS. RF7-02/03/04 по коду реализованы. **Но RF7 целиком не принят:** новая метрика v3 всё ещё недоступна старым сохранённым Lichess-PGN/JSON run; пакетный мигратор не вызывается app scheduler, и Progress по большому архиву неполный; Review по умолчанию может брать empty complete вместо scored partial, когда Stats выбирает правильно. Самостоятельный native smoke Codex завершился ошибкой своего UI-assertion. **Исполнять новое [REVIEW-FIX-08 RF8-01…RF8-04](specs/ARCH_UX_01_REVIEW_FIX_08_LEGACY_ALL_SOURCES_AND_REVIEW_SELECTION.md)** в том же code draft PR #44: старые scored runs всех источников, реально запускаемый низкоприоритетный bounded worker, единый выбор scored run, нативный повторный smoke с PASS + новый exact-head Windows CI.
