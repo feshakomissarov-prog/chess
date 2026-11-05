@@ -240,6 +240,28 @@ def test_archive_import_records_date_precision_and_unknown_date_is_not_recent(tm
         repo.shutdown()
 
 
+def test_archive_reimport_never_degrades_authoritative_start_timestamp(tmp_path):
+    repo = GameRepository(tmp_path / "archive-time-monotonic.sqlite3")
+    pgn = ('[Event "synthetic"]\n[White "Me"]\n[Black "Friend"]\n'
+           '[Date "2026.10.01"]\n[Result "1-0"]\n\n1. e4 1-0\n')
+    exact_ms = 1790841600123
+    exact = datetime.fromtimestamp(exact_ms / 1000, timezone.utc).isoformat()
+    try:
+        repo.import_archive_record("Me", {"id": "time-monotonic", "pgn": pgn,
+                                          "createdAt": exact_ms},
+                                   checkpoint_ms=None, backfill=False)
+        assert repo.get_game("time-monotonic")["started_at"] == exact
+        repo.import_archive_record("Me", {"id": "time-monotonic", "pgn": pgn},
+                                   checkpoint_ms=None, backfill=False)
+        row = repo.get_game("time-monotonic")
+        assert row["started_at"] == exact
+        assert row["game_time_precision"] == "timestamp"
+        with repo._connection() as db:
+            assert db.execute("PRAGMA integrity_check").fetchone()[0] == "ok"
+    finally:
+        repo.shutdown()
+
+
 def test_personal_profile_and_page_remain_bounded_on_10000_synthetic_games(tmp_path):
     repo = GameRepository(tmp_path / "profile-10000.sqlite3")
     try:

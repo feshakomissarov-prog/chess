@@ -264,6 +264,7 @@ class GamesStoreMixin:
                             opponent: str, rated: bool, clock: str, status: str,
                             winner: str | None = None, *, white_player: str | None = None,
                             black_player: str | None = None, started_at: str | None = None,
+                            time_precision: str | None = None,
                             final_sync_pending: bool = False,
                             account_username: str | None = None,
                             transaction_hook: Callable[[sqlite3.Connection, int, str], None] | None = None,
@@ -274,16 +275,24 @@ class GamesStoreMixin:
         game = chess.pgn.Game.from_board(board)
         game.headers["Event"] = "Lichess rated" if rated else "Lichess casual"
         game.headers["Site"] = f"https://lichess.org/{game_id}"
-        previous = None
-        if not (white_player and black_player and started_at):
-            with self._connection() as db:
-                previous = db.execute("SELECT white_player, black_player, started_at,game_time_precision FROM games "
-                                      "WHERE game_id=?", (game_id,)).fetchone()
+        with self._connection() as db:
+            previous = db.execute(
+                "SELECT white_player, black_player, started_at,game_time_precision FROM games "
+                "WHERE game_id=?", (game_id,)).fetchone()
         if previous:
             white_player = white_player or previous["white_player"]
             black_player = black_player or previous["black_player"]
-            started_at = started_at or previous["started_at"]
-        precision = _time_precision(started_at)
+        precision = time_precision or _time_precision(started_at)
+        if previous:
+            previous_precision = previous["game_time_precision"] or _time_precision(
+                previous["started_at"])
+            incoming_rank = {"unknown": 0, "date_only": 1, "timestamp": 2}.get(precision, 0)
+            previous_rank = {"unknown": 0, "date_only": 1, "timestamp": 2}.get(
+                previous_precision, 0)
+            if previous_rank > incoming_rank or (precision == "unknown"
+                    and previous["started_at"]):
+                started_at = previous["started_at"]
+                precision = previous_precision
         if precision == "unknown" and previous:
             precision = previous["game_time_precision"] or "unknown"
         if color == "white":
@@ -316,8 +325,12 @@ class GamesStoreMixin:
                 winner=excluded.winner, updated_at=excluded.updated_at, pgn=excluded.pgn,
                 color=CASE WHEN ? THEN games.color ELSE excluded.color END,
                 white_player=excluded.white_player, black_player=excluded.black_player,
-                started_at=excluded.started_at,
-                game_time_precision=excluded.game_time_precision,
+                started_at=CASE WHEN games.game_time_precision='timestamp' AND
+                    excluded.game_time_precision<>'timestamp' THEN games.started_at
+                    ELSE excluded.started_at END,
+                game_time_precision=CASE WHEN games.game_time_precision='timestamp' AND
+                    excluded.game_time_precision<>'timestamp' THEN 'timestamp'
+                    ELSE excluded.game_time_precision END,
                 final_sync_pending=excluded.final_sync_pending,
                 source=excluded.source, source_game_id=excluded.source_game_id,
                 variant=excluded.variant""",

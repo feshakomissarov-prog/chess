@@ -131,6 +131,24 @@ def test_library_note_draft_stays_bound_to_the_game_where_it_was_typed(qtbot):
     assert saved == [("game-a", "position note")]
 
 
+def test_library_keeps_independent_note_drafts_per_selected_game(qtbot):
+    page = LibraryPage()
+    qtbot.addWidget(page)
+    first = {"game_id": "draft-a", "line_revision": 1}
+    second = {"game_id": "draft-b", "line_revision": 4}
+    page.set_results([(first, "First", "Local"), (second, "Second", "Local")],
+                     page=0, pages=1, total=2)
+    page.games.setCurrentRow(0)
+    page.note.setText("note for A")
+    page.games.setCurrentRow(1)
+    page.note.setText("note for B")
+    page.games.setCurrentRow(0)
+    assert page.note.text() == "note for A"
+    page.games.setCurrentRow(1)
+    assert page.note.text() == "note for B"
+    assert page._note_draft_game_id == "draft-b"
+
+
 def test_play_page_exposes_cancel_only_for_cancellable_pending_challenge(qtbot):
     page = PlayPage({key: (lambda: None) for key in ("local", "ai", "friend", "challenge", "active")})
     qtbot.addWidget(page)

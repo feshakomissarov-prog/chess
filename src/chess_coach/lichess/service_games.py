@@ -77,6 +77,13 @@ class LichessGameActionsMixin:
             if key in self._pending_actions:
                 return self._pending_actions[key]
             self._pending_actions[key] = context.request_id
+            game_key = (context.generation, str(game_id or ""))
+            baseline = dict(self._game_authoritative_state.get(game_key) or {})
+            self._pending_action_states[key] = {
+                "context": context, "baseline": baseline, "after_sequence": None,
+                "baseline_sequence": self._game_event_sequence.get(game_key, 0),
+                "status": "in_flight",
+            }
         self.session_action_started.emit(
             context.generation, context.request_id, context.command, context.game_id or "")
         def work():
@@ -86,24 +93,192 @@ class LichessGameActionsMixin:
                 token = self.operation_token(context)
                 if not token:
                     result_status = -2
-                    return
-                action(token)
+                else:
+                    action(token)
             except Exception as exc:
                 result_status = exc.status if isinstance(exc, LichessError) and exc.status else -1
                 self._emit_operation_failure(context, exc)
-            finally:
-                with self._pending_action_lock:
-                    if self._pending_actions.get(key) == context.request_id:
+            definitive_rejection = result_status in {-2, 400, 401, 403, 404}
+            with self._pending_action_lock:
+                state = self._pending_action_states.get(key)
+                if state and state.get("context") is context:
+                    if definitive_rejection:
+                        self._pending_action_states.pop(key, None)
                         self._pending_actions.pop(key, None)
-                if self.is_auth_generation_current(context.generation):
-                    self.session_action_completed.emit(
+                    else:
+                        state["status"] = "awaiting_authoritative_state"
+                        state["after_sequence"] = self._game_event_sequence.get(
+                            (context.generation, str(game_id or "")), 0)
+                        current = self._game_authoritative_state.get(
+                            (context.generation, str(game_id or "")), {})
+                        if (state["after_sequence"] > state["baseline_sequence"]
+                                and self._action_effect_reconciled(
+                                    command, state.get("baseline") or {}, current)):
+                            self._pending_action_states.pop(key, None)
+                            self._pending_actions.pop(key, None)
+                            state["reconciled_before_http_completion"] = True
+                        else:
+                            state["reconciled_before_http_completion"] = False
+            if self.is_auth_generation_current(context.generation):
+                self.session_action_completed.emit(
+                    context.generation, context.request_id, command,
+                    context.game_id or "", result_status)
+                if state and state.get("reconciled_before_http_completion"):
+                    self.session_action_reconciled.emit(
                         context.generation, context.request_id, command,
-                        context.game_id or "", result_status)
+                        context.game_id or "")
         self._thread(work, "chess-coach-lichess-action")
         return context.request_id
 
+    def has_pending_action(self, game_id: str, command: str) -> bool:
+        with self._pending_action_lock:
+            return any(key[1:] == (str(game_id), str(command))
+                       for key in self._pending_actions)
+
+    def reconcile_game_actions(self, game_id: str, event: dict,
+                               generation: int | None = None) -> None:
+        """Resolve one-shot POSTs only after a newer authoritative game snapshot."""
+        generation = self.auth_generation if generation is None else int(generation)
+        state = event.get("state", event) if isinstance(event, dict) else {}
+        if not isinstance(state, dict) or event.get("type") not in {"gameFull", "gameState"}:
+            return
+        game_key = (generation, str(game_id))
+        live_statuses = {"created", "started", "started_soon", "playing"}
+        fingerprint = {
+            "status": state.get("status"), "moves": str(state.get("moves") or ""),
+            "wdraw": state.get("wdraw"), "bdraw": state.get("bdraw"),
+            "turns": state.get("turns"),
+        }
+        with self._pending_action_lock:
+            sequence = self._game_event_sequence.get(game_key, 0) + 1
+            self._game_event_sequence[game_key] = sequence
+            self._game_authoritative_state[game_key] = fingerprint
+            resolved = []
+            for key, action_state in tuple(self._pending_action_states.items()):
+                context = action_state.get("context")
+                if (not context or context.generation != generation
+                        or context.game_id != str(game_id)
+                        or action_state.get("status") != "awaiting_authoritative_state"
+                        or sequence <= int(action_state.get("after_sequence") or 0)):
+                    continue
+                if not self._action_effect_reconciled(
+                        context.command, action_state.get("baseline") or {}, fingerprint):
+                    continue
+                self._pending_action_states.pop(key, None)
+                self._pending_actions.pop(key, None)
+                resolved.append((context.request_id, context.command))
+        if self.is_auth_generation_current(generation):
+            for request_id, command in resolved:
+                self.session_action_reconciled.emit(
+                    generation, request_id, command, str(game_id))
+
+    @staticmethod
+    def _action_effect_reconciled(command: str, before: dict, after: dict) -> bool:
+        live_statuses = {"created", "started", "started_soon", "playing"}
+        status = str(after.get("status") or "")
+        if command in {"abort", "resign", "claim_draw", "claim_victory", "accept_draw"}:
+            return bool(status and status not in live_statuses)
+        if command == "offer_draw":
+            return any(after.get(key) is True and before.get(key) is not True
+                       for key in ("wdraw", "bdraw"))
+        if command == "decline_draw":
+            return (status and status not in live_statuses) or any(
+                before.get(key) is True and after.get(key) is False
+                for key in ("wdraw", "bdraw"))
+        return False
+
     def open_friend_game(self, color: str, clock_limit: int | None, increment: int = 0, rated: bool = False):
-        return self._challenge(lambda token: self._create_open(token, color, clock_limit, increment, rated))
+        context = self.capture_operation_context(command="create_friend_game")
+        cancel_event = threading.Event()
+        key = (context.generation, context.request_id)
+        with self._pending_action_lock:
+            self._pending_friend_challenges[key] = {
+                "context": context, "cancel_event": cancel_event,
+                "challenge_id": None, "creation_done": False,
+                "cancel_in_flight": False,
+            }
+        def action(token):
+            try:
+                return self._create_open(token, color, clock_limit, increment, rated,
+                                         cancel_event=cancel_event,
+                                         request_key=key,
+                                         on_created=lambda challenge_id:
+                                         self._friend_challenge_created(key, challenge_id))
+            except Exception:
+                with self._pending_action_lock:
+                    state = self._pending_friend_challenges.get(key)
+                    if state:
+                        state["creation_done"] = True
+                        if not cancel_event.is_set() or not state.get("challenge_id"):
+                            self._pending_friend_challenges.pop(key, None)
+                raise
+            else:
+                with self._pending_action_lock:
+                    self._pending_friend_challenges.pop(key, None)
+        return self._challenge(action, context=context)
+
+    def _friend_challenge_created(self, key, challenge_id: str) -> None:
+        with self._pending_action_lock:
+            state = self._pending_friend_challenges.get(key)
+            if state:
+                state["challenge_id"] = str(challenge_id)
+
+    def _friend_cancel_once(self, key, token: str, challenge_id: str) -> None:
+        with self._pending_action_lock:
+            state = self._pending_friend_challenges.get(key)
+            if not state or state.get("cancel_in_flight"):
+                raise LichessError("Отмена этого приглашения уже выполняется.")
+            state["cancel_in_flight"] = True
+        try:
+            self.client.cancel_challenge(token, challenge_id)
+        except Exception:
+            with self._pending_action_lock:
+                state = self._pending_friend_challenges.get(key)
+                if state:
+                    state["cancel_in_flight"] = False
+            raise
+
+    def cancel_pending_friend_challenge(self, request_id: str | None,
+                                        expected_generation: int | None = None) -> bool:
+        if not request_id:
+            return False
+        generation = self.auth_generation if expected_generation is None else int(expected_generation)
+        key = (generation, str(request_id))
+        with self._pending_action_lock:
+            pending = self._pending_friend_challenges.get(key)
+            if not pending or not self.is_operation_context_current(pending["context"]):
+                return False
+            pending["cancel_event"].set()
+            challenge_id = pending.get("challenge_id")
+            creation_done = bool(pending.get("creation_done"))
+            if challenge_id and creation_done and not pending.get("cancel_in_flight"):
+                pending["cancel_in_flight"] = True
+            else:
+                return True
+        context = pending["context"]
+        def work():
+            try:
+                token = self.operation_token(context)
+                if not token:
+                    raise LichessError("Сессия изменилась; отмена не подтверждена.")
+                self.client.cancel_challenge(token, challenge_id)
+            except Exception as exc:
+                with self._pending_action_lock:
+                    current = self._pending_friend_challenges.get(key)
+                    if current:
+                        current["cancel_in_flight"] = False
+                if self.is_operation_context_current(context):
+                    self.session_challenge_status_changed.emit(
+                        generation, str(request_id), f"Не удалось отменить приглашение: {exc}", True)
+                return
+            with self._pending_action_lock:
+                self._pending_friend_challenges.pop(key, None)
+            if self.is_operation_context_current(context):
+                self.session_challenge_status_changed.emit(
+                    generation, str(request_id), "Приглашение отменено Lichess.", False)
+        if challenge_id and creation_done:
+            self._thread(work, "chess-coach-cancel-friend-invitation")
+        return True
 
     def mark_game_finished(self, game_id: str) -> None:
         """Allow a bounded stream resync to fetch the final authoritative line."""
@@ -392,7 +567,10 @@ class LichessGameActionsMixin:
                      game_id=game_id, command="claim_victory")
 
     def create_ai_game(self, level: int, color: str, clock_limit: int | None, increment: int = 0):
-        return self._challenge(lambda token: self.client.create_ai_challenge(token, level, color, clock_limit, increment))
+        context = self.capture_operation_context(command="create_ai_game")
+        return self._challenge(
+            lambda token: self.client.create_ai_challenge(token, level, color, clock_limit, increment),
+            context=context)
 
     def fetch_active_games(self) -> str:
         """Fetch a single account/playing snapshot on explicit user request."""
@@ -451,15 +629,21 @@ class LichessGameActionsMixin:
         self._action(lambda token: self.client.abort(token, game_id),
                      game_id=game_id, command="abort")
 
-    def draw(self, game_id: str, accept: bool):
-        self._action(lambda token: self.client.handle_draw(token, game_id, accept),
-                     game_id=game_id, command="draw")
+    def draw(self, game_id: str, accept: bool, *, accepting_offer: bool = False):
+        return self._action(
+            lambda token: self.client.handle_draw(token, game_id, accept),
+            game_id=game_id,
+            command=("accept_draw" if accepting_offer else
+                     "offer_draw" if accept else "decline_draw"))
 
-    def _create_open(self, token, color, clock_limit, increment, rated):
+    def _create_open(self, token, color, clock_limit, increment, rated, *, cancel_event=None,
+                     on_created=None, request_key=None):
         if color == "random":
             color = random.choice(("white", "black"))
         result = self.client.create_open_challenge(token, color, rated, clock_limit, increment)
         challenge_id = result.get("id")
+        if challenge_id and on_created:
+            on_created(str(challenge_id))
         time_control = result.get("timeControl") or {}
         expected_type = "unlimited" if clock_limit is None else "clock"
         valid_control = time_control.get("type") == expected_type
@@ -480,6 +664,14 @@ class LichessGameActionsMixin:
                 "Lichess не подтвердил запрошенный режим часов или rated для приглашения. "
                 "Вызов не принят и не будет передан другу. Проверьте ответ API/ограничения аккаунта."
             )
+        if cancel_event is not None and cancel_event.is_set():
+            # The request task owns cancellation while creation is still running;
+            # it is the only place that can avoid a duplicate cancel POST.
+            if request_key is None:
+                self.client.cancel_challenge(token, challenge_id)
+            else:
+                self._friend_cancel_once(request_key, token, str(challenge_id))
+            return {"id": challenge_id, "cancelled": True}
         game_color = color
         friend_url = (result.get("blackUrl") or result.get("urlBlack")) if game_color == "white" else (result.get("whiteUrl") or result.get("urlWhite"))
         if not friend_url:
@@ -492,6 +684,10 @@ class LichessGameActionsMixin:
         accepted = self.client.accept_open_challenge(token, challenge_id, game_color)
         result["accept"] = accepted
         result["friendUrl"] = friend_url
+        if cancel_event is not None and cancel_event.is_set():
+            # The invitation may already have become an active game. Never
+            # send a challenge-cancel POST after accept has been issued.
+            result["cancel_too_late"] = True
         return result
 
     def _challenge(self, action, *, context=None):
@@ -500,6 +696,15 @@ class LichessGameActionsMixin:
             try:
                 token = self.operation_token(context)
                 if not token:
+                    if self.is_operation_context_current(context):
+                        self.session_operation_failed.emit(
+                            context.generation, context.request_id, context.command,
+                            context.game_id or "", -2,
+                            "Для текущего способа подключения нет доступных учётных данных.")
+                    if context.command == "create_friend_game":
+                        with self._pending_action_lock:
+                            self._pending_friend_challenges.pop(
+                                (context.generation, context.request_id), None)
                     return
                 result = action(token)
                 if isinstance(result, dict) and self.is_operation_context_current(context):
@@ -509,3 +714,4 @@ class LichessGameActionsMixin:
             except Exception as exc:
                 self._emit_operation_failure(context, exc)
         self._thread(work, "chess-coach-challenge")
+        return context.request_id

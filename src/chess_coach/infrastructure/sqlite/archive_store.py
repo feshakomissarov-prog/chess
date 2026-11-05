@@ -189,16 +189,19 @@ class ArchiveStoreMixin:
 
         def commit_archive(db: sqlite3.Connection, revision: int, line_hash: str) -> None:
             db.execute("UPDATE games SET source='lichess_archive', source_game_id=?, variant=?, "
-                       "started_at=COALESCE(started_at,?), "
-                       "game_time_precision=CASE WHEN ?='unknown' THEN game_time_precision "
-                       "ELSE ? END, "
+                       "started_at=CASE WHEN game_time_precision='timestamp' AND ?<>'timestamp' "
+                       "THEN started_at WHEN ?='unknown' THEN COALESCE(started_at,?) ELSE ? END, "
+                       "game_time_precision=CASE WHEN game_time_precision='timestamp' AND "
+                       "?<>'timestamp' THEN 'timestamp' WHEN ?='unknown' "
+                       "THEN COALESCE(game_time_precision,'unknown') ELSE ? END, "
                        "raw_checksum=?, raw_pgn=?, last_move_at=COALESCE(?,last_move_at), "
                        "lichess_accuracy_white=COALESCE(?,lichess_accuracy_white), "
                        "lichess_accuracy_black=COALESCE(?,lichess_accuracy_black), "
                        "white_rating=COALESCE(?,white_rating),black_rating=COALESCE(?,black_rating), "
                        "opening_eco=COALESCE(?,opening_eco),opening_name=COALESCE(?,opening_name) "
                        "WHERE game_id=?",
-                       (game_id, variant, started_at, time_precision, time_precision,
+                       (game_id, variant, time_precision, time_precision, started_at, started_at,
+                        time_precision, time_precision, time_precision,
                         raw_hash, raw_pgn, record.get("lastMoveAt"),
                        normalized_analytics.accuracy.get("white"),
                        normalized_analytics.accuracy.get("black"), white_data.get("rating"),
@@ -334,6 +337,7 @@ class ArchiveStoreMixin:
         args = (game_id, initial_fen, moves, player_color, opponent,
                 bool(record.get("rated", False)), clock, status, winner)
         kwargs = {"white_player": white, "black_player": black, "started_at": started_at,
+                  "time_precision": time_precision,
                   "transaction_hook": commit_archive, "preserve_existing_color": True}
         if self._writer is not None:
             # Archive workers wait for the durable single-writer transaction before

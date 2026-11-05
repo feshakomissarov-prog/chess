@@ -199,6 +199,8 @@ class LibraryPage(QWidget):
         self.note = QLineEdit()
         self.note.setPlaceholderText("Заметка к начальной позиции выбранной партии")
         self._note_draft_game_id: str | None = None
+        self._note_draft_line_revision: int | None = None
+        self._note_drafts: dict[tuple[str, int | None], str] = {}
         self.save_note = QPushButton("Сохранить заметку")
         self.save_note.setEnabled(False)
         note_row.addWidget(self.note, 1)
@@ -432,7 +434,8 @@ class LibraryPage(QWidget):
         game = self.selected_game()
         if game is None:
             return
-        if self._note_draft_game_id != str(game.get("game_id") or ""):
+        if (self._note_draft_game_id != str(game.get("game_id") or "")
+                or self._note_draft_line_revision != self._line_revision(game)):
             self.save_note.setToolTip(
                 "Черновик заметки привязан к другой партии. Выберите исходную партию, чтобы сохранить его.")
             return
@@ -441,25 +444,61 @@ class LibraryPage(QWidget):
     def _note_draft_changed(self, text: str) -> None:
         game = self.selected_game()
         current_id = str(game.get("game_id") or "") if game else None
-        if not text.strip():
+        current_revision = self._line_revision(game) if game else None
+        if self._note_draft_game_id is None:
             self._note_draft_game_id = current_id
-        elif self._note_draft_game_id is None:
-            self._note_draft_game_id = current_id
+            self._note_draft_line_revision = current_revision
+        if current_id and current_id == self._note_draft_game_id:
+            self._note_drafts[(current_id, self._note_draft_line_revision)] = str(text)
         enabled = bool(text.strip() and current_id
-                       and current_id == self._note_draft_game_id)
+                       and current_id == self._note_draft_game_id
+                       and current_revision == self._note_draft_line_revision)
         self.save_note.setEnabled(enabled)
         self.save_note.setToolTip("" if enabled else
             "Черновик заметки привязан к другой партии; выберите её для сохранения.")
 
-    def _selection_changed(self, current, _previous) -> None:
+    def clear_saved_note_draft(self, game_id: str, line_revision: int | None,
+                               saved_text: str) -> None:
+        key = (str(game_id), line_revision)
+        if self._note_drafts.get(key) == str(saved_text):
+            self._note_drafts.pop(key, None)
+
+    @staticmethod
+    def _line_revision(game: dict | None) -> int | None:
+        if not isinstance(game, dict) or game.get("line_revision") is None:
+            return None
+        try:
+            return int(game["line_revision"])
+        except (TypeError, ValueError, OverflowError):
+            return None
+
+    @staticmethod
+    def _item_game(item) -> dict | None:
+        if item is None:
+            return None
+        value = item.data(Qt.ItemDataRole.UserRole)
+        return value if isinstance(value, dict) else None
+
+    def _selection_changed(self, current, previous) -> None:
+        old_game = self._item_game(previous)
+        if old_game:
+            old_id = str(old_game.get("game_id") or "")
+            old_revision = self._line_revision(old_game)
+            if old_id:
+                self._note_drafts[(old_id, old_revision)] = self.note.text()
         enabled = current is not None and self.selected_game() is not None
         for button in (self.open_game, self.export_game, self.analyze_game):
             button.setEnabled(enabled)
         game = self.selected_game()
         current_id = str(game.get("game_id") or "") if game else None
-        if not self.note.text().strip():
-            self._note_draft_game_id = current_id
-        self._note_draft_changed(self.note.text())
+        current_revision = self._line_revision(game) if game else None
+        self._note_draft_game_id = current_id
+        self._note_draft_line_revision = current_revision
+        restored = self._note_drafts.get((current_id, current_revision), "") if current_id else ""
+        self.note.blockSignals(True)
+        self.note.setText(restored)
+        self.note.blockSignals(False)
+        self._note_draft_changed(restored)
         if game is None:
             self.show_game_detail(None)
         else:

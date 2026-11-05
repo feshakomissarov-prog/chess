@@ -281,6 +281,8 @@ class LichessAuthMixin:
         with self._auth_lock:
             if generation != self._auth_generation:
                 return False
+            if hasattr(self, "reconcile_game_actions"):
+                self.reconcile_game_actions(game_id, event, generation)
             self.session_game_event_received.emit(generation, game_id, event)
             self.game_event_received.emit(game_id, event)
             return True

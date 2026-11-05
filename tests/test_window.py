@@ -4,7 +4,7 @@ import threading
 import time
 import pytest
 from pathlib import Path
-from PySide6.QtCore import QPoint, QSettings, QStandardPaths, Qt
+from PySide6.QtCore import QPoint, QSettings, QStandardPaths, QTimer, Qt
 from PySide6.QtGui import QColor, QCloseEvent, QImage, QPainter
 from PySide6.QtWidgets import (QComboBox, QDialog, QDialogButtonBox, QLabel, QInputDialog,
                                QApplication, QMessageBox, QPushButton)
@@ -13,6 +13,7 @@ from chess_coach.board_view import BoardView
 from chess_coach.window import (ActiveGamesDialog, BatchAnalysisDialog, EvaluationGraph, MainWindow,
                                 OnlineGameDialog,
                                 SettingsDialog, StatisticsDialog, StatisticsGameDialog,
+                                EmbeddedStatisticsPage,
                                 _archive_row_presentation, _clock_filter_sort_key,
                                 _parse_external_study_text, _puzzle_attempt_summary)
 from chess_coach.lichess.session import LichessGameSession
@@ -3784,8 +3785,12 @@ def test_library_note_write_runs_off_ui_thread_and_remains_bound_during_selectio
     qtbot.waitUntil(lambda: window.game_repository.list_notes("note-original") != [], timeout=5000)
     assert write_threads and write_threads[0] is not threading.main_thread()
     assert window.game_repository.list_notes("note-other") == []
-    assert page.note.text() == "synthetic note for first game"
+    assert page.note.text() == ""  # The currently selected second game has its own draft.
     assert not page.save_note.isEnabled()
+    qtbot.waitUntil(lambda: not any(key[0] == "note-original"
+                                    for key in page._note_drafts), timeout=3000)
+    page.games.setCurrentRow(first_row)
+    assert page.note.text() == ""  # A successfully persisted draft is not restored as unsaved.
     window.close()
 
 
@@ -3880,6 +3885,266 @@ def test_embedded_play_form_uses_existing_lichess_facade_and_prevents_duplicate_
                                  "clock_increment": 2, "rated": False})
     assert calls[-1] == ("friend", ("white", 180, 2, False))
     assert not window._play_mode_page.rated.isHidden()
+    window.close()
+
+
+def test_failed_ai_create_releases_only_its_pending_play_request(qtbot, tmp_path, monkeypatch):
+    window = MainWindow(QSettings(str(tmp_path / "ai-create-fail.ini"),
+                                  QSettings.Format.IniFormat), offline_mode=True)
+    qtbot.addWidget(window)
+    monkeypatch.setattr(window, "_online_actions_allowed", lambda: True)
+    class FakeService:
+        auth_generation = 19
+        def create_ai_game(self, *args): return "ai-request"
+        def is_auth_generation_current(self, generation): return generation == self.auth_generation
+    window.lichess = FakeService()
+    window.show_play()
+    page = window._play_mode_page
+    window._create_play_request({"mode": "ai", "color": "white", "clock_limit": 300,
+                                 "clock_increment": 0, "level": 2})
+    generation = window.lichess.auth_generation
+    window._lichess_session_operation_failed(
+        generation, "ai-request", "create_challenge", "", 403, "forbidden")
+    assert not window._awaiting_game_start
+    assert page.start_button.isEnabled()
+    window.close()
+
+
+def test_unknown_ai_create_keeps_one_shot_locked_until_server_resolution(
+        qtbot, tmp_path, monkeypatch):
+    window = MainWindow(QSettings(str(tmp_path / "ai-create-429.ini"),
+                                  QSettings.Format.IniFormat), offline_mode=True)
+    qtbot.addWidget(window)
+    monkeypatch.setattr(window, "_online_actions_allowed", lambda: True)
+    class FakeService:
+        auth_generation = 22
+        def __init__(self): self.calls = 0
+        def create_ai_game(self, *args):
+            self.calls += 1
+            return f"request-{self.calls}"
+        def is_auth_generation_current(self, generation): return generation == self.auth_generation
+    service = FakeService()
+    window.lichess = service
+    window.show_play()
+    payload = {"mode": "ai", "color": "white", "clock_limit": 300,
+               "clock_increment": 0, "level": 2}
+    window._create_play_request(payload)
+    request_id = window._pending_play_request_id
+    window._lichess_session_operation_failed(
+        22, request_id, "create_ai_game", "", 429, "rate limited")
+    window._create_play_request(payload)
+    assert service.calls == 1
+    assert window._awaiting_game_start
+    assert window._pending_play_request_id == request_id
+    assert window._play_mode_page.form_status.text().strip()
+    window.close()
+
+
+def test_late_old_create_failure_cannot_release_new_play_request(qtbot, tmp_path, monkeypatch):
+    window = MainWindow(QSettings(str(tmp_path / "stale-create-fail.ini"),
+                                  QSettings.Format.IniFormat), offline_mode=True)
+    qtbot.addWidget(window)
+    monkeypatch.setattr(window, "_online_actions_allowed", lambda: True)
+    class FakeService:
+        auth_generation = 21
+        def __init__(self): self.ids = iter(("request-old", "request-new"))
+        def create_ai_game(self, *args): return next(self.ids)
+        def is_auth_generation_current(self, generation): return generation == self.auth_generation
+    window.lichess = FakeService()
+    first = {"mode": "ai", "color": "white", "clock_limit": 300,
+             "clock_increment": 0, "level": 2}
+    window._create_play_request(first)
+    window._lichess_session_operation_failed(21, "request-old", "create_ai_game", "", 403,
+                                              "forbidden")
+    window._create_play_request(first)
+    window._lichess_session_operation_failed(21, "request-old", "create_ai_game", "", 403,
+                                              "late forbidden")
+    assert window._awaiting_game_start
+    assert window._pending_play_request_id == "request-new"
+    assert not window._play_mode_page.start_button.isEnabled()
+    window.close()
+
+
+def test_unrelated_game_error_does_not_clear_pending_challenge(qtbot, tmp_path):
+    window = MainWindow(QSettings(str(tmp_path / "challenge-cross-error.ini"),
+                                  QSettings.Format.IniFormat), offline_mode=True)
+    qtbot.addWidget(window)
+    window._awaiting_game_start = True
+    window._play_mode_page.set_request_pending(True, cancellable=True)
+    window.show_play()
+    window.show()
+    window._lichess_game_event("broken-other-game", {
+        "type": "gameState", "moves": "e2e5", "status": "started"})
+    assert window._awaiting_game_start
+    assert not window._play_mode_page.start_button.isEnabled()
+    assert window._play_mode_page.cancel_pending_button.isVisible()
+    window.close()
+
+
+def test_friend_create_has_visible_safe_pending_cancel_before_server_id(qtbot, tmp_path,
+                                                                       monkeypatch):
+    window = MainWindow(QSettings(str(tmp_path / "friend-cancel-pending.ini"),
+                                  QSettings.Format.IniFormat), offline_mode=True)
+    qtbot.addWidget(window)
+    monkeypatch.setattr(window, "_online_actions_allowed", lambda: True)
+    window.show_play()
+    window.show()
+    called = []
+    class FakeService:
+        auth_generation = 20
+        def __init__(self): self.cancelled = []
+        def open_friend_game(self, *args): called.append(args); return "friend-request"
+        def cancel_pending_friend_challenge(self, request_id, *, expected_generation=None):
+            self.cancelled.append((request_id, expected_generation)); return True
+        def is_auth_generation_current(self, generation): return generation == self.auth_generation
+        def cancel_username_challenge(self): pytest.fail("friend cancel routed to username flow")
+    service = FakeService()
+    window.lichess = service
+    page = window._play_mode_page
+    window._create_play_request({"mode": "friend", "color": "white", "clock_limit": 300,
+                                 "clock_increment": 0, "rated": False})
+    assert len(called) == 1
+    assert page.cancel_pending_button.isVisible()
+    assert page.cancel_pending_button.isEnabled()
+    page.cancel_pending_button.click()
+    assert service.cancelled == [("friend-request", 20)]
+    assert window._awaiting_game_start
+    assert len(called) == 1
+    window.close()
+
+
+def test_late_friend_cancel_is_reported_as_unconfirmed_not_success(qtbot, tmp_path):
+    window = MainWindow(QSettings(str(tmp_path / "friend-cancel-too-late.ini"),
+                                  QSettings.Format.IniFormat), offline_mode=True)
+    qtbot.addWidget(window)
+    class FakeService:
+        auth_generation = 23
+    window.lichess = FakeService()
+    window.show_play()
+    window.show()
+    window._awaiting_game_start = True
+    window._track_play_request("friend-late", "friend")
+    window._challenge_ready({"id": "late-challenge", "friendUrl": "https://example.invalid/invite",
+                             "cancel_too_late": True})
+    assert "опоздал" in window._play_mode_page.form_status.text().casefold()
+    assert window._play_mode_page.invitation_row.isVisible()
+    assert window._play_mode_page.cancel_invitation_button.isEnabled()
+    assert window._awaiting_game_start
+    window.close()
+
+
+def test_starting_legacy_metrics_batch_preserves_progress_page(qtbot, tmp_path, monkeypatch):
+    window = MainWindow(QSettings(str(tmp_path / "metrics-page-preserve.ini"),
+                                  QSettings.Format.IniFormat), offline_mode=True)
+    qtbot.addWidget(window)
+    page = EmbeddedStatisticsPage(window.game_repository, window)
+    qtbot.addWidget(page)
+    window._statistics_dialog = page
+    page._page = 2
+    page.tabs.setCurrentIndex(1)
+    monkeypatch.setattr(window, "_library_detail_safety_allowed", lambda: True)
+    class IdleHandle:
+        def is_alive(self): return False
+    monkeypatch.setattr(window, "_start_registered_work", lambda *args, **kwargs: IdleHandle())
+    window._start_legacy_metrics_batch()
+    assert page._page == 2
+    assert page.tabs.currentIndex() == 1
+    window._legacy_metrics_timer.stop()
+    window.close()
+
+
+def test_finishing_legacy_metrics_batch_refreshes_without_losing_progress_position(
+        qtbot, tmp_path, monkeypatch):
+    window = MainWindow(QSettings(str(tmp_path / "metrics-finish-preserve.ini"),
+                                  QSettings.Format.IniFormat), offline_mode=True)
+    qtbot.addWidget(window)
+    page = EmbeddedStatisticsPage(window.game_repository, window)
+    qtbot.addWidget(page)
+    page.show()
+    qtbot.wait(30)
+    window._statistics_dialog = page
+    page._page = 2
+    page.tabs.setCurrentIndex(1)
+    page.games.verticalScrollBar().setRange(0, 100)
+    page.games.verticalScrollBar().setValue(37)
+    window._legacy_metrics_generation = 4
+    window._legacy_metrics_scope = None
+    class DoneHandle:
+        def is_alive(self): return False
+    window._legacy_metrics_handle = DoneHandle()
+    monkeypatch.setattr(window, "_library_detail_safety_allowed", lambda: True)
+    refresh_calls = []
+    monkeypatch.setattr(page, "refresh_data_preserving_position",
+                        lambda: refresh_calls.append((page._page, page.tabs.currentIndex(),
+                                                      page.games.verticalScrollBar().value())))
+    payload = {"scope": None, "result": {
+        "status": {"total": 30, "done": 20, "remaining": 10},
+        "batch": {"processed": 10, "remaining": 10}}}
+    window._legacy_metrics_batch_finished(4, payload)
+    assert refresh_calls == [(2, 1, 37)]
+    assert page._page == 2
+    assert page.tabs.currentIndex() == 1
+    window.close()
+
+
+def test_saved_game_analysis_repository_read_does_not_block_qt_heartbeat(
+        qtbot, tmp_path, monkeypatch):
+    window = MainWindow(QSettings(str(tmp_path / "analysis-read-heartbeat.ini"),
+                                  QSettings.Format.IniFormat), offline_mode=True)
+    qtbot.addWidget(window)
+    engine_path = tmp_path / "synthetic-engine.exe"
+    engine_path.write_bytes(b"fake executable placeholder")
+    window.settings.setValue("stockfish_path", str(engine_path))
+    window.settings.setValue("stockfish_verified_path", str(engine_path))
+    window.review_workspace.review = {"game": {
+        "game_id": "analysis-heartbeat", "status": "mate"}}
+    heartbeat = threading.Event()
+    observed_while_reading = []
+    def slow_read(_game_id):
+        observed_while_reading.append(heartbeat.wait(0.2))
+        return {"game_id": "analysis-heartbeat", "status": "mate", "variant": "standard"}
+    monkeypatch.setattr(window.game_repository, "get_game", slow_read)
+    monkeypatch.setattr(window, "_start_game_analysis", lambda *_args: None)
+    QTimer.singleShot(0, heartbeat.set)
+    window._request_saved_game_analysis("analysis-heartbeat")
+    qtbot.waitUntil(heartbeat.is_set, timeout=1000)
+    assert observed_while_reading == [True]
+    window.review_workspace.review = None
+    window.close()
+
+
+def test_saved_game_pgn_export_repository_read_does_not_block_qt_heartbeat(
+        qtbot, tmp_path, monkeypatch):
+    window = MainWindow(QSettings(str(tmp_path / "export-read-heartbeat.ini"),
+                                  QSettings.Format.IniFormat), offline_mode=True)
+    qtbot.addWidget(window)
+    window.show_saved_games()
+    page = window.library_page
+    game = {"game_id": "export-heartbeat", "line_revision": 1,
+            "status": "mate", "source": "local"}
+    page.set_results([(game, "Synthetic game", "synthetic")], page=0, pages=1, total=1)
+    output = tmp_path / "export-heartbeat.pgn"
+    monkeypatch.setattr("chess_coach.window.QFileDialog.getSaveFileName",
+                        lambda *_args, **_kwargs: (str(output), "PGN (*.pgn)"))
+    started, release, heartbeat = threading.Event(), threading.Event(), threading.Event()
+    observed_while_reading = []
+
+    def slow_export(game_id):
+        assert game_id == "export-heartbeat"
+        started.set()
+        observed_while_reading.append(heartbeat.wait(0.5))
+        release.wait(2)
+        return "[Event \"Synthetic\"]\n\n1. e4 *"
+
+    monkeypatch.setattr(window.game_repository, "export_pgn", slow_export)
+    QTimer.singleShot(0, heartbeat.set)
+    page.export_requested.emit(game)
+    qtbot.waitUntil(started.is_set, timeout=1000)
+    qtbot.waitUntil(heartbeat.is_set, timeout=1000)
+    assert observed_while_reading == [True]
+    release.set()
+    qtbot.waitUntil(output.exists, timeout=3000)
+    assert output.read_text(encoding="utf-8").endswith("1. e4 *\n")
     window.close()
 
 

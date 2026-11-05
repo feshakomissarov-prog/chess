@@ -361,6 +361,8 @@ class MainWindow(QMainWindow):
     library_target_finished = Signal(int, str, object, object)
     library_detail_finished = Signal(int, str, object, object)
     note_save_finished = Signal(str, str, object)
+    saved_game_analysis_read_finished = Signal(int, str, object, object)
+    pgn_export_finished = Signal(str, str, str, object)
     finalization_probe_finished = Signal(str, str, object)
     archive_account_ready_finished = Signal(int, str, object, object)
     external_study_finished = Signal(int, object, object)
@@ -477,6 +479,9 @@ class MainWindow(QMainWindow):
         self._active_games_request_generation: int | None = None
         self._open_challenge_generation: int | None = None
         self._pending_game_actions: set[tuple[str, str]] = set()
+        self._pending_play_request_id: str | None = None
+        self._pending_play_request_generation: int | None = None
+        self._pending_play_request_mode: str | None = None
         self._backfill_wakeup_identity: tuple[int, str] | None = None
         self._backfill_deferred_for_human_game = False
         self._backfill_wakeup_timer = QTimer(self)
@@ -519,6 +524,10 @@ class MainWindow(QMainWindow):
         self._review_safety_request_id: str | None = None
         self._review_safety_context: tuple | None = None
         self._analysis_session_generation = 0
+        self._saved_game_analysis_generation = 0
+        self._saved_game_analysis_handle = None
+        self._pgn_export_generation = 0
+        self._pgn_export_requests: dict[str, tuple[str, str]] = {}
         self._engine_probe_processes: set[QProcess] = set()
         self._engine_install_stop: threading.Event | None = None
         self._engine_install_thread: threading.Thread | None = None
@@ -569,6 +578,9 @@ class MainWindow(QMainWindow):
         self.library_target_finished.connect(self._library_target_result_ready)
         self.library_detail_finished.connect(self._library_detail_result_ready)
         self.note_save_finished.connect(self._note_save_result_ready)
+        self.saved_game_analysis_read_finished.connect(
+            self._saved_game_analysis_read_ready)
+        self.pgn_export_finished.connect(self._pgn_export_finished)
         self.finalization_probe_finished.connect(self._finalization_probe_result_ready)
         self.archive_account_ready_finished.connect(self._archive_account_ready_result)
         self.external_study_finished.connect(self._external_study_parse_finished)
@@ -659,6 +671,9 @@ class MainWindow(QMainWindow):
         if hasattr(service, "session_action_started"):
             service.session_action_started.connect(self._lichess_session_action_started)
             service.session_action_completed.connect(self._lichess_session_action_completed)
+            if hasattr(service, "session_action_reconciled"):
+                service.session_action_reconciled.connect(
+                    self._lichess_session_action_reconciled)
         if hasattr(service, "session_challenge_ready"):
             service.session_challenge_ready.connect(self._lichess_session_challenge_ready)
             service.session_challenge_status_changed.connect(
@@ -732,6 +747,9 @@ class MainWindow(QMainWindow):
         self._open_challenge_id = None
         self._open_challenge_generation = None
         self._awaiting_game_start = False
+        self._pending_play_request_id = None
+        self._pending_play_request_generation = None
+        self._pending_play_request_mode = None
         if hasattr(self, "_play_mode_page"):
             self._play_mode_page.clear_invitation()
         if getattr(self, "_screen_mode", "") == "online":
@@ -749,14 +767,22 @@ class MainWindow(QMainWindow):
 
     def _lichess_session_challenge_ready(self, generation: int, request_id: str,
                                          result: object) -> None:
-        if self._current_lichess_generation(generation):
+        if (self._current_lichess_generation(generation)
+                and self._play_request_matches(generation, request_id)):
             self._open_challenge_generation = generation
             self._challenge_ready(result)
 
     def _lichess_session_challenge_status(self, generation: int, request_id: str,
                                           message: str, waiting: bool) -> None:
-        if self._current_lichess_generation(generation):
+        if (self._current_lichess_generation(generation)
+                and self._play_request_matches(generation, request_id)):
             self._challenge_status(message, waiting)
+
+    def _play_request_matches(self, generation: int, request_id: str) -> bool:
+        expected_id = self._pending_play_request_id
+        expected_generation = self._pending_play_request_generation
+        return bool(expected_id and expected_id == str(request_id)
+                    and expected_generation == int(generation))
 
     def _lichess_session_invitation_cancelled(self, generation: int, request_id: str,
                                                challenge_id: str) -> None:
@@ -782,13 +808,30 @@ class MainWindow(QMainWindow):
                                           message: str) -> None:
         if not self._current_lichess_generation(generation):
             return
-        if command in {"username_challenge", "create_challenge"}:
-            if command == "username_challenge":
-                self._awaiting_game_start = False
-                self.cancel_challenge_button.setEnabled(False)
-                self.cancel_challenge_button.setVisible(False)
-                if hasattr(self, "_play_mode_page"):
-                    self._play_mode_page.set_request_pending(False)
+        if command in {"username_challenge", "create_challenge", "create_ai_game",
+                       "create_friend_game"}:
+            if not self._play_request_matches(generation, request_id):
+                return
+            if status in {429, 0, -1}:
+                # The POST may have reached Lichess. Keep the one-shot request
+                # locked until a stream/reconciliation event resolves it.
+                notice = (f"Результат запроса неизвестен ({message}); повторная отправка "
+                          "заблокирована до синхронизации с Lichess.")
+                self.game_status.setText(notice)
+                self._play_mode_page.set_status(notice)
+                cancellable = command in {"create_friend_game", "username_challenge"}
+                self._play_mode_page.set_request_pending(True, cancellable=cancellable)
+                self.cancel_challenge_button.setVisible(cancellable)
+                self.cancel_challenge_button.setEnabled(cancellable)
+                return
+            self._awaiting_game_start = False
+            self._pending_play_request_id = None
+            self._pending_play_request_generation = None
+            self._pending_play_request_mode = None
+            self.cancel_challenge_button.setEnabled(False)
+            self.cancel_challenge_button.setVisible(False)
+            if hasattr(self, "_play_mode_page"):
+                self._play_mode_page.set_request_pending(False)
             self._challenge_status(f"Не удалось выполнить запрос: {message}", False)
         elif command == "cancel_invitation":
             if getattr(self, "cancel_invitation_button", None) is not None:
@@ -811,9 +854,18 @@ class MainWindow(QMainWindow):
                                           command: str, game_id: str, status: int) -> None:
         if not self._current_lichess_generation(generation):
             return
-        self._pending_game_actions.discard((str(game_id), str(command)))
+        if status not in {0, 429, -1}:
+            self._pending_game_actions.discard((str(game_id), str(command)))
         if self.online_session and self.online_session.game_id == game_id:
             self._refresh_online()
+
+    def _lichess_session_action_reconciled(self, generation: int, request_id: str,
+                                           command: str, game_id: str) -> None:
+        if not self._current_lichess_generation(generation):
+            return
+        self._pending_game_actions.discard((str(game_id), str(command)))
+        if self.online_session and self.online_session.game_id == game_id:
+            self._refresh_online("Состояние команды подтверждено потоком Lichess.")
 
     def _lichess_session_status(self, generation: int, status: str) -> None:
         if self._current_lichess_generation(generation):
@@ -1241,7 +1293,6 @@ class MainWindow(QMainWindow):
         if isinstance(statistics_page, EmbeddedStatisticsPage):
             statistics_page.set_metric_migration_status(
                 self._legacy_metrics_text, safety_allowed=True)
-            statistics_page._schedule_refresh()
         def worker() -> None:
             try:
                 before = repository.analysis_metrics_migration_status(account_id=scope)
@@ -2263,12 +2314,17 @@ class MainWindow(QMainWindow):
             self.settings.setValue("workspace/ai_clock_increment", increment)
             self.settings.setValue("workspace/ai_level", level)
             self._awaiting_game_start = True
+            self._play_mode_page.set_request_pending(True, cancellable=False)
             self._play_mode_page.set_status("Создаём нерейтинговую партию против Lichess AI…")
-            self.lichess.create_ai_game(level, color, limit, increment)
+            request_id = self.lichess.create_ai_game(level, color, limit, increment)
+            self._track_play_request(request_id, mode)
         elif mode == "friend":
             self._awaiting_game_start = True
+            self._play_mode_page.set_request_pending(True, cancellable=True)
             self._play_mode_page.set_status("Создаём ссылку-приглашение…")
-            self.lichess.open_friend_game(color, limit, increment, rated)
+            request_id = self.lichess.open_friend_game(color, limit, increment, rated)
+            self._track_play_request(request_id, mode)
+            self._play_mode_page.set_request_pending(True, cancellable=True)
         elif mode == "challenge":
             username = str(options.get("username") or "").strip()
             if not username:
@@ -2277,10 +2333,32 @@ class MainWindow(QMainWindow):
             self._awaiting_game_start = True
             self._play_mode_page.set_status(f"Отправляем вызов игроку {username}…")
             self._play_mode_page.set_request_pending(True, cancellable=True)
-            self.lichess.challenge_username(username, color, limit, increment, rated)
+            request_id = self.lichess.challenge_username(username, color, limit, increment, rated)
+            self._track_play_request(request_id, mode)
+
+    def _track_play_request(self, request_id: object, mode: str) -> None:
+        self._pending_play_request_id = str(request_id) if request_id else None
+        self._pending_play_request_generation = getattr(
+            self.lichess, "auth_generation", None)
+        self._pending_play_request_mode = str(mode)
 
     def _cancel_play_challenge_wait(self) -> None:
         if not self._awaiting_game_start or not self.lichess:
+            return
+        if self._pending_play_request_mode == "friend":
+            cancel = getattr(self.lichess, "cancel_pending_friend_challenge", None)
+            if not cancel:
+                self._play_mode_page.set_status(
+                    "Серверная отмена ещё не доступна; запрос остаётся заблокирован до ответа Lichess.")
+                self._play_mode_page.set_request_pending(True, cancellable=False)
+                return
+            if cancel(self._pending_play_request_id,
+                      expected_generation=self._pending_play_request_generation):
+                message = "Отмена запрошена; ожидаем результат Lichess, затем отменим вызов по ID."
+            else:
+                message = "Не удалось подтвердить отмену запроса; повторное создание заблокировано."
+            self._play_mode_page.set_status(message)
+            self._play_mode_page.set_request_pending(True, cancellable=False)
             return
         cancellation_started = self.lichess.cancel_username_challenge()
         if cancellation_started:
@@ -5901,9 +5979,6 @@ class MainWindow(QMainWindow):
             self.lichess.start_game(game_id, expected_generation=self.lichess.auth_generation)
 
     def _lichess_error(self, message: str) -> None:
-        self._awaiting_game_start = False
-        self.cancel_challenge_button.setEnabled(False)
-        self.cancel_challenge_button.setVisible(False)
         if getattr(self, "_open_challenge_id", None):
             self.cancel_invitation_button.setEnabled(True)
         self.game_status.setText(message)
@@ -5991,7 +6066,8 @@ class MainWindow(QMainWindow):
         self._awaiting_game_start = True
         self.game_status.setText("Создаём вызов и присоединяем вас…")
         self.home_status.setText("Создаём вызов и присоединяем вас…")
-        self.lichess.open_friend_game(color, limit, increment, rated)
+        request_id = self.lichess.open_friend_game(color, limit, increment, rated)
+        self._track_play_request(request_id, "friend")
 
     def challenge_username(self, *, initial_username: str | None = None) -> None:
         if not self._online_actions_allowed() or self._awaiting_game_start:
@@ -6008,7 +6084,9 @@ class MainWindow(QMainWindow):
         self._awaiting_game_start = True
         self.game_status.setText(f"Ожидаем ответ от {username.strip()}…")
         self.home_status.setText(f"Ожидаем ответ от {username.strip()}…")
-        self.lichess.challenge_username(username.strip(), color, limit, increment, rated)
+        request_id = self.lichess.challenge_username(
+            username.strip(), color, limit, increment, rated)
+        self._track_play_request(request_id, "challenge")
 
     def play_ai(self) -> None:
         if not self._online_actions_allowed() or self._awaiting_game_start:
@@ -6031,15 +6109,31 @@ class MainWindow(QMainWindow):
         self._awaiting_game_start = True
         self.game_status.setText("Создаём партию против Lichess AI…")
         self.home_status.setText("Создаём партию против Lichess AI…")
-        self.lichess.create_ai_game(level, color, limit, increment)
+        request_id = self.lichess.create_ai_game(level, color, limit, increment)
+        self._track_play_request(request_id, "ai")
 
     def _challenge_ready(self, result: dict) -> None:
+        if result.get("cancelled"):
+            self._awaiting_game_start = False
+            self._pending_play_request_id = None
+            self._pending_play_request_generation = None
+            self._pending_play_request_mode = None
+            self._play_mode_page.set_request_pending(False)
+            self._play_mode_page.clear_invitation()
+            self.game_status.setText("Приглашение отменено до принятия партии.")
+            return
         url = result.get("friendUrl")
         if not url:
             self.game_status.setText("Вызов отправлен; ждём ответ Lichess…")
             self._play_mode_page.set_status("Вызов отправлен; ждём ответа соперника и сервера.")
             return
-        self._play_mode_page.set_status("Приглашение создано. Скопируйте ссылку и отправьте другу.")
+        if result.get("cancel_too_late"):
+            self._play_mode_page.set_status(
+                "Партия уже принята Lichess; запрос отмены опоздал и не подтверждён. "
+                "Ссылка доступна, приглашение можно отменить отдельно, если партия ещё не началась.")
+        else:
+            self._play_mode_page.set_status(
+                "Приглашение создано. Скопируйте ссылку и отправьте другу.")
         self._play_mode_page.set_request_pending(False)
         self._play_mode_page.show_invitation(str(url))
         self._open_challenge_id = result.get("id")
@@ -6050,12 +6144,20 @@ class MainWindow(QMainWindow):
         self.cancel_invitation_button.setVisible(bool(self._open_challenge_id) and not active_game)
         for button in (self.friend_link_button, self.username_button, self.ai_button):
             button.setVisible(False)
-        self.game_status.setText("Приглашение готово. Ссылка находится на странице «Играть».")
-        self._notify_inline("Ссылка приглашения готова: скопируйте её на странице «Играть».")
+        if result.get("cancel_too_late"):
+            self.game_status.setText("Запрос отмены не подтверждён: партия уже принята Lichess.")
+            self._notify_inline(
+                "Партия уже принята; запрос отмены не выполнен. Ссылку можно отменить отдельно.")
+        else:
+            self.game_status.setText("Приглашение готово. Ссылка находится на странице «Играть».")
+            self._notify_inline("Ссылка приглашения готова: скопируйте её на странице «Играть».")
 
     def _challenge_status(self, message: str, can_cancel: bool) -> None:
         if not can_cancel and any(word in message.casefold() for word in ("отклонил", "отменён", "отменено", "завершено")):
             self._awaiting_game_start = False
+            self._pending_play_request_id = None
+            self._pending_play_request_generation = None
+            self._pending_play_request_mode = None
         self.game_status.setText(message)
         if hasattr(self, "_play_mode_page"):
             self._play_mode_page.set_status(message)
@@ -6079,6 +6181,9 @@ class MainWindow(QMainWindow):
     def _invitation_cancelled(self, challenge_id: str) -> None:
         if challenge_id == getattr(self, "_open_challenge_id", None):
             self._awaiting_game_start = False
+            self._pending_play_request_id = None
+            self._pending_play_request_generation = None
+            self._pending_play_request_mode = None
             self._open_challenge_id = None
             self._open_challenge_generation = None
             self._play_mode_page.clear_invitation()
@@ -6135,6 +6240,9 @@ class MainWindow(QMainWindow):
                 self._pause_batch_analysis()
             if self._awaiting_game_start and previous is None:
                 self._awaiting_game_start = False
+                self._pending_play_request_id = None
+                self._pending_play_request_generation = None
+                self._pending_play_request_mode = None
                 self.sound_player.play_game_start(game_id)
                 self.board.clear_annotations()
                 self._selected_live_game_id = game_id
@@ -6255,7 +6363,10 @@ class MainWindow(QMainWindow):
         try:
             session.apply_event(event)
         except (ValueError, chess.InvalidMoveError, chess.IllegalMoveError) as exc:
-            self._lichess_error(f"Не удалось синхронизировать позицию Lichess: {exc}")
+            message = f"Не удалось синхронизировать позицию партии {game_id}: {exc}"
+            if game_id == self._selected_live_game_id and self.online_session is session:
+                self.game_status.setText(message)
+                self._notify_inline(message)
             return
         except Exception as exc:
             if session.status not in {"started", "playing", "created"}:
@@ -6617,7 +6728,7 @@ class MainWindow(QMainWindow):
             if QMessageBox.question(self, "Ничья", "Принять предложение ничьей?",
                     QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel,
                     QMessageBox.StandardButton.Cancel) == QMessageBox.StandardButton.Yes:
-                self.lichess.draw(session.game_id, True)
+                self.lichess.draw(session.game_id, True, accepting_offer=True)
         else:
             self.lichess.draw(session.game_id, True)
 
@@ -6716,11 +6827,30 @@ class MainWindow(QMainWindow):
             game = game or selected_game()
             if not game:
                 return
-            pgn = self.game_repository.export_pgn(game["game_id"])
             path, _ = QFileDialog.getSaveFileName(
                 self, "Экспорт PGN", f"{game['game_id']}.pgn", "PGN (*.pgn)")
-            if path and pgn is not None:
-                Path(path).write_text(pgn.rstrip() + "\n", encoding="utf-8")
+            if not path:
+                return
+            game_id = str(game["game_id"])
+            request_id = uuid.uuid4().hex
+            self._pgn_export_requests[request_id] = (game_id, path)
+            stop_event = threading.Event()
+
+            def worker() -> None:
+                error = None
+                try:
+                    pgn = self.game_repository.export_pgn(game_id)
+                    if pgn is None:
+                        raise ValueError("PGN для выбранной партии отсутствует")
+                    Path(path).write_text(pgn.rstrip() + "\n", encoding="utf-8")
+                except Exception as exc:
+                    error = f"Не удалось экспортировать PGN ({type(exc).__name__})."
+                if not stop_event.is_set():
+                    self.pgn_export_finished.emit(request_id, game_id, path, error)
+
+            self._start_registered_work(
+                worker, kind="pgn_export", lane=OperationLane.INTERACTIVE,
+                thread_name="cc-pgn-export", stop_event=stop_event)
 
         def save_selected_note(game=None, text=""):
             game = game or selected_game()
@@ -6732,7 +6862,9 @@ class MainWindow(QMainWindow):
                 return
             request_id = uuid.uuid4().hex
             draft_game_id = str(page._note_draft_game_id or "")
-            if draft_game_id != game_id:
+            draft_revision = page._note_draft_line_revision
+            game_revision = int(game["line_revision"]) if game.get("line_revision") is not None else None
+            if draft_game_id != game_id or draft_revision != game_revision:
                 return
             page.save_note.setEnabled(False)
             page.save_note.setText("Сохраняю…")
@@ -6745,17 +6877,19 @@ class MainWindow(QMainWindow):
                     if stop_event.is_set():
                         return
                     current = self.game_repository.current_line(game_id)
+                    if (current is None or draft_revision is None
+                            or int(current["line_revision"]) != draft_revision):
+                        raise ValueError("Линия партии изменилась; заметка не перепривязана автоматически.")
                     self.game_repository.save_note(
                         game_id, text,
-                        line_revision=current["line_revision"] if current else None,
-                        ply=0 if current else None)
+                        line_revision=draft_revision, ply=0)
                 except Exception as exc:
                     error = ("Не удалось сохранить заметку "
                              f"({type(exc).__name__}); текст черновика сохранён в поле.")
                 if not stop_event.is_set():
                     self.note_save_finished.emit(request_id, game_id, error)
 
-            self._note_save_requests[request_id] = (text, game_id, page)
+            self._note_save_requests[request_id] = (text, game_id, page, draft_revision)
             handle = self._start_registered_work(
                 worker, kind="save_game_note", lane=OperationLane.SQLITE_WRITER,
                 thread_name="cc-save-game-note", stop_event=stop_event)
@@ -6980,7 +7114,7 @@ class MainWindow(QMainWindow):
         request = self._note_save_requests.pop(str(request_id), None)
         if request is None:
             return
-        draft_text, draft_game_id, page = request
+        draft_text, draft_game_id, page, draft_revision = request
         if not shiboken6.isValid(page):
             return
         if str(error or ""):
@@ -6991,18 +7125,32 @@ class MainWindow(QMainWindow):
             return
         # A completed write belongs to the captured game. Clear only the same
         # unchanged draft; selection changes and edits made while writing survive.
+        page.clear_saved_note_draft(draft_game_id, draft_revision, draft_text)
         selected = page.selected_game() or {}
         if (page._note_draft_game_id == draft_game_id
+                and page._note_draft_line_revision == draft_revision
                 and page.note.text() == draft_text
-                and str(selected.get("game_id") or "") == draft_game_id):
+                and str(selected.get("game_id") or "") == draft_game_id
+                and page._line_revision(selected) == draft_revision):
             page.note.clear()
         page.save_note.setText("Сохранить заметку")
         selected = page.selected_game() or {}
         page.save_note.setEnabled(
             bool(page.note.text().strip())
-            and page._note_draft_game_id == str(selected.get("game_id") or ""))
+            and page._note_draft_game_id == str(selected.get("game_id") or "")
+            and page._note_draft_line_revision == page._line_revision(selected))
         page.save_note.setToolTip("Заметка сохранена к исходной партии.")
         self._notify_inline("Заметка сохранена к исходной партии.")
+
+    def _pgn_export_finished(self, request_id: str, game_id: str,
+                             path: str, error: object) -> None:
+        request = self._pgn_export_requests.pop(str(request_id), None)
+        if request is None or request != (str(game_id), str(path)):
+            return
+        if error:
+            self._notify_inline(str(error))
+            return
+        self._notify_inline(f"PGN партии {game_id} сохранён.")
 
     def _open_library_position(self, game: dict, ply: int) -> None:
         if self._open_saved_game(game):
@@ -7135,9 +7283,52 @@ class MainWindow(QMainWindow):
         if (not review or str(review["game"].get("game_id")) != str(game_id)
                 or review["game"].get("status") in {"created", "started", "started_soon", "playing"}):
             return
-        game = self.game_repository.get_game(str(game_id))
+        generation = self._saved_game_analysis_generation + 1
+        self._saved_game_analysis_generation = generation
+        previous = self._saved_game_analysis_handle
+        if previous is not None and previous.is_alive():
+            previous.cancel("session_replaced")
+        stop = threading.Event()
+        self.home_status.setText("Проверяем сохранённую партию перед запросом анализа…")
+
+        def worker() -> None:
+            try:
+                if stop.is_set():
+                    return
+                game = self.game_repository.get_game(str(game_id))
+                if not stop.is_set():
+                    self.saved_game_analysis_read_finished.emit(
+                        generation, str(game_id), game, None)
+            except Exception as exc:
+                if not stop.is_set():
+                    self.saved_game_analysis_read_finished.emit(
+                        generation, str(game_id), None, type(exc).__name__)
+
+        self._saved_game_analysis_handle = self._start_registered_work(
+            worker, kind="review_analysis_game_read", lane=OperationLane.INTERACTIVE,
+            thread_name="cc-review-analysis-read", stop_event=stop)
+
+    def _saved_game_analysis_read_ready(self, generation: int, game_id: str,
+                                        game: object, error: object) -> None:
+        if (generation != self._saved_game_analysis_generation or self._shutdown_requested):
+            return
+        review = self.review_workspace.review
+        if (not review or str(review.get("game", {}).get("game_id")) != str(game_id)):
+            return
+        if str(error or ""):
+            self._notify_inline(
+                f"Не удалось прочитать завершённую партию ({error}); анализ не запущен.")
+            return
         if not game or not self._is_standard_board_game(game):
             self._notify_inline("Эту запись нельзя анализировать как стандартную завершённую партию.")
+            return
+        review_game = review.get("game") or {}
+        if (review_game.get("line_revision") is not None
+                and int(game.get("line_revision", -1)) != int(review_game["line_revision"])):
+            self._notify_inline("Линия партии изменилась; откройте её заново перед анализом.")
+            return
+        if game.get("status") in {"created", "started", "started_soon", "playing"}:
+            self._notify_inline("Партия ещё не завершена; анализ не запущен.")
             return
         engine_path = str(self.settings.value("stockfish_path", "", type=str)).strip()
         verified_path = str(self.settings.value("stockfish_verified_path", "", type=str)).strip()
