@@ -26,7 +26,7 @@
 - **БЛОК II — UI, кнопки и end-to-end (SOURCE-АУДИТ ЗАВЕРШЁН, 11 UI findings + 24 COV):** утверждённые шесть основных экранов + Настройки/фон/игра/после игры/разбор/PGN-FEN/задачи/вложенные окна, каждая видимая команда и error/empty/loading states, geometry 1280×720/1366/1600/1920, DPI 125%/150%, accessibility, звуки AS-IS, переходы, сортировки, фильтры, счётчики, все 24 COV. Отдельная matrix кнопок: control→handler→предусловие→error→response→test→статус. Статус: **SOURCE REVIEW COMPLETED** — конкретные findings в §4A, матрица 24/24 в §6, сценарии репродукции в §7; **native Windows и реальные сервисы остаются непроверены**.
 - **ФИНАЛЬНЫЙ GATE АУДИТА: ПРОЙДЕН ДЛЯ ИСТОЧНИКОВ.** Документ содержит проверенные P0/P1/P2 source findings, отдельно contract-risk/geometry hypotheses, матрицу 24/24 групп и детерминированный план красных→зелёных тестов. Следующая стадия: **ОДНА** передача Codex для исправлений в существующем кодовом PR #44 и native Windows synthetic GUI, далее **одно независимое полное ревью** и физический пилот владельца. Не утверждать «все ошибки мира найдены» или «GUI физически PASS» без запуска на машине.
 
-## 2. Блок I — подтверждённые замечания (СОХРАНЕНО, НЕ ФИНАЛЬНО)
+## 2. Блок I — итоговые замечания независимого source-аудита
 
 ### CORE-01 · P0 · DEFECT — старый POST игры может удалить токен новой auth-сессии (source race)
 
@@ -107,7 +107,7 @@
 - P1: tests for migrations from *realistic old schema*, many accounts/sources, long timestamps, high DPI, local PGN/FEN, invalid and corrupt data, 429 and auth switching. No acceptance with green CI alone.
 
 
-## 4A. Блок II — подтверждённые замечания UI, controls, navigation (СОХРАНЕНО, НЕ ФИНАЛЬНО)
+## 4. Блок II — итоговые замечания UI, controls, navigation
 
 ### UI-01 · P1 · UX ROUTE INCONSISTENCY — «К партиям» внутри Review всегда ведёт в Library, тогда как shell Back знает origin
 
@@ -177,7 +177,7 @@
 
 **ТЗ:** измерить actual bounded worker backlog; если воспроизводится, 200–350ms debounce только для typing filters, сразу обновлять combo filters и явные page buttons; latest-generation result only, no lost account/source after async options update. Тест fake slow SQLite, 15 символов подряд, upper bound started calls и close/cancel; не тормозить возврат к живой игре.
 
-## 4. Блок II — список TODO матрицы UI / функциональной согласованности
+## 5. Дополнительная проверка интерфейса по матрице 24 групп
 
 Требуются source review и тесты, чтобы отличить неактивный compatibility adapter от реально видимой кнопки:
 
