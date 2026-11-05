@@ -1,5 +1,14 @@
 # Chess Coach — дорожная карта
 
+## Текущий gate 05.11.2026 — REVIEW-FIX-08 после RF7
+
+Кодовый [draft PR #44](https://github.com/feshakomissarov-prog/chess/pull/44), SHA `41b35221ac58d61c6c205933190b4d5449c8f778`: [CI #279](https://github.com/feshakomissarov-prog/chess/actions/runs/41989708089) **completed/SUCCESS, 744 PASS**, compileall/offline-window PASS. RF7-02/03/04 по коду реализованы. **Но RF7 целиком не принят:** новая метрика v3 всё ещё недоступна старым сохранённым Lichess-PGN/JSON run; пакетный мигратор не вызывается app scheduler, и Progress по большому архиву неполный; Review по умолчанию может брать empty complete вместо scored partial, когда Stats выбирает правильно. Самостоятельный native smoke Codex завершился ошибкой своего UI-assertion. **Исполнять новое [REVIEW-FIX-08 RF8-01…RF8-04](specs/ARCH_UX_01_REVIEW_FIX_08_LEGACY_ALL_SOURCES_AND_REVIEW_SELECTION.md)** в том же code draft PR #44: старые scored runs всех источников, реально запускаемый низкоприоритетный bounded worker, единый выбор scored run, нативный повторный smoke с PASS + новый exact-head Windows CI.
+
+P0 данные/линии, Fair Play/онлайн; P1 точная статистика и источник, производительность GUI. Без удаления старых v2, без Stockfish для миграции, без реальных персональных данных, без merge/main. Предыдущие RF7 и раньше — baseline/история, **не выполнять заново**.
+
+---
+
+
 ## Текущий приёмочный блокер 05.11.2026 — REVIEW-FIX-07 после RF6
 
 Кодовый draft [PR #44](https://github.com/feshakomissarov-prog/chess/pull/44) SHA `e0947646db73d2cfa6a6baf0b2d3eccc5fed3c2c`: [Windows CI #41979505071](https://github.com/feshakomissarov-prog/chess/actions/runs/41979505071) **completed/SUCCESS, 721 PASS**, native synthetic GUI по отчёту Codex. **Независимое source-review RF6 не приняло к слиянию**, выявило четыре нетестированных дефекта. Новое и единственное активное кодовое ТЗ — **[REVIEW-FIX-07 RF7-01…RF7-05](specs/ARCH_UX_01_REVIEW_FIX_07_LEGACY_METRICS_WDL_AUTO_SYNC.md)**: versioned пересчёт старых Stockfish metrics из SQLite без UCI, корректное Win/Loss WDL при терминальном `MateGiven/Mate(0)`, независимое scheduled puzzle history без archive, per-move accuracy terminal mate без score/depth и точный full CI/GUI gate.
