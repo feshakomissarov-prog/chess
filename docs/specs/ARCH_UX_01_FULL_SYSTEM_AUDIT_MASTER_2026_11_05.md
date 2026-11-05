@@ -1,8 +1,17 @@
 # ARCH-UX-01 · MASTER REVIEW — единое комплексное ревью приложения и исправления одним циклом
 
-> **СТАТУС: РАБОЧИЙ ЧЕРНОВИК · НЕ ПЕРЕДАВАТЬ CODEX ДО ЗАКРЫТИЯ ОБОИХ БЛОКОВ.** Редактируется/сохраняется в GitHub после каждого значимого шага. Последний подтверждённый code draft [PR #44](https://github.com/feshakomissarov-prog/chess/pull/44), HEAD `7a3a6775a0a27e60c0bea7cfbcd4f28d734e939b`, base `main`, draft/unmerged. Docs draft [PR #45](https://github.com/feshakomissarov-prog/chess/pull/45) — единственное место редактирования ТЗ. [Windows CI #286](https://github.com/feshakomissarov-prog/chess/actions/runs/42005438175) **SUCCESS, 750 PASS** на baseline SHA, но это не сертификат полноты GUI/сети.
+> **СТАТУС: ЕДИНОЕ ТЗ ГОТОВО К ПЕРЕДАЧЕ CODEX ПОСЛЕ ДВУХ БЛОКОВ SOURCE-АУДИТА.** Редактируется/сохраняется в GitHub после каждого значимого шага. Последний подтверждённый code draft [PR #44](https://github.com/feshakomissarov-prog/chess/pull/44), HEAD `7a3a6775a0a27e60c0bea7cfbcd4f28d734e939b`, base `main`, draft/unmerged. Docs draft [PR #45](https://github.com/feshakomissarov-prog/chess/pull/45) — единственное место редактирования ТЗ. [Windows CI #286](https://github.com/feshakomissarov-prog/chess/actions/runs/42005438175) **SUCCESS, 750 PASS** на baseline SHA, но это не сертификат полноты GUI/сети.
 >
 > **Решение владельца 05.11.2026:** запрещён процесс «нашли 2–5 дефектов → отдельное ТЗ → отдали Codex». Отныне **один полный набор всех доступных замечаний**, два блока независимого аудита, затем один большой fix-цикл в PR #44, далее единая приёмка по матрице. До закрытия всего аудита **не посылать Codex промежуточные исправления**. Документ — durable checkpoint на случай потери контекста/времени/интернета. Прежний RF9 — всего лишь первые два пункта этого документа, **не отдельная работа**.
+
+
+## EXECUTIVE CHECKPOINT — ОБА БЛОКА SOURCE-РЕВЬЮ ЗАВЕРШЕНЫ (05.11.2026)
+
+**Итог единого аудита:** 11 CORE и 11 UI findings (включая 2 UX/performance рисковых условия, требующих воспроизведения), плюс полная матрица COV-01…COV-24. Блок I проверил Lichess/SQLite/Fair Play/clock/engine/thread semantics; блок II — UI components, routes, dialog controls, game/review/notes/puzzles/statistics/settings/background. Это максимум **source-backed** данного прохода, **не** физическая сертификация каждого UI-сценария.
+
+**P0 исправлять ПЕРВЫМ:** CORE-01 stale 401 token deletion, CORE-02 stale action/request generation fencing, CORE-11 cross-account live registry. Fail-closed Fair Play и identity — неприкосновенные инварианты. **P1 correctness:** CORE-03/04 Progress live+scope, CORE-05 increment units, CORE-06 archive createdAt, CORE-07 SQLite puzzle GUI, CORE-08 duplicate game commands, CORE-09 action error cross-flow, CORE-10 SQLite GUI hot paths, UI-02/03 finalization buttons, UI-04 cancel pending Play, UI-05 note draft ownership, UI-06 Stats constructor SQL. **P2/contract verification:** UI-01 navigation semantics, UI-07 empty range, UI-08 preserved Progress page, UI-09 FEN geometry, UI-10 puzzle sync tooltip, UI-11 Library search coalescing.
+
+**Scope boundary:** проверять и сохранять рабочие звуки WAV/QSettings и параметры Stockfish; не переписывать работающее ради стилевой чистоты; pilot 5–10/premove-training/voice не возвращать; никакого username/token/PGN/SQLite owner в GH. Прежнее REVIEW-FIX-09 **включено как CORE-03/04**, не отдельное поручение. Это **одна** большая команда Codex и **одна** последующая комплексная приёмка.
 
 ## 0. Воспроизводимость и границы независимого аудита
 
@@ -13,9 +22,9 @@
 
 ## 1. ДВА БЛОКА АУДИТА (checkpoint)
 
-- **БЛОК I — архитектура и данные:** Lichess auth, генерации/401/429, сетевые действия и очереди, игровые snapshots/часы/premove/takeback, Fair Play, SQLite migration+revisions, аналитика CP/mate/accuracy/WDL, архив/задачи и инкрементальные cursor, Stockfish/PGN, Qt worker lifecycle, performance, failures/restart/shutdown, privacy. Проверить исходники и уже существующие тесты; сохранить все находки в этом файле. Статус: **ЗАВЕРШЁН КАК ПЕРВЫЙ ДОКУМЕНТИРОВАННЫЙ ПРОХОД**, §2 и §3; перед финалом провести перекрёстный sanity-check.
-- **БЛОК II — UI, кнопки и end-to-end:** утверждённые шесть основных экранов + Настройки/фон/игра/после игры/разбор/PGN-FEN/задачи/вложенные окна, каждая видимая команда и error/empty/loading states, geometry 1280×720/1366/1600/1920, DPI 125%/150%, accessibility, звуки AS-IS, переходы, сортировки, фильтры, счётчики, все 24 COV. Отдельная matrix кнопок: control→handler→предусловие→error→response→test→статус. Статус: **НЕ ЗАВЕРШЁН**.
-- **ФИНАЛЬНЫЙ GATE:** единый deduplicated P0/P1/P2 список, deterministic repro + тесты для каждого, отрицательные и cross-page сценарии, свидетельства CI и живого smoke. Только тогда заменить шапку на **ГОТОВО К ПЕРЕДАЧЕ CODEX**. Одного прохода по тестам нельзя назвать «всё без ошибок». Нельзя обещать математически найти абсолютно все баги.
+- **БЛОК I — архитектура и данные (SOURCE-АУДИТ ЗАВЕРШЁН, 11 CORE findings):** Lichess auth, генерации/401/429, сетевые действия и очереди, игровые snapshots/часы/premove/takeback, Fair Play, SQLite migration+revisions, аналитика CP/mate/accuracy/WDL, архив/задачи и инкрементальные cursor, Stockfish/PGN, Qt worker lifecycle, performance, failures/restart/shutdown, privacy. Проверить исходники и уже существующие тесты; сохранить все находки в этом файле. Статус: **SOURCE REVIEW ЗАВЕРШЁН**, 11 CORE пунктов в §2; §3 фиксирует дополнительные непроверенные сценарии, охваченные программой §7.
+- **БЛОК II — UI, кнопки и end-to-end (SOURCE-АУДИТ ЗАВЕРШЁН, 11 UI findings + 24 COV):** утверждённые шесть основных экранов + Настройки/фон/игра/после игры/разбор/PGN-FEN/задачи/вложенные окна, каждая видимая команда и error/empty/loading states, geometry 1280×720/1366/1600/1920, DPI 125%/150%, accessibility, звуки AS-IS, переходы, сортировки, фильтры, счётчики, все 24 COV. Отдельная matrix кнопок: control→handler→предусловие→error→response→test→статус. Статус: **SOURCE REVIEW COMPLETED** — конкретные findings в §4A, матрица 24/24 в §6, сценарии репродукции в §7; **native Windows и реальные сервисы остаются непроверены**.
+- **ФИНАЛЬНЫЙ GATE АУДИТА: ПРОЙДЕН ДЛЯ ИСТОЧНИКОВ.** Документ содержит проверенные P0/P1/P2 source findings, отдельно contract-risk/geometry hypotheses, матрицу 24/24 групп и детерминированный план красных→зелёных тестов. Следующая стадия: **ОДНА** передача Codex для исправлений в существующем кодовом PR #44 и native Windows synthetic GUI, далее **одно независимое полное ревью** и физический пилот владельца. Не утверждать «все ошибки мира найдены» или «GUI физически PASS» без запуска на машине.
 
 ## 2. Блок I — подтверждённые замечания (СОХРАНЕНО, НЕ ФИНАЛЬНО)
 
@@ -100,7 +109,7 @@
 
 ## 4A. Блок II — подтверждённые замечания UI, controls, navigation (СОХРАНЕНО, НЕ ФИНАЛЬНО)
 
-### UI-01 · P1 · DEFECT — кнопка «Назад» внутри Review обходит единый router
+### UI-01 · P1 · UX ROUTE INCONSISTENCY — «К партиям» внутри Review всегда ведёт в Library, тогда как shell Back знает origin
 
 **Доказательство:** `src/chess_coach/ui/game_review.py` связывает `back.clicked` с `return_requested`; `MainWindow` соединяет с `_return_from_review()`, который для **любой сохранённой** партии всегда вызывает `show_saved_games()`. Но сохранённую партию можно открыть из `Прогресс`, `Главная`, `Мои партии` и `Анализ`, а глобальная `navigate_back()` поддерживает `WorkspaceNavigator` и origin. В результате две кнопки «Назад» в одном окне возвращают в разные места; из «Прогресса» встроенная в Review кнопка неожиданно выбрасывает в «Мои партии», теряя исходный контекст и фильтр.
 
@@ -246,6 +255,6 @@
 
 Every one of 24 rows must have owner of its verification, and notable sub-actions (45+ controls) expanded as subrows. **No acceptance as «750+ PASS, therefore everything is fine».** If UI cannot be visually run, mark BLOCKED truthfully, still test with Qt offscreen and explain gaps. Accept production-readiness only after code/source pass and owner explicitly confirms real Windows/PAT/Stockfish smoke.
 
-## 8. Условия единственной будущей передачи Codex — пока ЗАКРЫТО
+## 8. Единая передача Codex — РАЗРЕШЕНО ТОЛЬКО ПО ПОЛНОМУ MASTER-ДОКУМЕНТУ
 
-После **Блок I завершён / Блок II завершён**, проверить минимум: P0 frozen gates, P1 end-to-end scenarios, P2 geometry/wording, UI action matrix with code references, red→green tests, synthetic old DB fixture, actual native Windows GUI smoke by Codex in each tab/button state, full pytest + compileall + Git diff check + exact-head completed Windows CI. PR #44 draft, no merge until owner explicitly approves physical pilot. Давая отчёт, не скрывать реальные blockers и не пытаться заменить реальный Lichess настоящим PAT/real DB. **Никаких отдельных «RF10–RF20»** из этого master-документа.
+После завершения **обоих SOURCE-блоков** исполнить одним циклом минимум: P0 frozen gates, P1 end-to-end scenarios, P2 geometry/wording, UI action matrix with code references, red→green tests, synthetic old DB fixture, actual native Windows GUI smoke by Codex in each tab/button state, full pytest + compileall + Git diff check + exact-head completed Windows CI. PR #44 draft, no merge until owner explicitly approves physical pilot. Давая отчёт, не скрывать реальные blockers и не пытаться заменить реальный Lichess настоящим PAT/real DB. **Никаких отдельных «RF10–RF20»** из этого master-документа. Новые найденные при реализации дефекты добавлять к этому же журналу и проверять в том же PR, не создавать очередную цепочку ТЗ.
