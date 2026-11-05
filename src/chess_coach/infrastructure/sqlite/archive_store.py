@@ -131,14 +131,18 @@ class ArchiveStoreMixin:
                 time_precision = "date_only"
             except ValueError:
                 pass
-        if started_at is None and record.get("createdAt") is not None:
+        # PGN Date is often only day-precision. Prefer the authoritative
+        # millisecond timestamp from Lichess whenever it is valid, upgrading
+        # date_only instead of leaving the archive chronologically ambiguous.
+        if time_precision in {"unknown", "date_only"} and record.get("createdAt") is not None:
+            date_only_fallback = started_at
             try:
                 started_at = datetime.fromtimestamp(int(record["createdAt"]) / 1000,
                     timezone.utc).isoformat()
                 time_precision = "timestamp"
             except (TypeError, ValueError, OverflowError, OSError):
-                started_at = None
-                time_precision = "unknown"
+                started_at = date_only_fallback
+                time_precision = "date_only" if date_only_fallback else "unknown"
         lichess_assessments = []
         initial_evaluation = parsed.eval()
         if initial_evaluation is not None:

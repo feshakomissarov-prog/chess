@@ -10,6 +10,7 @@ import webbrowser
 from .api import LichessError, RateLimitError
 from .auth import (CLIENT_ID, CredentialStorageError, OAuthCallbackServer,
                    WindowsCredentialStore, authorize_and_store, create_authorization_request)
+from .operation_context import LichessOperationContext
 from ..diagnostics import log_event
 
 class LichessAuthMixin:
@@ -398,6 +399,60 @@ class LichessAuthMixin:
     def is_auth_generation_current(self, generation: int) -> bool:
         with self._auth_lock:
             return generation == self._auth_generation
+
+    def capture_operation_context(self, *, game_id: str | None = None,
+                                  command: str = "",
+                                  request_id: str | None = None) -> LichessOperationContext:
+        """Capture session and credential-slot identity before queueing work."""
+        with self._auth_lock:
+            store = self.selected_token_store
+            return LichessOperationContext(
+                generation=self._auth_generation,
+                account=(self.username.strip().casefold() if self.username else None),
+                auth_method=self.auth_method,
+                credential_store=store,
+                connection_stop=self._connection_stop,
+                request_id=request_id or uuid.uuid4().hex,
+                game_id=str(game_id) if game_id is not None else None,
+                command=command,
+            )
+
+    def is_operation_context_current(self, context: LichessOperationContext) -> bool:
+        with self._auth_lock:
+            current_account = self.username.strip().casefold() if self.username else None
+            return bool(
+                context.generation == self._auth_generation
+                and context.auth_method == self.auth_method
+                and context.account == current_account
+                and context.credential_store is self.selected_token_store
+                and context.connection_stop is self._connection_stop
+                and not context.connection_stop.is_set()
+            )
+
+    def operation_token(self, context: LichessOperationContext) -> str | None:
+        """Read only the captured credential slot, then reject stale contexts."""
+        if not self.is_operation_context_current(context):
+            return None
+        token = context.credential_store.get()
+        return token if token and self.is_operation_context_current(context) else None
+
+    def reject_current_credential_if_matches(
+            self, context: LichessOperationContext, token: str) -> bool:
+        """Apply a 401 only to the still-current generation and exact credential."""
+        with self._auth_lock:
+            if (context.generation != self._auth_generation
+                    or context.auth_method != self.auth_method
+                    or context.account != (self.username.strip().casefold()
+                                           if self.username else None)
+                    or context.credential_store is not self.selected_token_store
+                    or context.connection_stop is not self._connection_stop
+                    or context.connection_stop.is_set()):
+                return False
+            if context.credential_store.get() != token:
+                return False
+            context.credential_store.delete()
+            context.connection_stop.set()
+            return True
 
     def _emit_session_event(self, generation: int, event: dict) -> bool:
         with self._auth_lock:

@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections.abc import Callable
 
 from PySide6.QtCore import Qt, Signal
-from PySide6.QtWidgets import (QCheckBox, QComboBox, QFrame, QGridLayout, QHBoxLayout,
+from PySide6.QtWidgets import (QCheckBox, QComboBox, QApplication, QFrame, QGridLayout, QHBoxLayout,
                                QLabel, QLineEdit, QPushButton, QSpinBox, QVBoxLayout, QWidget)
 
 
@@ -13,6 +13,8 @@ class PlayPage(QWidget):
     """Embedded game setup form; networking and game-state ownership stay outside UI."""
 
     create_requested = Signal(object)
+    cancel_requested = Signal()
+    cancel_invitation_requested = Signal()
 
     _MODES = (
         ("Локально", "Свободная доска для двух сторон.", "Свободная доска", "local", True),
@@ -70,6 +72,12 @@ class PlayPage(QWidget):
         self.rated = QCheckBox("Рейтинговая партия")
         self.start_button = QPushButton("Начать свободную доску")
         self.start_button.setObjectName("primaryAction")
+        self.cancel_pending_button = QPushButton("Отменить ожидание вызова")
+        self.cancel_pending_button.setAccessibleName("Отменить ожидающий вызов Lichess")
+        self.cancel_pending_button.setToolTip(
+            "Отменяет ожидающий вызов игрока Lichess. Для других типов создания партии отмена протоколом недоступна.")
+        self.cancel_pending_button.setVisible(False)
+        self.cancel_pending_button.clicked.connect(self.cancel_requested.emit)
         self.form_status = QLabel("Выберите режим и параметры партии.")
         self.form_status.setObjectName("secondary")
         self.form_status.setWordWrap(True)
@@ -91,7 +99,24 @@ class PlayPage(QWidget):
         form_layout.addWidget(self.custom_clock_row)
         form_layout.addWidget(self.rated)
         form_layout.addWidget(self.form_status)
+        self.invitation_row = QWidget()
+        invitation_layout = QHBoxLayout(self.invitation_row)
+        invitation_layout.setContentsMargins(0, 0, 0, 0)
+        self.invitation_link = QLineEdit()
+        self.invitation_link.setReadOnly(True)
+        self.invitation_link.setAccessibleName("Ссылка приглашения Lichess")
+        invitation_layout.addWidget(self.invitation_link, 1)
+        self.copy_invitation_button = QPushButton("Копировать ссылку")
+        self.copy_invitation_button.clicked.connect(
+            lambda: QApplication.clipboard().setText(self.invitation_link.text()))
+        invitation_layout.addWidget(self.copy_invitation_button)
+        self.cancel_invitation_button = QPushButton("Отменить приглашение")
+        self.cancel_invitation_button.clicked.connect(self.cancel_invitation_requested.emit)
+        invitation_layout.addWidget(self.cancel_invitation_button)
+        self.invitation_row.setVisible(False)
+        form_layout.addWidget(self.invitation_row)
         form_layout.addWidget(self.start_button)
+        form_layout.addWidget(self.cancel_pending_button)
         layout.addWidget(form)
         self.mode_selector.currentIndexChanged.connect(self._update_form)
         self.clock.currentIndexChanged.connect(self._update_form)
@@ -169,7 +194,7 @@ class PlayPage(QWidget):
             self.set_status("Инкремент должен быть от 0 до 180 секунд.")
             return
         if online:
-            self.set_request_pending(True)
+            self.set_request_pending(True, cancellable=(mode == "challenge"))
         self.create_requested.emit({
             "mode": mode,
             "color": self.color.currentData(), "clock_limit": limit,
@@ -183,9 +208,20 @@ class PlayPage(QWidget):
         if not pending:
             self.set_request_pending(False)
 
-    def set_request_pending(self, pending: bool) -> None:
+    def set_request_pending(self, pending: bool, *, cancellable: bool = False) -> None:
         self._request_pending = bool(pending)
         self.start_button.setEnabled(not self._request_pending)
+        self.cancel_pending_button.setVisible(self._request_pending and bool(cancellable))
+        self.cancel_pending_button.setEnabled(self._request_pending and bool(cancellable))
+
+    def show_invitation(self, url: str) -> None:
+        self.invitation_link.setText(str(url))
+        self.invitation_row.setVisible(bool(url))
+        self.cancel_invitation_button.setEnabled(bool(url))
+
+    def clear_invitation(self) -> None:
+        self.invitation_link.clear()
+        self.invitation_row.setVisible(False)
 
     def layout_modes(self, available_width: int) -> None:
         columns = 1 if int(available_width) < 1100 else 2

@@ -409,6 +409,64 @@ def test_disconnect_is_local_and_generation_switch_cannot_stop_new_same_name_ses
     service.close()
 
 
+def test_stale_send_move_401_cannot_delete_or_stop_replacement_auth_session():
+    entered = threading.Event()
+    release = threading.Event()
+
+    class DelayedMoveClient(AccountClient):
+        def send_move(self, token, game_id, uci):
+            self.calls.append((token, game_id, uci))
+            entered.set()
+            assert release.wait(2)
+            raise LichessError("old credential rejected", 401, "json")
+
+    oauth = MemoryStore("old-oauth")
+    personal = MemoryStore("new-pat")
+    client = DelayedMoveClient()
+    service = LichessService(client=client, token_store=oauth,
+                             personal_token_store=personal, auth_method="oauth")
+    service.username = "AccountA"
+    service.send_move("game-a", "e2e4", "move-request-a")
+    old_worker = service._threads[-1]
+    assert entered.wait(1)
+
+    service.set_auth_method("personal_token")
+    service.username = "AccountB"
+    replacement_stop = service._connection_stop
+    release.set()
+    old_worker.join(timeout=2)
+    assert not old_worker.is_alive()
+
+    assert oauth.value == "old-oauth"
+    assert personal.value == "new-pat"
+    assert not replacement_stop.is_set()
+    service.close()
+
+
+def test_queued_game_action_does_not_read_replacement_account_token():
+    queued = []
+    calls = []
+
+    class Client(AccountClient):
+        def abort(self, token, game_id):
+            calls.append((token, game_id))
+
+    oauth = MemoryStore("account-a-token")
+    personal = MemoryStore("account-b-token")
+    service = LichessService(client=Client(), token_store=oauth,
+                             personal_token_store=personal, auth_method="oauth")
+    service.username = "AccountA"
+    service._thread = lambda target, _name: queued.append(target)
+    service.abort("game-a")
+    service.set_auth_method("personal_token")
+    service.username = "AccountB"
+
+    queued.pop()()
+
+    assert calls == []
+    service.close()
+
+
 @pytest.mark.parametrize("status", [403, 429])
 def test_old_stream_error_after_switch_cannot_replace_new_connected_status(qtbot, status):
     entered = threading.Event()
@@ -530,6 +588,36 @@ def test_old_game_full_event_after_account_switch_is_discarded(qtbot):
     service.disconnect_account()
     join_worker(service)
     service.close()
+
+
+def test_duplicate_game_action_is_posted_once_while_first_request_is_pending(qtbot):
+    entered = threading.Event()
+    release = threading.Event()
+
+    class Client(AccountClient):
+        def abort(self, token, game_id):
+            self.calls.append((token, game_id))
+            entered.set()
+            assert release.wait(2)
+            return {}
+
+    client = Client()
+    service = LichessService(client=client, token_store=MemoryStore("token"),
+                             personal_token_store=MemoryStore("pat"))
+    started = []
+    completed = []
+    service.session_action_started.connect(lambda *args: started.append(args))
+    service.session_action_completed.connect(lambda *args: completed.append(args))
+    first_id = service.abort("game-1")
+    second_id = service.abort("game-1")
+    assert second_id == first_id
+    assert entered.wait(1)
+    assert client.calls == [("token", "game-1")]
+    release.set()
+    qtbot.waitUntil(lambda: len(completed) == 1, timeout=1000)
+    assert len(started) == 1
+    assert completed[0][2:] == ("abort", "game-1", 0)
+    service.close(timeout=1.0)
 
 
 def test_late_old_game_start_is_not_delivered_or_started(qtbot):

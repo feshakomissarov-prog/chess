@@ -93,6 +93,14 @@ class LichessGameSession:
     def __init__(self, game_id: str, repository: GameRepository) -> None:
         self.game_id = game_id
         self.repository = repository
+        # Cached sessions survive reconnects, but remain bound to the account
+        # that created them. A session without an owner is never eligible for
+        # online actions or Fair Play decisions.
+        self.owner_username: str | None = None
+        self.auth_generation: int | None = None
+        # Unowned is unknown, not detached: safety consumers treat active
+        # unknown sessions conservatively while presentation stays account-scoped.
+        self.detached = False
         self.initial_fen = "startpos"
         self.moves = ""
         self.color = chess.WHITE
@@ -133,6 +141,31 @@ class LichessGameSession:
         self.premove: chess.Move | None = None
         self._last_persisted_signature: tuple | None = None
         self._last_clock_at = time.monotonic()
+
+    def bind_owner(self, username: str, generation: int) -> None:
+        username = str(username or "").strip().casefold()
+        if not username:
+            raise ValueError("session owner username is required")
+        if self.owner_username not in (None, username):
+            raise ValueError("session cannot be reassigned to a different Lichess account")
+        self.owner_username = username
+        self.auth_generation = int(generation)
+        self.detached = False
+
+    def detach(self) -> None:
+        self.detached = True
+        self.awaiting_authoritative_snapshot = True
+        self.pending_uci = None
+        self.pending_request_id = None
+        self._pending_ply = None
+        self._pending_prefix = ()
+        self.premove = None
+
+    def belongs_to(self, username: str | None, *, generation: int | None = None) -> bool:
+        account = str(username or "").strip().casefold()
+        if not account or self.detached or self.owner_username != account:
+            return False
+        return generation is None or self.auth_generation == int(generation)
 
     @property
     def is_my_turn(self) -> bool:
@@ -582,5 +615,6 @@ class LichessGameSession:
             "white" if self.color == chess.WHITE else "black", self.opponent,
             self.rated, self.clock_control, self.status, self.winner,
             white_player=self.white_player, black_player=self.black_player,
-            started_at=self.started_at, final_sync_pending=self.final_sync_pending)
+            started_at=self.started_at, final_sync_pending=self.final_sync_pending,
+            account_username=self.owner_username)
         self._last_persisted_signature = signature

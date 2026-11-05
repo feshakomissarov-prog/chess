@@ -245,11 +245,15 @@ class GamesStoreMixin:
                 result["move_annotations"] = result["validation_issues"] = []
             return result
 
-    def list_pending_final_sync(self) -> list[dict]:
+    def list_pending_final_sync(self, *, account_id: str | None = None) -> list[dict]:
         self._wait_before_read()
         with self._connection() as db:
+            where = (" WHERE final_sync_pending=1" +
+                     (" AND EXISTS (SELECT 1 FROM account_games ag WHERE ag.game_id=games.game_id AND ag.account_id=?)"
+                      if account_id else ""))
             return [dict(row) for row in db.execute(
-                "SELECT * FROM games WHERE final_sync_pending=1 ORDER BY updated_at"
+                "SELECT * FROM games" + where + " ORDER BY updated_at",
+                (account_id,) if account_id else (),
             )]
 
     def export_pgn(self, game_id: str) -> str | None:
@@ -261,6 +265,7 @@ class GamesStoreMixin:
                             winner: str | None = None, *, white_player: str | None = None,
                             black_player: str | None = None, started_at: str | None = None,
                             final_sync_pending: bool = False,
+                            account_username: str | None = None,
                             transaction_hook: Callable[[sqlite3.Connection, int, str], None] | None = None,
                             preserve_existing_color: bool = False) -> None:
         board = chess.Board() if initial_fen == "startpos" else chess.Board(initial_fen)
@@ -335,6 +340,21 @@ class GamesStoreMixin:
                            (pgn, game_id, revision))
             db.execute("UPDATE games SET line_revision=?, import_error=NULL WHERE game_id=?",
                        (revision, game_id))
+            if account_username:
+                username = str(account_username).strip()
+                normalized = username.casefold()
+                if normalized:
+                    account_id = f"lichess:{normalized}"
+                    now = datetime.now(timezone.utc).isoformat()
+                    db.execute("INSERT INTO accounts(account_id,provider,username,created_at) "
+                               "VALUES (?,'lichess',?,?) ON CONFLICT(account_id) DO UPDATE SET "
+                               "username=excluded.username", (account_id, username, now))
+                    player_name = white_player if color == "white" else black_player
+                    db.execute("INSERT INTO account_games(account_id,game_id,remote_id,imported_at,opponent,player_name) "
+                               "VALUES (?,?,?,?,?,?) ON CONFLICT(account_id,game_id) DO UPDATE SET "
+                               "opponent=COALESCE(excluded.opponent,account_games.opponent), "
+                               "player_name=COALESCE(excluded.player_name,account_games.player_name)",
+                               (account_id, game_id, game_id, now, opponent, player_name))
             if transaction_hook is not None:
                 transaction_hook(db, revision, line_hash)
         self.invalidate_statistics_cache()

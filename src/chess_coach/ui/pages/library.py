@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from PySide6.QtCore import Qt, Signal
+from PySide6.QtCore import QTimer, Qt, Signal
 from PySide6.QtWidgets import (
     QComboBox, QFrame, QGridLayout, QHBoxLayout, QLabel, QListWidget, QListWidgetItem,
     QLayout, QLineEdit, QPushButton, QScrollArea, QSplitter, QVBoxLayout, QWidget,
@@ -198,7 +198,9 @@ class LibraryPage(QWidget):
         note_row = QHBoxLayout()
         self.note = QLineEdit()
         self.note.setPlaceholderText("Заметка к начальной позиции выбранной партии")
+        self._note_draft_game_id: str | None = None
         self.save_note = QPushButton("Сохранить заметку")
+        self.save_note.setEnabled(False)
         note_row.addWidget(self.note, 1)
         note_row.addWidget(self.save_note)
         layout.addLayout(note_row)
@@ -215,9 +217,13 @@ class LibraryPage(QWidget):
                        self.refresh_game, self.close_button):
             actions.addWidget(button)
         layout.addLayout(actions)
-        self.search.textChanged.connect(lambda _value: self._emit_filters())
-        self.opponent_filter.textChanged.connect(lambda _value: self._emit_filters())
-        self.opening_filter.textChanged.connect(lambda _value: self._emit_filters())
+        self._typing_filter_timer = QTimer(self)
+        self._typing_filter_timer.setSingleShot(True)
+        self._typing_filter_timer.setInterval(275)
+        self._typing_filter_timer.timeout.connect(self._emit_filters)
+        self.search.textChanged.connect(lambda _value: self._typing_filter_timer.start())
+        self.opponent_filter.textChanged.connect(lambda _value: self._typing_filter_timer.start())
+        self.opening_filter.textChanged.connect(lambda _value: self._typing_filter_timer.start())
         self.previous.clicked.connect(lambda _checked=False: self._request_page(self._page - 1))
         self.following.clicked.connect(lambda _checked=False: self._request_page(self._page + 1))
         self.games.itemDoubleClicked.connect(lambda _item: self._open_selected())
@@ -230,6 +236,7 @@ class LibraryPage(QWidget):
         self.refresh_game.clicked.connect(lambda _checked=False: self._emit_for_selected(
             self.refresh_requested))
         self.games.currentItemChanged.connect(self._selection_changed)
+        self.note.textChanged.connect(self._note_draft_changed)
         self.detail_graph.selected_ply.connect(self._detail_graph_selected)
         self._detail_game: dict | None = None
 
@@ -423,14 +430,36 @@ class LibraryPage(QWidget):
 
     def _emit_note(self) -> None:
         game = self.selected_game()
-        if game is not None:
-            self.note_requested.emit(game, self.note.text())
+        if game is None:
+            return
+        if self._note_draft_game_id != str(game.get("game_id") or ""):
+            self.save_note.setToolTip(
+                "Черновик заметки привязан к другой партии. Выберите исходную партию, чтобы сохранить его.")
+            return
+        self.note_requested.emit(game, self.note.text())
+
+    def _note_draft_changed(self, text: str) -> None:
+        game = self.selected_game()
+        current_id = str(game.get("game_id") or "") if game else None
+        if not text.strip():
+            self._note_draft_game_id = current_id
+        elif self._note_draft_game_id is None:
+            self._note_draft_game_id = current_id
+        enabled = bool(text.strip() and current_id
+                       and current_id == self._note_draft_game_id)
+        self.save_note.setEnabled(enabled)
+        self.save_note.setToolTip("" if enabled else
+            "Черновик заметки привязан к другой партии; выберите её для сохранения.")
 
     def _selection_changed(self, current, _previous) -> None:
         enabled = current is not None and self.selected_game() is not None
         for button in (self.open_game, self.export_game, self.analyze_game):
             button.setEnabled(enabled)
         game = self.selected_game()
+        current_id = str(game.get("game_id") or "") if game else None
+        if not self.note.text().strip():
+            self._note_draft_game_id = current_id
+        self._note_draft_changed(self.note.text())
         if game is None:
             self.show_game_detail(None)
         else:

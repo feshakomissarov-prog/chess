@@ -85,16 +85,65 @@ def test_library_page_emits_selected_game_actions_and_pagination(qtbot):
     page.opponent_filter.setText("Alpha")
     page.opening_filter.setText("B20")
     page.following.click()
-    assert page_requests[-2:] == [
-        ({**page.current_filters(), "query": "synthetic"}, 0),
-        ({**page.current_filters(), "query": "synthetic"}, 2),
-    ]
+    qtbot.waitUntil(lambda: len(page_requests) == 2, timeout=1000)
+    assert page_requests[0][1] == 2
+    assert page_requests[1] == (page.current_filters(), 0)
     assert page.refresh_game.isHidden()
     assert page.current_filters()["period_days"] == 0
     assert page.current_filters()["opponent"] == "Alpha"
     assert page.current_filters()["opening"] == "B20"
     assert page.sync_button.text() == "Синхронизировать"
     assert page.background_button.text() == "Фоновые операции"
+
+
+def test_library_typing_filters_coalesce_to_one_query(qtbot):
+    page = LibraryPage()
+    qtbot.addWidget(page)
+    page.set_results([], page=0, pages=1, total=0)
+    requests = []
+    page.query_requested.connect(lambda filters, index: requests.append((filters, index)))
+    for char in "synthetic-search-15-chars":
+        page.search.setText(page.search.text() + char)
+        qtbot.wait(8)
+    qtbot.waitUntil(lambda: len(requests) == 1, timeout=1200)
+    assert requests[0][0]["query"] == "synthetic-search-15-chars"
+
+
+def test_library_note_draft_stays_bound_to_the_game_where_it_was_typed(qtbot):
+    page = LibraryPage()
+    qtbot.addWidget(page)
+    first = {"game_id": "game-a"}
+    second = {"game_id": "game-b"}
+    page.set_results([(first, "First", "Local"), (second, "Second", "Local")],
+                     page=0, pages=1, total=2)
+    page.games.setCurrentRow(0)
+    saved = []
+    page.note_requested.connect(lambda game, text: saved.append((game["game_id"], text)))
+    page.note.setText("position note")
+    assert page.save_note.isEnabled()
+    page.games.setCurrentRow(1)
+    assert not page.save_note.isEnabled()
+    page.save_note.click()
+    assert saved == []
+    page.games.setCurrentRow(0)
+    assert page.save_note.isEnabled()
+    page.save_note.click()
+    assert saved == [("game-a", "position note")]
+
+
+def test_play_page_exposes_cancel_only_for_cancellable_pending_challenge(qtbot):
+    page = PlayPage({key: (lambda: None) for key in ("local", "ai", "friend", "challenge", "active")})
+    qtbot.addWidget(page)
+    page.show()
+    page.set_request_pending(True, cancellable=True)
+    assert page.cancel_pending_button.isVisible()
+    assert not page.start_button.isEnabled()
+    cancelled = []
+    page.cancel_requested.connect(lambda: cancelled.append(True))
+    page.cancel_pending_button.click()
+    assert cancelled == [True]
+    page.set_request_pending(True)
+    assert not page.cancel_pending_button.isVisible()
 
 
 def test_library_uses_bounded_three_zone_layout_at_laptop_size(qtbot):

@@ -448,6 +448,10 @@ def test_background_schedule_treats_archive_and_puzzles_independently(
     window.settings.setValue("lichess/auto_puzzle_history_sync", puzzles)
     window.settings.setValue("lichess/auto_ready_analytics", False)
 
+    # Background sync is released only after the account-owned SQLite profile
+    # is ready; inject the worker result deterministically for this scheduler test.
+    window._archive_account_ready_result(4, "Synthetic", {
+        "account_id": "lichess:synthetic", "pending_final_syncs": []}, None)
     window._lichess_event_stream_ready(4, "Synthetic")
     timer_active = window._auto_sync_timer.isActive()
     window._run_background_sync()

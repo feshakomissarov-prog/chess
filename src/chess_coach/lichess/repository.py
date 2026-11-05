@@ -231,12 +231,14 @@ class GameRepository(
                       opponent: str, rated: bool, clock: str, status: str,
                       winner: str | None = None, *, white_player: str | None = None,
                       black_player: str | None = None, started_at: str | None = None,
-                      final_sync_pending: bool = False) -> None:
+                      final_sync_pending: bool = False,
+                      account_username: str | None = None) -> None:
         if self._writer is None:
             self._save_snapshot_sync(game_id, initial_fen, moves, color, opponent,
                                      rated, clock, status, winner,
                                      white_player=white_player, black_player=black_player,
-                                     started_at=started_at, final_sync_pending=final_sync_pending)
+                                     started_at=started_at, final_sync_pending=final_sync_pending,
+                                     account_username=account_username)
             return
         with self._write_lock:
             if not self._accepting_writes:
@@ -245,7 +247,7 @@ class GameRepository(
                 self._save_snapshot_sync, game_id, initial_fen, moves, color, opponent,
                 rated, clock, status, winner, white_player=white_player,
                 black_player=black_player, started_at=started_at,
-                final_sync_pending=final_sync_pending,
+                final_sync_pending=final_sync_pending, account_username=account_username,
             )
             self._pending_writes[game_id] = future
         future.add_done_callback(lambda completed, key=game_id: self._record_write_result(key, completed))

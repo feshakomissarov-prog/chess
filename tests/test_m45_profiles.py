@@ -215,6 +215,9 @@ def test_archive_import_records_date_precision_and_unknown_date_is_not_recent(tm
                     '[Date "2026.10.01"]\n[Result "1-0"]\n\n1. e4 1-0\n')
         repo.import_archive_record("Me", {"id": "date-only", "pgn": date_pgn},
                                    checkpoint_ms=None, backfill=False)
+        repo.import_archive_record("Me", {"id": "date-only", "pgn": date_pgn,
+                                          "createdAt": 1790841600123},
+                                   checkpoint_ms=None, backfill=False)
         time_pgn = ('[Event "timestamp"]\n[White "Me"]\n[Black "Friend"]\n'
                     '[Result "1-0"]\n\n1. e4 1-0\n')
         repo.import_archive_record("Me", {"id": "timestamp", "pgn": time_pgn,
@@ -222,7 +225,10 @@ def test_archive_import_records_date_precision_and_unknown_date_is_not_recent(tm
                                    checkpoint_ms=None, backfill=False)
         repo.import_archive_record("Me", {"id": "unknown", "pgn": time_pgn},
                                    checkpoint_ms=None, backfill=False)
-        assert repo.get_game("date-only")["game_time_precision"] == "date_only"
+        upgraded = repo.get_game("date-only")
+        assert upgraded["game_time_precision"] == "timestamp"
+        assert upgraded["started_at"] == datetime.fromtimestamp(
+            1790841600123 / 1000, timezone.utc).isoformat()
         assert repo.get_game("timestamp")["game_time_precision"] == "timestamp"
         assert repo.get_game("unknown")["game_time_precision"] == "unknown"
         with repo._connection() as db:

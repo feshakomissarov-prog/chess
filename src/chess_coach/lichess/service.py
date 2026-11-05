@@ -24,6 +24,16 @@ class LichessService(QObject, LichessAuthMixin, LichessSyncMixin, LichessGameAct
     session_error = Signal(int, str)
     session_event_received = Signal(int, dict)
     session_game_event_received = Signal(int, str, dict)
+    session_operation_failed = Signal(int, str, str, str, int, str)
+    session_move_failed = Signal(int, str, str, str, int)
+    session_takeback_action_completed = Signal(int, str, str, int)
+    session_challenge_ready = Signal(int, str, object)
+    session_challenge_status_changed = Signal(int, str, str, bool)
+    session_invitation_cancelled = Signal(int, str, str)
+    session_active_games_received = Signal(int, str, object)
+    session_active_games_error = Signal(int, str, str)
+    session_action_started = Signal(int, str, str, str)
+    session_action_completed = Signal(int, str, str, str, int)
     # Endpoint-specific background failures must not be misread as account or
     # event-stream failures by the desktop session state machine.
     background_operation_status = Signal(int, str, int, str)
@@ -90,3 +100,7 @@ class LichessService(QObject, LichessAuthMixin, LichessSyncMixin, LichessGameAct
         self._callback: OAuthCallbackServer | None = None
         self._username_challenge_stop: threading.Event | None = None
         self._username_challenge_id: str | None = None
+        self._username_challenge_context = None
+        self._username_challenge_cancel_requested = False
+        self._pending_action_lock = threading.Lock()
+        self._pending_actions: dict[tuple[int, str, str], str] = {}

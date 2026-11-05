@@ -403,10 +403,12 @@ class StatisticsDialog(QDialog):
     safety_requested = Signal()
 
     def __init__(self, repository: GameRepository, parent=None,
-                 saved_filters: dict | None = None) -> None:
+                 saved_filters: dict | None = None,
+                 filter_options: dict | None = None) -> None:
         super().__init__(parent)
         self.repository = repository
         self.service = StatisticsService(repository)
+        self._saved_filter_state = dict(saved_filters or {})
         self.setWindowTitle("Статистика и анализ")
         self.setMinimumSize(480, 360)
         self.resize(1040, 820)
@@ -461,11 +463,13 @@ class StatisticsDialog(QDialog):
         filters = QGridLayout()
         self.account = QComboBox()
         self.account.addItem("Все локальные партии (смешанный срез)", None)
-        options = self.service.filter_options()
+        options = filter_options if isinstance(filter_options, dict) else {"accounts": [], "clocks": []}
+        self._filter_options_ready = filter_options is not None
         for account in options["accounts"]:
             self.account.addItem(account["username"], account["account_id"])
         if options["accounts"]:
             self.account.setCurrentIndex(1)
+        self.account.setEnabled(self._filter_options_ready)
         self.period = QComboBox()
         for title, days in (("Всё время", 0), ("30 дней", 30), ("90 дней", 90), ("1 год", 365)):
             self.period.addItem(title, days)
@@ -481,6 +485,7 @@ class StatisticsDialog(QDialog):
             self.clock.addItem(label, value)
         self.clock.setEditable(True)
         self.clock.lineEdit().setPlaceholderText("Любой контроль")
+        self.clock.setEnabled(self._filter_options_ready)
         self.side = QComboBox()
         self._fill_combo(self.side, (("Любой цвет", ""), ("Белые", "white"), ("Чёрные", "black")))
         self.result_filter = QComboBox()
@@ -678,6 +683,42 @@ class StatisticsDialog(QDialog):
         self.tabs.setCurrentIndex(max(0, min(self.tabs.count() - 1,
                                             int(state.get("tab", 0) or 0))))
 
+    def set_filter_options(self, options: dict) -> None:
+        """Install async selector data while retaining the saved account/clock."""
+        state = self._saved_filter_state
+        self.account.blockSignals(True)
+        self.clock.blockSignals(True)
+        self.account.clear()
+        self.account.addItem("Все локальные партии (смешанный срез)", None)
+        for account in options.get("accounts", []):
+            self.account.addItem(str(account["username"]), str(account["account_id"]))
+        if options.get("accounts"):
+            self.account.setCurrentIndex(1)
+        self.clock.clear()
+        self.clock.addItem("Любой контроль", "")
+        seen: set[str] = set()
+        for value in sorted(set(options.get("clocks", [])), key=_clock_filter_sort_key):
+            label = format_clock_control(value)
+            if label in seen:
+                label = f"{label} ({value})"
+            seen.add(label)
+            self.clock.addItem(label, value)
+        account_index = self.account.findData(state.get("account_id"))
+        clock_index = self.clock.findData(state.get("clock"))
+        if account_index >= 0:
+            self.account.setCurrentIndex(account_index)
+        if clock_index >= 0:
+            self.clock.setCurrentIndex(clock_index)
+        elif state.get("clock"):
+            self.clock.setCurrentText(format_clock_control(state["clock"]))
+        self.account.blockSignals(False)
+        self.clock.blockSignals(False)
+        self._filter_options_ready = True
+        self.account.setEnabled(True)
+        self.clock.setEnabled(True)
+        self.critical_select_account.setEnabled(bool(options.get("accounts")))
+        self._schedule_refresh()
+
     def persisted_filter_state(self) -> dict:
         return {
             "account_id": self.account.currentData(), "period_days": self.period.currentData(),
@@ -725,12 +766,27 @@ class StatisticsDialog(QDialog):
         raw = self.clock.currentText().strip()
         return raw or None
 
-    def _schedule_refresh(self, *_args) -> None:
+    def _schedule_refresh(self, *_args, preserve_position: bool = False) -> None:
         if self._close_when_idle:
             return
+        if preserve_position:
+            item = self.games.currentItem()
+            self._preserve_after_refresh = {
+                "page": self._page,
+                "game_id": item.data(Qt.ItemDataRole.UserRole) if item is not None else None,
+                "scroll": self.games.verticalScrollBar().value(),
+                "tab": self.tabs.currentIndex(),
+            }
+        else:
+            self._preserve_after_refresh = None
         self._filter_generation += 1
-        self._page = 0
+        if not preserve_position:
+            self._page = 0
         self._refresh_timer.start()
+
+    def refresh_data_preserving_position(self) -> None:
+        """Refresh a derived read model without resetting the user's place."""
+        self._schedule_refresh(preserve_position=True)
 
     def _set_page(self, value: int) -> None:
         self._page = value
@@ -825,6 +881,7 @@ class StatisticsDialog(QDialog):
         if error:
             self.summary_label.setText(f"Не удалось построить статистику: {error}")
         elif generation == self._generation and isinstance(summary, dict) and isinstance(parties, dict):
+            preserved = getattr(self, "_preserve_after_refresh", None)
             self._rows = parties["items"]
             self.games.clear()
             self.games_empty.setVisible(not self._rows)
@@ -884,6 +941,16 @@ class StatisticsDialog(QDialog):
                              f"Источник оценки: {source_detail}.")
                 item.setData(Qt.ItemDataRole.UserRole, game["game_id"])
                 self.games.addItem(item)
+            if isinstance(preserved, dict):
+                wanted = preserved.get("game_id")
+                index = next((i for i, game in enumerate(self._rows)
+                              if str(game.get("game_id")) == str(wanted)), -1)
+                if index >= 0:
+                    self.games.setCurrentRow(index)
+                self.games.verticalScrollBar().setValue(int(preserved.get("scroll") or 0))
+                self.tabs.setCurrentIndex(max(0, min(self.tabs.count() - 1,
+                                                     int(preserved.get("tab") or 0))))
+                self._preserve_after_refresh = None
             total = summary["games"]
             coverage = summary["move_coverage_percent"]
             coverage_text = ("нет данных" if coverage is None else
@@ -1018,8 +1085,10 @@ class StatisticsDialog(QDialog):
                         + "; ".join(official))
             self.trend.points = summary["rating_trend"]
             self.trend.update()
-            self.page_label.setText(f"Строки {self._page * 100 + 1}–"
-                                    f"{self._page * 100 + len(self._rows)} из {parties['total']}")
+            self.page_label.setText(
+                (f"Строки {self._page * 100 + 1}–"
+                 f"{self._page * 100 + len(self._rows)} из {parties['total']}"
+                 if parties["total"] else "Нет партий для выбранных фильтров"))
             self.previous_page.setEnabled(self._page > 0)
             self.next_page.setEnabled(self._page + 1 < parties["pages"])
             self._selection_changed(self.games.currentRow())

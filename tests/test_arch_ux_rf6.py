@@ -305,6 +305,9 @@ def test_background_sync_restores_incremental_archive_and_saved_puzzle_history(q
     window.settings.setValue("lichess/auto_ready_analytics", False)
     window._lichess_authenticated(service.username)
     window._lichess_event_stream_ready(service.auth_generation, service.username)
+    qtbot.waitUntil(
+        lambda: window._archive_account_ready_generation == service.auth_generation,
+        timeout=3000)
 
     window._run_background_sync()
 

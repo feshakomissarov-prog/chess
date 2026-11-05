@@ -20,6 +20,24 @@ from chess_coach.lichess.service import LichessService
 LICHESS_MIN_MS = 1_356_998_400_070
 
 
+def test_live_game_snapshot_persists_account_ownership_for_safe_final_sync_resume(tmp_path):
+    repository = GameRepository(tmp_path / "session-owner.sqlite3")
+    session = LichessGameSession("owned-finish", repository)
+    session.bind_owner("AccountA", 7)
+    session.apply_event({"type": "gameFull", "initialFen": "startpos",
+                         "state": {"moves": "e2e4", "status": "started"}})
+    session.final_sync_pending = True
+    session.status = "mate"
+    session._save()
+
+    account_a = repository.ensure_archive_account("AccountA")
+    account_b = repository.ensure_archive_account("AccountB")
+    assert [row["game_id"] for row in repository.list_pending_final_sync(account_id=account_a)] == [
+        "owned-finish"]
+    assert repository.list_pending_final_sync(account_id=account_b) == []
+    repository.shutdown()
+
+
 class FakeTransport:
     def __init__(self, responses=None, lines=None, stream_error=None):
         self.responses = list(responses or [])
@@ -137,6 +155,133 @@ def test_username_challenge_uses_keepalive_ndjson_stream():
         "rated": "false", "keepAliveStream": "true", "color": "white"
     }, threading.Event()))
     assert [event["type"] for event in events] == ["challenge", "challengeDeclined"]
+
+
+@pytest.mark.parametrize("cancel_before_id", [True, False])
+def test_username_challenge_cancel_is_sent_for_pending_and_known_server_id(cancel_before_id):
+    entered = threading.Event()
+    release = threading.Event()
+    id_available = threading.Event()
+
+    class Store:
+        def get(self):
+            return "synthetic-token"
+
+    class Client:
+        def __init__(self):
+            self.cancelled = []
+
+        def username_challenge_events(self, token, username, form, stop):
+            entered.set()
+            if cancel_before_id:
+                release.wait(2)
+            yield {"type": "challenge", "challenge": {"id": "synthetic-challenge"}}
+            id_available.set()
+            release.wait(2)
+
+        def cancel_challenge(self, token, challenge_id):
+            self.cancelled.append((token, challenge_id))
+
+    client = Client()
+    service = LichessService(client=client, token_store=Store(),
+                             personal_token_store=Store())
+    service.username = "SyntheticAccount"
+    service.challenge_username("SyntheticOpponent", "white", 300)
+    assert entered.wait(2)
+    if not cancel_before_id:
+        assert id_available.wait(2)
+    deadline = time.monotonic() + 2
+    while (not cancel_before_id and service._username_challenge_id is None
+           and time.monotonic() < deadline):
+        time.sleep(0.005)
+    if not cancel_before_id:
+        assert service._username_challenge_id == "synthetic-challenge"
+
+    service.cancel_username_challenge()
+    if cancel_before_id:
+        assert client.cancelled == []
+        release.set()
+    deadline = time.monotonic() + 2
+    while not client.cancelled and time.monotonic() < deadline:
+        time.sleep(0.005)
+    assert client.cancelled == [("synthetic-token", "synthetic-challenge")]
+    deadline = time.monotonic() + 2
+    while (service._username_challenge_stop is not None
+           and not service._username_challenge_stop.is_set()
+           and time.monotonic() < deadline):
+        time.sleep(0.005)
+    assert (service._username_challenge_stop is None
+            or service._username_challenge_stop.is_set())
+    release.set()
+    assert service.close(timeout=2)
+
+
+@pytest.mark.parametrize("cancel_before_id", [True, False])
+def test_username_challenge_cancel_429_keeps_pending_stream_retryable(qtbot, cancel_before_id):
+    entered = threading.Event()
+    release_id = threading.Event()
+    challenge_id_available = threading.Event()
+    release_stream = threading.Event()
+    statuses = []
+
+    class Store:
+        def get(self):
+            return "synthetic-token"
+
+    class Client:
+        def __init__(self):
+            self.cancel_attempts = 0
+
+        def username_challenge_events(self, token, username, form, stop):
+            entered.set()
+            if cancel_before_id:
+                release_id.wait(2)
+            yield {"type": "challenge", "challenge": {"id": "synthetic-challenge"}}
+            challenge_id_available.set()
+            release_stream.wait(2)
+            yield {"type": "challengeDeclined"}
+
+        def cancel_challenge(self, token, challenge_id):
+            self.cancel_attempts += 1
+            if self.cancel_attempts == 1:
+                raise RateLimitError(90)
+
+    client = Client()
+    service = LichessService(client=client, token_store=Store(),
+                             personal_token_store=Store())
+    service.username = "SyntheticAccount"
+    service.challenge_status_changed.connect(lambda message, retryable:
+        statuses.append((str(message), bool(retryable))))
+    service.challenge_username("SyntheticOpponent", "white", 300)
+    assert entered.wait(2)
+    if cancel_before_id:
+        assert service.cancel_username_challenge()
+        release_id.set()
+    else:
+        assert challenge_id_available.wait(2)
+        assert service.cancel_username_challenge()
+
+    qtbot.waitUntil(lambda: any("Не удалось отменить вызов" in message
+                                for message, _ in statuses), timeout=2000)
+    assert any("90 с" in message and retryable
+               for message, retryable in statuses
+               if "Не удалось отменить вызов" in message)
+    stop = service._username_challenge_stop
+    assert stop is not None and not stop.is_set()
+    assert client.cancel_attempts == 1
+
+    assert service.cancel_username_challenge()
+    deadline = time.monotonic() + 2
+    while client.cancel_attempts < 2 and time.monotonic() < deadline:
+        time.sleep(0.005)
+    assert client.cancel_attempts == 2
+    qtbot.waitUntil(lambda: any(message == "Вызов отменён." and not retryable
+                                for message, retryable in statuses), timeout=2000)
+    assert any(message == "Вызов отменён." and not retryable
+               for message, retryable in statuses)
+    assert stop.is_set()
+    release_stream.set()
+    assert service.close(timeout=2)
 
 
 def test_move_draw_resign_and_abort_use_documented_board_api_routes():

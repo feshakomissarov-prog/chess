@@ -33,7 +33,8 @@ class GameSessionCoordinator(Generic[SessionT]):
         if not game_id:
             raise ValueError("session game_id is required")
         existing = self._sessions.get(game_id)
-        if existing is not None and existing is not session:
+        if (existing is not None and existing is not session
+                and not bool(getattr(existing, "detached", False))):
             raise ValueError("a different session already owns this game_id")
         self._sessions[game_id] = session
         if select:
@@ -42,6 +43,16 @@ class GameSessionCoordinator(Generic[SessionT]):
 
     def get(self, game_id: str | None) -> SessionT | None:
         return self._sessions.get(str(game_id)) if game_id else None
+
+    def for_owner(self, username: str | None, *, generation: int | None = None) -> tuple[SessionT, ...]:
+        account = str(username or "").strip().casefold()
+        if not account:
+            return ()
+        return tuple(
+            session for session in self._sessions.values()
+            if callable(getattr(session, "belongs_to", None))
+            and session.belongs_to(account, generation=generation)
+        )
 
     def select(self, game_id: str | None) -> SessionT | None:
         session = self.get(game_id)

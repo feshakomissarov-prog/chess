@@ -4,6 +4,23 @@
 **UX source:** documentation PR [#45](https://github.com/feshakomissarov-prog/chess/pull/45), head `dc8edcd7cbfe88f30c3c88640bc40b8157f90be9` (draft, not merged)\
 **Scope:** [ARCH-UX-01 v1.1](../specs/ARCH_UX_01_UNIFIED_EXECUTION_SPEC.md), stages A0–A12. No merge, force-push, live Lichess, personal token, personal SQLite, or real Stockfish activity.
 
+## 05.11.2026 — ARCH-UX-01 FULL SYSTEM AUDIT MASTER (один комплексный цикл)
+
+**Baseline:** existing draft PR #44, branch `codex/arch-01-modular-refactor`, starting SHA `7a3a6775a0a27e60c0bea7cfbcd4f28d734e939b`. Preserved all pre-existing RF8 work and untracked `.venv312/`. No branch reset, main modification, merge, force push, user SQLite/token/PGN, real Lichess, or real Stockfish activity.
+
+| Finding | Status and evidence |
+|---|---|
+| CORE-01…CORE-08 | P0 auth/token generation fencing, account-owned session registry, analytics migration refresh/scope, clock units, archive timestamps, asynchronous puzzle history, and per-game one-shot actions are source-checked and covered by fake/temp-SQLite tests listed in [acceptance matrix](ARCH_UX_01_MASTER_ACCEPTANCE_MATRIX.md). |
+| CORE-09 | **Additional confirmed race fixed in this cycle:** challenge cancellation 429 was reported as success and stopped the waiting stream. Cancellation now stays pending and retryable until a server API cancellation succeeds; a synthetic 429→retry regression covers both before-ID and after-ID cases. A game-action failure also cannot clear a separate pending username challenge. |
+| CORE-10…CORE-11 | Registered asynchronous DB operations and account/generation-scoped live sessions verified by Qt barrier/owner regressions. No stress SLA introduced. |
+| UI-01 | **Additional confirmed routing defect fixed:** saved Review's internal Back always navigated to Library. It now uses the same `WorkspaceNavigator` history as shell Back; Progress page/tab/filter restoration is tested. |
+| UI-02…UI-08 | Final review remains disabled until the exact terminal line is durable; rematch readiness, play cancel/retry, note draft ownership, async Progress options, truthful empty range and stable Progress page/selection are tested. |
+| UI-09…UI-11 | Risk checks added for the FEN editor's 1280×720 visible action, retained puzzle sync diagnostics, and coalesced 275 ms typing search. No 125/150% physical DPI claims. |
+
+The full CORE/UI finding table and 24-group COV acceptance matrix are in `ARCH_UX_01_MASTER_ACCEPTANCE_MATRIX.md`. Visible synthetic Windows check was completed in a regular non-offscreen Python 3.12 process: Home, local Play, Library, Analysis, Training, Progress, Settings, Review and Background Operations. Offline synthetic database/settings only; first invalid puzzle fixture was corrected, and only the corrected legal puzzle run counts. The connection, active server games, live commands/finalization, Lichess archive/backfill, real Stockfish, OAuth/PAT and physical sound output remain blocked/unrun and are not recorded as PASS.
+
+**Checks:** final Python 3.12.10 / Qt offscreen `pytest -o addopts= -W error::pytest.PytestUnhandledThreadExceptionWarning -q`: **774 passed in 210.18 s**. The focused master regression group: **10 passed**. `compileall -q src tests scripts` and `git diff --check`: PASS. Visible synthetic native GUI checklist is recorded in the matrix; live/API/engine and owner data remain blocked. Hosted Windows CI on the final published SHA is still pending. PR #44 remains draft; no merge.
+
 ## 05.11.2026 — REVIEW-FIX-08 RF8-01…RF8-04
 
 **Baseline:** continued the existing draft PR [#44](https://github.com/feshakomissarov-prog/chess/pull/44), branch `codex/arch-01-modular-refactor`, from `41b35221ac58d61c6c205933190b4d5449c8f778`. The pre-existing `.venv312/` was left untouched. No user database, tokens, real games, live Lichess, or Stockfish process was accessed.
