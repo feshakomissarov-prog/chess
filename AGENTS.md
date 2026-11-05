@@ -2,6 +2,9 @@
 
 **Статус:** постоянная инструкция для ИИ-разработчика. Рабочий язык общения и отчётов — **русский**. Названия API, файлов и идентификаторов оставлять оригинальными.
 
+> **АКТУАЛЬНЫЙ OWNER-APPROVED HANDOFF 05.11.2026 — ЕДИНЫЙ ПОЛНЫЙ SOURCE-АУДИТ В 2 БЛОКА ЗАВЕРШЁН.** Текущее **одно большое ТЗ** для Codex: [ARCH-UX-01 FULL SYSTEM AUDIT MASTER](docs/specs/ARCH_UX_01_FULL_SYSTEM_AUDIT_MASTER_2026_11_05.md): 11 CORE + 11 UI source-backed findings, включая критические auth token/old 401, stale game actions и A→B live session registry; все **24 UX-COV** с реальными контролами/handlers/acceptance и сквозная тестовая программа. Старый RF9 включён туда как CORE-03/04 и **НЕ передаётся отдельно**. Исполнять одним циклом **в существующем draft code PR #44**, не повторять W0–W9/A0–A12/RF1–RF8 и не создавать цепочку мелких RF. Принятие только по **всей матрице**, physical owner pilot отдельно; нельзя приравнивать 750 базовых PASS к GUI/настоящему Lichess. Docs только draft PR #45, main/merge запрещены, Fair Play fail-closed, owner PAT/PGN/SQLite не использовать.
+
+
 > **АКТУАЛЬНЫЙ GATE 05.11.2026 — REVIEW-FIX-09 после RF8:** code draft PR #44 HEAD `7a3a6775a0a27e60c0bea7cfbcd4f28d734e939b`, [Windows CI #286](https://github.com/feshakomissarov-prog/chess/actions/runs/42005438175) **750 PASS, SUCCESS**. RF8-01…04 реализованы по коду/CI и native synthetic smoke Codex; остаются **две source-backed ошибки UI**: открытый Progress не делает новый stats query после каждого завершённого миграционного batch (только статус обновляется) и его статус по аккаунту берётся из dashboard_account Главной, а не из Progress.account, включая устаревший scope после смены фильтра. Текущее короткое исполняемое ТЗ — [REVIEW-FIX-09 RF9-01…03](docs/specs/ARCH_UX_01_REVIEW_FIX_09_PROGRESS_LIVE_REFRESH_AND_SCOPE.md). Исправить в том же draft PR #44, не повторять RF1–RF8, не merge/main, Fair Play не ослаблять и не использовать пользовательские данные.
 
 
