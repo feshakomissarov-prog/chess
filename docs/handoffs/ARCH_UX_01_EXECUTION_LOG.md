@@ -15,7 +15,9 @@
 | RF8-03 — review source selection | **PASS in repository/read-model tests.** Detail selection ranks a current scored run before a newer empty complete run, with deterministic status/time/run-id ordering and optional Progress source filter. Review graph/metrics are loaded from the selected run only. |
 | RF8-04 — visible smoke and gates | **VISIBLE SYNTHETIC GUI PASS.** One ordinary Windows Python 3.12 window displayed background progress, statistics, Lichess-PGN/JSON and Stockfish reviews, plus Qh4# and Qxf7# boards/move lists. Own smoke assertions ended `VISIBLE_GUI_SMOKE_PASS`; data and window were temporary/synthetic. Full pytest, compileall, diff check and hosted exact-head Windows CI are the publication gates. |
 
-**Local gates before publication:** full pytest **750 passed** (Python 3.12.10, Qt offscreen, thread warnings treated as errors); CLI→runtime→MainWindow offline/manual integration **2 passed**; `compileall` and `git diff --check` passed. The visible smoke harness was corrected to read `review["positions"]` (not `review["board"]`), then run against the actual `BoardView`; it completed `VISIBLE_GUI_SMOKE_PASS`. Hosted exact-head Windows CI is pending publication. No physical owner data or screenshots were stored in the repository.
+**Local gates before publication:** full pytest **750 passed** (Python 3.12.10, Qt offscreen, thread warnings treated as errors); CLI→runtime→MainWindow offline/manual integration **2 passed**; `compileall` and `git diff --check` passed. The visible smoke harness was corrected to read `review["positions"]` (not `review["board"]`), then run against the actual `BoardView`; it completed `VISIBLE_GUI_SMOKE_PASS`.
+
+**Hosted Windows CI:** run [#284](https://github.com/feshakomissarov-prog/chess/actions/runs/42003567503) **SUCCESS** on code commit `9522d93cde2d98685d809592c81c979b5d919e2c`; Windows Server, Python 3.12.10, **750 passed in 322.29s**, compileall and isolated offline-window initialization passed. CI is also rerun on the final documentation commit before handoff. No physical owner data or screenshots were stored in the repository.
 
 ## 05.11.2026 — REVIEW-FIX-05 RF5-00…RF5-12 implementation
 
