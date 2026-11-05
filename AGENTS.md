@@ -2,6 +2,9 @@
 
 **Статус:** постоянная инструкция для ИИ-разработчика. Рабочий язык общения и отчётов — **русский**. Названия API, файлов и идентификаторов оставлять оригинальными.
 
+> **АКТИВНЫЙ GATE 05.11.2026 · REVIEW-FIX-07:** независимая проверка кодового draft PR #44 на SHA `e0947646db73d2cfa6a6baf0b2d3eccc5fed3c2c` подтвердила [Windows CI #41979505071](https://github.com/feshakomissarov-prog/chess/actions/runs/41979505071) **721 PASS**, но обнаружены P1 регрессии. **Исполняемое [REVIEW-FIX-07 RF7-01…RF7-05](docs/specs/ARCH_UX_01_REVIEW_FIX_07_LEGACY_METRICS_WDL_AUTO_SYNC.md)**: старые `cc-move-metrics-v2` с `accuracy=NULL` не обновляются без versioned lazy materialization; python-chess `MateGiven.mate()==0` ошибочно читается WDL как `Mate(0)` с поражением белых; auto puzzle history не работает при выключенном archive auto-sync; последний матовый ход без UCI terminal-depth не получает per-move accuracy. Исправить исходные причины в **том же code draft PR #44**, тесты с legacy synthetic SQLite, не запускать Stockfish для миграции. **RF6 не принят для merge; main не менять, Fair Play не ослаблять.** Все прежние RF/ARCH описания ниже — исторические и не требуют повторного исполнения.
+
+
 > **ДОПОЛНЕНИЕ К ВЫДАННОМУ RF6 · 05.11.2026:** владелец требует [**RF6-09…RF6-11 — Lichess-method Accuracy и Stockfish forced mate**](docs/specs/ARCH_UX_01_REVIEW_FIX_06_INDEPENDENT_REVIEW.md#дополнение-05112026--rf6-09rf6-11-lichess-accuracy-и-форсированные-маты-stockfish) с полным зафиксированным [исследованием и спецификацией](docs/specs/LICHESS_STOCKFISH_ACCURACY_MATE_V1.md). Продолжать тот же code draft PR #44; уже существующие domain/accuracy.py и game_review.py **не дублировать**; устранить move_metrics accuracy=None, фиктивный CP для UCI mate, пустую шкалу мата, добавить матовые события и golden parity. **Официальную точность Lichess не перезаписывать, Fair Play не ослаблять.** Этот пункт новее предыдущего указания RF6-01…08 и добавляется к нему (RF6-01…11).
 
 
