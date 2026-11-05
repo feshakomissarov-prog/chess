@@ -227,7 +227,9 @@ def test_save_analysis_persists_versioned_facts_and_report_detail_without_mixing
         assert detail["official_game_accuracy_source"] == "lichess"
         assert detail["official_game_accuracy_color"] == "white"
         assert detail["local_game_accuracy"] is None
-        assert detail["metrics_materialization_pending"] is False  # non-Stockfish source
+        # Legacy Lichess-derived facts are now eligible for the same offline
+        # v2→v3 materializer as saved Stockfish metrics.
+        assert detail["metrics_materialization_pending"] is True
         with repository._connection() as db:
             assert db.execute("SELECT COUNT(*) FROM move_metrics WHERE run_id=?",
                               (detail["run_id"],)).fetchone()[0] == 0

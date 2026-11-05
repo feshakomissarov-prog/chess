@@ -4,6 +4,19 @@
 **UX source:** documentation PR [#45](https://github.com/feshakomissarov-prog/chess/pull/45), head `dc8edcd7cbfe88f30c3c88640bc40b8157f90be9` (draft, not merged)\
 **Scope:** [ARCH-UX-01 v1.1](../specs/ARCH_UX_01_UNIFIED_EXECUTION_SPEC.md), stages A0–A12. No merge, force-push, live Lichess, personal token, personal SQLite, or real Stockfish activity.
 
+## 05.11.2026 — REVIEW-FIX-08 RF8-01…RF8-04
+
+**Baseline:** continued the existing draft PR [#44](https://github.com/feshakomissarov-prog/chess/pull/44), branch `codex/arch-01-modular-refactor`, from `41b35221ac58d61c6c205933190b4d5449c8f778`. The pre-existing `.venv312/` was left untouched. No user database, tokens, real games, live Lichess, or Stockfish process was accessed.
+
+| Requirement | Result and evidence |
+| --- | --- |
+| RF8-01 — v2→v3 for all saved sources | **PASS in synthetic SQLite regression.** Bounded materialization now covers scored current-line `stockfish`, `lichess-pgn`, and `lichess-json` runs from persisted CP/mate assessments. v2 rows, PGN, raw assessments/classifications, source identity and official Lichess accuracy are preserved. Derived Lichess facts do not claim Stockfish-local accuracy. Review-only and stale revisions are excluded. |
+| RF8-02 — application-owned background worker | **PASS in Qt integration and native visible smoke.** A bounded worker runs through the existing `SQLITE_WRITER` lane after local startup or a current safe preflight, resumes from persisted v3 rows, refreshes Progress/operation status, and cancels on shutdown, account/safety change. Temporary database with five old runs across all three sources reached `5/5`, without per-game clicks, UCI or HTTP. |
+| RF8-03 — review source selection | **PASS in repository/read-model tests.** Detail selection ranks a current scored run before a newer empty complete run, with deterministic status/time/run-id ordering and optional Progress source filter. Review graph/metrics are loaded from the selected run only. |
+| RF8-04 — visible smoke and gates | **VISIBLE SYNTHETIC GUI PASS.** One ordinary Windows Python 3.12 window displayed background progress, statistics, Lichess-PGN/JSON and Stockfish reviews, plus Qh4# and Qxf7# boards/move lists. Own smoke assertions ended `VISIBLE_GUI_SMOKE_PASS`; data and window were temporary/synthetic. Full pytest, compileall, diff check and hosted exact-head Windows CI are the publication gates. |
+
+**Local gates before publication:** full pytest **750 passed** (Python 3.12.10, Qt offscreen, thread warnings treated as errors); CLI→runtime→MainWindow offline/manual integration **2 passed**; `compileall` and `git diff --check` passed. The visible smoke harness was corrected to read `review["positions"]` (not `review["board"]`), then run against the actual `BoardView`; it completed `VISIBLE_GUI_SMOKE_PASS`. Hosted exact-head Windows CI is pending publication. No physical owner data or screenshots were stored in the repository.
+
 ## 05.11.2026 — REVIEW-FIX-05 RF5-00…RF5-12 implementation
 
 **Baseline and scope:** continued the existing code draft PR [#44](https://github.com/feshakomissarov-prog/chess/pull/44), branch `codex/arch-01-modular-refactor`, from `f957f994275933e0b6eb19134fa8cb34c39286e3`. Working tree was checked before edits; the pre-existing `.venv312/` remains untracked and untouched. No other branch, ROADMAP, PR #45, user database, OAuth/PAT secret, archive, or Stockfish process was changed. This entry records RF5 only; prior A0–A12 and RF1–RF4 entries remain historical.

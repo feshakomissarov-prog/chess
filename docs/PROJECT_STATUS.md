@@ -1,3 +1,11 @@
+## 05.11.2026 — ARCH-UX-01 REVIEW-FIX-08 RF8-01…RF8-04 (текущий handoff)
+
+Исправления продолжают существующий draft [PR #44](https://github.com/feshakomissarov-prog/chess/pull/44), ветка `codex/arch-01-modular-refactor`. Старые сохранённые scored runs `stockfish`, `lichess-pgn` и `lichess-json` переводятся с derived metrics v2 на v3 исключительно из уже сохранённых CP/mate-оценок; исходные v2 rows, PGN и официальная Lichess accuracy сохраняются. Review выбирает scored current-line run раньше более нового пустого complete run, а ручной source filter Progress передаётся на экран разбора.
+
+Добавлен app-owned ограниченный фоновый SQLite worker с возобновлением по v3 checkpoint, прогрессом `готово N/всего; осталось M`, остановкой при shutdown/account switch/Fair Play revoke и без UCI/HTTP. Добавлены регрессии на временной старой SQLite и Qt-путь автоматической обработки нескольких партий. Видимый Windows smoke на синтетической БД прошёл: прогресс, статистика, Lichess-PGN/JSON, Stockfish и Qh4#/Qxf7# review завершены `VISIBLE_GUI_SMOKE_PASS`. Тестовая SQLite находилась только в `%TEMP%`; реальные аккаунты, токены, партии и база владельца не использовались.
+
+Полный локальный pytest завершён: 750 PASS; compileall, diff check и CLI→runtime→MainWindow offline/manual (2 PASS) пройдены. Видимый GUI smoke на синтетической старой SQLite завершён `VISIBLE_GUI_SMOKE_PASS`, включая обе матовые позиции. Новый exact-head Windows CI ожидает публикации этого состояния. PR остаётся draft; main не меняется, merge не выполняется. Детали и фактические проверки: [ARCH-UX-01 execution log](handoffs/ARCH_UX_01_EXECUTION_LOG.md).
+
 ## 05.11.2026 — ARCH-UX-01 REVIEW-FIX-07 RF7-01…RF7-05 (текущая работа)
 
 В draft PR [#44](https://github.com/feshakomissarov-prog/chess/pull/44), ветка `codex/arch-01-modular-refactor`, подготовлено адресное исправление совместимости аналитических метрик со старыми сохранёнными Stockfish-run. Введена версия `cc-move-metrics-v3` и отдельная версия модели WDL; старые строки не удаляются. Временная SQLite-регрессия создаёт прежние строки `cc-move-metrics-v2` с `accuracy=NULL`, проверяет чтение старой линии, bounded/resumable rematerialization только из сохранённых оценок, неизменность PGN/official Lichess accuracy и отсутствие вызова движка.

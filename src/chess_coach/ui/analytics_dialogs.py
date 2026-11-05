@@ -181,7 +181,8 @@ class RatingTrendGraph(QWidget):
 class StatisticsGameDialog(QDialog):
     position_requested = Signal(str, int)
 
-    def __init__(self, repository: GameRepository, game: dict, parent=None) -> None:
+    def __init__(self, repository: GameRepository, game: dict, parent=None, *,
+                 analysis_source: str | None = None) -> None:
         super().__init__(parent)
         self.repository = repository
         self.game = game
@@ -195,7 +196,8 @@ class StatisticsGameDialog(QDialog):
         line = repository.current_line(game["game_id"])
         analysis = repository.latest_analysis_detail(
             game["game_id"], int(line["line_revision"]),
-            account_id=game.get("account_id"), user_color=game.get("account_color") or game.get("color")) if line else None
+            account_id=game.get("account_id"), user_color=game.get("account_color") or game.get("color"),
+            analysis_source=analysis_source) if line else None
         revision = int(line["line_revision"]) if line else int(game.get("line_revision", 1))
         opening = repository.opening_match(game["game_id"], revision)
         phases = repository.phase_boundaries(game["game_id"], revision)

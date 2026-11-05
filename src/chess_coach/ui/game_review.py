@@ -755,7 +755,8 @@ class GameReviewWorkspace(QWidget):
 
     def load_game(self, game: dict, *, training_allowed: bool | None = None,
                   training_block_reason: str | None = None,
-                  ephemeral: bool = False) -> None:
+                  ephemeral: bool = False,
+                  analysis_source: str | None = None) -> None:
         self._ephemeral_study = bool(ephemeral)
         self._ephemeral_board = None
         self._ephemeral_branch.clear()
@@ -764,7 +765,8 @@ class GameReviewWorkspace(QWidget):
         self.ephemeral_status.setText(
             "Исследование временное: ходы не попадут в PGN, SQLite или онлайн-партию."
             if self._ephemeral_study else "")
-        self.review = load_game_review(self.repository, game)
+        self.review = load_game_review(self.repository, game,
+                                       analysis_source=analysis_source)
         if training_allowed is not None:
             self.training_allowed = training_allowed
             self.evaluation_allowed = training_allowed

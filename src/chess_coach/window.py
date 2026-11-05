@@ -110,6 +110,21 @@ class EmbeddedStatisticsPage(StatisticsDialog):
 
     close_requested = Signal()
 
+    def __init__(self, *args, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+        self.metric_migration_status = QLabel("Метрики сохранённых анализов: состояние не загружено.")
+        self.metric_migration_status.setWordWrap(True)
+        self.metric_migration_status.setObjectName("secondary")
+        self.metric_migration_status.setAccessibleName("Фоновое обновление метрик")
+        self.layout().insertWidget(0, self.metric_migration_status)
+        self._metric_migration_text = ""
+
+    def set_metric_migration_status(self, text: str, *, safety_allowed: bool) -> None:
+        self._metric_migration_text = str(text)
+        self.metric_migration_status.setText(
+            self._metric_migration_text if safety_allowed else
+            "Статус обновления аналитики скрыт до безопасной проверки Lichess.")
+
     def accept(self) -> None:
         self.close_requested.emit()
 
@@ -337,6 +352,7 @@ class MainWindow(QMainWindow):
     library_detail_finished = Signal(int, str, object, object)
     external_study_finished = Signal(int, object, object)
     background_status_finished = Signal(int, object)
+    legacy_metrics_finished = Signal(int, object)
 
     @property
     def _selected_live_game_id(self) -> str | None:
@@ -499,6 +515,18 @@ class MainWindow(QMainWindow):
         self._auto_sync_timer = QTimer(self)
         self._auto_sync_timer.setInterval(10 * 60 * 1000)
         self._auto_sync_timer.timeout.connect(self._run_background_sync)
+        self._legacy_metrics_timer = QTimer(self)
+        self._legacy_metrics_timer.setSingleShot(True)
+        self._legacy_metrics_timer.setInterval(500)
+        self._legacy_metrics_timer.timeout.connect(self._start_legacy_metrics_batch)
+        self._legacy_metrics_generation = 0
+        self._legacy_metrics_scope: str | None = None
+        self._legacy_metrics_handle = None
+        self._legacy_metrics_stop: threading.Event | None = None
+        self._legacy_metrics_text = (
+            "Локальные метрики сохранённых анализов обновляются фоновыми партиями; "
+            "движок и сеть для этого не запускаются.")
+        self._legacy_metrics_complete_revision: int | None = None
         self.analysis_progress.connect(self._analysis_progress)
         self.analysis_finished.connect(self._analysis_finished)
         self.engine_install_progress.connect(self._engine_install_progress_changed)
@@ -511,6 +539,7 @@ class MainWindow(QMainWindow):
         self.library_detail_finished.connect(self._library_detail_result_ready)
         self.external_study_finished.connect(self._external_study_parse_finished)
         self.background_status_finished.connect(self._background_operations_result_ready)
+        self.legacy_metrics_finished.connect(self._legacy_metrics_batch_finished)
         self._external_study_generation = 0
         self._background_status_generation = 0
         self._background_status_handle = None
@@ -560,6 +589,10 @@ class MainWindow(QMainWindow):
         elif self.offline_mode:
             self._disable_online_controls()
         self.refresh()
+        if self.offline_mode:
+            # Let the shell and local-only views settle before starting the
+            # low-priority read/derive/write worker.
+            self._legacy_metrics_timer.start(1500)
         if not self.offline_mode:
             QTimer.singleShot(75, self._restore_workspace_after_startup)
 
@@ -663,6 +696,7 @@ class MainWindow(QMainWindow):
         self.connect_button.setVisible(False)
         self._refresh_online_controls()
         self._request_dashboard_display_safety()
+        self._cancel_legacy_metrics_batch("account_switched")
         account_id = self.game_repository.ensure_archive_account(username)
         self._home_view.select_profile(account_id, notify=False)
         self.game_repository.set_lichess_analysis_backfill_paused(
@@ -828,6 +862,8 @@ class MainWindow(QMainWindow):
             previous.cancel("status_refresh_superseded")
         stop_event = threading.Event()
         repository = self.game_repository
+        metric_scope = (self.dashboard_account.currentData()
+                        if hasattr(self, "dashboard_account") else None)
         operations = self.runtime.work_coordinator.snapshots()
 
         def worker() -> None:
@@ -838,6 +874,8 @@ class MainWindow(QMainWindow):
                 puzzles = repository.puzzle_sync_state(account_id) if account_id else {}
                 summary = (repository.lichess_analysis_backfill_summary(account_id)
                            if account_id else {})
+                metric_status = repository.analysis_metrics_migration_status(
+                    account_id=str(metric_scope) if metric_scope else None)
                 paused = bool(account_id and
                               repository.lichess_analysis_backfill_paused(account_id))
                 if stop_event.is_set():
@@ -846,6 +884,7 @@ class MainWindow(QMainWindow):
                     "account_id": account_id, "username": username, "available": available,
                     "archive": archive, "puzzles": puzzles, "summary": summary,
                     "paused": paused, "operations": operations,
+                    "metric_scope": metric_scope, "metric_status": metric_status,
                 })
             except Exception as exc:
                 if not stop_event.is_set():
@@ -870,6 +909,15 @@ class MainWindow(QMainWindow):
             return
         summary = payload.get("summary") or {}
         statuses: list[str] = []
+        safety_allowed = self._library_detail_safety_allowed()
+        metric_status = payload.get("metric_status") or {}
+        if safety_allowed and payload.get("metric_scope") == (
+                self.dashboard_account.currentData()
+                if hasattr(self, "dashboard_account") else None):
+            metric_text = self._format_legacy_metrics_status(metric_status)
+            self._legacy_metrics_text = metric_text
+        else:
+            metric_text = "Статус обновления аналитики скрыт до безопасной проверки Lichess."
         if payload.get("failure_code"):
             statuses.append(f"SQLite · статус недоступен ({payload['failure_code']})")
         else:
@@ -922,7 +970,135 @@ class MainWindow(QMainWindow):
                 backfill_paused=bool(payload.get("paused")),
                 can_check=bool(payload.get("available") and account_id),
                 can_pause=bool(account_id), retry_status=retry,
-                durable_statuses=statuses)
+                durable_statuses=statuses, local_metrics_status=metric_text)
+
+    @staticmethod
+    def _format_legacy_metrics_status(status: dict) -> str:
+        total = max(0, int(status.get("total", 0)))
+        remaining = max(0, int(status.get("remaining", 0)))
+        done = max(0, min(total, int(status.get("done", total - remaining))))
+        if remaining:
+            return (f"Локальные сохранённые анализы · метрики обновляются: готово "
+                    f"{done}/{total}; осталось {remaining}. UCI и сеть не используются.")
+        return (f"Локальные сохранённые анализы · метрики актуальны: "
+                f"{done}/{total}; осталось 0.")
+
+    def _legacy_metrics_account_scope(self) -> str | None:
+        if hasattr(self, "dashboard_account"):
+            value = self.dashboard_account.currentData()
+            return str(value) if value else None
+        return None
+
+    def _schedule_legacy_metrics_batch(self) -> None:
+        if (self._shutdown_requested or not self._library_detail_safety_allowed()
+                or any(session.status in {"started", "playing"} and not session.is_ai_opponent
+                       for session in self.online_sessions.values())):
+            return
+        if self._legacy_metrics_complete_revision == self.game_repository.statistics_revision:
+            return
+        scope = self._legacy_metrics_account_scope()
+        self._legacy_metrics_scope = scope
+        if not self._legacy_metrics_timer.isActive():
+            self._legacy_metrics_timer.start(500)
+
+    def _cancel_legacy_metrics_batch(self, reason: str) -> None:
+        self._legacy_metrics_timer.stop()
+        self._legacy_metrics_generation += 1
+        if self._legacy_metrics_stop is not None:
+            self._legacy_metrics_stop.set()
+        handle = self._legacy_metrics_handle
+        if handle is not None and handle.is_alive():
+            handle.cancel(reason)
+
+    def _start_legacy_metrics_batch(self) -> None:
+        if (self._shutdown_requested or not self._library_detail_safety_allowed()
+                or any(session.status in {"started", "playing"} and not session.is_ai_opponent
+                       for session in self.online_sessions.values())):
+            return
+        handle = self._legacy_metrics_handle
+        if handle is not None and handle.is_alive():
+            # A prior account/safety generation is winding down; wait for its
+            # transactional row boundary before starting the next bounded batch.
+            return
+        self._legacy_metrics_handle = None
+        stop = threading.Event()
+        generation = self._legacy_metrics_generation
+        scope = self._legacy_metrics_account_scope()
+        self._legacy_metrics_scope = scope
+        repository = self.game_repository
+        self._legacy_metrics_text = (
+            "Локальные метрики сохранённых анализов обновляются небольшими фоновыми партиями; "
+            "движок и сеть для этого не запускаются.")
+        statistics_page = getattr(self, "_statistics_dialog", None)
+        if isinstance(statistics_page, EmbeddedStatisticsPage):
+            statistics_page.set_metric_migration_status(
+                self._legacy_metrics_text, safety_allowed=True)
+            statistics_page._schedule_refresh()
+        def worker() -> None:
+            try:
+                before = repository.analysis_metrics_migration_status(account_id=scope)
+                if stop.is_set():
+                    result = {"cancelled": True, "status": before}
+                else:
+                    batch = repository.materialize_stale_analysis_metrics_batch(
+                        limit=10, cancel_check=stop.is_set)
+                    after = repository.analysis_metrics_migration_status(account_id=scope)
+                    result = {"cancelled": stop.is_set(), "batch": batch, "status": after}
+            except Exception as exc:
+                result = {"error": type(exc).__name__}
+            self.legacy_metrics_finished.emit(generation, {
+                "scope": scope, "result": result,
+            })
+
+        self._legacy_metrics_stop = stop
+        self._legacy_metrics_handle = self._start_registered_work(
+            worker, kind="legacy_analysis_metrics_v3", lane=OperationLane.SQLITE_WRITER,
+            thread_name="cc-legacy-metrics-v3", stop_event=stop)
+
+    def _legacy_metrics_batch_finished(self, generation: int, payload: object) -> None:
+        if not isinstance(payload, dict):
+            return
+        handle = self._legacy_metrics_handle
+        if handle is not None and handle.is_alive():
+            QTimer.singleShot(50, lambda: self._legacy_metrics_batch_finished(
+                generation, payload))
+            return
+        if handle is not None:
+            self._legacy_metrics_handle = None
+            self._legacy_metrics_stop = None
+        if (generation != self._legacy_metrics_generation or self._shutdown_requested
+                or payload.get("scope") != self._legacy_metrics_account_scope()):
+            if self._library_detail_safety_allowed():
+                self._schedule_legacy_metrics_batch()
+            return
+        if not self._library_detail_safety_allowed():
+            return
+        result = payload.get("result") or {}
+        status = result.get("status") or {}
+        if result.get("error"):
+            self._legacy_metrics_text = (
+                f"Локальное обновление метрик временно не выполнено ({result['error']}); "
+                "повтор будет отложен.")
+            retry_ms = 30_000
+        else:
+            self._legacy_metrics_text = self._format_legacy_metrics_status(status)
+            remaining_global = int((result.get("batch") or {}).get("remaining", 0))
+            if remaining_global == 0:
+                self._legacy_metrics_complete_revision = self.game_repository.statistics_revision
+            retry_ms = 500 if remaining_global > 0 else 0
+        statistics_page = getattr(self, "_statistics_dialog", None)
+        if isinstance(statistics_page, EmbeddedStatisticsPage):
+            statistics_page.set_metric_migration_status(
+                self._legacy_metrics_text, safety_allowed=True)
+        if ((result.get("batch") or {}).get("processed", 0) > 0
+                and self.screen_stack.currentWidget() is getattr(self, "home_page", None)):
+            self._refresh_home_dashboard()
+        page = getattr(self, "_background_operations_page", None)
+        if page is not None:
+            page.local_metrics_status.setText(self._legacy_metrics_text)
+            self._refresh_background_operations_page()
+        if retry_ms:
+            self._legacy_metrics_timer.start(retry_ms)
 
     def _set_backfill_paused(self, paused: bool) -> None:
         username = str(getattr(self.lichess, "username", "") or "").strip()
@@ -2294,6 +2470,13 @@ class MainWindow(QMainWindow):
                 safety_allowed,
                 "Статистика и кэшированные оценки скрыты: подтвердите безопасное состояние Lichess.",
             )
+            if isinstance(statistics_page, EmbeddedStatisticsPage):
+                statistics_page.set_metric_migration_status(
+                    self._legacy_metrics_text, safety_allowed=safety_allowed)
+        if safety_allowed:
+            self._schedule_legacy_metrics_batch()
+        else:
+            self._cancel_legacy_metrics_batch("safety_revoked")
 
     def _request_dashboard_display_safety(self) -> None:
         self._request_dashboard_display_safety_internal(manual=False)
@@ -2312,6 +2495,7 @@ class MainWindow(QMainWindow):
         if any(session.status in {"started", "playing"} and not session.is_ai_opponent
                for session in self.online_sessions.values()):
             self._dashboard_analysis_safety_allowed = False
+            self._cancel_legacy_metrics_batch("safety_revoked")
             self._set_sidebar_safety_status("Аналитика скрыта · активная партия")
             self._dashboard_display_safety_request_id = None
             self._dashboard_display_safety_context = None
@@ -2323,6 +2507,7 @@ class MainWindow(QMainWindow):
                 or self._lichess_stream_ready_generation != getattr(
                     service, "auth_generation", None)):
             self._dashboard_analysis_safety_allowed = False
+            self._cancel_legacy_metrics_batch("safety_revoked")
             self._set_sidebar_safety_status("Аналитика скрыта · нужна проверка")
             self.safety_retry_button.setVisible(False)
             self._refresh_dashboard_analysis_visibility()
@@ -2335,6 +2520,7 @@ class MainWindow(QMainWindow):
         cooldown = self._lichess_rate_limit_remaining()
         if cooldown:
             self._dashboard_analysis_safety_allowed = False
+            self._cancel_legacy_metrics_batch("safety_revoked")
             self._set_sidebar_safety_status(f"Аналитика скрыта · повтор через {cooldown} с")
             self.safety_retry_button.setVisible(True)
             self._refresh_dashboard_analysis_visibility()
@@ -2354,6 +2540,7 @@ class MainWindow(QMainWindow):
             "username": username,
         }
         self._dashboard_analysis_safety_allowed = False
+        self._cancel_legacy_metrics_batch("safety_revoked")
         self.safety_retry_button.setVisible(False)
         self._refresh_dashboard_analysis_visibility()
         page = getattr(self, "_statistics_dialog", None)
@@ -2392,6 +2579,10 @@ class MainWindow(QMainWindow):
         self._dashboard_display_safety_request_id = None
         self._dashboard_display_safety_context = None
         self._dashboard_analysis_safety_allowed = result is True
+        if result is True:
+            self._schedule_legacy_metrics_batch()
+        else:
+            self._cancel_legacy_metrics_batch("safety_revoked")
         self.safety_retry_button.setVisible(result is not True)
         if result is True:
             self._dashboard_safety_retry_due = False
@@ -2414,6 +2605,7 @@ class MainWindow(QMainWindow):
             self._dashboard_display_safety_request_id = None
             self._dashboard_display_safety_context = None
             self._dashboard_analysis_safety_allowed = False
+            self._cancel_legacy_metrics_batch("safety_revoked")
             self.safety_retry_button.setVisible(True)
             self._set_sidebar_safety_status(
                 f"Аналитика скрыта · {self._safe_safety_error_kind(error_code)}")
@@ -2430,6 +2622,7 @@ class MainWindow(QMainWindow):
     def _revoke_dashboard_display_safety(self, status: str) -> None:
         self._invalidate_analysis_preflight()
         self._dashboard_analysis_safety_allowed = False
+        self._cancel_legacy_metrics_batch("safety_revoked")
         self._dashboard_display_safety_request_id = None
         self._dashboard_display_safety_context = None
         self._set_sidebar_safety_status(status)
@@ -2470,9 +2663,12 @@ class MainWindow(QMainWindow):
         return "сетевая ошибка"
 
     def _dashboard_filter_changed(self, *_args) -> None:
+        self._cancel_legacy_metrics_batch("account_switched")
         if hasattr(self, "dashboard_account"):
             selected = self.dashboard_account.currentData()
             self.settings.setValue("workspace/selected_account", selected or "")
+        if self._library_detail_safety_allowed():
+            self._schedule_legacy_metrics_batch()
         self._refresh_home_dashboard()
 
     def _layout_dashboard_metrics(self) -> None:
@@ -2830,6 +3026,9 @@ class MainWindow(QMainWindow):
             self._library_detail_safety_allowed(),
             "Статистика и кэшированные оценки скрыты до свежей проверки безопасного состояния Lichess.",
         )
+        dialog.set_metric_migration_status(
+            self._legacy_metrics_text,
+            safety_allowed=self._library_detail_safety_allowed())
         dialog.safety_requested.connect(self._request_dashboard_display_safety)
         # Track workers at application scope, so destroying an embedded page
         # cannot disconnect the completion path needed by window shutdown.
@@ -2857,8 +3056,9 @@ class MainWindow(QMainWindow):
         self.show_home()
 
     def _open_statistics_game(self, dialog: StatisticsDialog, game_id: str) -> None:
+        analysis_source = dialog.analysis_source.currentData() or None
         dialog.accept()
-        self._open_analysis_position(game_id, 0)
+        self._open_analysis_position(game_id, 0, analysis_source=analysis_source)
 
     def show_batch_analysis(self) -> None:
         if self._batch_dialog is not None:
@@ -3838,6 +4038,10 @@ class MainWindow(QMainWindow):
         self._review_safety_request_id = None
         self._review_safety_context = None
         self._dashboard_analysis_safety_allowed = bool(safe)
+        if safe:
+            self._schedule_legacy_metrics_batch()
+        else:
+            self._cancel_legacy_metrics_batch("safety_revoked")
         self._refresh_dashboard_analysis_visibility()
         if context and self._review_workspace_identity() == (
                 context["game_id"], context["line_revision"], context["line_hash"]):
@@ -3851,6 +4055,7 @@ class MainWindow(QMainWindow):
             self._review_safety_request_id = None
             self._review_safety_context = None
             self._dashboard_analysis_safety_allowed = False
+            self._cancel_legacy_metrics_batch("safety_revoked")
             self._refresh_dashboard_analysis_visibility()
             self._revoke_review_safety(
                 f"Заблокировано: проверка Lichess не выполнена ({message}).")
@@ -6421,6 +6626,7 @@ class MainWindow(QMainWindow):
                 "У аккаунта есть активная партия с человеком. Анализ Stockfish не запущен.")
             return
         self._dashboard_analysis_safety_allowed = True
+        self._schedule_legacy_metrics_batch()
         self._refresh_dashboard_analysis_visibility()
         _request, game_id, engine_path, options, _generation, _account_id, _service = context
         self._analysis_safety_phase = "running"
@@ -6615,11 +6821,12 @@ class MainWindow(QMainWindow):
             else:
                 self._notify_inline("Stockfish не сохранил оценки для этой партии.")
 
-    def _open_analysis_position(self, game_id: str, ply: int) -> bool:
+    def _open_analysis_position(self, game_id: str, ply: int, *,
+                                analysis_source: str | None = None) -> bool:
         game = self.game_repository.get_game(game_id)
         if not game:
             return False
-        if not self._open_saved_game(game):
+        if not self._open_saved_game(game, analysis_source=analysis_source):
             self.home_status.setText(self._raw_only_game_message(game))
             return False
         self.review_workspace.select_ply(ply)
@@ -6638,7 +6845,7 @@ class MainWindow(QMainWindow):
         return (f"Запись сохранена как исходный PGN. Вариант: {variant}. "
                 f"Просмотр доски и анализ недоступны: {reason}. Экспорт PGN доступен.")
 
-    def _open_saved_game(self, game: dict) -> bool:
+    def _open_saved_game(self, game: dict, *, analysis_source: str | None = None) -> bool:
         if not self._is_standard_board_game(game):
             self.home_status.setText(self._raw_only_game_message(game))
             return False
@@ -6669,7 +6876,8 @@ class MainWindow(QMainWindow):
         allowed, reason = self._review_training_safety()
         try:
             self.review_workspace.load_game(game, training_allowed=allowed,
-                                            training_block_reason=reason)
+                                            training_block_reason=reason,
+                                            analysis_source=analysis_source)
         except (KeyError, ValueError) as exc:
             self.home_status.setText(f"Не удалось открыть сохранённую линию: {exc}")
             return False
@@ -6702,6 +6910,8 @@ class MainWindow(QMainWindow):
             timer.stop()
         self._persist_workspace_state()
         self._shutdown_requested = True
+        self._legacy_metrics_timer.stop()
+        self._cancel_legacy_metrics_batch("shutdown")
         self._cancel_lichess_backfill_wakeup()
         for handle_name in ("_library_query_handle", "_library_detail_handle",
                             "_external_study_handle"):

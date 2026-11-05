@@ -30,6 +30,11 @@ class BackgroundOperationsPage(QWidget):
         self.source_summary.setWordWrap(True)
         self.source_summary.setObjectName("secondary")
         root.addWidget(self.source_summary)
+        self.local_metrics_status = QLabel("Локальные метрики v3: состояние не загружено.")
+        self.local_metrics_status.setWordWrap(True)
+        self.local_metrics_status.setObjectName("secondary")
+        self.local_metrics_status.setAccessibleName("Фоновое обновление метрик сохранённой аналитики")
+        root.addWidget(self.local_metrics_status)
         self.retry_status = QLabel("")
         self.retry_status.setWordWrap(True)
         self.retry_status.setObjectName("secondary")
@@ -53,7 +58,8 @@ class BackgroundOperationsPage(QWidget):
 
     def set_snapshot(self, operations, *, source_summary: str,
                      backfill_paused: bool, can_check: bool, can_pause: bool,
-                     retry_status: str = "", durable_statuses=()) -> None:
+                     retry_status: str = "", durable_statuses=(),
+                     local_metrics_status: str | None = None) -> None:
         durable_statuses = tuple(durable_statuses)
         self.operation_list.clear()
         for operation in operations:
@@ -73,6 +79,8 @@ class BackgroundOperationsPage(QWidget):
             f"{len(tuple(durable_statuses))}. Онлайн-ходы и проверки безопасности "
             "используют отдельные приоритетные ресурсы.")
         self.source_summary.setText(source_summary)
+        if local_metrics_status is not None:
+            self.local_metrics_status.setText(local_metrics_status)
         self.retry_status.setText(retry_status)
         self._paused = bool(backfill_paused)
         self.pause_button.setText("Возобновить Lichess" if self._paused

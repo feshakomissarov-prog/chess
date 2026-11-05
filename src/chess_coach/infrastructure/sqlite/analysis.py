@@ -14,6 +14,8 @@ from ...lichess.event_detectors import (
 )
 from ...lichess.move_metrics import METRIC_VERSION, build_move_facts
 from ...lichess.phases import PHASE_FALLBACK_VERSION, infer_phase_boundaries, phase_at_ply
+from ...domain.analysis_scope import (analysis_run_has_position_scores,
+                                      analysis_run_source_filter)
 
 class AnalysisStoreMixin:
 
@@ -284,9 +286,13 @@ class AnalysisStoreMixin:
 
     def latest_analysis_detail(self, game_id: str, line_revision: int, *,
                                account_id: str | None = None,
-                               user_color: str | None = None) -> dict | None:
+                               user_color: str | None = None,
+                               analysis_source: str | None = None) -> dict | None:
         """Load one current analysis and its plotted points/classifications for a detail view."""
         with self._connection() as db:
+            scored_run = analysis_run_has_position_scores("ar")
+            source_filter, source_params = analysis_run_source_filter("ar", analysis_source)
+            source_clause = f" AND ({source_filter})" if source_filter else ""
             run = db.execute(
                 "SELECT ar.* FROM analysis_runs ar JOIN game_revisions gr "
                 "ON gr.game_id=ar.game_id AND gr.line_revision=ar.line_revision "
@@ -294,9 +300,11 @@ class AnalysisStoreMixin:
                 "AND ar.status IN ('complete','partial') AND NOT EXISTS "
                 "(SELECT 1 FROM analysis_jobs aj WHERE aj.result_run_id=ar.run_id "
                 "AND aj.analysis_pass='review') "
-                "ORDER BY CASE WHEN ar.status='complete' THEN 0 ELSE 1 END,"
-                "ar.finished_at DESC,ar.run_id DESC LIMIT 1",
-                (game_id, line_revision)).fetchone()
+                + source_clause + " "
+                + f"ORDER BY CASE WHEN {scored_run} THEN 0 ELSE 1 END,"
+                + "CASE WHEN ar.status='complete' THEN 0 ELSE 1 END,"
+                + "ar.finished_at DESC,ar.run_id DESC LIMIT 1",
+                (game_id, line_revision, *source_params)).fetchone()
             if not run:
                 return None
             result = dict(run)
@@ -319,7 +327,11 @@ class AnalysisStoreMixin:
                 result["events"].extend(
                     event for event in derived_events
                     if event.get("event_key") not in existing_keys)
-                result["metrics_materialization_pending"] = result["source"] == "stockfish"
+                result["metrics_materialization_pending"] = (
+                    result["source"] in {"stockfish", "lichess-pgn", "lichess-json"}
+                    and any(item.get("white_cp") is not None or
+                            item.get("mate_white") is not None
+                            for item in result["assessments"]))
             else:
                 result["metrics_materialization_pending"] = False
             coverage = db.execute("SELECT * FROM analysis_coverage WHERE run_id=?",
@@ -389,8 +401,9 @@ class AnalysisStoreMixin:
         comparable = int(db.execute(
             "SELECT COUNT(*) FROM move_metrics mm JOIN game_moves gm ON gm.game_id=mm.game_id "
             "AND gm.line_revision=mm.line_revision AND gm.ply=mm.ply "
-            "WHERE mm.run_id=? AND gm.mover=? AND mm.cp_loss IS NOT NULL",
-            (run_id, color)).fetchone()[0])
+            "WHERE mm.run_id=? AND mm.metric_version=? AND gm.mover=? "
+            "AND mm.cp_loss IS NOT NULL",
+            (run_id, METRIC_VERSION, color)).fetchone()[0])
         missing = [int(row[0]) for row in db.execute(
             "SELECT gm.ply FROM game_moves gm WHERE gm.game_id=? AND gm.line_revision=? "
             "AND gm.mover=? AND NOT EXISTS (SELECT 1 FROM position_assessments pre "
@@ -450,47 +463,70 @@ class AnalysisStoreMixin:
         self.invalidate_statistics_cache()
         return count
 
-    def count_stale_analysis_metrics(self, *, game_id: str | None = None) -> int:
-        """Count current saved runs that lack current derived facts."""
+    @staticmethod
+    def _saved_metric_run_predicate(*, stale: bool) -> str:
+        predicate = ("gr.is_current=1 AND ar.source IN ('stockfish','lichess-pgn','lichess-json') "
+                     "AND ar.status IN ('complete','partial') "
+                     "AND NOT EXISTS (SELECT 1 FROM analysis_jobs aj "
+                     "WHERE aj.result_run_id=ar.run_id AND aj.analysis_pass='review') "
+                     "AND EXISTS (SELECT 1 FROM game_moves gm WHERE gm.game_id=ar.game_id "
+                     "AND gm.line_revision=ar.line_revision) "
+                     "AND EXISTS (SELECT 1 FROM position_assessments pa "
+                     "WHERE pa.run_id=ar.run_id AND "
+                     "(pa.white_cp IS NOT NULL OR pa.mate_white IS NOT NULL))")
+        if stale:
+            predicate += (" AND NOT EXISTS (SELECT 1 FROM move_metrics mm "
+                          "WHERE mm.run_id=ar.run_id AND mm.metric_version=?)")
+        return predicate
+
+    def analysis_metrics_migration_status(self, *, account_id: str | None = None) -> dict[str, int]:
+        """Return eligible/current and stale counts, scoped to an account when requested."""
+        scope = (" AND EXISTS (SELECT 1 FROM account_games ag WHERE ag.game_id=ar.game_id "
+                 "AND ag.account_id=?)") if account_id else ""
+        params: list[object] = ([account_id] if account_id else [])
+        predicate = self._saved_metric_run_predicate(stale=False) + scope
+        stale_predicate = self._saved_metric_run_predicate(stale=True) + scope
+        with self._connection() as db:
+            total = int(db.execute(
+                "SELECT COUNT(*) FROM analysis_runs ar JOIN game_revisions gr "
+                "ON gr.game_id=ar.game_id AND gr.line_revision=ar.line_revision WHERE "
+                + predicate, params).fetchone()[0])
+            remaining = int(db.execute(
+                "SELECT COUNT(*) FROM analysis_runs ar JOIN game_revisions gr "
+                "ON gr.game_id=ar.game_id AND gr.line_revision=ar.line_revision WHERE "
+                + stale_predicate, [METRIC_VERSION, *params]).fetchone()[0])
+        return {"total": total, "remaining": remaining, "done": max(0, total - remaining)}
+
+    def count_stale_analysis_metrics(self, *, game_id: str | None = None,
+                                     account_id: str | None = None) -> int:
+        """Count eligible current scored runs that lack current derived facts."""
         sql = ("SELECT COUNT(*) FROM analysis_runs ar JOIN game_revisions gr "
-               "ON gr.game_id=ar.game_id AND gr.line_revision=ar.line_revision "
-               "WHERE gr.is_current=1 AND ar.source='stockfish' "
-               "AND ar.status IN ('complete','partial') AND NOT EXISTS "
-               "(SELECT 1 FROM analysis_jobs aj WHERE aj.result_run_id=ar.run_id "
-               "AND aj.analysis_pass='review') AND EXISTS (SELECT 1 FROM game_moves gm "
-               "WHERE gm.game_id=ar.game_id AND gm.line_revision=ar.line_revision) "
-               "AND NOT EXISTS (SELECT 1 FROM move_metrics mm WHERE mm.run_id=ar.run_id "
-               "AND mm.metric_version=?)")
+               "ON gr.game_id=ar.game_id AND gr.line_revision=ar.line_revision WHERE "
+               + self._saved_metric_run_predicate(stale=True))
         params: list[object] = [METRIC_VERSION]
         if game_id is not None:
             sql += " AND ar.game_id=?"
             params.append(game_id)
+        if account_id is not None:
+            sql += " AND EXISTS (SELECT 1 FROM account_games ag WHERE ag.game_id=ar.game_id AND ag.account_id=?)"
+            params.append(account_id)
         with self._connection() as db:
             return int(db.execute(sql, params).fetchone()[0])
 
     def materialize_stale_analysis_for_game(self, game_id: str) -> dict[str, int]:
-        """Lazily update the selected game's latest Stockfish run; call from a worker."""
+        """Lazily update the selected game's saved scored runs; call from a worker."""
+        predicate = self._saved_metric_run_predicate(stale=True)
         with self._connection() as db:
             total = int(db.execute(
                 "SELECT COUNT(*) FROM analysis_runs ar JOIN game_revisions gr "
                 "ON gr.game_id=ar.game_id AND gr.line_revision=ar.line_revision "
-                "WHERE ar.game_id=? AND gr.is_current=1 AND ar.source='stockfish' "
-                "AND ar.status IN ('complete','partial') AND NOT EXISTS "
-                "(SELECT 1 FROM analysis_jobs aj WHERE aj.result_run_id=ar.run_id "
-                "AND aj.analysis_pass='review') AND EXISTS (SELECT 1 FROM game_moves gm "
-                "WHERE gm.game_id=ar.game_id AND gm.line_revision=ar.line_revision) "
-                "AND NOT EXISTS (SELECT 1 FROM move_metrics mm WHERE mm.run_id=ar.run_id "
-                "AND mm.metric_version=?)", (game_id, METRIC_VERSION)).fetchone()[0])
+                "WHERE ar.game_id=? AND " + predicate,
+                (game_id, METRIC_VERSION)).fetchone()[0])
             runs = [str(row[0]) for row in db.execute(
                 "SELECT ar.run_id FROM analysis_runs ar JOIN game_revisions gr "
                 "ON gr.game_id=ar.game_id AND gr.line_revision=ar.line_revision "
-                "WHERE ar.game_id=? AND gr.is_current=1 AND ar.source='stockfish' "
-                "AND ar.status IN ('complete','partial') AND NOT EXISTS "
-                "(SELECT 1 FROM analysis_jobs aj WHERE aj.result_run_id=ar.run_id "
-                "AND aj.analysis_pass='review') AND EXISTS (SELECT 1 FROM game_moves gm "
-                "WHERE gm.game_id=ar.game_id AND gm.line_revision=ar.line_revision) "
-                "AND NOT EXISTS (SELECT 1 FROM move_metrics mm WHERE mm.run_id=ar.run_id "
-                "AND mm.metric_version=?) ORDER BY ar.finished_at DESC,ar.run_id DESC LIMIT 5",
+                "WHERE ar.game_id=? AND " + predicate
+                + " ORDER BY ar.finished_at DESC,ar.run_id DESC LIMIT 5",
                 (game_id, METRIC_VERSION))]
         processed = 0
         moves = 0
@@ -507,17 +543,12 @@ class AnalysisStoreMixin:
         """Process a bounded resumable batch; current-version rows are its checkpoint."""
         limit = max(1, min(int(limit), 25))
         total = self.count_stale_analysis_metrics()
+        predicate = self._saved_metric_run_predicate(stale=True)
         with self._connection() as db:
             runs = [str(row[0]) for row in db.execute(
                 "SELECT ar.run_id FROM analysis_runs ar JOIN game_revisions gr "
                 "ON gr.game_id=ar.game_id AND gr.line_revision=ar.line_revision "
-                "WHERE gr.is_current=1 AND ar.source='stockfish' "
-                "AND ar.status IN ('complete','partial') AND EXISTS (SELECT 1 FROM game_moves gm "
-                "WHERE gm.game_id=ar.game_id AND gm.line_revision=ar.line_revision) "
-                "AND NOT EXISTS (SELECT 1 FROM analysis_jobs aj WHERE aj.result_run_id=ar.run_id "
-                "AND aj.analysis_pass='review') AND NOT EXISTS "
-                "(SELECT 1 FROM move_metrics mm WHERE mm.run_id=ar.run_id "
-                "AND mm.metric_version=?) ORDER BY ar.finished_at,ar.run_id LIMIT ?",
+                "WHERE " + predicate + " ORDER BY ar.finished_at,ar.run_id LIMIT ?",
                 (METRIC_VERSION, limit))]
         processed = 0
         for run_id in runs:

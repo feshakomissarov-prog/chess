@@ -61,7 +61,8 @@ def _pv(row: dict[str, Any] | None) -> list[str]:
     return list(value) if isinstance(value, (list, tuple)) else str(value).split()
 
 
-def load_game_review(repository, game: dict[str, Any]) -> dict[str, Any]:
+def load_game_review(repository, game: dict[str, Any], *,
+                     analysis_source: str | None = None) -> dict[str, Any]:
     """Read current line, saved analysis, source-aware metrics and notes, without UCI."""
     game_id = str(game["game_id"])
     line = repository.current_line(game_id)
@@ -71,7 +72,8 @@ def load_game_review(repository, game: dict[str, Any]) -> dict[str, Any]:
     account_id = game.get("account_id")
     owner_color = game.get("account_color") or game.get("color")
     analysis = repository.latest_analysis_detail(
-        game_id, revision, account_id=account_id, user_color=owner_color)
+        game_id, revision, account_id=account_id, user_color=owner_color,
+        analysis_source=analysis_source)
 
     fen = chess.STARTING_FEN if line["initial_fen"] == "startpos" else line["initial_fen"]
     board = chess.Board(fen)
