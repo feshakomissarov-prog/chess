@@ -2,6 +2,9 @@
 
 **Статус:** постоянная инструкция для ИИ-разработчика. Рабочий язык общения и отчётов — **русский**. Названия API, файлов и идентификаторов оставлять оригинальными.
 
+> **ДОПОЛНЕНИЕ К ВЫДАННОМУ RF6 · 05.11.2026:** владелец требует [**RF6-09…RF6-11 — Lichess-method Accuracy и Stockfish forced mate**](docs/specs/ARCH_UX_01_REVIEW_FIX_06_INDEPENDENT_REVIEW.md#дополнение-05112026--rf6-09rf6-11-lichess-accuracy-и-форсированные-маты-stockfish) с полным зафиксированным [исследованием и спецификацией](docs/specs/LICHESS_STOCKFISH_ACCURACY_MATE_V1.md). Продолжать тот же code draft PR #44; уже существующие domain/accuracy.py и game_review.py **не дублировать**; устранить move_metrics accuracy=None, фиктивный CP для UCI mate, пустую шкалу мата, добавить матовые события и golden parity. **Официальную точность Lichess не перезаписывать, Fair Play не ослаблять.** Этот пункт новее предыдущего указания RF6-01…08 и добавляется к нему (RF6-01…11).
+
+
 > **НОВЕЙШЕЕ 05.11.2026 — независимое ревью RF5, исполнять REVIEW-FIX-06:** после exact-head [CI #41945044572](https://github.com/feshakomissarov-prog/chess/actions/runs/41945044572) **687 PASS** в кодовом draft PR #44 на `881a8d8f49c2cbdae7ffb1f5c4d79d0f091bafc9` обнаружены **подтверждённые функциональные регрессии и пробелы тестов**. Текущий документ для Codex — [**REVIEW-FIX-06 RF6-01…RF6-08**](docs/specs/ARCH_UX_01_REVIEW_FIX_06_INDEPENDENT_REVIEW.md): неверное разлогинивание от ошибки фоновой аналитики 401/403, отключение кнопки Disconnect при pending/429, смешение профилей Home, неоткрытие нужной Recent-партии при фильтрах, исчезновение прежних auto archive/puzzle sync, отсутствие due-time повторной проверки безопасности после 429, collapsed sidebar/tooltip и регрессии. **RF5 не принят для merge; не повторять W0–W9/A0–A12/RF1–RF5.** Работать в существующем draft PR #44; docs-only PR #45 не сливать, main не менять, реальные PAT/PGN/SQLite не трогать. 687 PASS подтверждают baseline, не принятие продукта.
 
 
