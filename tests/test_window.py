@@ -3981,8 +3981,9 @@ def test_unrelated_game_error_does_not_clear_pending_challenge(qtbot, tmp_path):
     window.close()
 
 
-def test_friend_create_has_visible_safe_pending_cancel_before_server_id(qtbot, tmp_path,
-                                                                       monkeypatch):
+@pytest.mark.parametrize("cancel_location", ["play", "game"])
+def test_friend_create_has_visible_safe_pending_cancel_before_server_id(
+        qtbot, tmp_path, monkeypatch, cancel_location):
     window = MainWindow(QSettings(str(tmp_path / "friend-cancel-pending.ini"),
                                   QSettings.Format.IniFormat), offline_mode=True)
     qtbot.addWidget(window)
@@ -4006,7 +4007,10 @@ def test_friend_create_has_visible_safe_pending_cancel_before_server_id(qtbot, t
     assert len(called) == 1
     assert page.cancel_pending_button.isVisible()
     assert page.cancel_pending_button.isEnabled()
-    page.cancel_pending_button.click()
+    if cancel_location == "play":
+        page.cancel_pending_button.click()
+    else:
+        window.cancel_challenge_button.click()
     assert service.cancelled == [("friend-request", 20)]
     assert window._awaiting_game_start
     assert len(called) == 1

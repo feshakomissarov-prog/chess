@@ -1693,7 +1693,7 @@ class MainWindow(QMainWindow):
         self.games_button.clicked.connect(self.show_saved_games)
         side_layout.addWidget(self.games_button)
         self.cancel_challenge_button = QPushButton("Отменить ожидающий вызов")
-        self.cancel_challenge_button.clicked.connect(self.cancel_username_challenge)
+        self.cancel_challenge_button.clicked.connect(self._cancel_play_challenge_wait)
         self.cancel_challenge_button.setEnabled(False)
         self.cancel_challenge_button.setVisible(False)
         side_layout.addWidget(self.cancel_challenge_button)
@@ -5579,10 +5579,6 @@ class MainWindow(QMainWindow):
         else:
             reason = "Безопасность аккаунта не подтверждена."
         dialog.set_readiness(engine_path, verified, account_connected, reason)
-
-    def cancel_username_challenge(self) -> None:
-        if self.lichess:
-            self.lichess.cancel_username_challenge()
 
     def show_active_games(self) -> None:
         if not self._online_actions_allowed():
