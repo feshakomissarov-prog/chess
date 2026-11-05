@@ -1,3 +1,11 @@
+## 05.11.2026 — дополнение к REVIEW-FIX-06: формула Lichess Accuracy + форсированный мат
+
+Исследованы **официальная lichess.org/page/accuracy** и первоисточники lila **AccuracyPercent.scala**, **tree/eval.scala**, **Advice.scala** и scalachess **eval.scala** (SHA blob зафиксированы в [LICHESS_STOCKFISH_ACCURACY_MATE_V1](specs/LICHESS_STOCKFISH_ACCURACY_MATE_V1.md)). Подтверждены sigmoid Win% с CP clamp ±1000, move accuracy по изменению Win% с **+1 uncertainty bonus** в текущем Lichess, volatility-weighted/harmonic game accuracy, специальные Mate/Mate(0)/MateGiven без выдуманных CP. **Код PR #44 на SHA 881a8d8f… уже имеет расчёт точности полной партии в domain/accuracy.py, фактически вызываемый lichess/game_review.py; дублировать его нельзя.** Найдены конкретные пробелы: move_metrics.py записывает **accuracy=None для всех ходов** и severity unknown для mate переходов; position_analysis.py генерирует искусственное score(mate_score=100000); ui/game_review.py делает пустой advantage bar при любой матовой оценке. При этом полная Postgame analysis сохраняет CP и Mate раздельно корректно.
+
+По решению владельца в [REVIEW-FIX-06](specs/ARCH_UX_01_REVIEW_FIX_06_INDEPENDENT_REVIEW.md) добавлены **RF6-09…RF6-11**: проверка формулы по актуальному Scala и golden fixtures; per-move local accuracy и события форсированного мата без подмены CP; Review/Progress/vertical bar/coverage с разделением server official vs Chess Coach local. Codex, уже получивший RF6-01…08, должен перечитать обновлённое ТЗ и выполнить все **RF6-01…11** одним циклом в draft PR #44, без merge/main, с новым exact-head Windows CI и физической приёмкой. Статус программных исправлений RF6-09…11 — **ТЗ создано, код ещё не изменён**.
+
+---
+
 ## 05.11.2026 — независимое ревью RF5: Windows CI 687 PASS, **к слиянию НЕ ПРИНЯТО**, активное REVIEW-FIX-06
 
 Проверен exact кодовый HEAD `881a8d8f49c2cbdae7ffb1f5c4d79d0f091bafc9` в [draft PR #44](https://github.com/feshakomissarov-prog/chess/pull/44): GitHub [Windows run #41945044572](https://github.com/feshakomissarov-prog/chess/actions/runs/41945044572) **completed/SUCCESS** на том же SHA, **687 passed**, compileall и offline window PASS. Реальный Lichess/PAT/пользовательские партии не проверены (BLOCKED), физическая приёмка владельца не дана.
