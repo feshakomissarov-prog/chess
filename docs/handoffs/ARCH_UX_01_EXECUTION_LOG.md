@@ -17,7 +17,7 @@
 
 **Local gates before publication:** full pytest **750 passed** (Python 3.12.10, Qt offscreen, thread warnings treated as errors); CLI→runtime→MainWindow offline/manual integration **2 passed**; `compileall` and `git diff --check` passed. The visible smoke harness was corrected to read `review["positions"]` (not `review["board"]`), then run against the actual `BoardView`; it completed `VISIBLE_GUI_SMOKE_PASS`.
 
-**Hosted Windows CI:** run [#284](https://github.com/feshakomissarov-prog/chess/actions/runs/42003567503) **SUCCESS** on code commit `9522d93cde2d98685d809592c81c979b5d919e2c`; Windows Server, Python 3.12.10, **750 passed in 322.29s**, compileall and isolated offline-window initialization passed. CI is also rerun on the final documentation commit before handoff. No physical owner data or screenshots were stored in the repository.
+**Hosted Windows CI:** run [#284](https://github.com/feshakomissarov-prog/chess/actions/runs/42003567503) **SUCCESS** on code commit `9522d93cde2d98685d809592c81c979b5d919e2c`; Windows Server, Python 3.12.10, **750 passed in 322.29s**, compileall and isolated offline-window initialization passed. A final exact-head CI is run after this RF8 regression and documentation update. The smoke correction is also protected by Qt regression assertions that render both mate lines from `review["positions"]` and verify the terminal BoardView FEN. No physical owner data or screenshots were stored in the repository.
 
 ## 05.11.2026 — REVIEW-FIX-05 RF5-00…RF5-12 implementation
 

@@ -243,7 +243,8 @@ def test_application_resumes_bounded_v2_materialization_in_background_and_masks_
     ("f2f3 e7e5 g2g4 d8h4", "lichess-pgn"),  # Qh4#
     ("e2e4 e7e5 d1h5 b8c6 f1c4 g8f6 h5f7", "stockfish"),  # Qxf7#
 ])
-def test_legacy_mate_positions_materialize_as_typed_source_aware_metrics(tmp_path, moves, source):
+def test_legacy_mate_positions_materialize_and_render_final_board(
+        qtbot, tmp_path, moves, source):
     repo = GameRepository(tmp_path / f"mate-{len(moves)}.sqlite3")
     try:
         board = chess.Board()
@@ -263,5 +264,17 @@ def test_legacy_mate_positions_materialize_as_typed_source_aware_metrics(tmp_pat
             assert any(row["event_type"] == "checkmate_terminal" for row in detail["events"])
         else:
             assert detail["move_metrics"][-1]["accuracy"] is None
+
+        # The desktop review renders the final stored position from the
+        # review model's positions list (the smoke harness used to read a
+        # nonexistent `board` key and silently failed to check the GUI board).
+        from chess_coach.ui.game_review import GameReviewWorkspace
+        workspace = GameReviewWorkspace(repo)
+        qtbot.addWidget(workspace)
+        workspace.load_game(repo.get_game(f"mate-{len(moves)}"), training_allowed=False)
+        workspace.select_ply(len(moves.split()))
+        assert workspace.selected_ply == len(review_positions := workspace.review["positions"]) - 1
+        assert workspace.review_board._board.fen() == review_positions[-1].fen()
+        assert workspace.review_board._board.is_checkmate()
     finally:
         repo.shutdown()
