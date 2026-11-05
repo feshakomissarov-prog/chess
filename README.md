@@ -1,5 +1,8 @@
 # Chess Coach
 
+> **05.11.2026: после source-аудита Блок I + II актуальное техническое задание — [полный ARCH-UX-01 MASTER AUDIT](docs/specs/ARCH_UX_01_FULL_SYSTEM_AUDIT_MASTER_2026_11_05.md)**: 11 CORE + 11 UI замечаний, матрица всех 24 функций, единый цикл исправлений в code draft PR #44. Ранее отдельное RF9 включено в MASTER. GitHub CI #286 750 PASS — только baseline, не владельческая приёмка. Draft PR #44/#45 не сливать, main не менять.
+
+
 > **Новые данные 05.11.2026:** кодовый draft PR #44 на SHA `881a8d8f…` прошёл [Windows CI #41945044572](https://github.com/feshakomissarov-prog/chess/actions/runs/41945044572) (687 PASS), но независимая проверка нашла недочёты auth-status Lichess, кнопки Disconnect при 429, scope Home/последних партий и потерю auto-sync. **RF5 к merge не принят; текущее корректирующее [REVIEW-FIX-06](docs/specs/ARCH_UX_01_REVIEW_FIX_06_INDEPENDENT_REVIEW.md)**, RF6-01…08. Код только в draft PR #44, docs в draft PR #45, main не менять.
 
 
