@@ -208,16 +208,24 @@ def test_opening_matcher_worker_can_finish_after_dialog_is_destroyed(
     dialog = StatisticsDialog(repo)
     dialog._refresh_timer.stop()
     dialog._start_opening_refresh()
-    assert started.wait(2)
     hub = dialog._worker_hub
     worker = dialog._opening_thread
-    assert worker in hub.active_threads
-    shiboken6.delete(dialog)
-    assert not shiboken6.isValid(dialog)
-    release.set()
-    qtbot.waitUntil(lambda: worker not in hub.active_threads, timeout=4000)
-    assert not worker.is_alive()
-    repo.shutdown()
+    try:
+        # This test verifies safe destruction while work is in flight, not a
+        # startup-time SLA. A full Windows suite can temporarily starve a new
+        # Python thread; wait for the barrier without asserting a two-second
+        # response time.
+        qtbot.waitUntil(started.is_set, timeout=10000)
+        assert worker in hub.active_threads
+        shiboken6.delete(dialog)
+        assert not shiboken6.isValid(dialog)
+        release.set()
+        qtbot.waitUntil(lambda: worker not in hub.active_threads, timeout=10000)
+        assert not worker.is_alive()
+    finally:
+        release.set()
+        worker.join(timeout=5)
+        repo.shutdown()
 
 
 def test_statistics_worker_keeps_main_window_alive_until_result_dispatch_finishes(
