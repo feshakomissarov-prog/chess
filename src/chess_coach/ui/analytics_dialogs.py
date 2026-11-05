@@ -33,23 +33,30 @@ class EvaluationGraph(QWidget):
         self.phase_boundaries = phase_boundaries
         self.setMinimumHeight(210)
         self.setMinimumWidth(420)
+        self._last_mate_markers: list[tuple[int, int, str]] = []
+        self._last_rendered_cp_segments: list[tuple[int, int]] = []
 
     def _points(self):
         values = []
         for item in self.assessments:
             score = item.get("white_cp")
-            if score is None and item.get("mate_white") is not None:
-                score = 1000 if item["mate_white"] > 0 else -1000 if item["mate_white"] < 0 else 0
             if score is not None:
                 values.append((int(item["ply"]), max(-1000, min(1000, int(score)))))
         return values
+
+    def _mates(self):
+        return [(int(item["ply"]), int(item["mate_white"]))
+                for item in self.assessments if item.get("mate_white") is not None]
 
     def paintEvent(self, _event) -> None:
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
         rect = self.rect().adjusted(32, 12, -12, -26)
         points = self._points()
-        max_ply = max(1, max((ply for ply, _ in points), default=0))
+        mates = self._mates()
+        self._last_mate_markers = []
+        self._last_rendered_cp_segments = []
+        max_ply = max(1, max((int(item["ply"]) for item in self.assessments), default=0))
         boundaries = self.phase_boundaries or {}
         middle = boundaries.get("middle_start_ply")
         end = boundaries.get("end_start_ply")
@@ -78,7 +85,7 @@ class EvaluationGraph(QWidget):
                 painter.drawText(left + 3, rect.top() + 16, label)
         painter.setPen(QPen(QColor("#777777"), 1))
         painter.drawLine(rect.left(), rect.center().y(), rect.right(), rect.center().y())
-        if not points:
+        if not points and not mates:
             painter.drawText(rect, Qt.AlignmentFlag.AlignCenter, "Нет оценок для графика")
             return
         coords = []
@@ -87,11 +94,24 @@ class EvaluationGraph(QWidget):
             y = rect.center().y() - int((rect.height() * score) / 2000)
             coords.append((x, y))
         painter.setPen(QPen(QColor("#315f9b"), 2))
-        for first, second in zip(coords, coords[1:]):
-            painter.drawLine(first[0], first[1], second[0], second[1])
+        for first_point, second_point, first, second in zip(points, points[1:], coords, coords[1:]):
+            if second_point[0] == first_point[0] + 1:
+                painter.drawLine(first[0], first[1], second[0], second[1])
+                self._last_rendered_cp_segments.append((first_point[0], second_point[0]))
         painter.setBrush(QColor("#315f9b"))
         for x, y in coords:
             painter.drawEllipse(x - 3, y - 3, 6, 6)
+        for ply, mate in mates:
+            x = rect.left() + int(rect.width() * ply / max_ply)
+            y = rect.top() + 12 if mate > 0 else rect.bottom() - 12 if mate < 0 else rect.center().y()
+            label = f"M{mate}" if mate > 0 else f"−M{abs(mate)}" if mate < 0 else "M0"
+            color = QColor("#a13d45") if mate < 0 else QColor("#397a55")
+            painter.setPen(QPen(color, 2))
+            painter.setBrush(color)
+            painter.drawEllipse(x - 4, y - 4, 8, 8)
+            text_x = max(rect.left() + 2, min(rect.right() - 44, x + 5))
+            painter.drawText(text_x, max(rect.top() + 12, min(rect.bottom() - 2, y - 5)), label)
+            self._last_mate_markers.append((ply, mate, label))
         for boundary in (middle, end):
             if boundary is not None and 0 <= int(boundary) <= max_ply:
                 x = rect.left() + int(rect.width() * int(boundary) / max_ply)
@@ -105,9 +125,9 @@ class EvaluationGraph(QWidget):
 
     def mousePressEvent(self, event) -> None:
         points = self._points()
-        if points:
+        if points or self._mates():
             rect = self.rect().adjusted(32, 12, -12, -26)
-            max_ply = max(1, max(ply for ply, _ in points))
+            max_ply = max(1, max((int(item["ply"]) for item in self.assessments), default=0))
             ply = round((event.position().x() - rect.left()) * max_ply / max(1, rect.width()))
             self.selected_ply.emit(max(0, min(max_ply, ply)))
 
@@ -251,9 +271,12 @@ class StatisticsGameDialog(QDialog):
             for item in metrics:
                 label = str(item.get("severity", "unknown"))
                 if label in {"mistake", "blunder", "inaccuracy"}:
+                    move_accuracy = item.get("accuracy")
+                    accuracy_suffix = (f" · локальная точность {float(move_accuracy):.1f}%"
+                                       if move_accuracy is not None else "")
                     row = QListWidgetItem(
                         f"Ход {item['ply']} · {label} · {item.get('phase') or 'фаза неизвестна'} · "
-                        f"{item.get('cp_loss')} CP · {item.get('source')}")
+                        f"{item.get('cp_loss')} CP · {item.get('source')}{accuracy_suffix}")
                     row.setData(Qt.ItemDataRole.UserRole, int(item["ply"]))
                     self.errors.addItem(row)
             severity_counts = {label: sum(1 for item in metrics
@@ -269,12 +292,27 @@ class StatisticsGameDialog(QDialog):
             phase_summary = " · ".join(
                 f"{phase}: {values['inaccuracy']}/{values['mistake']}/{values['blunder']}"
                 for phase, values in sorted(own_phase_counts.items())) or "нет классифицированных ходов"
+            local_accuracy_rows = [item for item in metrics
+                                   if item.get("mover") == color
+                                   and item.get("accuracy") is not None
+                                   and item.get("accuracy_source") ==
+                                   "stockfish-local-lichess-method"]
+            local_move_accuracy = (
+                sum(float(item["accuracy"]) for item in local_accuracy_rows)
+                / len(local_accuracy_rows) if local_accuracy_rows else None)
+            local_accuracy_detail = (
+                f"Локальная точность отдельных ходов: {local_move_accuracy:.1f}% "
+                f"(n={len(local_accuracy_rows)}/{sum(item.get('mover') == color for item in metrics)}, "
+                f"методика Lichess, неофициально, формула "
+                f"{local_accuracy_rows[0].get('accuracy_formula_id')})"
+                if local_move_accuracy is not None else
+                "Локальная точность отдельных ходов: нет подтверждённых соседних оценок с глубиной")
             self.graph_layout.addWidget(QLabel(
                 f"Свои неточности/ошибки/зевки: {severity_counts['inaccuracy']}/"
                 f"{severity_counts['mistake']}/{severity_counts['blunder']} "
                 f"(сопоставимых оценённых ходов: {sum(1 for item in metrics if item.get('mover') == color and item.get('cp_loss') is not None)})\n"
                 f"По фазам (неточности/ошибки/зевки): {phase_summary}\n"
-                "Локальная точность: недоступна, formula_id не утверждён."))
+                f"{local_accuracy_detail}"))
             for event in analysis.get("events", []):
                 confidence = event.get("confidence_state", "unknown")
                 try:
@@ -861,6 +899,13 @@ class StatisticsDialog(QDialog):
                 if int(summary.get("own_assessed_moves") or 0) > 0 else
                 "Классификация собственных ходов: нет данных")
             accuracy = summary["lichess_accuracy"]
+            local_move_accuracy = summary.get("local_move_accuracy")
+            local_accuracy_text = (
+                f"Средняя точность отдельных ходов Chess Coach: {local_move_accuracy}% "
+                f"(n={summary.get('local_move_accuracy_n', 0)}, методика Lichess, "
+                f"неофициально, формула {summary.get('local_move_accuracy_formula_id')})"
+                if local_move_accuracy is not None else
+                "Локальная точность отдельных ходов: нет подтверждённых оценённых пар")
             scope = ("Смешанные локальные аккаунты; результаты по цвету в профиле партии."
                      if not self.account.currentData() else
                      f"Аккаунт: {self.account.currentText()}")
@@ -877,6 +922,7 @@ class StatisticsDialog(QDialog):
                 f"{summary['own_error_rate_per_100'] if summary['own_error_rate_per_100'] is not None else 'нет данных'}\n"
                 f"Официальная точность Lichess: белые {accuracy['white'] if accuracy['white'] is not None else 'нет данных'}, "
                 f"чёрные {accuracy['black'] if accuracy['black'] is not None else 'нет данных'}. "
+                f"{local_accuracy_text}. "
                 "Н/д означает отсутствие подходящего источника или знаменателя, а не нулевой результат.")
             profile = summary.get("personal_profile")
             if isinstance(profile, dict):
@@ -889,6 +935,13 @@ class StatisticsDialog(QDialog):
                                      f"нет официальной accuracy ({official['n']}/{official['games']} игр)")
                     quality = (f"{stats['own_error_rate_per_100']} ошибок/100 оценённых ходов"
                                if stats["own_error_rate_per_100"] is not None else "ошибки/100: нет знаменателя")
+                    local_profile_accuracy = stats.get("local_move_accuracy")
+                    local_profile_text = (
+                        f"средняя точность отдельных ходов Chess Coach {local_profile_accuracy}% "
+                        f"(n={stats.get('local_move_accuracy_n', 0)}, неофициально, "
+                        f"формула {stats.get('local_move_accuracy_formula_id')})"
+                        if local_profile_accuracy is not None else
+                        "локальная точность ходов: нет оценённых пар")
                     average_errors = (f"среднее ошибок на анализированную игру: "
                                       f"{stats['avg_mistakes_per_analyzed_game']} ошибок + "
                                       f"{stats['avg_blunders_per_analyzed_game']} зевков "
@@ -898,7 +951,8 @@ class StatisticsDialog(QDialog):
                     sections.append(f"{('Белые' if color == 'white' else 'Чёрные')}, "
                                     f"{segment['current_window']}: игр {stats['games']}, "
                                     f"полных анализов {segment['complete_games']}, {confidence}; "
-                                    f"официальная accuracy {official_text}; {quality}; {average_errors}")
+                                    f"официальная accuracy {official_text}; {quality}; "
+                                    f"{local_profile_text}; {average_errors}")
                     diagnostics = segment["opening_phase_diagnostics"]
                     phase_lines = [f"{item['phase']}: {item['errors']} ошибок / "
                                    f"{item['evaluated_moves']} оценённых собственных ходов"

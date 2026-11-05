@@ -13,7 +13,10 @@ from typing import Any
 import chess
 
 
-FORMULA_ID = "lichess-accuracy-2e653ad1-v1"
+# Lichess AccuracyPercent.scala, immutable source blob verified 2026-11-05.
+# Keep the former id as a historical value; never rewrite saved official accuracy.
+FORMULA_ID = "lichess-accuracy-a46b4e6d9d80a100-v2"
+REFERENCE_SOURCE_SHA = "a46b4e6d9d80a100c2a617db8bbc558bcec918d5"
 SUPPORTED_SOURCES = {"stockfish", "lichess-pgn", "lichess-json"}
 ACTIVE_STATUSES = {"created", "started", "started_soon", "playing"}
 
@@ -27,6 +30,7 @@ class AccuracyResult:
     source: str | None = None
     coverage: tuple[int, int] = (0, 0)
     depth_range: tuple[int, int] | None = None
+    terminal_positions_derived: int = 0
 
 
 def win_percent_cp(cp: int) -> float:
@@ -64,16 +68,27 @@ def _harmonic_mean(values: list[float]) -> float | None:
 def _game_scores(rows: list[dict[str, Any]], positions: list[chess.Board]) -> list[float]:
     scores: list[float] = []
     for ply, row in enumerate(rows):
+        board = positions[ply]
+        if ply == len(positions) - 1 and board.is_checkmate():
+            # The legal terminal board is stronger evidence than a missing,
+            # stale, or depthless engine score at the final node.
+            scores.append(win_percent_cp(1000 if board.turn == chess.BLACK else -1000))
+            continue
         if row.get("white_cp") is not None:
             scores.append(win_percent_cp(int(row["white_cp"])))
             continue
         mate = row.get("mate_white")
         if mate is None:
+            # A legal terminal checkmate has a known result independently of
+            # engine depth. Other missing evaluations remain unknown.
             raise ValueError("missing_score")
         mate = int(mate)
         if mate == 0:
-            # Lichess Mate(0) means the side to move is mated.
-            white_wins = positions[ply].turn == chess.BLACK
+            # Mate(0) is meaningful only when the legal board proves checkmate.
+            board = positions[ply]
+            if not board.is_checkmate():
+                raise ValueError("nonterminal_mate_zero")
+            white_wins = board.turn == chess.BLACK
             scores.append(win_percent_cp(1000 if white_wins else -1000))
         else:
             scores.append(win_percent_cp(1000 if mate > 0 else -1000))
@@ -126,6 +141,10 @@ def calculate_saved_game_accuracy(game: dict[str, Any], line: dict[str, Any],
         return AccuracyResult({"white": None, "black": None}, "unavailable",
                               "Нет совместимого источника позиционных оценок.",
                               source=source, coverage=(0, expected))
+    if str(analysis.get("status") or "") != "complete":
+        return AccuracyResult({"white": None, "black": None}, "incomplete",
+                              "Для точности нужна завершённая запись анализа.",
+                              source=source, coverage=(0, expected))
     if (int(analysis.get("line_revision") or -1) != int(line.get("line_revision") or -2)
             or str(analysis.get("line_hash") or "") != str(line.get("line_hash") or "")):
         return AccuracyResult({"white": None, "black": None}, "unavailable",
@@ -136,12 +155,20 @@ def calculate_saved_game_accuracy(game: dict[str, Any], line: dict[str, Any],
     scored = sum(row is not None and
                  (row.get("white_cp") is not None or row.get("mate_white") is not None)
                  for row in covered)
-    if len(positions) != expected or scored != expected:
+    terminal_derived = bool(len(positions) == expected and positions[-1].is_checkmate())
+    terminal_missing = bool(terminal_derived and (not covered or covered[-1] is None or
+                            covered[-1].get("depth") is None or
+                            covered[-1].get("mate_white") == 0))
+    if len(positions) != expected or (scored != expected and not
+                                      (terminal_missing and scored == expected - 1)):
         return AccuracyResult({"white": None, "black": None}, "incomplete",
                               "Нужны оценки всех позиций, включая исходную; охват неполный.",
                               source=source, coverage=(scored, expected))
-    depths = [int(row["depth"]) for row in covered if row.get("depth") is not None]
-    if len(depths) != expected:
+    depth_rows = [row for ply, row in enumerate(covered) if row is not None and
+                  (row.get("white_cp") is not None or row.get("mate_white") is not None)
+                  and not (terminal_derived and ply == expected - 1)]
+    depths = [int(row["depth"]) for row in depth_rows if row.get("depth") is not None]
+    if len(depths) != len(depth_rows):
         return AccuracyResult({"white": None, "black": None}, "incomplete",
                               "Глубина одного или нескольких сохранённых оценок неизвестна.",
                               source=source, coverage=(scored, expected))
@@ -150,7 +177,8 @@ def calculate_saved_game_accuracy(game: dict[str, Any], line: dict[str, Any],
                               "В партии нет ходов для расчёта.", source=source,
                               coverage=(scored, expected))
     try:
-        scores = _game_scores([dict(row) for row in covered], positions)
+        normalized = [dict(row) if row is not None else {} for row in covered]
+        scores = _game_scores(normalized, positions)
     except (ValueError, TypeError, IndexError):
         return AccuracyResult({"white": None, "black": None}, "incomplete",
                               "Сохранённые оценки нельзя сопоставить с позициями.",
@@ -159,4 +187,39 @@ def calculate_saved_game_accuracy(game: dict[str, Any], line: dict[str, Any],
     return AccuracyResult(_accuracy_by_side(scores, start_color), "complete",
                           "Локальный расчёт, методика Lichess; неофициальное значение.",
                           source=source, coverage=(scored, expected),
-                          depth_range=(min(depths), max(depths)))
+                          depth_range=(min(depths), max(depths)),
+                          terminal_positions_derived=int(terminal_derived))
+
+
+def assessment_win_percent(row: dict[str, Any] | None,
+                           position: chess.Board) -> float | None:
+    """Return Lichess-method white Win% without converting mate to stored CP."""
+    if position.is_checkmate():
+        return win_percent_cp(1000 if position.turn == chess.BLACK else -1000)
+    if not row:
+        return None
+    if row.get("white_cp") is not None:
+        return win_percent_cp(int(row["white_cp"]))
+    mate = row.get("mate_white")
+    if mate is None:
+        return None
+    mate = int(mate)
+    if mate == 0:
+        if not position.is_checkmate():
+            return None
+        mate = 1 if position.turn == chess.BLACK else -1
+    return win_percent_cp(1000 if mate > 0 else -1000)
+
+
+def move_accuracy_from_assessments(before: dict[str, Any] | None,
+                                   after: dict[str, Any] | None, *, mover: str,
+                                   before_position: chess.Board,
+                                   after_position: chess.Board) -> float | None:
+    """Calculate one move's accuracy in the mover's POV from typed adjacent scores."""
+    before_white = assessment_win_percent(before, before_position)
+    after_white = assessment_win_percent(after, after_position)
+    if before_white is None or after_white is None or mover not in {"white", "black"}:
+        return None
+    if mover == "black":
+        before_white, after_white = 100.0 - before_white, 100.0 - after_white
+    return move_accuracy(before_white, after_white)

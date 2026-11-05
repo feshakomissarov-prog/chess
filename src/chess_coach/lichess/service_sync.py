@@ -334,11 +334,13 @@ class LichessSyncMixin:
                 if fatal_status in {401, 403}:
                     account_id = self.repository.ensure_archive_account(username)
                     self.repository.set_lichess_analysis_backfill_paused(account_id, True)
-                    self._emit_session_status(
-                        generation, f"Ошибка получения готовой аналитики Lichess (HTTP {fatal_status}); фоновая очередь приостановлена")
+                    self.background_operation_status.emit(
+                        generation, "ready_analytics", int(fatal_status),
+                        f"Очередь готовой аналитики приостановлена (HTTP {fatal_status}).")
                 elif fatal_status == 429:
-                    self._emit_session_status(
-                        generation, f"Ограничение Lichess (429): повтор не раньше чем через {self.client.rate_limit_remaining} с")
+                    self.background_operation_status.emit(
+                        generation, "ready_analytics", 429,
+                        f"Пауза API; повтор не раньше чем через {self.client.rate_limit_remaining} с.")
                 if not self.is_auth_generation_current(generation):
                     return
                 summary = self.repository.lichess_analysis_backfill_summary(
@@ -365,13 +367,15 @@ class LichessSyncMixin:
                         retry_after = max(60, int(getattr(exc, "retry_after", 60)))
                         self.repository.set_lichess_analysis_retry_after(account_id, retry_after)
                         message = f"пауза · HTTP 429 · повтор не раньше чем через {retry_after} с"
-                        self._emit_session_status(generation,
-                                                  f"Lichess ограничил фоновые запросы (429), пауза {retry_after} с")
+                        self.background_operation_status.emit(
+                            generation, "ready_analytics", 429,
+                            f"Пауза API; повтор не раньше чем через {retry_after} с.")
                     elif status in {401, 403}:
                         self.repository.set_lichess_analysis_backfill_paused(account_id, True)
                         message = f"пауза · HTTP {status}"
-                        self._emit_session_status(generation,
-                                                  f"Фоновая аналитика приостановлена (HTTP {status})")
+                        self.background_operation_status.emit(
+                            generation, "ready_analytics", int(status),
+                            f"Очередь готовой аналитики приостановлена (HTTP {status}).")
                     else:
                         message = f"ошибка · {type(exc).__name__}"
                     summary = self.repository.lichess_analysis_backfill_summary(account_id)

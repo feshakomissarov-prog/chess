@@ -460,3 +460,27 @@ def test_position_evaluator_reuses_one_engine_for_a_local_session(monkeypatch, t
     assert len(starts) == 1
     position_module.close_position_engines()
     assert quits == ["quit"]
+
+
+def test_position_evaluator_never_serializes_mate_as_synthetic_cp(monkeypatch, tmp_path):
+    import chess_coach.position_analysis as position_module
+    position_module.close_position_engines()
+
+    class Analysis:
+        info = {"score": chess.engine.PovScore(chess.engine.Mate(3), chess.WHITE),
+                "pv": [chess.Move.from_uci("e2e4")], "depth": 22}
+        def __iter__(self): return iter([self.info])
+        def wait(self): return type("Best", (), {"move": chess.Move.from_uci("e2e4")})()
+        def stop(self): pass
+
+    class Engine:
+        def analysis(self, *_args, **_kwargs): return Analysis()
+        def quit(self): pass
+
+    monkeypatch.setattr(position_module, "popen_uci_hidden",
+                        lambda *_args, **_kwargs: Engine())
+    result = position_module.evaluate_position(
+        str(tmp_path / "synthetic-fish.exe"), chess.Board(), threading.Event(), {})
+    assert result["score_white_cp"] is None
+    assert result["mate_white"] == 3
+    assert result["depth"] == 22

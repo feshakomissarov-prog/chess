@@ -184,8 +184,10 @@ def test_authenticated_account_is_not_ready_until_event_stream_and_safety_snapsh
     assert window._dashboard_metric_values["accuracy"].text() == "92%"
 
     window._run_background_sync()
-    assert service.archive_calls == 0
-    assert service.puzzle_calls == 0
+    # RF6 restores historical incremental archive/puzzle sync independently of
+    # the optional ready-analysis queue.
+    assert service.archive_calls == 1
+    assert service.puzzle_calls == 1
     assert service.analytics_calls == []
     window.close()
 

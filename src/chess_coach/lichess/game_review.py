@@ -32,6 +32,8 @@ class ReviewMove:
     mate_white: int | None
     depth: int | None
     nodes: int | None
+    local_accuracy: float | None = None
+    local_accuracy_formula_id: str | None = None
 
 
 def _score(row: dict[str, Any] | None) -> int | None:
@@ -95,7 +97,11 @@ def load_game_review(repository, game: dict[str, Any]) -> dict[str, Any]:
             cp_loss=(int(metric["cp_loss"]) if metric.get("cp_loss") is not None else None),
             source=str(metric.get("source") or (analysis or {}).get("source") or "unknown"),
             white_cp=assessment.get("white_cp"), mate_white=assessment.get("mate_white"),
-            depth=assessment.get("depth"), nodes=assessment.get("nodes")))
+            depth=assessment.get("depth"), nodes=assessment.get("nodes"),
+            local_accuracy=(float(metric["accuracy"]) if metric.get("accuracy") is not None
+                            and metric.get("accuracy_source") == "stockfish-local-lichess-method"
+                            else None),
+            local_accuracy_formula_id=metric.get("accuracy_formula_id")))
 
     source_is_lichess = bool(game.get("source") in {"lichess", "lichess_archive"}
                              or game.get("source_game_id"))
@@ -147,6 +153,7 @@ def load_game_review(repository, game: dict[str, Any]) -> dict[str, Any]:
             "coverage": {"scored": local_accuracy.coverage[0],
                          "total": local_accuracy.coverage[1]},
             "depth_range": local_accuracy.depth_range,
+            "terminal_positions_derived": local_accuracy.terminal_positions_derived,
             "official": False,
         }
     coverage = (analysis or {}).get("coverage") or {}

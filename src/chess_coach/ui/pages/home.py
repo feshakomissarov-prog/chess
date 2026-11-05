@@ -205,6 +205,11 @@ class HomePage(QWidget):
                 if self.dashboard_account.itemText(candidate).casefold() == username:
                     index = candidate
                     break
+            if index < 0:
+                # Keep a newly authenticated account scoped while selector
+                # options are being refreshed. Never fall back to All accounts.
+                self.dashboard_account.addItem(username, preferred)
+                index = self.dashboard_account.count() - 1
         if index < 0:
             index = 0
         previous = self.dashboard_account.blockSignals(True)

@@ -17,6 +17,7 @@ from ..board_view import BoardView
 from ..lichess.game_review import (
     eligible_error_moves, load_game_review, verified_improved_moves,
 )
+from ..domain.accuracy import win_percent_cp
 from .display import (
     evaluation_label, format_clock_control, format_game_timeline, opening_tooltip, phase_label,
     russian_opening_name, severity_label, source_short,
@@ -31,14 +32,35 @@ class AdvantageBar(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.white_cp: int | None = None
+        self.mate_white: int | None = None
+        self.terminal_checkmate = False
+        self.terminal_winner_white: bool | None = None
         self.allowed = False
         self.setMinimumWidth(24)
         self.setMaximumWidth(30)
         self.setToolTip("Оценка позиции за белых; цветная часть не является вероятностью победы.")
 
-    def set_evaluation(self, white_cp: int | None, *, allowed: bool):
+    def set_evaluation(self, white_cp: int | None, *, allowed: bool,
+                       mate_white: int | None = None,
+                       terminal_checkmate: bool = False,
+                       terminal_winner_white: bool | None = None):
         self.white_cp = None if white_cp is None else int(white_cp)
+        self.mate_white = None if mate_white is None else int(mate_white)
+        self.terminal_checkmate = bool(terminal_checkmate)
+        self.terminal_winner_white = terminal_winner_white
         self.allowed = bool(allowed)
+        if self.allowed and self.mate_white is not None:
+            if self.mate_white == 0 and not self.terminal_checkmate:
+                self.setToolTip("Противоречивая оценка Mate(0): позиция не подтверждена как мат.")
+            else:
+                side = ("белые" if self.mate_white > 0 else "чёрные" if self.mate_white < 0
+                        else "победитель по терминальной доске")
+                self.setToolTip(
+                    f"Форсированный мат стороне {side}; маркер показывает сторону и Win%, "
+                    "не фиктивную оценку в сантипешках.")
+        else:
+            self.setToolTip(
+                "Оценка позиции за белых; цветная часть не является вероятностью победы.")
         self.setVisible(self.allowed)
         self.update()
 
@@ -52,16 +74,27 @@ class AdvantageBar(QWidget):
         center = rect.center().y()
         painter.setPen(QPen(QColor(TOKENS.secondary), 1))
         painter.drawLine(rect.left() + 2, center, rect.right() - 2, center)
-        if not self.allowed or self.white_cp is None:
+        if not self.allowed or (self.white_cp is None and self.mate_white is None):
             return
-        extent = round((rect.height() / 2 - 3) * min(600, abs(self.white_cp)) / 600)
-        color = QColor(TOKENS.success if self.white_cp > 0 else TOKENS.danger)
+        if self.mate_white is not None:
+            if self.mate_white == 0 and not self.terminal_checkmate:
+                return
+            white_wins = (self.mate_white > 0 if self.mate_white != 0
+                          else self.terminal_winner_white is True)
+            win_percent = win_percent_cp(1000 if white_wins else -1000)
+            magnitude = abs(win_percent - 50.0) / 50.0
+            sign = 1 if white_wins else -1
+        else:
+            magnitude = min(600, abs(self.white_cp)) / 600
+            sign = 1 if self.white_cp > 0 else -1
+        extent = round((rect.height() / 2 - 3) * magnitude)
+        color = QColor(TOKENS.success if sign > 0 else TOKENS.danger)
         painter.setPen(Qt.PenStyle.NoPen)
         painter.setBrush(color)
-        if self.white_cp > 0:
+        if sign > 0:
             painter.drawRoundedRect(rect.left() + 4, center - extent,
                                     rect.width() - 8, extent, 3, 3)
-        elif self.white_cp < 0:
+        else:
             painter.drawRoundedRect(rect.left() + 4, center,
                                     rect.width() - 8, extent, 3, 3)
 
@@ -83,6 +116,7 @@ class ReviewGraph(QWidget):
         self.markers_visible = False
         self.coverage_text = ""
         self.move_san: dict[int, str] = {}
+        self.mate_outcome_signs: dict[int, int] = {}
         self.setMinimumHeight(170)
         self.setMaximumHeight(220)
         self.setMinimumWidth(320)
@@ -209,8 +243,9 @@ class ReviewGraph(QWidget):
             for ply, score, mate in values:
                 x = rect.left() + round(rect.width() * ply / max_ply)
                 if mate is not None:
-                    y = (rect.top() if mate > 0 else rect.bottom() if mate < 0
-                         else rect.center().y())
+                    outcome_sign = self.mate_outcome_signs.get(ply, int(mate))
+                    y = (rect.top() if outcome_sign > 0 else rect.bottom()
+                         if outcome_sign < 0 else rect.center().y())
                     clipped = False
                 else:
                     y, clipped = self._score_y(rect, score, axis_limit)
@@ -808,6 +843,9 @@ class GameReviewWorkspace(QWidget):
             f"чёрные {percent(local_accuracy.get('black'))} · "
             f"охват {local_coverage.get('scored', 0)}/{local_coverage.get('total', 0)} · "
             f"источник {source_short(local_accuracy_status.get('source'))[1]} · "
+            f"глубина {((local_accuracy_status.get('depth_range') or ('н/д', 'н/д'))[0])}–"
+            f"{((local_accuracy_status.get('depth_range') or ('н/д', 'н/д'))[1])} · "
+            f"терминально доказано позиций: {local_accuracy_status.get('terminal_positions_derived', 0)} · "
             f"{local_accuracy_status.get('reason') or 'сохранённые оценки'}")
         backfill = self.review.get("lichess_backfill_state") or {}
         if game.get("source_game_id"):
@@ -881,6 +919,13 @@ class GameReviewWorkspace(QWidget):
         self.graph.move_san = ({int(move.ply): str(move.san)
                                 for move in self.review["moves"]}
                                if self.evaluation_allowed else {})
+        self.graph.mate_outcome_signs = {
+            int(row["ply"]): (1 if self.review["positions"][int(row["ply"])].turn == chess.BLACK
+                               else -1)
+            for row in analysis.get("assessments", [])
+            if self.evaluation_allowed and row.get("mate_white") == 0
+            and 0 <= int(row["ply"]) < len(self.review["positions"])
+            and self.review["positions"][int(row["ply"])].is_checkmate()}
         coverage = self.review.get("coverage", {}) if self.evaluation_allowed else {}
         self.graph.coverage_text = (
             f"{coverage.get('scored', 0)}/{coverage.get('total', 0)} позиций"
@@ -1048,6 +1093,7 @@ class GameReviewWorkspace(QWidget):
             self.graph.analysis_status = ""
             self.graph.coverage_text = ""
             self.graph.move_san = {}
+            self.graph.mate_outcome_signs = {}
             self.graph.setToolTip(message)
             self.graph.setAccessibleDescription("Оценки и классификация скрыты правилами Fair Play.")
             self.graph_legend.setText("Оценки и классификация скрыты правилами Fair Play.")
@@ -1155,7 +1201,13 @@ class GameReviewWorkspace(QWidget):
         score_for_bar = (None if position_score.get("mate_white") is not None
                          else position_score.get("white_cp"))
         self.advantage_bar.set_evaluation(score_for_bar,
-                                          allowed=self.evaluation_allowed)
+                                          allowed=self.evaluation_allowed,
+                                          mate_white=position_score.get("mate_white"),
+                                          terminal_checkmate=self.review["positions"][ply].is_checkmate(),
+                                          terminal_winner_white=(
+                                              self.review["positions"][ply].turn == chess.BLACK
+                                              if self.review["positions"][ply].is_checkmate()
+                                              else None))
         self.advantage_label.setText(
             evaluation_label(position_score.get("white_cp"), position_score.get("mate_white"))
             if self.evaluation_allowed else "Оценки скрыты")
@@ -1192,13 +1244,16 @@ class GameReviewWorkspace(QWidget):
             before_cp, after_cp = before.get("white_cp"), after.get("white_cp")
             before_label = evaluation_label(before_cp, before.get("mate_white"))
             after_label = evaluation_label(after_cp, after.get("mate_white"))
-            delta_label = "Δ: н/д (нет сопоставимых оценок или указан мат)"
+            delta_label = "Δ: нет сопоставимой численной оценки"
             if (before_cp is not None and after_cp is not None
                     and before.get("mate_white") is None and after.get("mate_white") is None):
                 delta_white = int(after_cp) - int(before_cp)
                 delta_mover = delta_white if move.mover == "white" else -delta_white
                 delta_label = (f"Δ белых {delta_white / 100:+.2f} · "
                                f"Δ ходившего {delta_mover / 100:+.2f} пешки")
+            elif before.get("mate_white") is not None or after.get("mate_white") is not None:
+                delta_label = (f"Динамика мата: {before_label} → {after_label}; "
+                               "длина мата не переводится в сантипешки")
             best_label = "лучший ход не сохранён"
             pv = before.get("pv") or before.get("pv_uci") or []
             if isinstance(pv, str):
@@ -1227,11 +1282,37 @@ class GameReviewWorkspace(QWidget):
                    if position_best_label else ""))
             move_metric = next((item for item in analysis.get("move_metrics", [])
                                 if int(item.get("ply", -1)) == ply), {})
+            move_events = [item for item in analysis.get("events", [])
+                           if int(item.get("ply", -1)) == ply
+                           and str(item.get("event_type", "")).startswith(("mate", "missed_own", "saved_", "allowed_", "checkmate"))]
+            accuracy_value = move_metric.get("accuracy")
+            accuracy_text = (f"Точность хода: {float(accuracy_value):.1f}% · "
+                             "методика Lichess, локальная и неофициальная"
+                             if accuracy_value is not None else "Точность хода: н/д")
+            event_names = {
+                "missed_own_mate": "упущен форсированный мат",
+                "saved_against_forced_mate": "отражена форсированная матовая угроза",
+                "allowed_opponent_mate": "допущен форсированный мат соперника",
+                "mate_preserved": "форсированный мат сохранён",
+                "checkmate_terminal": "мат подтверждён терминальной позицией",
+            }
+            mate_event_text = "; ".join(event_names.get(item.get("event_type"),
+                                                     "матовое событие")
+                                         for item in move_events)
+            cpl_text = (f"потеря {move.cp_loss} сантипешек"
+                        if move.cp_loss is not None else
+                        "CPL не применим к матовой оценке"
+                        if before.get("mate_white") is not None
+                        or after.get("mate_white") is not None else
+                        "CPL: нет сравнимых оценок")
             self.move_detail.setText(
-                f"{move.san} · {severity_label(move.severity)} · "
-                f"потеря {move.cp_loss if move.cp_loss is not None else 'н/д'} сантипешек · "
+                f"{move.san} · {severity_label(move.severity)} · {cpl_text} · "
                 f"{phase_label(move_metric.get('phase'))} · {source_short(move.source)[1]} · "
-                f"глубина {move.depth or 'н/д'}")
+                f"глубина {move.depth or 'н/д'}\n{accuracy_text}"
+                + (f"\n{mate_event_text}" if mate_event_text else ""))
+            self.move_detail.setToolTip(
+                f"{accuracy_text} · формула {move_metric.get('accuracy_formula_id') or 'н/д'}"
+                + (f"\nСобытие: {mate_event_text}" if mate_event_text else ""))
         else:
             self.move_detail.setText("Начальная позиция партии.")
             initial = (self.review.get("analysis") or {}).get("assessments", [])

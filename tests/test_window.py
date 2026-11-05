@@ -1083,6 +1083,28 @@ def test_evaluation_graph_click_emits_nearest_ply(qtbot):
     assert selected == [2]
 
 
+def test_evaluation_graph_keeps_mate_typed_and_does_not_plot_fake_ten_pawns(qtbot):
+    graph = EvaluationGraph([
+        {"ply": 0, "white_cp": 35},
+        {"ply": 1, "mate_white": 3},
+        {"ply": 2, "white_cp": 210},
+        {"ply": 3, "mate_white": -2},
+        {"ply": 4, "mate_white": 0},
+    ])
+    qtbot.addWidget(graph)
+    graph.resize(460, 220)
+    graph.show()
+    qtbot.wait(20)
+
+    assert graph._points() == [(0, 35), (2, 210)]
+    assert graph._mates() == [(1, 3), (3, -2), (4, 0)]
+    assert graph._last_mate_markers == [(1, 3, "M3"), (3, -2, "−M2"), (4, 0, "M0")]
+    rendered = graph.grab()
+    assert not rendered.isNull()
+    # The CP polyline must not bridge over either mate result.
+    assert graph._last_rendered_cp_segments == []
+
+
 def test_evaluation_graph_keeps_phase_boundaries_for_rendering(qtbot):
     graph = EvaluationGraph([{"ply": 0, "white_cp": 0}, {"ply": 4, "white_cp": 10}],
                             phase_boundaries={"middle_start_ply": 2, "end_start_ply": 4,
@@ -1386,6 +1408,8 @@ def test_progress_cached_analytics_is_visually_masked_until_fresh_safety_snapsho
 
     window.lichess = FakeService()
     window._lichess_connected = True
+    window._lichess_account_authenticated = True
+    window._lichess_session_selected = True
     window._lichess_stream_ready_generation = 7
     monkeypatch.setattr(window, "_online_actions_allowed", lambda: True)
     window.show_statistics()
@@ -5000,23 +5024,51 @@ def test_main_window_waits_for_engine_probe_process_before_destroying_qprocess_p
     assert window.close() is True
 
 
-def test_background_refresh_never_starts_archive_or_puzzle_downloads(qtbot, tmp_path):
+def test_background_refresh_restores_auto_sync_only_for_ready_session(qtbot, tmp_path):
     from types import SimpleNamespace
     window = MainWindow(QSettings(str(tmp_path / "auto.ini"), QSettings.Format.IniFormat),
                         offline_mode=True)
     qtbot.addWidget(window)
     calls = []
     window._run_background_sync()
+    assert calls == []  # Isolated offline mode never starts a network job.
     window.offline_mode = False
     window.settings.setValue("lichess/auto_ready_analytics", False)
+    window.settings.setValue("lichess/auto_archive_sync", True)
+    window.settings.setValue("lichess/auto_puzzle_history_sync", True)
     window.lichess = SimpleNamespace(
         auth_generation=1,
         username="Sample",
+        client=SimpleNamespace(rate_limit_remaining=0),
         is_auth_generation_current=lambda generation: generation == 1,
         sync_archive=lambda **kwargs: calls.append(("archive", kwargs)),
         sync_puzzle_activity_background=lambda repo: calls.append(("puzzles", repo)))
+    window.archive_sync.start_full_sync = lambda service, *, background: calls.append(
+        ("archive", {"background": background}))
+    window._lichess_account_authenticated = True
+    window._lichess_session_selected = True
     window._lichess_connected = True
     window._lichess_stream_ready_generation = 1
+    window._run_background_sync()
+    assert calls == [("archive", {"background": True}), ("puzzles", window.game_repository)]
+
+    # Shared Retry-After/cooldown suppresses all automatic sync lanes.
+    calls.clear()
+    window.lichess.client.rate_limit_remaining = 60
+    window._run_background_sync()
+    assert calls == []
+
+    # A human game takes priority even after the cooldown has elapsed.
+    from types import SimpleNamespace
+    window.lichess.client.rate_limit_remaining = 0
+    window.online_sessions["human"] = SimpleNamespace(status="playing", is_ai_opponent=False)
+    window._run_background_sync()
+    assert calls == []
+    window.online_sessions.clear()
+
+    # Disabled per-source preferences remain independent.
+    window.settings.setValue("lichess/auto_archive_sync", False)
+    window.settings.setValue("lichess/auto_puzzle_history_sync", False)
     window._run_background_sync()
     assert calls == []
     window._lichess_connected = False

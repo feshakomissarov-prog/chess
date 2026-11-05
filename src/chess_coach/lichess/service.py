@@ -24,6 +24,9 @@ class LichessService(QObject, LichessAuthMixin, LichessSyncMixin, LichessGameAct
     session_error = Signal(int, str)
     session_event_received = Signal(int, dict)
     session_game_event_received = Signal(int, str, dict)
+    # Endpoint-specific background failures must not be misread as account or
+    # event-stream failures by the desktop session state machine.
+    background_operation_status = Signal(int, str, int, str)
     challenge_ready = Signal(dict)
     challenge_status_changed = Signal(str, bool)
     invitation_cancelled = Signal(str)

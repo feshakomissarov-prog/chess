@@ -1,7 +1,7 @@
 import chess
 import pytest
 
-from chess_coach.ui.game_review import GameReviewWorkspace, ReviewGraph
+from chess_coach.ui.game_review import AdvantageBar, GameReviewWorkspace, ReviewGraph
 from chess_coach.lichess.game_review import (
     ACCEPTANCE_POLICY_VERSION, eligible_error_moves, load_game_review,
     verified_improved_moves,
@@ -64,7 +64,7 @@ def test_read_model_is_current_revision_source_aware_and_contains_two_sided_coun
         assert view["local_accuracy_status"]["official"] is False
         assert view["local_game_accuracy"]["white"] is not None
         assert view["local_game_accuracy"]["black"] is not None
-        assert "lichess-accuracy-2e653ad1-v1" == view["local_accuracy_status"]["formula_id"]
+        assert "lichess-accuracy-a46b4e6d9d80a100-v2" == view["local_accuracy_status"]["formula_id"]
     finally:
         repo.shutdown()
 
@@ -692,13 +692,80 @@ def test_review_advantage_bar_uses_mate_status_without_centipawn_fill(qtbot, tmp
         workspace = GameReviewWorkspace(repo, training_allowed=True)
         qtbot.addWidget(workspace)
         workspace.load_game(game)
+        workspace.show()
+        qtbot.wait(10)
         assessment = next(row for row in workspace.review["analysis"]["assessments"]
                           if int(row["ply"]) == 3)
         assessment["white_cp"] = 180
         assessment["mate_white"] = 3
         workspace.select_ply(3)
         assert workspace.advantage_bar.white_cp is None
+        assert workspace.advantage_bar.mate_white == 3
         assert "белые ставят мат через 3" in workspace.advantage_label.text()
+        assert "не фиктивную оценку" in workspace.advantage_bar.toolTip()
+        # The negative side is painted from the typed mate sign as well; it
+        # must not compare an absent CP value with zero.
+        assessment["mate_white"] = -3
+        workspace.select_ply(3)
+        assert workspace.advantage_bar.white_cp is None
+        assert workspace.advantage_bar.mate_white == -3
+        assert "чёрные ставят мат через 3" in workspace.advantage_label.text()
+
+        bar = AdvantageBar()
+        qtbot.addWidget(bar)
+        bar.resize(30, 220)
+        bar.set_evaluation(None, allowed=True, mate_white=-3)
+        bar.show()
+        qtbot.wait(10)
+        assert not bar.grab().isNull()
+    finally:
+        repo.shutdown()
+
+
+def test_checkmate_review_shows_mate_bar_accuracy_and_terminal_event_without_fake_cp(
+        qtbot, tmp_path):
+    import chess
+
+    repo = GameRepository(tmp_path / "review-terminal-mate.sqlite3")
+    try:
+        moves = "f2f3 e7e5 g2g4 d8h4"
+        repo.save_snapshot("terminal-mate", "startpos", moves, "black", "Synthetic",
+                           False, "300+0", "mate", "black", started_at="2026-11-05T12:00:00Z")
+        line = repo.current_line("terminal-mate")
+        repo.save_analysis(
+            "terminal-mate", line_revision=line["line_revision"], line_hash=line["line_hash"],
+            source="stockfish", engine_name="SyntheticFish", engine_version="test",
+            parameters={"depth": 20}, assessments=[
+                {"ply": 0, "white_cp": 0, "depth": 20},
+                {"ply": 1, "white_cp": 0, "depth": 20},
+                {"ply": 2, "mate_white": 5, "depth": 20},
+                {"ply": 3, "mate_white": 3, "depth": 20},
+                {"ply": 4, "mate_white": 0, "depth": 20},
+            ], classifications=[])
+        view = load_game_review(repo, repo.get_game("terminal-mate"))
+        assert view["moves"][-1].local_accuracy == pytest.approx(100.0)
+        assert view["moves"][-1].cp_loss is None
+        workspace = GameReviewWorkspace(repo, training_allowed=True)
+        qtbot.addWidget(workspace)
+        workspace.load_game(repo.get_game("terminal-mate"))
+        workspace.show()
+        workspace.select_ply(4)
+        image = workspace.grab()
+        assert not image.isNull()
+        graph_image = workspace.graph.grab()
+        assert not graph_image.isNull()
+        graph_rect = workspace.graph._last_plot_rect
+        terminal_point = next(point for point in workspace.graph._last_rendered_points
+                              if point[0] == 4)
+        assert terminal_point[2] == graph_rect.bottom()  # Black mate plots at black's end.
+        assert workspace.advantage_bar.mate_white == 0
+        assert workspace.advantage_bar.terminal_checkmate
+        assert "Win%" in workspace.advantage_bar.toolTip()
+        assert "100.0%" in workspace.move_detail.text()
+        assert "Мат в текущей позиции" in workspace.advantage_label.text()
+        workspace.select_ply(3)
+        assert "Динамика мата" in workspace.selected_move_summary.text()
+        assert "Δх" not in workspace.selected_move_summary.text()
     finally:
         repo.shutdown()
 

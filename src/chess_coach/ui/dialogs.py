@@ -696,6 +696,22 @@ class SettingsDialog(QDialog):
         layout.addWidget(self.engine_hash)
 
         layout = add_settings_tab("Lichess / подключение")
+        self.auto_lichess_archive = QCheckBox(
+            "Автоматически синхронизировать архив партий после подключения и каждые 10 минут")
+        self.auto_lichess_archive.setChecked(
+            settings.value("lichess/auto_archive_sync", True, type=bool))
+        self.auto_lichess_archive.setToolTip(
+            "Продолжает сохранённую начальную загрузку, затем запрашивает только изменения по курсору. "
+            "Учитываются готовность игрового потока, активные партии и Retry-After.")
+        layout.addWidget(self.auto_lichess_archive)
+        self.auto_lichess_puzzles = QCheckBox(
+            "Автоматически обновлять сохранённую историю задач Lichess")
+        self.auto_lichess_puzzles.setChecked(
+            settings.value("lichess/auto_puzzle_history_sync", True, type=bool))
+        self.auto_lichess_puzzles.setToolTip(
+            "Используется только отдельный ранее сохранённый puzzle:read токен. "
+            "Автоматическая авторизация и загрузка новых задач не выполняются.")
+        layout.addWidget(self.auto_lichess_puzzles)
         self.auto_lichess_analytics = QCheckBox(
             "Автоматически дозагружать готовую аналитику завершённых партий")
         self.auto_lichess_analytics.setChecked(
@@ -807,6 +823,8 @@ class SettingsDialog(QDialog):
         settings.setValue("stockfish_threads", self.engine_threads.value())
         settings.setValue("stockfish_hash_mb", self.engine_hash.value())
         settings.setValue("lichess/auto_ready_analytics", self.auto_lichess_analytics.isChecked())
+        settings.setValue("lichess/auto_archive_sync", self.auto_lichess_archive.isChecked())
+        settings.setValue("lichess/auto_puzzle_history_sync", self.auto_lichess_puzzles.isChecked())
         settings.setValue("lichess/ready_analytics_paused", self.pause_lichess_analytics.isChecked())
         settings.setValue("lichess/ready_analytics_daily_limit", self.lichess_analytics_daily_limit.value())
         settings.sync()

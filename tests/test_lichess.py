@@ -1491,7 +1491,7 @@ def test_statistics_use_move_denominators_partial_coverage_and_keep_accuracy_sep
     line = repo.current_line("w")
     repo.save_analysis("w", line_revision=1, line_hash=line["line_hash"],
         source="stockfish", engine_name="Fake", engine_version="1", parameters={"nodes": 1},
-        assessments=[{"ply": i, "white_cp": i * 10} for i in range(3)],
+        assessments=[{"ply": i, "white_cp": i * 10, "depth": 16} for i in range(3)],
         classifications=[
             {"ply": 1, "mover": "white", "eval_loss_cp": 100, "label": "mistake",
              "phase": "opening", "algorithm_version": "test"},
@@ -1515,6 +1515,10 @@ def test_statistics_use_move_denominators_partial_coverage_and_keep_accuracy_sep
     assert summary["avg_cpl_cp"] == 0.0
     assert summary["swings_200cp"] == 0
     assert summary["lichess_accuracy"] == {"white": 90.0, "black": 80.0}
+    assert summary["local_move_accuracy_n"] == 1
+    assert summary["local_move_accuracy"] is not None
+    assert summary["local_move_accuracy_formula_id"].startswith(
+        "lichess-accuracy-a46b4e6d")
     assert summary["rating_trend"] == [{"date": repo.get_game("w")["started_at"],
                                          "game_time_precision": "timestamp",
                                          "rating": 1500, "game_id": "w"}]

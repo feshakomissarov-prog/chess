@@ -61,7 +61,7 @@ class AnalysisStoreMixin:
                 classifications=classifications,
                 initial_fen=revision_row["initial_fen"] if revision_row else "startpos")
             for event in events:
-                event["tags"] = ["opportunity"]
+                event.setdefault("tags", ["opportunity"])
             from ...lichess.event_detectors import detect_registered_events
             events.extend(detect_registered_events(
                 assessments, moves, metrics, run_id=run_id, source=source))
@@ -134,7 +134,7 @@ class AnalysisStoreMixin:
             classifications=classifications,
             initial_fen=revision["initial_fen"] if revision else "startpos")
         for event in events:
-            event["tags"] = ["opportunity"]
+            event.setdefault("tags", ["opportunity"])
         events.extend(detect_registered_events(
             assessments, moves, metrics, run_id=run_id, source=run["source"]))
         if replace:

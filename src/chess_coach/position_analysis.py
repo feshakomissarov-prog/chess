@@ -72,7 +72,9 @@ def evaluate_position(engine_path: str, board: chess.Board, stop_event: threadin
         if stop_event.is_set():
             return {"cancelled": True}
         score = info.get("score")
-        score_cp = score.pov(chess.WHITE).score(mate_score=100000) if score else None
+        # Preserve python-chess' typed mate result. A mate is not an enormous
+        # centipawn evaluation; callers display M±n from the separate field.
+        score_cp = score.pov(chess.WHITE).score(mate_score=None) if score else None
         pv = info.get("pv") or []
         return {"cancelled": False, "score_white_cp": score_cp,
                 "mate_white": score.pov(chess.WHITE).mate() if score else None,

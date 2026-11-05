@@ -7,6 +7,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from .repository import GameRepository
+from ..domain.accuracy import FORMULA_ID
 from ..domain.analysis_scope import (analysis_run_has_position_scores,
                                      analysis_run_source_filter,
                                      current_scored_analysis_exists)
@@ -194,9 +195,12 @@ class StatisticsService:
                 "COUNT(CASE WHEN mover=my_color AND severity='mistake' THEN 1 END) AS own_mistakes,"
                 "COUNT(CASE WHEN mover=my_color AND severity='blunder' THEN 1 END) AS own_blunders,"
                 "AVG(CASE WHEN mover=my_color AND cp_loss IS NOT NULL THEN cp_loss END) AS avg_cpl,"
+                "AVG(CASE WHEN mover=my_color AND accuracy_formula_id=? THEN accuracy END) AS local_accuracy,"
+                "COUNT(CASE WHEN mover=my_color AND accuracy_formula_id=? AND accuracy IS NOT NULL THEN 1 END) AS local_accuracy_n,"
                 "COUNT(CASE WHEN mover=my_color AND cp_loss>=200 THEN 1 END) AS swings "
                 "FROM class_rows")
-            own = db.execute(classification_sql, [*params, *source_params]).fetchone()
+            own = db.execute(classification_sql,
+                             [*params, *source_params, FORMULA_ID, FORMULA_ID]).fetchone()
             per_game = db.execute(selected + ", own_per_game AS (SELECT mm.game_id,"
                 "COUNT(CASE WHEN gm.mover=fg.my_color AND mm.cp_loss IS NOT NULL "
                 "THEN 1 END) AS assessed,"
@@ -260,6 +264,10 @@ class StatisticsService:
                  "share_games_with_blunder_percent": round(100 * float(per_game['share_games_with_blunder']), 1) if per_game['share_games_with_blunder'] is not None else None,
                  "own_error_rate_per_100": round(100 * int(own['own_errors'] or 0) / own_count, 1) if own_count else None,
                  "avg_cpl_cp": round(float(own['avg_cpl']), 1) if own['avg_cpl'] is not None else None,
+                 "local_move_accuracy": round(float(own['local_accuracy']), 1)
+                     if own['local_accuracy'] is not None else None,
+                 "local_move_accuracy_n": int(own['local_accuracy_n'] or 0),
+                 "local_move_accuracy_formula_id": FORMULA_ID,
                  "swings_200cp": int(own['swings'] or 0),
                  "lichess_accuracy": {
                      "white": round(float(base['accuracy_white']), 1) if base['accuracy_white'] is not None else None,
