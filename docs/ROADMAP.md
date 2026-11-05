@@ -1,5 +1,14 @@
 # Chess Coach — дорожная карта
 
+## Текущий приёмочный блокер 05.11.2026 — REVIEW-FIX-07 после RF6
+
+Кодовый draft [PR #44](https://github.com/feshakomissarov-prog/chess/pull/44) SHA `e0947646db73d2cfa6a6baf0b2d3eccc5fed3c2c`: [Windows CI #41979505071](https://github.com/feshakomissarov-prog/chess/actions/runs/41979505071) **completed/SUCCESS, 721 PASS**, native synthetic GUI по отчёту Codex. **Независимое source-review RF6 не приняло к слиянию**, выявило четыре нетестированных дефекта. Новое и единственное активное кодовое ТЗ — **[REVIEW-FIX-07 RF7-01…RF7-05](specs/ARCH_UX_01_REVIEW_FIX_07_LEGACY_METRICS_WDL_AUTO_SYNC.md)**: versioned пересчёт старых Stockfish metrics из SQLite без UCI, корректное Win/Loss WDL при терминальном `MateGiven/Mate(0)`, независимое scheduled puzzle history без archive, per-move accuracy terminal mate без score/depth и точный full CI/GUI gate.
+
+**Приоритет:** P0 сохранность старого анализа, PGN/SQLite, Fair Play; P1 расчёт и миграция аналитики + архив/задачи. Выполнение только в прежнем code draft PR #44. Docs-only PR #45 хранит исследование и ТЗ. Никаких merge, main, живого Stockfish/личной БД. Исторический RF6 ниже — baseline, не перезапускать его целиком.
+
+---
+
+
 ## 05.11.2026 — дополнение к действующему REVIEW-FIX-06: точность Lichess и форсированный мат
 
 Владелец дополнил уже выданное Codex ТЗ: **[REVIEW-FIX-06 теперь RF6-01…RF6-11](specs/ARCH_UX_01_REVIEW_FIX_06_INDEPENDENT_REVIEW.md)**. Новые RF6-09/10/11: сопоставить существующий локальный подсчёт с **актуальным** Lichess AccuracyPercent.scala (Win% logistic, +1 бонус, weighted/harmonic), рассчитывать **точность отдельных Stockfish ходов даже при CP/Mate**, не переводить M3 в фиктивные CP, корректно рисовать мат в вертикальной шкале и Review, сохранять подробную provenance/coverage и Fair Play. Полная методика и зафиксированные первоисточники — [LICHESS_STOCKFISH_ACCURACY_MATE_V1](specs/LICHESS_STOCKFISH_ACCURACY_MATE_V1.md).
