@@ -1,0 +1,71 @@
+# ARCH-UX-01 · MASTER REVIEW — единое комплексное ревью приложения и исправления одним циклом
+
+> **СТАТУС: РАБОЧИЙ ЧЕРНОВИК · НЕ ПЕРЕДАВАТЬ CODEX ДО ЗАКРЫТИЯ ОБОИХ БЛОКОВ.** Редактируется/сохраняется в GitHub после каждого значимого шага. Последний подтверждённый code draft [PR #44](https://github.com/feshakomissarov-prog/chess/pull/44), HEAD `7a3a6775a0a27e60c0bea7cfbcd4f28d734e939b`, base `main`, draft/unmerged. Docs draft [PR #45](https://github.com/feshakomissarov-prog/chess/pull/45) — единственное место редактирования ТЗ. [Windows CI #286](https://github.com/feshakomissarov-prog/chess/actions/runs/42005438175) **SUCCESS, 750 PASS** на baseline SHA, но это не сертификат полноты GUI/сети.
+>
+> **Решение владельца 05.11.2026:** запрещён процесс «нашли 2–5 дефектов → отдельное ТЗ → отдали Codex». Отныне **один полный набор всех доступных замечаний**, два блока независимого аудита, затем один большой fix-цикл в PR #44, далее единая приёмка по матрице. До закрытия всего аудита **не посылать Codex промежуточные исправления**. Документ — durable checkpoint на случай потери контекста/времени/интернета. Прежний RF9 — всего лишь первые два пункта этого документа, **не отдельная работа**.
+
+## 0. Воспроизводимость и границы независимого аудита
+
+- Источники: точный GitHub SHA кодовой ветки; утверждённые [UX-B1](../ux/UX_APPROVED_BASELINE_V1.md), [UX-A2](../ux/UX_ANALYSIS_APPROVED_V2.md), [UX-GAME-01](../ux/GAME_WORKSPACE_AND_FINISH_STATES_V1.md), [UX-COV-01…24](../ux/EXISTING_FEATURES_TO_UX_COVERAGE_AUDIT.md), [ARCH-UX-01](ARCH_UX_01_UNIFIED_EXECUTION_SPEC.md), прежние RF1…RF9 и hosted CI.
+- Реальное пользовательское устройство/GUI, PAT/OAuth, Lichess online, реальная пользовательская SQLite и UCI Stockfish в этой независимой GitHub проверке недоступны. Не писать «визуально проверил» без фактического GUI-прогона. Статус каждого замечания: **DEFECT (прямое несоответствие в source)**, **HIGH-RISK CONTRACT (доказуемый отсутствующий guard/test, требующий детерминированного repro)**, **VERIFY (проверка, не утверждение об ошибке)**. Не создавать ложных дефектов из одного подозрения.
+- Охват дерева на старте: 233 Git blobs, 121 Python файла, из них **79 src и 41 tests**, `window.py` ~7033 строк. Нужна полная карта действий/кнопок и 24 групп, не только changed diff.
+- Ограничения: Windows Python 3.12+, PySide6, python-chess, одна SQLite и один управляемый UCI Stockfish, modular monolith; **Fail-closed Fair Play** для любой живой human/unknown онлайн партии и сетевой неопределённости. Не скачивать/анализировать пользовательские токены/БД, не раскрывать персональные идентификаторы в GH, не сливать PR.
+
+## 1. ДВА БЛОКА АУДИТА (checkpoint)
+
+- **БЛОК I — архитектура и данные:** Lichess auth, генерации/401/429, сетевые действия и очереди, игровые snapshots/часы/premove/takeback, Fair Play, SQLite migration+revisions, аналитика CP/mate/accuracy/WDL, архив/задачи и инкрементальные cursor, Stockfish/PGN, Qt worker lifecycle, performance, failures/restart/shutdown, privacy. Проверить исходники и уже существующие тесты; сохранить все находки в этом файле. Статус: **В РАБОТЕ**, см. §2.
+- **БЛОК II — UI, кнопки и end-to-end:** утверждённые шесть основных экранов + Настройки/фон/игра/после игры/разбор/PGN-FEN/задачи/вложенные окна, каждая видимая команда и error/empty/loading states, geometry 1280×720/1366/1600/1920, DPI 125%/150%, accessibility, звуки AS-IS, переходы, сортировки, фильтры, счётчики, все 24 COV. Отдельная matrix кнопок: control→handler→предусловие→error→response→test→статус. Статус: **НЕ ЗАВЕРШЁН**.
+- **ФИНАЛЬНЫЙ GATE:** единый deduplicated P0/P1/P2 список, deterministic repro + тесты для каждого, отрицательные и cross-page сценарии, свидетельства CI и живого smoke. Только тогда заменить шапку на **ГОТОВО К ПЕРЕДАЧЕ CODEX**. Одного прохода по тестам нельзя назвать «всё без ошибок». Нельзя обещать математически найти абсолютно все баги.
+
+## 2. Блок I — подтверждённые замечания (СОХРАНЕНО, НЕ ФИНАЛЬНО)
+
+### CORE-01 · P0 · DEFECT — старый POST игры может удалить токен новой auth-сессии (source race)
+
+**Доказательство:** `src/chess_coach/lichess/service_games.py::send_move` в worker захватывает token через `self.token_store.get()`, а при HTTP 401 вызывает **позднее** `self.token_store.delete()` и `self._connection_stop.set()`. `src/chess_coach/lichess/service_auth.py::set_auth_method/_cancel_active_session` изменяет `auth_method`, `_auth_generation` и `_connection_stop`, при этом `token_store` — динамическое alias `selected_token_store`, а в `send_move` **нет generation/identity check**. Сценарий: отправить ход в A; во время ожидания сетевого ответа переключиться на B/другой способ; старый ответ A=401 удалит **слот B** и остановит **новый** stream. Это прямое нарушение session identity и сохранности credential.
+
+**ТЗ:** capture `AuthOperationContext` (generation, account, credential-slot identity, stop_event, game_id, request_id) до отправки; любые *mutating auth side-effects* 401 применять только если context ещё текущий **и** удаляемая credential совпадает с токеном использованного запроса (atomic/CAS under lock), иначе stale response dropped. Не удалять/не отзывать токен при неопределённом HTTP/429; старую pending move до definitive response считать отдельно. Qt signals с typed generation. Tests с barriers: A send_move delayed→B auth/login→A 401; два PAT аккаунта; PAT→OAuth; reconnect same slot with a different token; old 429 and old 200; убедиться, что B credential/stream survives, не отправлена auto-retry.
+
+### CORE-02 · P0 · HIGH-RISK CONTRACT — Lichess action workers читают *текущий* token после enqueue и не имеют request-generation fencing
+
+**Доказательство:** `LichessGameActionsMixin::_action`, `_challenge`, `takeback`, `cancel_open_invitation`, `fetch_active_games`, `challenge_username`, `create_ai_game` получают `self.token_store.get()` **внутри запускаемого thread** и используют mutable `self.auth_method`/session; у callback `_challenge_ready`, `_active_games_received`, `_active_games_error`, `_challenge_status` в `window.py` нет generation argument/guard. События от старой сессии могут запустить запрос под новой credential или обновить UI/активные игры нового профиля. Вызывающие safety checks, где есть request_id + identity guard, уже лучше — не ломать.
+
+**ТЗ:** для каждой командной операции game/action/challenge/cancel/active snapshot захватить account, session generation, expected game owner/intent при клике; проверить перед HTTP и перед UI mutation; user-scoped game ID и challenge ID; запрещать старому work менять новую UI сессию, завершать старый запрос без срыва нового; исключить дублирование POST при race. Активные игры не должны подмешиваться из A в B, не должны открываться после смены auth. Tests с deterministic `Event` barriers для каждой категории, A→B, A→logout, delayed 401/429/200, old challenge events, finished game auto-reconnect, idempotency.
+
+### CORE-03 · P1 · DEFECT — архив v3 статистики не перерисовывается в уже открытом Progress
+
+**Доказательство:** `MainWindow._start_legacy_metrics_batch` делает `statistics_page._schedule_refresh()` **перед** SQLite migration; `MainWindow._legacy_metrics_batch_finished` обновляет только `statistics_page.set_metric_migration_status`, фоновый инспектор и Home. `StatisticsDialog._refresh_timer` single-shot, после завершения batch queries не приходят без изменения фильтра. Получается устаревший summary/phases/coverage при корректных v3 данных. Предыдущее [RF9](ARCH_UX_01_REVIEW_FIX_09_PROGRESS_LIVE_REFRESH_AND_SCOPE.md) подтверждает кодовый сценарий.
+
+**ТЗ:** coalesced source-scoped generation-safe auto-requery для **видимого** Progress после каждой результативной порции и финального завершения, без запроса на каждую строку, без сброса фильтров/выбранного scroll/tab. Qt test: Progress открыт ДО migration, legacy A+B + три sources, задержанная пачка, без клика ожидаем обновления всех отображаемых KPI из v3.
+
+### CORE-04 · P1 · DEFECT — UI Progress выводит счётчик миграции из аккаунта Главной
+
+**Доказательство:** `_legacy_metrics_account_scope()` опирается на `dashboard_account.currentData()` из скрытого Home-adapter, хотя `StatisticsDialog.account.currentData()` — собственный фильтр Progress. `set_metric_migration_status` слепо публикует Home-scoped `n/N`; completion cache по revision блокирует повторный пересчёт scope. При Home A / Progress B можно увидеть неверный статус.
+
+**ТЗ:** разделить global migration executor и status read models в каждом экране; scope на Progress — собственный account (и source только если label подразумевает source), Home/Background — явно подписанный scope; filter/revision invalidation, async count, generation guard. Qt case A=5/B=15/All=20, с Home A и Progress B + late A callback, завершённая migration + switch. Скрывать engine-derived coverage при Fair Play blocked.
+
+## 3. Блок I — контрольный перечень для дальнейшего изучения (НЕ ЯВЛЯЕТСЯ НАХОДКАМИ)
+
+- P0: full chain user account/PAT/OAuth/token store & reconnect; stale events/stream and human game safety; Lichess active games AI/HUMAN validator against real documented API; per-account live session commands; clock authority and game finalization writes.
+- P0: current-only line_revision/line_hash + analysis source, mate and cp and accuracy semantics; saved v2→v3 from all three scored sources; empty complete vs partial scored; official Lichess vs local-method formula; legacy database backup/rollback.
+- P1: archive lastMoveAt vs createdAt, cursor inclusivity, limited NDJSON pagination, late games; Lichess API stream finite vs live resource gate; puzzle history retries and duplicate attempts; Lichess analysis backfill and Retry-After/resume.
+- P1: background thread/process leaks, concurrency priorities, durable SQLite writer, cancellation, GUI blocking, QSettings/threads at shutdown, UCI install verification/security and post-install rollback.
+- P1: tests for migrations from *realistic old schema*, many accounts/sources, long timestamps, high DPI, local PGN/FEN, invalid and corrupt data, 429 and auth switching. No acceptance with green CI alone.
+
+## 4. Блок II — список TODO матрицы UI / функциональной согласованности
+
+Требуются source review и тесты, чтобы отличить неактивный compatibility adapter от реально видимой кнопки:
+
+1. Shell, route/back, sidebar collapse, Lichess status/readiness, header; root Back visibility, auth status text wrap.
+2. Home: compact KPI and 3 newest games, mini trend, account scope, truthful empty/unsafe states, single CTA for next exercise, no unnecessary mode/time control.
+3. Play: 5 mode options and valid parameters/rated, explicit create, cancel, pending; check for alternative modal duplicate via legacy callbacks.
+4. Live game: same board, clocks, player identity, history navigation, premove, accept/decline takeback/draw, claim/resign/abort, multi-games, live reconnect, final sync and postgame two buttons only.
+5. Library: pinned active, pagination, side filters, search ECO Russian, sort date, graph, details→review, export/notes, sync/recovery; no clipped controls.
+6. Analysis: three cards, ephemeral text/file PGN and FEN editor, board validity, CP/Mate/AdvantageBar/Δ graph, drill-down, source and provenance, batch queue/stop/resume, fail-closed.
+7. Training: puzzle attempts history, refresh token scope, offline solve/reveal/repeat, live safety; defer novel trainer/voice and piloted 5–10 UI.
+8. Progress: all 8+ filters, openings/phase/game timeline, account and source, official vs local percentages, chart, stats reload and drilldown.
+9. Settings/background/sounds: every control must be hooked and readable; puzzle/archive auto-sync independent; engine configure/test/install, WAV preview/preset as-is; rate-limit inspector.
+10. Universal: geometry, accessibility, keyboard, Windows 125/150%, async UI spinners/stale workers, destroyed widget Qt signals, privacy logs, failure/empty/loading states.
+
+## 5. Условия единственной будущей передачи Codex — пока ЗАКРЫТО
+
+После **Блок I завершён / Блок II завершён**, проверить минимум: P0 frozen gates, P1 end-to-end scenarios, P2 geometry/wording, UI action matrix with code references, red→green tests, synthetic old DB fixture, actual native Windows GUI smoke by Codex in each tab/button state, full pytest + compileall + Git diff check + exact-head completed Windows CI. PR #44 draft, no merge until owner explicitly approves physical pilot. Давая отчёт, не скрывать реальные blockers и не пытаться заменить реальный Lichess настоящим PAT/real DB. **Никаких отдельных «RF10–RF20»** из этого master-документа.
