@@ -129,6 +129,25 @@
 
 **ТЗ:** новый метод `refresh_data_preserving_filters_and_position()` (или явный `reset_page=False`) для событий пересчёта, stable game_id/page/scroll/active tab, nonblocking stale replies; тест на страницу 4/10 и открытый detail, migration batch завершён, UI не прыгает.
 
+
+### UI-09 · P1/P2 · HIGH-RISK GEOMETRY — FEN editor «Открыть позицию» может оказаться ниже видимой области на 1280×720
+
+**Проверенная структура:** `AnalysisLandingPage` содержит в обычном `QVBoxLayout` (без `QScrollArea`) три карточки, отдельный `QGroupBox` с текстовым PGN/FEN `QTextEdit(maxHeight=150)`, а затем `PositionSetupWidget` с жёсткой доской `setFixedSize(320,320)`, строкой выбора фигур, рокировкой/EP, тремя кнопками и status. С учётом шапки/Windows font scale суммарная минимальная вертикальная геометрия **может** превысить 720px и обрезать нижний action `Открыть позицию в разборе`; этот эффект ещё не измерен на native Windows, поэтому классификация **HIGH-RISK, НЕ подтверждённый визуальный факт**.
+
+**ТЗ/QA:** средствами Qt измерить `QRect` критических FEN controls (320 board + actions) относительно visible viewport для 1280×720/1366×768, 125%/150% DPI, expanded/collapsed FEN editor, PGN input; при воспроизведении сделать локальную прокрутку **только на странице Анализ** или адаптивную высоту editor (не глобальный scroll Home/Library) и скролл к кнопке/Keyboard focus. Все шахматные поля и 64 клетки кликабельны и верно mapped; не терять EP/castling rights.
+
+### UI-10 · P2 · DEFECT — последняя успешная синхронизация задач исчезает из tooltip после загрузки списка
+
+**Доказательство:** `MainWindow.show_puzzle_history::refresh_account_summary` устанавливает `summary.setToolTip("Последняя успешная синхронизация: …" + error)`, но затем вызывается `render_page()`, который безусловно делает `summary.setToolTip(_puzzle_attempt_summary(state["items"]))`, перетирая состояние синхронизации. При любом переключении аккаунта `select_account()` снова вызывает два метода в том же порядке. Пользователь теряет доступ к доступной диагностике и времени sync из единственной подсказки.
+
+**ТЗ:** разделить tooltip источника/синхронизации и summary subset попыток (отдельные labels/tooltips), не показывать персональные секреты; Qt test initial first page, switch account, retry error and empty attempts → last_success / status остаются доступны, выбор попытки не стирает диагностический tooltip.
+
+### UI-11 · P2 · HIGH-RISK PERFORMANCE — поиск партий создаёт новый запрос на каждый символ без debounce
+
+**Доказанная связь:** `LibraryPage.search.textChanged`, `opponent_filter.textChanged` и `opening_filter.textChanged` сразу вызывают `_emit_filters()`; `MainWindow` отменяет прежний `_library_query_handle` и запускает новый background query. Это может создавать десятки потоковых задач при быстром вводе/SQLite writer lock. Сама SQLite остаётся в worker, поэтому **не утверждать подтверждённое зависание** без fake lock/инструментирования.
+
+**ТЗ:** измерить actual bounded worker backlog; если воспроизводится, 200–350ms debounce только для typing filters, сразу обновлять combo filters и явные page buttons; latest-generation result only, no lost account/source after async options update. Тест fake slow SQLite, 15 символов подряд, upper bound started calls и close/cancel; не тормозить возврат к живой игре.
+
 ## 4. Блок II — список TODO матрицы UI / функциональной согласованности
 
 Требуются source review и тесты, чтобы отличить неактивный compatibility adapter от реально видимой кнопки:
