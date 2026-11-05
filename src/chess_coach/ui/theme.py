@@ -38,6 +38,7 @@ def stylesheet() -> str:
     return f"""
     QWidget {{ background: {t.app}; color: {t.text}; font-size: 14px; }}
     QMainWindow, QDialog {{ background: {t.app}; }}
+    QLabel {{ background: transparent; }}
     QStatusBar#inlineNoticeBar {{ background: {t.sidebar}; color: {t.secondary}; border-top: 1px solid {t.border}; }}
     QStatusBar#inlineNoticeBar::item {{ border: none; }}
     QFrame#appSidebar {{ background: {t.sidebar}; border-right: 1px solid {t.border}; }}

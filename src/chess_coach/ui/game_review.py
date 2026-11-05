@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import chess
 import math
-from PySide6.QtCore import QPointF, QSettings, Qt, Signal
+from PySide6.QtCore import QPointF, QSettings, QTimer, Qt, Signal
 from PySide6.QtGui import QColor, QKeySequence, QPainter, QPen, QPolygonF, QShortcut
 from PySide6.QtWidgets import (
     QAbstractItemView, QCheckBox, QComboBox, QFrame, QGridLayout, QGroupBox,
@@ -697,6 +697,13 @@ class GameReviewWorkspace(QWidget):
             self.left_metrics.setMinimumWidth(0 if compact else 360)
             self.left_metrics.setMaximumWidth(16777215 if compact else 370)
             self._fit_review_board()
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        # QStackedWidget can deliver a show before its splitter has received
+        # the final height from the shell. Fit once more after that layout pass
+        # so a fixed-size board cannot extend beyond the visible board column.
+        QTimer.singleShot(0, self._fit_review_board)
 
     def _review_splitter_moved(self, *_args):
         if self.workspace_splitter.orientation() == Qt.Orientation.Horizontal:

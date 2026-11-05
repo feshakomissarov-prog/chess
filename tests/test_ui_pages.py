@@ -9,6 +9,8 @@ from PySide6.QtWidgets import QScrollArea
 from chess_coach.ui.pages import LibraryPage, PlayPage, ResultPage
 from chess_coach.ui.pages.background import BackgroundOperationsPage
 from chess_coach.ui.pages.position_setup import PositionSetupWidget
+from chess_coach.ui.dialogs import SettingsDialog
+from PySide6.QtCore import QSettings
 
 
 def test_play_page_keeps_each_action_connected_and_reflows_cards(qtbot):
@@ -103,12 +105,34 @@ def test_library_uses_bounded_three_zone_layout_at_laptop_size(qtbot):
     qtbot.wait(30)
 
     assert page.body_splitter.count() == 2
-    assert page.filter_panel.parentWidget() is page.body_splitter.widget(1)
-    assert page.detail_panel.parentWidget() is page.body_splitter.widget(1)
+    aside_scroll = page.body_splitter.widget(1)
+    assert isinstance(aside_scroll, QScrollArea)
+    aside = aside_scroll.widget()
+    assert page.filter_panel.parentWidget() is aside
+    assert page.detail_panel.parentWidget() is aside
     assert page.body_splitter.widget(0).width() >= 420
     assert page.body_splitter.widget(1).width() >= 320
     assert not isinstance(page, QScrollArea)
     assert page.summary.text().startswith("Завершённые партии")
+    assert page.search.height() >= 28
+    assert page.account_filter.height() >= 28
+    assert page.detail_open.height() > 0
+
+
+def test_settings_tab_contents_stay_top_aligned_and_reachable(qtbot, tmp_path):
+    settings = QSettings(str(tmp_path / "settings-layout.ini"), QSettings.Format.IniFormat)
+    dialog = SettingsDialog(settings)
+    qtbot.addWidget(dialog)
+    dialog.resize(900, 650)
+    dialog.show()
+    qtbot.wait(20)
+
+    for index in range(dialog.settings_tabs.count()):
+        scroll = dialog.settings_tabs.widget(index)
+        assert isinstance(scroll, QScrollArea)
+        content = scroll.widget()
+        assert content.layout().alignment() & Qt.AlignmentFlag.AlignTop
+        assert content.geometry().top() == 0
 
 
 def test_background_operations_page_renders_shared_registry_and_pause_state(qtbot):

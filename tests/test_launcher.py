@@ -207,7 +207,7 @@ def test_cli_modes_reach_real_window_and_apply_runtime_ui_without_credentials_or
     if expected_mode == "offline":
         assert visible_state["runtime_isolated"]
         assert not visible_state["runtime_manual"]
-        assert visible_state["connection"].startswith("●  Офлайн-режим")
+        assert visible_state["connection"] == "Офлайн"
         assert not visible_state["connect_enabled"]
         assert not visible_state["friend_visible"]
         assert not visible_state["ai_visible"]
@@ -217,7 +217,7 @@ def test_cli_modes_reach_real_window_and_apply_runtime_ui_without_credentials_or
     else:
         assert not visible_state["runtime_isolated"]
         assert visible_state["runtime_manual"]
-        assert visible_state["connection"].startswith("●  Ручной режим")
+        assert visible_state["connection"] == "Ручной"
         assert visible_state["connect_text"] == "Подключиться вручную"
         assert visible_state["connect_enabled"]
         assert visible_state["runtime_data_root"] == tmp_path / "profile"

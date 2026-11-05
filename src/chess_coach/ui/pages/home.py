@@ -1,4 +1,4 @@
-"""Home/dashboard page widget. Data is supplied by the application shell."""
+"""Compact home dashboard; all values and actions are supplied by the shell."""
 
 from __future__ import annotations
 
@@ -7,65 +7,59 @@ from PySide6.QtWidgets import (
     QComboBox, QFrame, QGridLayout, QHBoxLayout, QLabel, QPushButton,
     QVBoxLayout, QWidget,
 )
-from ..display import format_clock_control
 
 
 class HomePage(QWidget):
     def __init__(self, repository, settings, username, actions, filters_changed, parent=None):
         super().__init__(parent)
         layout = QVBoxLayout(self)
-        title = QLabel("Ваша шахматная практика")
-        title.setObjectName("pageTitle")
-        title.setVisible(False)
-        layout.addWidget(title)
-        self.home_status = QLabel(
-            "Начните локальную партию или подключите Lichess. Сводка и последние партии — ниже.")
-        self.home_status.setWordWrap(True)
+        layout.setContentsMargins(4, 2, 4, 4)
+        layout.setSpacing(9)
+        self.home_status = QLabel("Практика, сохранённые партии и проверенная статистика.")
         self.home_status.setObjectName("secondary")
-        self.home_status.setMaximumHeight(42)
+        self.home_status.setWordWrap(False)
+        self.home_status.setMaximumHeight(24)
         layout.addWidget(self.home_status)
-        scope_row = QHBoxLayout()
-        self.dashboard_account = QComboBox()
+
+        # Account scope is shared with the authenticated profile. Keep the old
+        # controls as hidden compatibility adapters; Home is not a filter page.
+        self.dashboard_account = QComboBox(self)
         self.dashboard_account.setAccessibleName("Аккаунт сводки")
         self.dashboard_account.addItem("Все локальные партии", None)
-        self.dashboard_clock = QComboBox()
-        self.dashboard_clock.setAccessibleName("Контроль времени сводки")
-        self.dashboard_clock.addItem("Любой контроль", "")
-        preferred_account = str(settings.value("workspace/selected_account", "", type=str))
-        if username:
-            preferred_account = f"lichess:{username.strip().lower()}"
-        preferred_clock = str(settings.value("workspace/dashboard_clock", "", type=str))
-        self._preferred_account = preferred_account
-        self._preferred_clock = preferred_clock
-        scope_row.addWidget(QLabel("Аккаунт"))
-        scope_row.addWidget(self.dashboard_account, 1)
-        scope_row.addWidget(QLabel("Контроль"))
-        scope_row.addWidget(self.dashboard_clock, 1)
-        layout.addLayout(scope_row)
         self.dashboard_account.currentIndexChanged.connect(filters_changed)
-        self.dashboard_clock.currentIndexChanged.connect(filters_changed)
+        self.dashboard_clock = QComboBox(self)
+        self.dashboard_clock.setAccessibleName("Устаревший фильтр контроля времени")
+        self.dashboard_clock.addItem("Любой контроль", "")
+        self.dashboard_clock.hide()
+        self.dashboard_account.hide()
+        self._preferred_account = str(settings.value("workspace/selected_account", "", type=str))
+        if username:
+            self._preferred_account = f"lichess:{username.strip().lower()}"
+        self._preferred_clock = ""  # the historical key remains stored but is no longer applied on Home
+
         self.dashboard_metrics = {}
         metrics_grid = QGridLayout()
         self.dashboard_metrics_grid = metrics_grid
-        metrics_grid.setHorizontalSpacing(12)
-        metrics_grid.setVerticalSpacing(12)
+        metrics_grid.setContentsMargins(0, 0, 0, 0)
+        metrics_grid.setHorizontalSpacing(9)
+        metrics_grid.setVerticalSpacing(0)
         self._dashboard_metric_values = {}
         self._dashboard_metric_details = {}
-        for index, (key, label) in enumerate((
-                ("games", "Завершённые партии"), ("accuracy", "Точность Lichess"),
-                ("analysis", "Партии с анализом"),
-                ("errors", "Ошибки на 100 оценённых ходов"))):
-            card = QFrame()
+        for key, label in (
+                ("games", "Завершённые партии"),
+                ("analysis", "Партии с оценками ходов"),
+                ("accuracy", "Точность Lichess"),
+                ("errors", "Ошибки на 100 оценённых ходов")):
+            card = QFrame(self)
             card.setObjectName("metricCard")
             card_layout = QVBoxLayout(card)
-            card_layout.setContentsMargins(10, 8, 10, 8)
-            card_layout.setSpacing(4)
+            card_layout.setContentsMargins(10, 7, 10, 7)
+            card_layout.setSpacing(2)
             caption = QLabel(label)
             caption.setObjectName("secondary")
-            caption.setWordWrap(True)
-            caption.setMaximumHeight(34)
+            caption.setWordWrap(False)
             value = QLabel("—")
-            value.setStyleSheet("font-size: 22px; font-weight: 700;")
+            value.setStyleSheet("font-size: 20px; font-weight: 700;")
             detail = QLabel("Локальные данные")
             detail.setObjectName("muted")
             detail.setWordWrap(True)
@@ -75,70 +69,95 @@ class HomePage(QWidget):
             self._dashboard_metric_values[key] = value
             self._dashboard_metric_details[key] = detail
             self.dashboard_metrics[key] = card
+        # Error-rate detail belongs in Progress; retain the existing read-model
+        # field for compatibility without giving it KPI prominence on Home.
+        self.dashboard_metrics["errors"].hide()
         self.layout_metrics()
         layout.addLayout(metrics_grid)
-        recent_card = QFrame()
+
+        top_row = QHBoxLayout()
+        self.home_primary_actions = top_row
+        top_row.setSpacing(9)
+        self.home_progress_card = QFrame(self)
+        self.home_progress_card.setObjectName("metricCard")
+        self.home_progress_card.setMaximumHeight(160)
+        progress_layout = QVBoxLayout(self.home_progress_card)
+        progress_layout.setContentsMargins(11, 8, 11, 8)
+        progress_layout.setSpacing(4)
+        progress_title = QLabel("Мой прогресс")
+        progress_title.setStyleSheet("font-size: 16px; font-weight: 700;")
+        progress_layout.addWidget(progress_title)
+        self.progress_trend = QLabel("Нет сохранённых точек тренда.")
+        self.progress_trend.setObjectName("secondary")
+        self.progress_trend.setWordWrap(True)
+        self.progress_trend.setMaximumHeight(50)
+        progress_layout.addWidget(self.progress_trend, 1)
+        self.home_all_progress_button = QPushButton("Весь прогресс")
+        self.home_all_progress_button.clicked.connect(actions["show_statistics"])
+        progress_layout.addWidget(self.home_all_progress_button, 0, Qt.AlignmentFlag.AlignLeft)
+        top_row.addWidget(self.home_progress_card, 1)
+
+        self.home_play_card = QFrame(self)
+        self.home_play_card.setObjectName("metricCard")
+        self.home_play_card.setMaximumHeight(160)
+        activity_layout = QVBoxLayout(self.home_play_card)
+        activity_layout.setContentsMargins(11, 8, 11, 8)
+        activity_layout.setSpacing(4)
+        activity_title = QLabel("Следующее занятие")
+        activity_title.setStyleSheet("font-size: 16px; font-weight: 700;")
+        activity_layout.addWidget(activity_title)
+        self.activity_status = QLabel("Пока нет сохранённых задач для повторения.")
+        self.activity_status.setObjectName("secondary")
+        self.activity_status.setWordWrap(True)
+        self.activity_status.setMaximumHeight(50)
+        activity_layout.addWidget(self.activity_status, 1)
+        self.home_activity_button = QPushButton("Открыть обучение")
+        self.home_activity_button.setObjectName("primaryAction")
+        self.home_activity_button.clicked.connect(actions["open_puzzle_history_local"])
+        activity_layout.addWidget(self.home_activity_button, 0, Qt.AlignmentFlag.AlignLeft)
+        top_row.addWidget(self.home_play_card, 1)
+        layout.addLayout(top_row)
+
+        recent_card = QFrame(self)
         self.home_recent_card = recent_card
         recent_card.setObjectName("metricCard")
         recent_layout = QVBoxLayout(recent_card)
-        recent_layout.setContentsMargins(12, 10, 12, 10)
+        recent_layout.setContentsMargins(11, 8, 11, 8)
+        recent_title_row = QHBoxLayout()
         recent_title = QLabel("Последние партии")
-        recent_title.setStyleSheet("font-size: 18px; font-weight: 700;")
-        recent_layout.addWidget(recent_title)
+        recent_title.setStyleSheet("font-size: 16px; font-weight: 700;")
+        recent_title_row.addWidget(recent_title)
+        recent_title_row.addStretch(1)
+        self.home_games_button = QPushButton("Все партии")
+        self.home_games_button.clicked.connect(actions["show_saved_games"])
+        recent_title_row.addWidget(self.home_games_button)
+        recent_layout.addLayout(recent_title_row)
+        self.recent_safety_notice = QLabel("Оценки доступны после проверки безопасности Lichess.")
+        self.recent_safety_notice.setObjectName("muted")
+        self.recent_safety_notice.setMaximumHeight(20)
+        recent_layout.addWidget(self.recent_safety_notice)
         self._recent_games_layout = QVBoxLayout()
-        self._recent_games_layout.setSpacing(8)
+        self._recent_games_layout.setSpacing(5)
         recent_layout.addLayout(self._recent_games_layout, 1)
-        primary_actions = QHBoxLayout()
-        self.home_primary_actions = primary_actions
-        activity_card = QFrame()
-        self.home_play_card = activity_card
-        activity_card.setObjectName("metricCard")
-        activity_card.setMaximumHeight(230)
-        activity_layout = QVBoxLayout(activity_card)
-        activity_layout.setContentsMargins(12, 10, 12, 10)
-        activity_layout.setSpacing(8)
-        activity_title = QLabel("Следующее занятие")
-        activity_title.setStyleSheet("font-size: 18px; font-weight: 700;")
-        activity_layout.addWidget(activity_title)
-        self.activity_status = QLabel(
-            "Персональная рекомендация появится при наличии достаточных подтверждённых данных. "
-            "Сохранённая история задач доступна для повторения.")
-        self.activity_status.setObjectName("secondary")
-        self.activity_status.setWordWrap(True)
-        activity_layout.addWidget(self.activity_status, 1)
-        self.home_activity_button = QPushButton("Открыть историю задач")
-        self.home_activity_button.setObjectName("primaryAction")
-        self.home_activity_button.clicked.connect(actions["open_puzzle_history_local"])
-        activity_layout.addWidget(self.home_activity_button)
-        primary_actions.addWidget(activity_card, 1, Qt.AlignmentFlag.AlignTop)
-        primary_actions.addWidget(recent_card, 2)
-        layout.addLayout(primary_actions, 1)
+        layout.addWidget(recent_card, 1)
 
-        # Keep legacy action objects as non-visible compatibility hooks for
-        # existing shell callbacks. Their user-facing routes live in the
-        # sidebar and dedicated pages.
+        # Preserve shell callbacks and old tests as hidden compatibility hooks.
         self.home_friend_button = QPushButton("Играть с другом по ссылке")
         self.home_friend_button.clicked.connect(actions["open_friend_game"])
         self.home_username_button = QPushButton("Вызвать игрока Lichess")
         self.home_username_button.clicked.connect(actions["challenge_username"])
         self.active_games_button = QPushButton("Активные партии Lichess")
         self.active_games_button.clicked.connect(actions["show_active_games"])
-        self.active_games_button.setEnabled(False)
-        self.home_games_button = QPushButton("Завершённые партии")
-        self.home_games_button.clicked.connect(actions["show_saved_games"])
         self.home_archive_status_button = QPushButton("Хранилище и статус архива")
         self.home_archive_status_button.clicked.connect(actions["show_archive_status"])
         self.home_archive_button = QPushButton("Полная синхронизация архива Lichess")
         self.home_archive_button.clicked.connect(actions["start_archive_sync"])
-        self.home_archive_button.setEnabled(False)
         self.home_stats_button = QPushButton("Статистика партий")
         self.home_stats_button.clicked.connect(actions["show_statistics"])
         self.home_batch_analysis_button = QPushButton("Массовый анализ Stockfish")
         self.home_batch_analysis_button.clicked.connect(actions["show_batch_analysis"])
-        self.home_batch_analysis_button.setEnabled(True)
         self.home_puzzles_button = QPushButton("Моя история задач Lichess")
         self.home_puzzles_button.clicked.connect(actions["open_puzzle_history_local"])
-        self.home_puzzles_button.setEnabled(True)
         self.home_settings_button = QPushButton("Настройки")
         self.home_settings_button.clicked.connect(actions["open_settings"])
         self.home_ai_button = QPushButton("Играть против Lichess AI")
@@ -157,49 +176,50 @@ class HomePage(QWidget):
         self._legacy_action_host = QWidget(self)
         self._legacy_action_host.hide()
         for widget in (self.home_friend_button, self.home_username_button,
-                       self.active_games_button, self.home_games_button,
-                       self.home_archive_status_button, self.home_archive_button,
-                       self.home_stats_button, self.home_batch_analysis_button,
-                       self.home_puzzles_button, self.home_settings_button,
-                       self.home_ai_button, self.home_local_button,
+                       self.active_games_button, self.home_archive_status_button,
+                       self.home_archive_button, self.home_stats_button,
+                       self.home_batch_analysis_button, self.home_puzzles_button,
+                       self.home_settings_button, self.home_ai_button, self.home_local_button,
                        self.resume_game_button, self.home_review_button,
                        self.resume_review_button, self.home_more_toggle,
                        self.home_more_content, self.home_more):
             widget.setParent(self._legacy_action_host)
             widget.hide()
-        layout.addStretch(1)
 
     def set_selector_options(self, options: dict) -> None:
-        """Apply a small repository read model delivered by a background worker."""
-        account = self.dashboard_account.currentData()
-        clock = self.dashboard_clock.currentData()
         self.dashboard_account.blockSignals(True)
-        self.dashboard_clock.blockSignals(True)
         self.dashboard_account.clear()
         self.dashboard_account.addItem("Все локальные партии", None)
         for item in options.get("accounts", []):
             self.dashboard_account.addItem(str(item["username"]), str(item["account_id"]))
-        self.dashboard_clock.clear()
-        self.dashboard_clock.addItem("Любой контроль", "")
-        for item in options.get("clocks", []):
-            self.dashboard_clock.addItem(format_clock_control(item), item)
-        account_choice = account if account is not None else self._preferred_account
-        account_index = self.dashboard_account.findData(account_choice)
-        if account_index >= 0:
-            self.dashboard_account.setCurrentIndex(account_index)
-        clock_choice = clock or self._preferred_clock
-        clock_index = self.dashboard_clock.findData(clock_choice)
-        if clock_index >= 0:
-            self.dashboard_clock.setCurrentIndex(clock_index)
+        self.select_profile(self._preferred_account, notify=False)
         self.dashboard_account.blockSignals(False)
-        self.dashboard_clock.blockSignals(False)
+
+    def select_profile(self, profile: str | None, *, notify: bool = True) -> None:
+        preferred = str(profile or "")
+        self._preferred_account = preferred
+        index = self.dashboard_account.findData(preferred)
+        if index < 0 and preferred.startswith("lichess:"):
+            username = preferred.partition(":")[2].casefold()
+            for candidate in range(self.dashboard_account.count()):
+                if self.dashboard_account.itemText(candidate).casefold() == username:
+                    index = candidate
+                    break
+        if index < 0:
+            index = 0
+        previous = self.dashboard_account.blockSignals(True)
+        self.dashboard_account.setCurrentIndex(index)
+        self.dashboard_account.blockSignals(previous)
+        if notify:
+            self.dashboard_account.currentIndexChanged.emit(index)
 
     def layout_metrics(self, width: int | None = None) -> None:
         grid = self.dashboard_metrics_grid
-        cards = list(self.dashboard_metrics.values())
+        cards = [self.dashboard_metrics[key] for key in ("games", "analysis", "accuracy")]
         if not cards:
             return
-        columns = 2 if int(width if width is not None else self.width()) < 900 else 4
+        available = int(width if width is not None else self.width())
+        columns = 3 if available >= 980 else 2 if available >= 620 else 1
         if getattr(self, "_dashboard_metric_columns", None) == columns:
             return
         self._dashboard_metric_columns = columns

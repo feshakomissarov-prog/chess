@@ -274,7 +274,7 @@ def test_main_window_smoke_and_game_controller_integration(qtbot, tmp_path) -> N
     assert isinstance(window.board, BoardView)
     assert window.local_mode_combo.currentData() == "free"
     assert not window.premove_title.isVisible()
-    assert "Не подключено" in window.connection.text()
+    assert window.connection.text() == "Нет связи"
     assert window.controller.ply == 0
     e2 = window.board._get_board_rect()
     side = e2.width() / 8
@@ -874,6 +874,8 @@ def test_transient_event_stream_recovery_restores_availability_not_review_lease(
     service = FakeService()
     window.lichess = service
     window._lichess_connected = True
+    window._lichess_account_authenticated = True
+    window._lichess_stream_ready_generation = service.auth_generation
     window._request_review_training_safety("event-stream-recovery")
     window._review_safety_games_received(service.request_id, [])
     assert window.review_workspace.evaluation_allowed
@@ -955,6 +957,8 @@ def test_stream_429_retry_after_never_reenables_actions_before_stream_ready(
     service = FakeService()
     window.lichess = service
     window._lichess_connected = True
+    window._lichess_account_authenticated = True
+    window._lichess_stream_ready_generation = service.auth_generation
     window._request_review_training_safety("event-stream-429-ready")
     window._review_safety_games_received(service.safety_requests[-1], [])
     assert window.review_workspace.evaluation_allowed
@@ -1695,7 +1699,7 @@ def test_explicit_offline_window_never_constructs_or_uses_lichess_credentials(qt
     qtbot.addWidget(window)
 
     assert window.lichess is None
-    assert "Офлайн-режим" in window.connection.text()
+    assert window.connection.text() == "Офлайн"
     assert not window.connect_button.isEnabled()
     assert window.home_ai_button.isHidden()
     assert not window.play_ai_button.isEnabled()
@@ -1967,7 +1971,8 @@ def test_manual_connect_defers_lichess_and_credentials_until_button(qtbot, tmp_p
     assert window.lichess is None
     assert not window.offline_mode
     assert window.manual_connect_mode
-    assert "Ручной режим" in window.connection.text()
+    assert window.connection.text() == "Ручной"
+    assert "сетевые запросы" in window.connection.toolTip()
     assert window.connect_button.isEnabled()
     assert window.connect_button.text() == "Подключиться вручную"
     assert "до нажатия" in window.home_status.text()
@@ -2347,6 +2352,8 @@ def test_open_active_game_clears_old_premove_and_background_events_do_not_submit
     window.online_sessions[existing.game_id] = existing
     window.online_session = existing
     window._lichess_connected = True
+    window._lichess_account_authenticated = True
+    window._lichess_stream_ready_generation = window.lichess.auth_generation
     window._selected_live_game_id = existing.game_id
     window._screen_mode = "online"
     starts = []
@@ -2373,6 +2380,8 @@ def test_active_game_blocks_all_actions_until_valid_game_full(qtbot, tmp_path, m
     window = MainWindow(QSettings(str(tmp_path / "active-sync.ini"), QSettings.Format.IniFormat))
     qtbot.addWidget(window)
     window._lichess_connected = True
+    window._lichess_account_authenticated = True
+    window._lichess_stream_ready_generation = window.lichess.auth_generation
     started = []
     sent = []
     takebacks = []
@@ -3266,11 +3275,14 @@ def test_m46_home_has_progress_activity_and_no_legacy_action_drawer(qtbot, tmp_p
     qtbot.addWidget(window)
     assert window.home_ai_button.isHidden()
     assert window.home_local_button.isHidden()
-    assert window.home_activity_button.text() == "Открыть историю задач"
+    assert window.home_activity_button.text() == "Открыть обучение"
     assert not window.home_activity_button.isHidden()
     assert {"games", "accuracy", "analysis", "errors"} == set(window.dashboard_metrics)
     assert window.dashboard_account.count() >= 1
-    assert window.dashboard_clock.count() >= 1
+    assert window.dashboard_clock.isHidden()
+    assert not window.home_page.findChild(QLabel, "dashboardClock")
+    assert not window.home_all_progress_button.isHidden()
+    assert not window.home_games_button.isHidden()
     assert window.home_friend_button.parentWidget() is not None
     assert window.home_activity_button.parentWidget() is window.home_play_card
     assert window.home_review_button.isHidden()
@@ -3287,8 +3299,8 @@ def test_home_has_two_columns_and_three_recent_game_cards(qtbot, tmp_path):
     # Let that generation finish before installing this test's synthetic data,
     # otherwise its later render can delete the card wrappers retained below.
     qtbot.waitUntil(lambda: window._dashboard_thread is None, timeout=3000)
-    assert window.home_primary_actions.itemAt(0).widget() is window.home_play_card
-    assert window.home_primary_actions.itemAt(1).widget() is window.home_recent_card
+    assert window.home_primary_actions.itemAt(0).widget() is window.home_progress_card
+    assert window.home_primary_actions.itemAt(1).widget() is window.home_play_card
     assert window.home_friend_button.isHidden()
     games = [{
         "game_id": f"synthetic-{index}", "status": "mate", "winner": "white",
@@ -3306,7 +3318,7 @@ def test_home_has_two_columns_and_three_recent_game_cards(qtbot, tmp_path):
     assert all("Победа с Opponent" in heading for heading in headings)
     assert all("Queen's Pawn Game" not in heading for heading in headings)
     assert window.dashboard_account.currentIndex() == 0
-    assert window.dashboard_clock.currentIndex() == 0
+    assert window.dashboard_clock.isHidden()
     window.setFixedSize(1360, 860)
     window.show()
     qtbot.wait(20)
@@ -3320,7 +3332,7 @@ def test_home_has_two_columns_and_three_recent_game_cards(qtbot, tmp_path):
     assert all(card.sizeHint().height() <= 200 for card in cards)
     assert window.home_play_card.maximumHeight() <= 230
     opened = []
-    window._open_saved_game = lambda game: opened.append(game["game_id"]) or True
+    window._open_home_game_details = lambda game: opened.append(game["game_id"])
     qtbot.mouseClick(cards[1].findChildren(QLabel)[1], Qt.MouseButton.LeftButton)
     assert opened == ["synthetic-1"]
     window.close()
@@ -3411,8 +3423,9 @@ def test_home_dashboard_masks_cached_analysis_when_safety_is_pending_or_human_ga
     assert window._dashboard_metric_details["errors"].text() == (
         "Проверка безопасности Lichess не подтверждена.")
     card = window._recent_games_layout.itemAt(0).widget()
-    assert "1" not in card.findChild(QLabel, "dashboardAnalysisMetrics").text()
-    assert "1/1" not in card.findChild(QLabel, "dashboardAnalysisCoverage").text()
+    assert card.findChild(QLabel, "dashboardAnalysisMetrics") is None
+    assert "Оценки скрыты" in card.findChild(QLabel, "dashboardAnalysisCoverage").text()
+    assert not window.recent_safety_notice.isHidden()
 
     window._dashboard_analysis_safety_allowed = True
     window._render_dashboard_snapshot(snapshot)
@@ -3424,8 +3437,8 @@ def test_home_dashboard_masks_cached_analysis_when_safety_is_pending_or_human_ga
     window._render_dashboard_snapshot(snapshot)
     assert window._dashboard_metric_values["accuracy"].text() == "скрыто"
     assert window._dashboard_metric_values["analysis"].text() == "скрыто"
-    assert "ошибки 1" not in window._recent_games_layout.itemAt(0).widget().findChild(
-        QLabel, "dashboardAnalysisMetrics").text()
+    assert window._recent_games_layout.itemAt(0).widget().findChild(
+        QLabel, "dashboardAnalysisMetrics") is None
     human.status = "mate"
     window.online_sessions.pop(human.game_id)
     window._render_dashboard_snapshot(snapshot)
@@ -3743,9 +3756,9 @@ def test_recent_game_card_does_not_show_zero_coverage_when_analysis_is_missing(
                                "opponent_coverage": "0/12", "source": "нет данных"}}
     window._render_dashboard_snapshot({"metrics": [], "recent_games": [game]})
     labels = [label.text() for label in window.home_page.findChildren(QLabel)]
-    card_detail = next(value for value in labels if "анализа пока нет" in value)
+    card_detail = next(value for value in labels if "оценок пока нет" in value)
     assert "0/12" not in card_detail
-    assert "охват Я / соперник" in card_detail
+    assert "охват" not in card_detail
     window.close()
 
 
@@ -4291,14 +4304,15 @@ def test_ready_event_stream_automatically_starts_bounded_old_game_analytics(qtbo
     class ConnectedService:
         username = "Me"
         auth_generation = 7
-        def __init__(self): self.calls = []
+        def __init__(self): self.calls, self.safety = [], []
         def is_auth_generation_current(self, generation): return generation == self.auth_generation
         def refresh_lichess_analysis_background(self, **kwargs): self.calls.append(kwargs)
+        def check_active_games_for_analysis(self, request_id): self.safety.append(request_id)
 
     service = ConnectedService()
     window.lichess = service
     window.offline_mode = False
-    window._lichess_connected = True
+    window._lichess_account_authenticated = True
     window._lichess_event_stream_ready(7, "Me")
     qtbot.waitUntil(lambda: bool(service.calls), timeout=2500)
     assert service.calls == [{"generation": 7, "limit": 10, "daily_limit": 25,
@@ -4365,10 +4379,12 @@ def test_analytics_stream_ready_is_ignored_for_offline_or_stale_auth(qtbot, tmp_
         def __init__(self): self.calls = []
         def is_auth_generation_current(self, generation): return generation == self.auth_generation
         def refresh_lichess_analysis_background(self, **kwargs): self.calls.append(kwargs)
+        def check_active_games_for_analysis(self, _request_id): self.calls.append({"safety": True})
     service = ConnectedService()
     window.lichess = service
-    window._lichess_connected = True
+    window._lichess_account_authenticated = True
     window._lichess_event_stream_ready(8, "Me")
+    window.offline_mode = False
     window._lichess_event_stream_ready(7, "Me")
     qtbot.wait(1250)
     assert service.calls == []
@@ -4584,10 +4600,14 @@ def test_connected_analysis_allows_only_official_lichess_ai_and_blocks_bot_accou
     requests = []
     class ConnectedService:
         username = "AccountA"
+        auth_generation = 7
+        def is_auth_generation_current(self, generation): return generation == self.auth_generation
         def check_active_games_for_analysis(self, request_id): requests.append(request_id)
         def close(self, timeout=1.0): return True
     window.lichess = ConnectedService()
     window.offline_mode = False
+    window._lichess_account_authenticated = True
+    window._lichess_stream_ready_generation = 7
     launches = []
     monkeypatch.setattr(window, "_launch_game_analysis", lambda *args, **kwargs: launches.append((args, kwargs)))
     monkeypatch.setattr(QMessageBox, "warning", lambda *_args: QMessageBox.StandardButton.Ok)
@@ -4742,6 +4762,7 @@ def test_connected_analysis_cancel_stops_fake_analyzer_without_saving_complete_r
         token = "synthetic-token"
         client = type("Client", (), {"get_playing_games": lambda self, _token: []})()
         def __init__(self): self.requests = []
+        def is_auth_generation_current(self, generation): return generation == self.auth_generation
         def check_active_games_for_analysis(self, request_id): self.requests.append(request_id)
         def close(self, timeout=1.0): return True
 
@@ -4832,6 +4853,7 @@ def test_late_safety_snapshot_cannot_authorize_old_account_session(
 
     class ConnectedService:
         username = "AccountA"
+        auth_generation = 7
         token = "saved-fake-token"
         class Signal:
             def connect(self, _callback): pass
@@ -4845,6 +4867,7 @@ def test_late_safety_snapshot_cannot_authorize_old_account_session(
         session_status_changed = Signal()
         client = type("Client", (), {"rate_limit_remaining": 0})()
         def __init__(self): self.requests = []
+        def is_auth_generation_current(self, generation): return generation == self.auth_generation
         def check_active_games_for_analysis(self, request_id): self.requests.append(request_id)
         def disconnect_account(self): pass
         def set_auth_method(self, _method): pass
@@ -4860,6 +4883,9 @@ def test_late_safety_snapshot_cannot_authorize_old_account_session(
     monkeypatch.setattr(window, "_resume_pending_final_syncs", lambda: None)
     monkeypatch.setattr(window, "_refresh_online_controls", lambda: None)
 
+    window._lichess_account_authenticated = True
+    window._lichess_stream_ready_generation = service.auth_generation
+
     window._start_game_analysis("old-account-game", "fake-stockfish")
     old_request = service.requests[-1]
     if transition == "disconnect":
@@ -4867,6 +4893,8 @@ def test_late_safety_snapshot_cannot_authorize_old_account_session(
     elif transition == "account-switch":
         service.username = "AccountB"
         window._lichess_authenticated("AccountB")
+        window.settings.setValue("lichess/auto_ready_analytics", False)
+        window._lichess_event_stream_ready(service.auth_generation, service.username)
     else:
         window._lichess_connected = False
         window.offline_mode = False
@@ -4936,7 +4964,8 @@ def test_analysis_shutdown_timeout_enters_read_only_then_repeated_close_finishes
     assert window.isEnabled()
     assert window._shutdown_read_only
     assert not window.centralWidget().isEnabled()
-    assert not window.settings_button.isEnabled()
+    assert window.settings_button.isHidden()
+    assert not window.sidebar_settings.isEnabled()
     assert "действия отключены" in window.home_status.text()
     assert "ожидание завершения Stockfish" in window.windowTitle()
     assert worker.is_alive()  # No forced process kill or hidden worker detachment.
@@ -4971,7 +5000,7 @@ def test_main_window_waits_for_engine_probe_process_before_destroying_qprocess_p
     assert window.close() is True
 
 
-def test_background_refresh_requires_authenticated_connected_account(qtbot, tmp_path):
+def test_background_refresh_never_starts_archive_or_puzzle_downloads(qtbot, tmp_path):
     from types import SimpleNamespace
     window = MainWindow(QSettings(str(tmp_path / "auto.ini"), QSettings.Format.IniFormat),
                         offline_mode=True)
@@ -4979,17 +5008,20 @@ def test_background_refresh_requires_authenticated_connected_account(qtbot, tmp_
     calls = []
     window._run_background_sync()
     window.offline_mode = False
+    window.settings.setValue("lichess/auto_ready_analytics", False)
     window.lichess = SimpleNamespace(
+        auth_generation=1,
         username="Sample",
+        is_auth_generation_current=lambda generation: generation == 1,
         sync_archive=lambda **kwargs: calls.append(("archive", kwargs)),
         sync_puzzle_activity_background=lambda repo: calls.append(("puzzles", repo)))
     window._lichess_connected = True
+    window._lichess_stream_ready_generation = 1
     window._run_background_sync()
-    assert calls[0] == ("archive", {"background": True})
-    assert calls[1][0] == "puzzles"
+    assert calls == []
     window._lichess_connected = False
     window._run_background_sync()
-    assert len(calls) == 2
+    assert calls == []
     window.lichess = None
     window.offline_mode = True
 
@@ -5016,7 +5048,7 @@ def test_window_discards_queued_lichess_status_from_previous_auth_generation(qtb
     window._lichess_session_status(stale_generation, "Не подключено")
     assert window.connection.text() == before
     window._lichess_session_status(current_generation, "Подключено: SameName")
-    assert window.connection.text() == "●  Подключено: SameName"
+    assert window.connection.text() == "Вход"
 
     window.lichess = None
     service.close()

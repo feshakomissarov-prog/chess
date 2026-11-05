@@ -83,6 +83,16 @@ def test_workspace_navigator_retains_typed_back_context_without_resetting_sessio
     assert navigator.back().route is WorkspaceRoute.HOME
 
 
+def test_navigating_home_clears_breadcrumb_history():
+    navigator = WorkspaceNavigator()
+    navigator.navigate(WorkspaceRoute.GAMES, context="selected-game")
+    navigator.navigate(WorkspaceRoute.ANALYSIS, context="review")
+    navigator.navigate(WorkspaceRoute.HOME)
+    assert navigator.current.route is WorkspaceRoute.HOME
+    assert not navigator.can_go_back
+    assert navigator.back().route is WorkspaceRoute.HOME
+
+
 def test_game_finalization_tracks_server_then_bounded_local_write_checks():
     coordinator = GameFinalizationCoordinator()
     record = coordinator.track("game", server_sync_pending=True, storage_write_pending=True)

@@ -512,6 +512,7 @@ class SettingsDialog(QDialog):
             page_layout = QVBoxLayout(page)
             page_layout.setContentsMargins(12, 12, 12, 12)
             page_layout.setSpacing(8)
+            page_layout.setAlignment(Qt.AlignmentFlag.AlignTop)
             scroll = QScrollArea()
             scroll.setWidgetResizable(True)
             scroll.setFrameShape(QFrame.Shape.NoFrame)

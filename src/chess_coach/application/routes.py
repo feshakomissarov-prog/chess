@@ -40,6 +40,12 @@ class WorkspaceNavigator:
     def navigate(self, route: WorkspaceRoute, *, context: str | None = None,
                  remember: bool = True) -> RouteEntry:
         entry = RouteEntry(route, context)
+        # Home is the root workspace, not another breadcrumb. Re-selecting it
+        # or restoring it from a nested screen must clear stale Back entries.
+        if route is WorkspaceRoute.HOME:
+            self._back.clear()
+            self._current = entry
+            return entry
         if entry == self._current:
             return entry
         if remember:

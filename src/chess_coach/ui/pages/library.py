@@ -5,7 +5,7 @@ from __future__ import annotations
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
     QComboBox, QFrame, QGridLayout, QHBoxLayout, QLabel, QListWidget, QListWidgetItem,
-    QLineEdit, QPushButton, QSplitter, QVBoxLayout, QWidget,
+    QLayout, QLineEdit, QPushButton, QScrollArea, QSplitter, QVBoxLayout, QWidget,
 )
 from ..display import format_clock_control, format_game_timeline
 from ..game_review import ReviewGraph
@@ -32,6 +32,7 @@ class LibraryPage(QWidget):
         self._pages = 1
         self.setMinimumSize(680, 520)
         layout = QVBoxLayout(self)
+        layout.setSpacing(7)
         self.active_title = QLabel("Текущие партии")
         self.active_title.setStyleSheet("font-weight: 700;")
         layout.addWidget(self.active_title)
@@ -49,7 +50,9 @@ class LibraryPage(QWidget):
             "обновление аналитики его не меняет.")
         summary_row = QHBoxLayout()
         summary_row.addWidget(self.summary, 1)
-        summary_row.addWidget(self.sort_description)
+        summary_row.addWidget(self.sort_description, 0, Qt.AlignmentFlag.AlignRight)
+        layout.addLayout(summary_row)
+        action_row = QHBoxLayout()
         self.sync_button = QPushButton("Синхронизировать")
         self.sync_button.clicked.connect(self.sync_requested.emit)
         self.background_button = QPushButton("Фоновые операции")
@@ -57,8 +60,9 @@ class LibraryPage(QWidget):
         self.settings_button = QPushButton("Настройки загрузки")
         self.settings_button.clicked.connect(self.settings_requested.emit)
         for button in (self.sync_button, self.background_button, self.settings_button):
-            summary_row.addWidget(button)
-        layout.addLayout(summary_row)
+            action_row.addWidget(button)
+        action_row.addStretch(1)
+        layout.addLayout(action_row)
         self.sync_status = QLabel("")
         self.sync_status.setWordWrap(True)
         self.sync_status.setObjectName("secondary")
@@ -115,6 +119,11 @@ class LibraryPage(QWidget):
         self.opening_filter = QLineEdit()
         self.opening_filter.setPlaceholderText("Дебют / ECO")
         filter_layout.addWidget(self.opening_filter)
+        for control in (self.search, self.opponent_filter, self.opening_filter,
+                        self.account_filter, self.side_filter, self.result_filter,
+                        self.source_filter, self.clock_filter, self.analysis_filter,
+                        self.analysis_source_filter, self.period_filter):
+            control.setMinimumHeight(28)
         filter_grid = QGridLayout()
         filter_grid.setContentsMargins(0, 0, 0, 0)
         filter_grid.setHorizontalSpacing(6)
@@ -135,6 +144,10 @@ class LibraryPage(QWidget):
         aside_layout = QVBoxLayout(aside)
         aside_layout.setContentsMargins(0, 0, 0, 0)
         aside_layout.setSpacing(8)
+        aside_layout.setSizeConstraint(QLayout.SizeConstraint.SetMinimumSize)
+        # Keep the filter grid and selected-game actions at readable heights;
+        # compact windows scroll this inspector instead of compressing controls.
+        aside.setMinimumHeight(520)
         aside_layout.addWidget(filter_panel)
         self.detail_panel = QFrame()
         self.detail_panel.setObjectName("metricCard")
@@ -156,15 +169,21 @@ class LibraryPage(QWidget):
         detail_layout.addWidget(self.detail_metrics)
         self.detail_graph = ReviewGraph([], [])
         self.detail_graph.setMinimumWidth(0)
-        self.detail_graph.setMaximumHeight(130)
-        self.detail_graph.setMinimumHeight(100)
+        self.detail_graph.setMaximumHeight(110)
+        self.detail_graph.setMinimumHeight(72)
         self.detail_graph.setVisible(False)
         detail_layout.addWidget(self.detail_graph)
         self.detail_open = QPushButton("Открыть разбор")
         self.detail_open.clicked.connect(lambda: self._emit_for_selected(self.open_requested))
         detail_layout.addWidget(self.detail_open)
         aside_layout.addWidget(self.detail_panel, 1)
-        body.addWidget(aside)
+        self.aside_scroll = QScrollArea()
+        self.aside_scroll.setObjectName("libraryAsideScroll")
+        self.aside_scroll.setWidgetResizable(True)
+        self.aside_scroll.setFrameShape(QFrame.Shape.NoFrame)
+        self.aside_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.aside_scroll.setWidget(aside)
+        body.addWidget(self.aside_scroll)
         body.setStretchFactor(0, 3)
         body.setStretchFactor(1, 2)
         layout.addWidget(body, 1)
@@ -213,6 +232,12 @@ class LibraryPage(QWidget):
         self.games.currentItemChanged.connect(self._selection_changed)
         self.detail_graph.selected_ply.connect(self._detail_graph_selected)
         self._detail_game: dict | None = None
+
+    def resizeEvent(self, event) -> None:
+        super().resizeEvent(event)
+        # Keep ordering help available as a tooltip while giving the game count
+        # enough room on compact windows. The action buttons have their own row.
+        self.sort_description.setVisible(self.width() >= 760)
 
     def show_game_detail(self, game: dict | None, review: dict | None = None, *,
                          safety_allowed: bool = False) -> None:

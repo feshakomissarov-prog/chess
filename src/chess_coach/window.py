@@ -18,7 +18,8 @@ import weakref
 import PySide6
 import shiboken6
 from PySide6.QtCore import QEvent, QProcess, QSettings, Qt, QTimer, Signal, qVersion, QUrl
-from PySide6.QtGui import QKeySequence, QShortcut, QColor, QPainter, QPen, QDesktopServices, QGuiApplication
+from PySide6.QtGui import (QKeySequence, QShortcut, QColor, QPainter, QPen,
+                           QDesktopServices, QGuiApplication, QFontMetrics)
 from PySide6.QtWidgets import (
     QCheckBox,
     QButtonGroup,
@@ -400,6 +401,7 @@ class MainWindow(QMainWindow):
         self.archive_sync = ArchiveSyncCoordinator(self.game_repository)
         self.dashboard_queries = DashboardQueryCoordinator(self.game_repository)
         self._dashboard_options_loaded = False
+        self._home_detail_game_id: str | None = None
         self._library_filter_options_loaded = False
         self.library_queries = GameLibraryQueryCoordinator(self.game_repository)
         self._library_query_generation = 0
@@ -426,6 +428,8 @@ class MainWindow(QMainWindow):
         self._selected_live_game_id: str | None = None
         self._review_session: LichessGameSession | None = None
         self._lichess_connected = False
+        self._lichess_account_authenticated = False
+        self._lichess_profile_username = ""
         self._event_stream_recovery_pending = False
         self._lichess_stream_ready_generation: int | None = None
         self._backfill_wakeup_identity: tuple[int, str] | None = None
@@ -521,10 +525,6 @@ class MainWindow(QMainWindow):
         self.clock_timer = QTimer(self)
         self.clock_timer.timeout.connect(self._update_clock)
         self.clock_timer.start(250)
-        self._auto_sync_timer = QTimer(self)
-        self._auto_sync_timer.setInterval(10 * 60 * 1000)
-        self._auto_sync_timer.timeout.connect(self._run_background_sync)
-        self._auto_sync_timer.start()
         self._close_retry_timer = QTimer(self)
         self._close_retry_timer.setSingleShot(True)
         self._close_retry_timer.setInterval(200)
@@ -535,7 +535,9 @@ class MainWindow(QMainWindow):
             self._attach_lichess_service(self.lichess)
             self.lichess.restore()
         elif self.manual_connect_mode:
-            self.connection.setText("●  Ручной режим · запросов нет")
+            self._set_connection_header(
+                "Ручной",
+                "Подключение и сетевые запросы начнутся только после нажатия кнопки в приложении.")
             self.connect_button.setText("Подключиться вручную")
             self.connect_button.setToolTip(
                 "Профиль и локальные партии доступны. Выбор OAuth/PAT и сетевые запросы "
@@ -599,10 +601,19 @@ class MainWindow(QMainWindow):
 
     def _lichess_event_stream_ready(self, generation: int, username: str) -> None:
         if (not self._current_lichess_generation(generation) or self.offline_mode
-                or not self._lichess_connected or not username
+                or not self._lichess_account_authenticated or not username
                 or username.casefold() != str(self.lichess.username or "").casefold()):
             return
         self._lichess_stream_ready_generation = generation
+        self._lichess_connected = True
+        self._event_stream_recovery_pending = False
+        self._set_connection_header(
+            "Готов", "Аккаунт подтверждён; игровой поток Lichess доступен.")
+        self.sidebar_connection_label.setText("Поток готов")
+        self.disconnect_button.setVisible(True)
+        self.connect_button.setVisible(False)
+        self._refresh_online_controls()
+        self._request_dashboard_display_safety()
         account_id = self.game_repository.ensure_archive_account(username)
         self.game_repository.set_lichess_analysis_backfill_paused(
             account_id, self.settings.value("lichess/ready_analytics_paused", False, type=bool))
@@ -886,7 +897,11 @@ class MainWindow(QMainWindow):
             self._lichess_game_event(game_id, event)
 
     def _disable_online_controls(self) -> None:
-        self.connection.setText("●  Офлайн-режим · Lichess отключён")
+        self._set_connection_header("Офлайн", "Офлайн-режим · Lichess отключён.")
+        self.sidebar_connection_label.setText("Офлайн")
+        self._set_sidebar_safety_status("Локальные данные · офлайн")
+        self.connect_button.setVisible(False)
+        self.disconnect_button.setVisible(False)
         self.connect_button.setEnabled(False)
         self.connect_button.setToolTip("В офлайн-smoke авторизация и сетевые запросы отключены.")
         self.disconnect_button.setVisible(False)
@@ -913,6 +928,7 @@ class MainWindow(QMainWindow):
         header = QHBoxLayout()
         header.setContentsMargins(0, 0, 0, 0)
         header_widget = QWidget()
+        self.header_widget = header_widget
         header_widget.setFixedHeight(64)
         header_widget.setLayout(header)
         self.back_button = QPushButton("← Назад")
@@ -929,32 +945,42 @@ class MainWindow(QMainWindow):
         self.header_brand.setStyleSheet("font-size: 20px; font-weight: 700;")
         header.addWidget(self.header_brand)
         header.addStretch(1)
-        self.connection = QLabel("●  Не подключено")
+        self.connection = QLabel("Нет связи")
         self.connection.setObjectName("connectionStatus")
-        self.connection.setStyleSheet("color: #77766f;")
+        self.connection.setStyleSheet(f"color: {TOKENS.secondary};")
+        self.connection.setMinimumWidth(0)
+        self.connection.setMaximumWidth(210)
+        self.connection.setToolTip("Состояние подключения Lichess")
+        self._connection_header_label = "Нет связи"
+        self._connection_header_tooltip = "Состояние подключения Lichess"
         header.addWidget(self.connection)
         self.lichess_analysis_status = QLabel("Lichess · фоновая аналитика: не запущена")
         self.lichess_analysis_status.setObjectName("lichessAnalyticsStatus")
         self.lichess_analysis_status.setStyleSheet("font-size: 11px; color: #77766f;")
         self.lichess_analysis_status.setMaximumWidth(210)
         self.lichess_analysis_status.setWordWrap(True)
-        header.addWidget(self.lichess_analysis_status)
+        self.lichess_analysis_status.hide()
         self.background_operations_button = QPushButton("Фоновые операции")
         self.background_operations_button.clicked.connect(self.show_background_analytics)
+        self.background_operations_button.setText("Фон")
+        self.background_operations_button.setToolTip("Статус и управление фоновыми операциями")
         header.addWidget(self.background_operations_button)
         self.connect_button = QPushButton("Подключить Lichess")
         self.connect_button.clicked.connect(self.connect_lichess)
-        header.addWidget(self.connect_button)
+        self.connect_button.setMinimumHeight(38)
+        self.sidebar_layout.insertWidget(4, self.connect_button)
         self.disconnect_button = QPushButton("Отключить сеанс")
         self.disconnect_button.setToolTip(
             "Остановить текущую Lichess-сессию, сохранив выбранные учётные данные локально.")
         self.disconnect_button.setEnabled(False)
+        self.disconnect_button.setVisible(False)
         self.disconnect_button.clicked.connect(self.disconnect_lichess)
-        header.addWidget(self.disconnect_button)
+        self.disconnect_button.setMinimumHeight(38)
+        self.sidebar_layout.insertWidget(5, self.disconnect_button)
         self.settings_button = QPushButton("Настройки")
         self.settings_button.setAccessibleName("Настройки")
         self.settings_button.clicked.connect(self.open_settings)
-        header.addWidget(self.settings_button)
+        self.settings_button.hide()  # Settings has one persistent entry in the sidebar footer.
         outer.addWidget(header_widget)
 
         self.screen_title = QLabel("Главная")
@@ -1293,6 +1319,7 @@ class MainWindow(QMainWindow):
         if (hasattr(self, "sidebar") and not self._sidebar_explicit_override
                 and self.width() < 1160):
             self._set_sidebar_collapsed(True)
+        self._update_sidebar_profile_label()
         self._apply_board_size()
         if hasattr(self, "game_splitter"):
             self.game_splitter.setOrientation(
@@ -1304,18 +1331,36 @@ class MainWindow(QMainWindow):
         self._schedule_workspace_save()
 
     def _apply_header_responsive(self) -> None:
-        if not hasattr(self, "settings_button"):
+        if not hasattr(self, "header_widget"):
             return
-        compact = self.width() < 820
+        width = max(0, self.header_widget.contentsRect().width())
+        compact = width < 940
         if self.manual_connect_mode and not self.lichess:
             connect_text = "Подключиться вручную"
         else:
             connect_text = "Подключить" if compact else "Подключить Lichess"
         self.connect_button.setText(connect_text)
-        self.disconnect_button.setText("Отключить" if compact else "Отключить сеанс")
-        self.settings_button.setText("⚙" if compact else "Настройки")
-        self.settings_button.setToolTip("Настройки")
-        self.header_brand.setVisible(self.sidebar.width() <= 60 and self.width() >= 800)
+        self.disconnect_button.setText("Отключить" if compact else "Отключить Lichess")
+        self.background_operations_button.setText("⋯" if compact else "Фон")
+        self.header_brand.setVisible(self.sidebar.width() <= 60)
+        self.connection.setMaximumWidth(150 if compact else 210)
+        self._render_connection_header()
+
+    def _set_connection_header(self, label: str, tooltip: str | None = None) -> None:
+        """Keep the global header status short; details live in the sidebar/tooltip."""
+        self._connection_header_label = str(label)
+        self._connection_header_tooltip = str(tooltip or label)
+        self._render_connection_header()
+
+    def _render_connection_header(self) -> None:
+        label = str(getattr(self, "_connection_header_label", "Нет связи"))
+        available = self.connection.contentsRect().width()
+        if available > 0:
+            label = QFontMetrics(self.connection.font()).elidedText(
+                label, Qt.TextElideMode.ElideRight, available)
+        self.connection.setText(label)
+        self.connection.setToolTip(str(getattr(
+            self, "_connection_header_tooltip", "Состояние подключения Lichess")))
 
     def moveEvent(self, event) -> None:
         super().moveEvent(event)
@@ -1338,6 +1383,19 @@ class MainWindow(QMainWindow):
         self.sidebar_brand = QLabel("♟  Chess Coach")
         self.sidebar_brand.setStyleSheet("font-size: 18px; font-weight: 700; padding: 4px;")
         layout.addWidget(self.sidebar_brand)
+        self.sidebar_profile_label = QLabel("Локальный профиль")
+        self.sidebar_profile_label.setObjectName("secondary")
+        self.sidebar_profile_label.setWordWrap(False)
+        self.sidebar_profile_label.setToolTip("Текущий профиль данных")
+        layout.addWidget(self.sidebar_profile_label)
+        self.sidebar_connection_label = QLabel("Не подключено")
+        self.sidebar_connection_label.setObjectName("muted")
+        self.sidebar_connection_label.setWordWrap(False)
+        layout.addWidget(self.sidebar_connection_label)
+        self.sidebar_safety_label = QLabel("Fair Play: не проверено")
+        self.sidebar_safety_label.setObjectName("muted")
+        self.sidebar_safety_label.setWordWrap(False)
+        layout.addWidget(self.sidebar_safety_label)
         self._nav_buttons: dict[str, QPushButton] = {}
         items = (("home", "⌂", "Главная", self.show_home),
                  ("play", "♟", "Играть", self.show_play),
@@ -1364,6 +1422,7 @@ class MainWindow(QMainWindow):
         self.sidebar_settings.setAccessibleName("Настройки")
         self.sidebar_settings.clicked.connect(self.open_settings)
         layout.addWidget(self.sidebar_settings)
+        self.sidebar_layout = layout
         self._sidebar_explicit_override = False
         return sidebar
 
@@ -1373,7 +1432,15 @@ class MainWindow(QMainWindow):
         collapsed = bool(collapsed)
         self.sidebar.setFixedWidth(60 if collapsed else 212)
         self.sidebar_brand.setVisible(not collapsed)
+        self.sidebar_profile_label.setVisible(not collapsed)
+        self.sidebar_connection_label.setVisible(not collapsed)
+        self.sidebar_safety_label.setVisible(not collapsed)
+        self._update_sidebar_profile_label()
         self.sidebar_settings.setText("⚙" if collapsed else "⚙   Настройки")
+        self.sidebar_settings.setToolTip("Настройки")
+        if hasattr(self, "connect_button"):
+            self.connect_button.setText("Подключить" if collapsed else "Подключить Lichess")
+            self.disconnect_button.setText("Отключить" if collapsed else "Отключить Lichess")
         icons = {"home": "⌂", "play": "♟", "games": "▤", "analysis": "⌁",
                  "training": "♞", "progress": "◷"}
         for key, button in self._nav_buttons.items():
@@ -1384,6 +1451,25 @@ class MainWindow(QMainWindow):
         self._apply_board_size()
         self._apply_header_responsive()
         self._schedule_workspace_save()
+
+    def _update_sidebar_profile_label(self) -> None:
+        label = getattr(self, "sidebar_profile_label", None)
+        if label is None:
+            return
+        username = str(getattr(self, "_lichess_profile_username", "") or "")
+        if not username:
+            label.setText("Локальный профиль")
+            label.setToolTip("Текущий профиль данных")
+            return
+        label.setText(QFontMetrics(label.font()).elidedText(
+            username, Qt.TextElideMode.ElideRight, max(60, label.width())))
+        label.setToolTip(username)
+
+    def _set_sidebar_safety_status(self, text: str) -> None:
+        label = getattr(self, "sidebar_safety_label", None)
+        if label is not None:
+            label.setText(str(text))
+            label.setToolTip(str(text))
 
     def _shell_screen_changed(self, _index: int) -> None:
         if not hasattr(self, "sidebar"):
@@ -1437,10 +1523,25 @@ class MainWindow(QMainWindow):
         else:
             route = WorkspaceRoute.HOME
             context = None
+        titles = {
+            WorkspaceRoute.HOME: "Главная", WorkspaceRoute.PLAY: "Играть",
+            WorkspaceRoute.GAMES: "Мои партии", WorkspaceRoute.ANALYSIS: "Анализ",
+            WorkspaceRoute.TRAINING: "Обучение", WorkspaceRoute.PROGRESS: "Прогресс",
+            WorkspaceRoute.SETTINGS: "Настройки",
+        }
+        if current is self.review_workspace:
+            self.screen_title.setText("Временный разбор" if self._ephemeral_study else "Разбор партии")
+        elif current is getattr(self, "_batch_dialog", None) and current is not None:
+            self.screen_title.setText("Массовый анализ")
+        elif current is getattr(self, "_background_operations_page", None) and current is not None:
+            self.screen_title.setText("Фоновые операции")
+        else:
+            self.screen_title.setText(titles[route])
         self.workspace_navigator.navigate(route, context=context)
         self._active_route = route.value
         self._set_active_route(route.value)
-        self.back_button.setVisible(self.workspace_navigator.can_go_back)
+        self.back_button.setVisible(
+            route is not WorkspaceRoute.HOME and self.workspace_navigator.can_go_back)
         self._update_return_to_game_button()
         if not self._sidebar_explicit_override:
             self._set_sidebar_collapsed(is_board or self.width() < 1160)
@@ -1590,7 +1691,9 @@ class MainWindow(QMainWindow):
             "dashboard_metrics_grid", "_dashboard_metric_values", "_dashboard_metric_details",
             "home_recent_card", "_recent_games_layout", "home_primary_actions",
             "home_activity_button", "activity_status",
-            "home_play_card", "home_ai_button", "home_local_button", "resume_game_button",
+            "home_play_card", "home_progress_card", "home_all_progress_button",
+            "progress_trend", "recent_safety_notice",
+            "home_ai_button", "home_local_button", "resume_game_button",
             "home_review_button", "resume_review_button", "home_friend_button",
             "home_username_button", "active_games_button", "home_games_button",
             "home_archive_status_button", "home_archive_button",
@@ -1852,7 +1955,15 @@ class MainWindow(QMainWindow):
         if not hasattr(self, "_dashboard_metric_values"):
             return
         account_id = self.dashboard_account.currentData() if hasattr(self, "dashboard_account") else None
-        clock = (self.dashboard_clock.currentData() if hasattr(self, "dashboard_clock") else "") or None
+        if account_id is None and hasattr(self, "dashboard_account"):
+            preferred = str(self.settings.value("workspace/selected_account", "", type=str))
+            if preferred.startswith("lichess:"):
+                username = preferred.partition(":")[2].casefold()
+                for index in range(self.dashboard_account.count()):
+                    if self.dashboard_account.itemText(index).casefold() == username:
+                        account_id = self.dashboard_account.itemData(index)
+                        break
+        clock = None
         generation = self.dashboard_queries.begin_request()
         for detail in self._dashboard_metric_details.values():
             if detail.text() in {"Локальные данные", "Обновляем локальную сводку…"}:
@@ -1899,6 +2010,10 @@ class MainWindow(QMainWindow):
                 if isinstance(selector_options, dict):
                     self._home_view.set_selector_options(selector_options)
                     self._dashboard_options_loaded = True
+                    if (self.dashboard_account.currentData()
+                            != snapshot.get("filter", {}).get("account_id")):
+                        self._refresh_home_dashboard()
+                        return
                 self._render_dashboard_snapshot(snapshot)
         pending = self.dashboard_queries.take_pending()
         if pending is not None and not self._shutdown_requested:
@@ -1910,34 +2025,44 @@ class MainWindow(QMainWindow):
         if trend:
             points = [f"{item['month']}: {item['average_rating']} · {item['attempts']} попыток"
                       for item in trend if item.get("average_rating") is not None]
-            self._home_view.activity_status.setText(
-                "Рейтинг личных задач Lichess по месяцам · N "
+            self._home_view.progress_trend.setText(
+                "Задачи Lichess · "
                 f"{sum(int(item.get('attempts') or 0) for item in trend)}. "
                 + (" → ".join(points[-4:]) if points else "Нет рейтинговых точек."))
-            self._home_view.activity_status.setToolTip(
+            self._home_view.progress_trend.setToolTip(
                 "Источник: локально сохранённые попытки Lichess; сгруппировано по месяцу. "
-                "Это история, не персональная рекомендация.")
+                "Это исторический прогресс, не рекомендация занятия.")
         elif snapshot.get("filter", {}).get("account_id"):
-            self._home_view.activity_status.setText(
-                "Для выбранного аккаунта пока нет сохранённой помесячной истории рейтинга задач.")
-            self._home_view.activity_status.setToolTip("Для тренда нужны сохранённые попытки.")
+            self._home_view.progress_trend.setText("Для этого профиля пока нет точек тренда.")
+            self._home_view.progress_trend.setToolTip("Здесь отображается только сохранённая история.")
         else:
-            self._home_view.activity_status.setText(
-                "Выберите аккаунт Lichess с сохранёнными попытками, чтобы увидеть их реальный тренд.")
-            self._home_view.activity_status.setToolTip("Нет временных точек для всех локальных партий.")
+            self._home_view.progress_trend.setText("Нет сохранённых точек тренда.")
+            self._home_view.progress_trend.setToolTip("Нет выбранного профиля с историей попыток.")
         active_human = any(
             session.status in {"started", "playing"} and not session.is_ai_opponent
             for session in self.online_sessions.values())
         analysis_allowed = bool(self.offline_mode or
                                 (self._dashboard_analysis_safety_allowed and not active_human))
+        self._home_view.recent_safety_notice.setVisible(
+            not analysis_allowed and not self.offline_mode)
         for metric in snapshot["metrics"]:
             masked = metric["key"] in {"accuracy", "analysis", "errors"} and not analysis_allowed
             self._dashboard_metric_values[metric["key"]].setText(
                 "скрыто" if masked else metric["value"])
+            detail_text = str(metric["detail"])
+            if metric["key"] == "analysis" and not masked:
+                parts = detail_text.split(" · ")
+                if len(parts) >= 5 and parts[0].startswith("Полный охват:"):
+                    full = parts[0].partition(":")[2].strip()
+                    partial = parts[1].partition(":")[2].strip()
+                    own_moves = parts[-1].replace("оценено моих ходов:", "мои ходы:")
+                    detail_text = f"Полный {full} · частичный {partial} · {own_moves}"
             self._dashboard_metric_details[metric["key"]].setText(
-                "Проверка безопасности Lichess не подтверждена." if masked else metric["detail"])
+                "Проверка безопасности Lichess не подтверждена." if masked else detail_text)
             safe_description = ("Аналитика скрыта до свежего разрешения Fair Play."
-                                if masked else str(metric["source"]))
+                                if masked else
+                                f"{metric['detail']}\nИсточник: {metric['source']}"
+                                if metric["key"] == "analysis" else str(metric["source"]))
             self._dashboard_metric_values[metric["key"]].setToolTip(safe_description)
             self._dashboard_metric_details[metric["key"]].setToolTip(safe_description)
             self._dashboard_metric_values[metric["key"]].setAccessibleDescription(safe_description)
@@ -1975,31 +2100,22 @@ class MainWindow(QMainWindow):
             description.setToolTip(opening_tooltip(game.get("opening_name")))
             card_layout.addWidget(description)
             source_code = source_short(metrics.get("source"))[0]
-            def count(key):
-                return str(metrics.get(key, "н/д"))
-            comparison = QLabel(
-                ("Аналитика скрыта до подтверждения безопасности Lichess." if not analysis_allowed else
-                 f"Я: неточн. {count('owner_inaccuracies')} · ошибки {count('owner_mistakes')} · "
-                 f"зевки {count('owner_blunders')}     │     "
-                 f"Соперник: {count('opponent_inaccuracies')} · {count('opponent_mistakes')} · "
-                 f"{count('opponent_blunders')}"))
-            comparison.setObjectName("dashboardAnalysisMetrics")
-            comparison.setWordWrap(True)
-            comparison.setMaximumHeight(40)
-            comparison.setToolTip("Неточности · ошибки · зевки; подробности доступны в разборе.")
-            card_layout.addWidget(comparison)
-            coverage_text = ("скрыто" if not analysis_allowed else
-                             "анализа пока нет" if metrics.get("status") == "без анализа" else
-                             f"{metrics.get('coverage', 'н/д')} / {metrics.get('opponent_coverage', 'н/д')}")
-            coverage = QLabel("Оценки скрыты до проверки безопасности." if not analysis_allowed else
-                              f"{source_code} · охват Я / соперник: {coverage_text}")
+            coverage_text = ("оценок пока нет" if metrics.get("status") == "без анализа" else
+                             f"{source_code} · охват {metrics.get('coverage', 'н/д')}")
+            coverage = QLabel(coverage_text if analysis_allowed else "Оценки скрыты до проверки безопасности")
             coverage.setObjectName("dashboardAnalysisCoverage")
-            coverage.setToolTip(source_short(metrics.get("source"))[1])
-            coverage.setAccessibleName(f"Источник оценки: {source_short(metrics.get('source'))[1]}")
+            coverage.setWordWrap(False)
+            coverage.setToolTip("Источник и охват доступны только после свежей проверки безопасности.")
             card_layout.addWidget(coverage)
-            card.activated.connect(lambda item=dict(game): self._open_saved_game(item))
+            card.activated.connect(lambda item=dict(game): self._open_home_game_details(item))
             card.watch_children()
             self._recent_games_layout.addWidget(card)
+
+    def _open_home_game_details(self, game: dict) -> None:
+        """Open the selected record in Library's details pane, not Review."""
+        game_id = str(game.get("game_id") or "")
+        self._home_detail_game_id = game_id or None
+        self.show_saved_games()
 
     def _refresh_dashboard_analysis_visibility(self) -> None:
         safety_allowed = self._library_detail_safety_allowed()
@@ -2019,12 +2135,22 @@ class MainWindow(QMainWindow):
     def _request_dashboard_display_safety(self) -> None:
         if self.offline_mode and self.lichess is None:
             self._dashboard_analysis_safety_allowed = True
+            self._set_sidebar_safety_status("Локальные данные · офлайн")
             self._refresh_dashboard_analysis_visibility()
             return
         service = self.lichess
         username = str(getattr(service, "username", "") or "").strip().casefold()
+        if any(session.status in {"started", "playing"} and not session.is_ai_opponent
+               for session in self.online_sessions.values()):
+            self._dashboard_analysis_safety_allowed = False
+            self._set_sidebar_safety_status("Аналитика скрыта · активная партия")
+            self._dashboard_display_safety_request_id = None
+            self._dashboard_display_safety_context = None
+            self._refresh_dashboard_analysis_visibility()
+            return
         if not service or not username or not self._online_actions_allowed():
             self._dashboard_analysis_safety_allowed = False
+            self._set_sidebar_safety_status("Аналитика скрыта · нужна проверка")
             self._refresh_dashboard_analysis_visibility()
             page = getattr(self, "_statistics_dialog", None)
             if page is not None:
@@ -2032,7 +2158,11 @@ class MainWindow(QMainWindow):
                     "Нужны подключённый аккаунт Lichess и доступное сетевое соединение. "
                     "Оценки остаются скрыты.")
             return
+        active_id = self._dashboard_display_safety_request_id
+        if active_id is not None and self._dashboard_display_safety_is_current(active_id):
+            return
         request_id = uuid.uuid4().hex
+        self._set_sidebar_safety_status("Проверяем активные партии Lichess…")
         self._dashboard_display_safety_request_id = request_id
         self._dashboard_display_safety_context = {
             "service": service,
@@ -2048,7 +2178,8 @@ class MainWindow(QMainWindow):
         try:
             service.check_active_games_for_analysis(request_id)
         except Exception as exc:
-            self._dashboard_display_safety_error(request_id, type(exc).__name__)
+            self._dashboard_display_safety_error(
+                request_id, self._safe_safety_error_kind(exc))
 
     def _dashboard_display_safety_is_current(self, request_id: str) -> bool:
         context = self._dashboard_display_safety_context
@@ -2074,6 +2205,9 @@ class MainWindow(QMainWindow):
         self._dashboard_display_safety_request_id = None
         self._dashboard_display_safety_context = None
         self._dashboard_analysis_safety_allowed = result is True
+        self._set_sidebar_safety_status(
+            "Проверка пройдена · аналитика доступна" if result is True else
+            "Аналитика скрыта · список небезопасен")
         self._refresh_dashboard_analysis_visibility()
         page = getattr(self, "_statistics_dialog", None)
         if page is not None and result is not True:
@@ -2089,6 +2223,8 @@ class MainWindow(QMainWindow):
             self._dashboard_display_safety_request_id = None
             self._dashboard_display_safety_context = None
             self._dashboard_analysis_safety_allowed = False
+            self._set_sidebar_safety_status(
+                f"Аналитика скрыта · {self._safe_safety_error_kind(error_code)}")
             self._refresh_dashboard_analysis_visibility()
             page = getattr(self, "_statistics_dialog", None)
             if page is not None:
@@ -2096,13 +2232,26 @@ class MainWindow(QMainWindow):
                     f"Проверка Lichess не выполнена ({error_code}); оценки остаются скрыты.")
         return True
 
+    @staticmethod
+    def _safe_safety_error_kind(message: object) -> str:
+        """Reduce service failures to a safe, non-identifying status category."""
+        text = str(message or "").casefold()
+        if "429" in text or "retry-after" in text or "огранич" in text:
+            return "429 · повтор позже"
+        if "401" in text:
+            return "401 · нужна повторная авторизация"
+        if "403" in text or "scope" in text or "permission" in text or "прав" in text:
+            return "403 · недостаточно прав"
+        if "trunc" in text or "усеч" in text or "непол" in text:
+            return "неполный ответ"
+        if "timeout" in text or "тайм-аут" in text:
+            return "тайм-аут"
+        return "сетевая ошибка"
+
     def _dashboard_filter_changed(self, *_args) -> None:
         if hasattr(self, "dashboard_account"):
             selected = self.dashboard_account.currentData()
             self.settings.setValue("workspace/selected_account", selected or "")
-        if hasattr(self, "dashboard_clock"):
-            self.settings.setValue("workspace/dashboard_clock",
-                                   self.dashboard_clock.currentData() or "")
         self._refresh_home_dashboard()
 
     def _layout_dashboard_metrics(self) -> None:
@@ -4226,7 +4375,7 @@ class MainWindow(QMainWindow):
             if self.lichess.selected_token_store.get():
                 self.lichess.restore()
             else:
-                self.connection.setText("●  Не подключено")
+                self._set_connection_header("Нет связи", "Учётные данные не выбраны.")
         except CredentialStorageError as exc:
             if self._connection_dialog:
                 self._connection_dialog.set_status(str(exc))
@@ -4304,6 +4453,7 @@ class MainWindow(QMainWindow):
         self._dashboard_analysis_safety_allowed = bool(self.offline_mode)
         self._refresh_dashboard_analysis_visibility()
         self._lichess_connected = False
+        self._set_sidebar_safety_status("Аналитика скрыта · отключено")
         self._reset_backfill_status("Lichess · отключено")
         self._pause_batch_analysis()
         if self.lichess:
@@ -4453,15 +4603,59 @@ class MainWindow(QMainWindow):
         ))
 
     def _lichess_status(self, status: str) -> None:
-        display_status = ("●  Не подключено — подключите Lichess"
-                          if status == "Не подключено" else "●  " + status)
-        self.connection.setText(display_status)
+        status_text = str(status or "")
+        if status_text.startswith("Поток восстановлен:"):
+            compact_status = "Lichess · поток готов"
+        elif status_text.startswith("Подключено:"):
+            compact_status = "Аккаунт подтверждён · поток подключается"
+        elif status_text.startswith("Ограничение Lichess (429)") or "HTTP 429" in status_text:
+            compact_status = "Lichess · пауза API"
+        elif "403" in status_text:
+            compact_status = "Lichess · нет нужного разрешения"
+        elif "401" in status_text:
+            compact_status = "Lichess · нужна авторизация"
+        elif status_text.startswith("Переподключение"):
+            compact_status = "Lichess · восстановление потока"
+        elif status_text.startswith("Не подключено"):
+            compact_status = "Не подключено"
+        elif status_text.startswith("Ошибка"):
+            compact_status = "Lichess · ошибка соединения"
+        elif status_text.startswith("Проверка аккаунта отклонена") or status_text.startswith(
+                "Требуется повторное подключение"):
+            compact_status = "Lichess · нужна авторизация"
+        elif status_text.startswith("Ошибка проверки аккаунта"):
+            compact_status = "Lichess · ошибка проверки"
+        elif status_text.startswith("Проверяем"):
+            compact_status = "Lichess · проверяем аккаунт"
+        else:
+            compact_status = status_text[:34]
+        display_labels = {
+            "Lichess · поток готов": "Готов",
+            "Аккаунт подтверждён · поток подключается": "Вход",
+            "Lichess · пауза API": "429",
+            "Lichess · нет нужного разрешения": "403",
+            "Lichess · нужна авторизация": "401",
+            "Lichess · восстановление потока": "Связь…",
+            "Не подключено": "Нет связи",
+            "Lichess · ошибка соединения": "Ошибка",
+            "Lichess · ошибка проверки": "Проверка",
+            "Lichess · проверяем аккаунт": "Проверка",
+        }
+        display_status = display_labels.get(compact_status, "…")
+        self._set_connection_header(display_status, "Подключение Lichess: " + compact_status)
         if not self.offline_mode and self._lichess_status_invalidates_safety(status):
             # Revoke review leases/exercises as well as live engine and batch
             # work. A recovered transport never grants a new review lease.
             self._invalidate_analysis_preflight()
+            self._dashboard_display_safety_request_id = None
+            self._dashboard_display_safety_context = None
+            self._dashboard_analysis_safety_allowed = False
+            self._set_sidebar_safety_status("Аналитика скрыта · проверка устарела")
+            self._refresh_dashboard_analysis_visibility()
             if self._lichess_status_clears_authenticated_identity(status):
                 self._lichess_connected = False
+                self._lichess_account_authenticated = False
+                self._lichess_stream_ready_generation = None
                 self._event_stream_recovery_pending = False
             elif (status.startswith("Переподключение")
                   or (status.startswith("Ограничение Lichess (429)")
@@ -4469,13 +4663,60 @@ class MainWindow(QMainWindow):
                 # The account identity remains authenticated, but live actions
                 # stay gated until the current generation confirms stream recovery.
                 self._lichess_connected = False
+                self._lichess_stream_ready_generation = None
                 self._event_stream_recovery_pending = True
         elif status.startswith("Поток восстановлен: ") and not self.offline_mode:
             # This status arrives through _lichess_session_status, which rejects
             # stale auth generations before reaching this method.
             self._lichess_connected = True
+            self._lichess_account_authenticated = True
+            self._lichess_stream_ready_generation = getattr(self.lichess, "auth_generation", None)
             self._event_stream_recovery_pending = False
-        connected = bool(self._lichess_connected and not self.offline_mode)
+            QTimer.singleShot(0, self._request_dashboard_display_safety)
+        connected = self._online_actions_allowed()
+        if not self.offline_mode:
+            if not self._lichess_account_authenticated:
+                self._lichess_profile_username = ""
+                self.sidebar_profile_label.setText("Локальный профиль")
+                if status_text.startswith("Ограничение Lichess (429)") or "HTTP 429" in status_text:
+                    import re
+                    match = re.search(r"через (\d+) с", status_text)
+                    cooldown = f" · {match.group(1)} с" if match else ""
+                    self.sidebar_connection_label.setText("Пауза API" + cooldown)
+                elif "403" in status_text:
+                    self.sidebar_connection_label.setText("Недостаточно прав")
+                elif "401" in status_text:
+                    self.sidebar_connection_label.setText("Нужна авторизация")
+                elif status.startswith("Ошибка"):
+                    self.sidebar_connection_label.setText("Ошибка подключения")
+                else:
+                    self.sidebar_connection_label.setText(
+                        "Ошибка проверки" if status_text.startswith("Ошибка проверки")
+                        else "Нужна авторизация")
+                self.connect_button.setVisible(True)
+                self.disconnect_button.setVisible(False)
+            elif not connected:
+                if status_text.startswith("Ограничение Lichess (429)") or "HTTP 429" in status_text:
+                    import re
+                    match = re.search(r"через (\d+) с", status_text)
+                    cooldown = f" · {match.group(1)} с" if match else ""
+                    self.sidebar_connection_label.setText("Пауза API" + cooldown)
+                elif "403" in status_text:
+                    self.sidebar_connection_label.setText("Недостаточно прав")
+                elif "401" in status_text:
+                    self.sidebar_connection_label.setText("Нужна авторизация")
+                elif status_text.startswith("Ошибка проверки"):
+                    self.sidebar_connection_label.setText("Ошибка проверки")
+                else:
+                    self.sidebar_connection_label.setText(
+                        "Восстановление…" if self._event_stream_recovery_pending else
+                        "Ожидание потока…")
+                self.connect_button.setVisible(False)
+                self.disconnect_button.setVisible(True)
+            else:
+                self.sidebar_connection_label.setText("Поток готов")
+                self.connect_button.setVisible(False)
+                self.disconnect_button.setVisible(True)
         if status == "Не подключено":
             self.home_status.setText(
                 "Не подключено к Lichess. Подключите аккаунт, если хотите играть онлайн.")
@@ -4505,7 +4746,7 @@ class MainWindow(QMainWindow):
             self.connect_button.setEnabled(True)
         elif status.startswith("Подключено"):
             self._restore_retry_ready = False
-            self.connect_button.setText("Подключить Lichess")
+            self.connect_button.setText("Подключение…")
             self.connect_button.setEnabled(False)
         self.disconnect_button.setEnabled(connected)
         online_allowed = connected and self._lichess_rate_limit_remaining() == 0
@@ -4535,6 +4776,8 @@ class MainWindow(QMainWindow):
 
     def _online_actions_allowed(self) -> bool:
         return bool(self.lichess and not self.offline_mode and self._lichess_connected
+                    and self._lichess_stream_ready_generation == getattr(
+                        self.lichess, "auth_generation", None)
                     and self._lichess_rate_limit_remaining() == 0)
 
     def _refresh_online_controls(self) -> None:
@@ -4558,37 +4801,48 @@ class MainWindow(QMainWindow):
         if not self.lichess or self.lichess.username != username:
             return
         self._invalidate_analysis_preflight()
+        self._dashboard_display_safety_request_id = None
+        self._dashboard_display_safety_context = None
         self._dashboard_analysis_safety_allowed = False
+        self._analysis_session_generation += 1
+        self.dashboard_queries.begin_request()
+        self._latest_dashboard_snapshot = None
         self._refresh_dashboard_analysis_visibility()
-        self._lichess_connected = True
+        self._lichess_account_authenticated = True
+        self._lichess_profile_username = username
+        self._lichess_connected = False
+        self._lichess_stream_ready_generation = None
         self._event_stream_recovery_pending = False
-        self.lichess_analysis_status.setText(
-            "Lichess · подключено; фоновая аналитика будет проверена для этого аккаунта")
+        self.lichess_analysis_status.setText("Lichess · аккаунт подтверждён, подключаем поток")
         self.lichess_analysis_status.setToolTip("")
         self.settings.setValue("workspace/selected_account", f"lichess:{username.strip().lower()}")
-        self.connection.setText(f"●  Подключено: {username}")
+        self._set_connection_header(
+            "Вход", "Аккаунт подтверждён; ожидается готовность игрового потока.")
+        self._update_sidebar_profile_label()
+        self.sidebar_connection_label.setText("Подключаем поток…")
+        self._set_sidebar_safety_status("Ожидание проверки активных партий")
         if self._connection_dialog is not None:
             self._connection_dialog.accept()
-        self.connect_button.setEnabled(False)
+        self.connect_button.setVisible(False)
+        self.disconnect_button.setVisible(True)
         self.disconnect_button.setEnabled(True)
+        self._home_view.select_profile(f"lichess:{username.strip().lower()}", notify=False)
+        self._dashboard_options_loaded = False
+        self._refresh_home_dashboard()
         self._refresh_online_controls()
         self._refresh_batch_readiness()
         self._sync_position_eval_controls(self._position_eval_context_available())
         for button in (self.friend_link_button, self.username_button, self.ai_button):
             button.setVisible(self.online_session is None)
         self._resume_pending_final_syncs()
-        # Reuse the existing OAuth tokens; never start authorization from a timer.
-        QTimer.singleShot(3000, self._run_background_sync)
 
     def _run_background_sync(self) -> None:
-        if (self._shutdown_requested or self.offline_mode or not self._lichess_connected
+        if (self._shutdown_requested or self.offline_mode or not self._online_actions_allowed()
                 or self.lichess is None or not self.lichess.username):
             return
         if any(s.status in {"started", "playing"} and not s.is_ai_opponent
                for s in self.online_sessions.values()):
             return  # Prioritize live play over background network traffic.
-        self.archive_sync.start_full_sync(self.lichess, background=True)
-        self.lichess.sync_puzzle_activity_background(self.game_repository)
         generation = getattr(self.lichess, "auth_generation", None)
         if generation is not None and self._lichess_stream_ready_generation == generation:
             self._start_lichess_analysis_backfill(generation)
@@ -4837,6 +5091,7 @@ class MainWindow(QMainWindow):
             session.set_server_game_identity(game)
             self.game_sessions.register(session)
             if not session.is_ai_opponent:
+                self._set_sidebar_safety_status("Аналитика скрыта · активная партия")
                 self._cancel_lichess_backfill_wakeup()
                 self._backfill_deferred_for_human_game = True
                 self._dashboard_analysis_safety_allowed = False
@@ -5030,8 +5285,8 @@ class MainWindow(QMainWindow):
         elif had_premove and session.premove is None:
             if is_selected_live:
                 self.refresh("Предход не стал легальным и снят.")
-        if session.status not in {"created", "started", "playing"}:
-            QTimer.singleShot(3000, self._run_background_sync)
+        # Archive and puzzle history are explicit user actions; a game finish
+        # must never schedule those potentially large downloads.
 
     def _refresh_online(self, message: str | None = None) -> None:
         self.local_mode_label.setVisible(False)
@@ -5314,6 +5569,7 @@ class MainWindow(QMainWindow):
             self.lichess.draw(session.game_id, True)
 
     def show_saved_games(self) -> None:
+        self.screen_title.setText("Мои партии")
         existing = getattr(self, "library_page", None)
         if existing is not None:
             self.screen_stack.setCurrentWidget(existing)
@@ -5495,6 +5751,16 @@ class MainWindow(QMainWindow):
         page.set_results(rows, page=int(result.get("page", 0)),
                          pages=int(result.get("pages", 1)),
                          total=int(result.get("total", 0)))
+        target = self._home_detail_game_id
+        if target:
+            self._home_detail_game_id = None
+            for index in range(page.games.count()):
+                item = page.games.item(index)
+                game = item.data(Qt.ItemDataRole.UserRole)
+                if isinstance(game, dict) and str(game.get("game_id")) == target:
+                    page.games.setCurrentItem(item)
+                    page.games.scrollToItem(item)
+                    break
 
     def _library_detail_safety_allowed(self) -> bool:
         active_human = any(
@@ -5793,7 +6059,8 @@ class MainWindow(QMainWindow):
                                    request_id=request_id)
 
     def _analysis_safety_error(self, request_id: str, message: str) -> None:
-        if self._dashboard_display_safety_error(request_id, type(message).__name__):
+        if self._dashboard_display_safety_error(
+                request_id, self._safe_safety_error_kind(message)):
             return
         if self._review_safety_error_received(request_id, message):
             return
