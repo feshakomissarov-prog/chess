@@ -69,6 +69,19 @@
 
 **ТЗ:** явные typed one-shot pending states/operation generation на каждый game_id/action; coalescing duplicate click, disabled/visible progress, server authoritative stream acknowledgement и reconciliation после unknown POST (никогда не переотправлять неподтверждённый ход/сдачу «на всякий случай»), renew only when server state clearly permits; 401/403/429 и смена auth не позволят старому callback воздействовать на новый profile. Tests double click, delayed 200/error, reconnect, status changes during modal, stale request with second active game.
 
+
+### CORE-09 · P1 · DEFECT — ошибка чужой Lichess-команды сбрасывает ожидающий вызов в другом workflow
+
+**Доказательство:** `LichessGameActionsMixin::_action` используется для `resign`, `abort`, `draw`, `claim_draw`, `claim_victory`, cancel и при ошибке отправляет только **нетипизированный `self.error.emit(str(exc))`**. `MainWindow._lichess_error` реагирует на **любой** `error` с `self._awaiting_game_start=False` и скрывает `cancel_challenge_button`. Сценарий: ожидается username challenge, затем параллельное завершение/операция другой game с 403; общий handler ошибочно считает challenge завершённым. Отдельные auth generation guards для game stream не исправляют этот UI state.
+
+**ТЗ:** одна типизированная `OperationFailure(kind,game_id/challenge_id,request_id,auth_generation,http_code)`, сообщения для конкретного workflow. Ошибка resign/draw не изменяет pending invitation, ошибка archive/analytics не разлогинивает, ошибка challenge не затрагивает чужую игру. User-visible error on relevant page and background inspector; no token/PGN in logs. Regression two simultaneous game sessions + challenge + cross-generation 401/403/429 in deterministic ordering.
+
+### CORE-10 · P1 · HIGH-RISK UI LIVENESS — SQLite в GUI hot paths auth/finish/notes, не только в конструкторах
+
+**Проверенные вызовы:** `MainWindow._lichess_authenticated` и `_lichess_event_stream_ready` вызывают `game_repository.ensure_archive_account(username)` из Qt slots; `_show_result` делает `has_pending_write/get_game/export_pgn` и `_track_game_finalization` также читает SQLite synchronously; `Library.save_selected_note` вызывает `current_line` и `save_note` внутри click handler; `Puzzle open/history` и `StatisticsDialog.__init__` уже покрыты CORE-07/UI-06. При writer lock это может блокировать GUI, часы, доску и cancel button. **Эти операции действительно синхронны в коде**; зависание на реальной базе еще не измерено.
+
+**ТЗ:** app-owned serialized DB writer/read-only worker models для критичных Qt slots, без разрушения game finalization correctness: строго atomic CAS финальной линии с уведомлением Qt signal/revision, чёткое progress/loading; no duplicated writes, stale profile/generation not consumed. Обязательные worst-case Qt barrier tests: writer holds `BEGIN IMMEDIATE`, login account A→B, finish game last move, save note, show Progress/Puzzle; paint/clock updates/Disconnect remain responsive, final move persisted eventually or explicit error. Не перемещать саму отрисовку/Qt signals в worker thread. Ограниченная задержка shutdown, no SQLite concurrency corruption.
+
 ## 3. Блок I — контрольный перечень для дальнейшего изучения (НЕ ЯВЛЯЕТСЯ НАХОДКАМИ)
 
 - P0: full chain user account/PAT/OAuth/token store & reconnect; stale events/stream and human game safety; Lichess active games AI/HUMAN validator against real documented API; per-account live session commands; clock authority and game finalization writes.
