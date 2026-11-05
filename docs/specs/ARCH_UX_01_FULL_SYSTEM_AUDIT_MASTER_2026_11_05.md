@@ -43,6 +43,13 @@
 
 **ТЗ:** разделить global migration executor и status read models в каждом экране; scope на Progress — собственный account (и source только если label подразумевает source), Home/Background — явно подписанный scope; filter/revision invalidation, async count, generation guard. Qt case A=5/B=15/All=20, с Home A и Progress B + late A callback, завершённая migration + switch. Скрывать engine-derived coverage при Fair Play blocked.
 
+
+### CORE-05 · P1 · DEFECT — онлайн-инкремент часов показывается в миллисекундах как секунды
+
+**Доказательство:** `src/chess_coach/lichess/session.py::_apply_game_full_metadata` и `_apply_clock_state` принимают Lichess `increment,winc,binc` **в миллисекундах**: типовая игра 3+2 — `increment=2000`, `white_inc=black_inc=2000`. `MainWindow._update_clock` (оба пути: ожидание часов и обычный live) пишет `f"+{owner_increment} с после подтверждённого хода"` напрямую. Получается `+2000 с` вместо `+2 с`. В unit-тестах проверяется валидация live clock и UI board, но не этот label при ненулевом increment.
+
+**ТЗ:** единый тип `milliseconds` в модели и `format_increment_ms` только для presentation; 2000→`+2 с`, 10_000→`+10 с`, sub-second без выдуманных округлений, clock snapshot/paused/offline. Не менять физическую валидацию миллисекунд. Test Qt: Lichess gameFull 3+2/15+10, оба пути _update_clock, correspondences, same board after finish. Подписанные часы/Control должны быть согласованы.
+
 ## 3. Блок I — контрольный перечень для дальнейшего изучения (НЕ ЯВЛЯЕТСЯ НАХОДКАМИ)
 
 - P0: full chain user account/PAT/OAuth/token store & reconnect; stale events/stream and human game safety; Lichess active games AI/HUMAN validator against real documented API; per-account live session commands; clock authority and game finalization writes.
