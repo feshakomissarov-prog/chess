@@ -1198,18 +1198,20 @@ class GameReviewWorkspace(QWidget):
         position_assessments = {int(item.get("ply", -1)): item
                                 for item in position_analysis.get("assessments", [])}
         position_score = position_assessments.get(ply, {})
+        terminal_position = self.review["positions"][ply].is_checkmate()
+        terminal_winner_white = (self.review["positions"][ply].turn == chess.BLACK
+                                 if terminal_position else None)
         score_for_bar = (None if position_score.get("mate_white") is not None
                          else position_score.get("white_cp"))
         self.advantage_bar.set_evaluation(score_for_bar,
                                           allowed=self.evaluation_allowed,
                                           mate_white=position_score.get("mate_white"),
-                                          terminal_checkmate=self.review["positions"][ply].is_checkmate(),
-                                          terminal_winner_white=(
-                                              self.review["positions"][ply].turn == chess.BLACK
-                                              if self.review["positions"][ply].is_checkmate()
-                                              else None))
+                                          terminal_checkmate=terminal_position,
+                                          terminal_winner_white=terminal_winner_white)
         self.advantage_label.setText(
-            evaluation_label(position_score.get("white_cp"), position_score.get("mate_white"))
+            (("Мат · белые победили" if terminal_winner_white else "Мат · чёрные победили")
+             if terminal_position else
+             evaluation_label(position_score.get("white_cp"), position_score.get("mate_white")))
             if self.evaluation_allowed else "Оценки скрыты")
         position_best_label = ""
         if self.evaluation_allowed:
@@ -1245,7 +1247,11 @@ class GameReviewWorkspace(QWidget):
             before_label = evaluation_label(before_cp, before.get("mate_white"))
             after_label = evaluation_label(after_cp, after.get("mate_white"))
             delta_label = "Δ: нет сопоставимой численной оценки"
-            if (before_cp is not None and after_cp is not None
+            if self.review["positions"][ply].is_checkmate():
+                winner = "белые" if self.review["positions"][ply].turn == chess.BLACK else "чёрные"
+                after_label = f"Мат · победили {winner} (по законной позиции)"
+                delta_label = "Терминальный мат подтверждён доской; CPL не применяется"
+            elif (before_cp is not None and after_cp is not None
                     and before.get("mate_white") is None and after.get("mate_white") is None):
                 delta_white = int(after_cp) - int(before_cp)
                 delta_mover = delta_white if move.mover == "white" else -delta_white
@@ -1286,9 +1292,13 @@ class GameReviewWorkspace(QWidget):
                            if int(item.get("ply", -1)) == ply
                            and str(item.get("event_type", "")).startswith(("mate", "missed_own", "saved_", "allowed_", "checkmate"))]
             accuracy_value = move_metric.get("accuracy")
+            terminal_accuracy = str(move_metric.get("accuracy_source") or "").endswith(
+                ":board-terminal")
             accuracy_text = (f"Точность хода: {float(accuracy_value):.1f}% · "
                              "методика Lichess, локальная и неофициальная"
                              if accuracy_value is not None else "Точность хода: н/д")
+            if accuracy_value is not None and terminal_accuracy:
+                accuracy_text += " · мат подтверждён доской; конечная оценка движка не требовалась"
             event_names = {
                 "missed_own_mate": "упущен форсированный мат",
                 "saved_against_forced_mate": "отражена форсированная матовая угроза",
@@ -1303,7 +1313,8 @@ class GameReviewWorkspace(QWidget):
                         if move.cp_loss is not None else
                         "CPL не применим к матовой оценке"
                         if before.get("mate_white") is not None
-                        or after.get("mate_white") is not None else
+                        or after.get("mate_white") is not None
+                        or self.review["positions"][ply].is_checkmate() else
                         "CPL: нет сравнимых оценок")
             self.move_detail.setText(
                 f"{move.san} · {severity_label(move.severity)} · {cpl_text} · "
@@ -1312,6 +1323,8 @@ class GameReviewWorkspace(QWidget):
                 + (f"\n{mate_event_text}" if mate_event_text else ""))
             self.move_detail.setToolTip(
                 f"{accuracy_text} · формула {move_metric.get('accuracy_formula_id') or 'н/д'}"
+                + (f"\nИсточник конечного результата: {move_metric.get('accuracy_source')}"
+                   if terminal_accuracy else "")
                 + (f"\nСобытие: {mate_event_text}" if mate_event_text else ""))
         else:
             self.move_detail.setText("Начальная позиция партии.")

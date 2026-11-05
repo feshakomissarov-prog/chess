@@ -111,7 +111,7 @@ class AnalysisStoreMixin:
     def _insert_derived_metrics_for_run(cls, db: sqlite3.Connection, run_id: str,
                                         *, user_color: str | None = None,
                                         replace: bool = False) -> int:
-        """Materialize canonical v2 move facts from one persisted source run, without UCI."""
+        """Materialize current-version move facts from one saved run, without UCI."""
         from ...lichess.move_metrics import build_move_facts
         from ...lichess.event_detectors import detect_registered_events
 
@@ -139,11 +139,16 @@ class AnalysisStoreMixin:
             assessments, moves, metrics, run_id=run_id, source=run["source"]))
         if replace:
             from ...lichess.move_metrics import METRIC_VERSION
+            from ...lichess.event_detectors import DETECTOR_VERSION
             db.execute("DELETE FROM move_metrics WHERE run_id=? AND metric_version=?",
                        (run_id, METRIC_VERSION))
+            # Superseded detector versions are audit history. Replace only the
+            # currently materialized projections so source refreshes cannot
+            # leave stale current events or duplicate active event rows.
             db.execute("DELETE FROM analysis_events WHERE run_id=? AND "
-                       "(detector_version='cc-opportunity-candidate-v1' "
-                       "OR detector_version LIKE 'cc-base-events-v1:%')", (run_id,))
+                       "(detector_version=? OR detector_version=? OR detector_version LIKE ?)",
+                       (run_id, "cc-opportunity-candidate-v2",
+                        "cc-mate-events-accuracy-a46b4e6d-v2", DETECTOR_VERSION + ":%"))
         db.executemany("""INSERT OR IGNORE INTO move_metrics (
             run_id,game_id,line_revision,ply,metric_version,source,
             white_cp_before,mate_white_before,white_cp_after,mate_white_after,
@@ -166,11 +171,15 @@ class AnalysisStoreMixin:
     def _load_analysis_events(db: sqlite3.Connection, run_id: str) -> list[dict]:
         from ...lichess.event_detectors import DETECTOR_VERSION
 
-        # Retain superseded detector evidence in SQLite for audit, but expose only
-        # the active base-detector version in reports and review planning.
+        # Retain superseded evidence in SQLite for audit, but expose only active
+        # versions of each versioned derived-event family in reports/review.
         events = [dict(row) for row in db.execute(
             "SELECT * FROM analysis_events WHERE run_id=? AND "
-            "(detector_version NOT LIKE 'cc-base-events-v%' OR detector_version LIKE ?) "
+            "(detector_version NOT LIKE 'cc-base-events-v%' OR detector_version LIKE ?) AND "
+            "(detector_version NOT LIKE 'cc-opportunity-candidate-v%' "
+            "OR detector_version='cc-opportunity-candidate-v2') AND "
+            "(detector_version NOT LIKE 'cc-mate-events-accuracy-a46b4e6d-v%' "
+            "OR detector_version='cc-mate-events-accuracy-a46b4e6d-v2') "
             "ORDER BY ply,event_type,detector_version",
             (run_id, DETECTOR_VERSION + ":%"))]
         for event in events:
@@ -190,8 +199,9 @@ class AnalysisStoreMixin:
             "FROM move_metrics mm JOIN game_moves gm ON gm.game_id=mm.game_id "
             "AND gm.line_revision=mm.line_revision AND gm.ply=mm.ply "
             "LEFT JOIN game_phase_boundaries pb ON pb.game_id=mm.game_id "
-            "AND pb.line_revision=mm.line_revision WHERE mm.run_id=? ORDER BY mm.ply",
-            (run_id,)).fetchall()
+            "AND pb.line_revision=mm.line_revision WHERE mm.run_id=? "
+            "AND mm.metric_version=? ORDER BY mm.ply",
+            (run_id, METRIC_VERSION)).fetchall()
         return [dict(row) for row in rows]
 
     @staticmethod
@@ -208,7 +218,7 @@ class AnalysisStoreMixin:
             return None
         params = json.loads(row["parameters_json"])
         reviewed = db.execute(
-            "SELECT COUNT(*) FROM move_metrics WHERE run_id=? AND metric_version='cc-move-metrics-v2' "
+            "SELECT COUNT(*) FROM move_metrics WHERE run_id=? AND metric_version='cc-move-metrics-v3' "
             "AND cp_loss IS NOT NULL", (row["run_id"],)).fetchone()[0]
         total_moves = db.execute(
             "SELECT COUNT(*) FROM game_moves WHERE game_id=? AND line_revision=?",
@@ -277,24 +287,6 @@ class AnalysisStoreMixin:
                                user_color: str | None = None) -> dict | None:
         """Load one current analysis and its plotted points/classifications for a detail view."""
         with self._connection() as db:
-            materialize = db.execute(
-                "SELECT ar.run_id FROM analysis_runs ar JOIN game_revisions gr "
-                "ON gr.game_id=ar.game_id AND gr.line_revision=ar.line_revision "
-                "WHERE ar.game_id=? AND ar.line_revision=? AND gr.is_current=1 "
-                "AND ar.status IN ('complete','partial') AND NOT EXISTS "
-                "(SELECT 1 FROM analysis_jobs aj WHERE aj.result_run_id=ar.run_id "
-                "AND aj.analysis_pass='review') ORDER BY "
-                "CASE WHEN ar.status='complete' THEN 0 ELSE 1 END,ar.finished_at DESC,"
-                "ar.run_id DESC LIMIT 1", (game_id, line_revision)).fetchone()
-            if materialize:
-                has_metrics = db.execute("SELECT 1 FROM move_metrics WHERE run_id=? LIMIT 1",
-                                         (materialize["run_id"],)).fetchone()
-            else:
-                has_metrics = True
-        if materialize and not has_metrics:
-            # Legacy reports are hydrated from saved assessments only; this never opens UCI.
-            self.materialize_analysis_metrics(materialize["run_id"])
-        with self._connection() as db:
             run = db.execute(
                 "SELECT ar.* FROM analysis_runs ar JOIN game_revisions gr "
                 "ON gr.game_id=ar.game_id AND gr.line_revision=ar.line_revision "
@@ -318,6 +310,18 @@ class AnalysisStoreMixin:
                 "SELECT * FROM analysis_alternatives WHERE run_id=? ORDER BY ply,multipv_rank",
                 (run["run_id"],))]
             result["events"] = self._load_analysis_events(db, run["run_id"])
+            if not result["move_metrics"]:
+                # Return current metrics immediately without doing any write on
+                # a synchronous GUI read. The review worker persists them.
+                facts, derived_events = self._derive_saved_metrics(db, run)
+                result["move_metrics"] = facts
+                existing_keys = {event["event_key"] for event in result["events"]}
+                result["events"].extend(
+                    event for event in derived_events
+                    if event.get("event_key") not in existing_keys)
+                result["metrics_materialization_pending"] = result["source"] == "stockfish"
+            else:
+                result["metrics_materialization_pending"] = False
             coverage = db.execute("SELECT * FROM analysis_coverage WHERE run_id=?",
                                   (run["run_id"],)).fetchone()
             result["coverage"] = dict(coverage) if coverage else None
@@ -336,6 +340,33 @@ class AnalysisStoreMixin:
                              "own_moves": result["decision_coverage"]["own_moves"]},
             }
             return result
+
+    @classmethod
+    def _derive_saved_metrics(cls, db: sqlite3.Connection, run) -> tuple[list[dict], list[dict]]:
+        """Build an ephemeral current-version view from persisted source rows."""
+        from ...lichess.event_detectors import detect_registered_events
+
+        assessments = [dict(row) for row in db.execute(
+            "SELECT * FROM position_assessments WHERE run_id=? ORDER BY ply", (run["run_id"],))]
+        for item in assessments:
+            item["pv"] = str(item.get("pv_uci") or "").split()
+        moves = [dict(row) for row in db.execute(
+            "SELECT ply,mover,uci FROM game_moves WHERE game_id=? AND line_revision=? ORDER BY ply",
+            (run["game_id"], run["line_revision"]))]
+        revision = db.execute(
+            "SELECT initial_fen FROM game_revisions WHERE game_id=? AND line_revision=?",
+            (run["game_id"], run["line_revision"])).fetchone()
+        classifications = [dict(row) for row in db.execute(
+            "SELECT * FROM move_classifications WHERE run_id=? ORDER BY ply", (run["run_id"],))]
+        metrics, events = build_move_facts(
+            assessments, moves, source=run["source"], run_id=run["run_id"],
+            classifications=classifications,
+            initial_fen=revision["initial_fen"] if revision else "startpos")
+        for event in events:
+            event.setdefault("tags", ["opportunity"])
+        events.extend(detect_registered_events(
+            assessments, moves, metrics, run_id=run["run_id"], source=run["source"]))
+        return metrics, events
 
     @staticmethod
 
@@ -409,7 +440,7 @@ class AnalysisStoreMixin:
         result["official_game_accuracy_n"] = int(value is not None)
 
     def materialize_analysis_metrics(self, run_id: str) -> int:
-        """Atomically replace v2 facts from persisted assessments; no engine is started."""
+        """Atomically replace current facts from saved assessments; no engine is started."""
         with self._connection() as db:
             run = db.execute("SELECT * FROM analysis_runs WHERE run_id=?", (run_id,)).fetchone()
             if not run:
@@ -418,6 +449,84 @@ class AnalysisStoreMixin:
             count = self._insert_derived_metrics_for_run(db, run_id, replace=True)
         self.invalidate_statistics_cache()
         return count
+
+    def count_stale_analysis_metrics(self, *, game_id: str | None = None) -> int:
+        """Count current saved runs that lack current derived facts."""
+        sql = ("SELECT COUNT(*) FROM analysis_runs ar JOIN game_revisions gr "
+               "ON gr.game_id=ar.game_id AND gr.line_revision=ar.line_revision "
+               "WHERE gr.is_current=1 AND ar.source='stockfish' "
+               "AND ar.status IN ('complete','partial') AND NOT EXISTS "
+               "(SELECT 1 FROM analysis_jobs aj WHERE aj.result_run_id=ar.run_id "
+               "AND aj.analysis_pass='review') AND EXISTS (SELECT 1 FROM game_moves gm "
+               "WHERE gm.game_id=ar.game_id AND gm.line_revision=ar.line_revision) "
+               "AND NOT EXISTS (SELECT 1 FROM move_metrics mm WHERE mm.run_id=ar.run_id "
+               "AND mm.metric_version=?)")
+        params: list[object] = [METRIC_VERSION]
+        if game_id is not None:
+            sql += " AND ar.game_id=?"
+            params.append(game_id)
+        with self._connection() as db:
+            return int(db.execute(sql, params).fetchone()[0])
+
+    def materialize_stale_analysis_for_game(self, game_id: str) -> dict[str, int]:
+        """Lazily update the selected game's latest Stockfish run; call from a worker."""
+        with self._connection() as db:
+            total = int(db.execute(
+                "SELECT COUNT(*) FROM analysis_runs ar JOIN game_revisions gr "
+                "ON gr.game_id=ar.game_id AND gr.line_revision=ar.line_revision "
+                "WHERE ar.game_id=? AND gr.is_current=1 AND ar.source='stockfish' "
+                "AND ar.status IN ('complete','partial') AND NOT EXISTS "
+                "(SELECT 1 FROM analysis_jobs aj WHERE aj.result_run_id=ar.run_id "
+                "AND aj.analysis_pass='review') AND EXISTS (SELECT 1 FROM game_moves gm "
+                "WHERE gm.game_id=ar.game_id AND gm.line_revision=ar.line_revision) "
+                "AND NOT EXISTS (SELECT 1 FROM move_metrics mm WHERE mm.run_id=ar.run_id "
+                "AND mm.metric_version=?)", (game_id, METRIC_VERSION)).fetchone()[0])
+            runs = [str(row[0]) for row in db.execute(
+                "SELECT ar.run_id FROM analysis_runs ar JOIN game_revisions gr "
+                "ON gr.game_id=ar.game_id AND gr.line_revision=ar.line_revision "
+                "WHERE ar.game_id=? AND gr.is_current=1 AND ar.source='stockfish' "
+                "AND ar.status IN ('complete','partial') AND NOT EXISTS "
+                "(SELECT 1 FROM analysis_jobs aj WHERE aj.result_run_id=ar.run_id "
+                "AND aj.analysis_pass='review') AND EXISTS (SELECT 1 FROM game_moves gm "
+                "WHERE gm.game_id=ar.game_id AND gm.line_revision=ar.line_revision) "
+                "AND NOT EXISTS (SELECT 1 FROM move_metrics mm WHERE mm.run_id=ar.run_id "
+                "AND mm.metric_version=?) ORDER BY ar.finished_at DESC,ar.run_id DESC LIMIT 5",
+                (game_id, METRIC_VERSION))]
+        processed = 0
+        moves = 0
+        for run_id in runs:
+            moves += self.materialize_analysis_metrics(run_id)
+            processed += 1
+        return {"processed": processed, "total": total,
+                "remaining": self.count_stale_analysis_metrics(game_id=game_id),
+                "moves_materialized": moves}
+
+    def materialize_stale_analysis_metrics_batch(
+            self, *, limit: int = 10,
+            cancel_check: Callable[[], bool] | None = None) -> dict[str, int]:
+        """Process a bounded resumable batch; current-version rows are its checkpoint."""
+        limit = max(1, min(int(limit), 25))
+        total = self.count_stale_analysis_metrics()
+        with self._connection() as db:
+            runs = [str(row[0]) for row in db.execute(
+                "SELECT ar.run_id FROM analysis_runs ar JOIN game_revisions gr "
+                "ON gr.game_id=ar.game_id AND gr.line_revision=ar.line_revision "
+                "WHERE gr.is_current=1 AND ar.source='stockfish' "
+                "AND ar.status IN ('complete','partial') AND EXISTS (SELECT 1 FROM game_moves gm "
+                "WHERE gm.game_id=ar.game_id AND gm.line_revision=ar.line_revision) "
+                "AND NOT EXISTS (SELECT 1 FROM analysis_jobs aj WHERE aj.result_run_id=ar.run_id "
+                "AND aj.analysis_pass='review') AND NOT EXISTS "
+                "(SELECT 1 FROM move_metrics mm WHERE mm.run_id=ar.run_id "
+                "AND mm.metric_version=?) ORDER BY ar.finished_at,ar.run_id LIMIT ?",
+                (METRIC_VERSION, limit))]
+        processed = 0
+        for run_id in runs:
+            if cancel_check is not None and cancel_check():
+                break
+            self.materialize_analysis_metrics(run_id)
+            processed += 1
+        return {"processed": processed, "total": total,
+                "remaining": self.count_stale_analysis_metrics()}
 
     def reclassify_analysis_events(self, run_id: str) -> int:
         """Run registered pure detectors over one saved run, with no Stockfish access."""
@@ -435,7 +544,7 @@ class AnalysisStoreMixin:
                 "SELECT ply,mover,uci FROM game_moves WHERE game_id=? AND line_revision=? ORDER BY ply",
                 (run["game_id"], run["line_revision"]))]
             metrics = [dict(row) for row in db.execute(
-                "SELECT * FROM move_metrics WHERE run_id=? AND metric_version='cc-move-metrics-v2' "
+                "SELECT * FROM move_metrics WHERE run_id=? AND metric_version='cc-move-metrics-v3' "
                 "ORDER BY ply", (run_id,))]
             before = int(db.execute("SELECT COUNT(*) FROM analysis_events WHERE run_id=?",
                                     (run_id,)).fetchone()[0])
@@ -456,7 +565,7 @@ class AnalysisStoreMixin:
 
         with self._connection() as db:
             metrics = [dict(row) for row in db.execute(
-                "SELECT * FROM move_metrics WHERE run_id=? AND metric_version='cc-move-metrics-v2' "
+                "SELECT * FROM move_metrics WHERE run_id=? AND metric_version='cc-move-metrics-v3' "
                 "ORDER BY ply", (run_id,))]
             events = self._load_analysis_events(db, run_id)
         return select_review_positions(metrics, events, budget_per_game=budget_per_game,

@@ -13,10 +13,10 @@ from ..domain.accuracy import FORMULA_ID, move_accuracy_from_assessments
 
 # The metric row shape is unchanged; its accuracy has an independently versioned
 # formula id so existing rows remain readable and auditable.
-METRIC_VERSION = "cc-move-metrics-v2"
+METRIC_VERSION = "cc-move-metrics-v3"
 LOCAL_ACCURACY_SOURCE = "stockfish-local-lichess-method"
 SEVERITY_POLICY_VERSION = "cc-cpl-thresholds-v2"
-WDL_MODEL = f"python-chess-sf-v1:{chess.__version__}"
+WDL_MODEL = f"python-chess-sf-v2-terminal-aware:{chess.__version__}"
 
 
 def _typed_score(item: dict[str, Any]) -> chess.engine.PovScore | None:
@@ -27,7 +27,21 @@ def _typed_score(item: dict[str, Any]) -> chess.engine.PovScore | None:
     return None
 
 
-def _white_wdl(item: dict[str, Any], ply: int) -> dict[str, int] | None:
+def _white_wdl(item: dict[str, Any], ply: int,
+               position: chess.Board | None = None) -> dict[str, int] | None:
+    if position is not None and position.is_checkmate():
+        white_wins = position.turn == chess.BLACK
+        return ({"win": 1000, "draw": 0, "loss": 0} if white_wins else
+                {"win": 0, "draw": 0, "loss": 1000})
+    mate = item.get("mate_white")
+    if mate is not None and int(mate) == 0:
+        # Stored mate=0 conflates python-chess MateGiven and Mate(0). Only a
+        # legal terminal board can recover which side delivered the mate.
+        if position is None or not position.is_checkmate():
+            return None
+        white_wins = position.turn == chess.BLACK
+        return ({"win": 1000, "draw": 0, "loss": 0} if white_wins else
+                {"win": 0, "draw": 0, "loss": 1000})
     score = _typed_score(item)
     if score is None:
         return None
@@ -98,24 +112,33 @@ def build_move_facts(assessments: list[dict[str, Any]], moves: list[dict[str, An
                 and after.get("white_cp") is not None):
             delta = int(before["white_cp"]) - int(after["white_cp"])
             cp_loss = max(0, delta if mover == "white" else -delta)
+        terminal_derived = bool(ply in position_by_ply and position_by_ply[ply].is_checkmate())
         accuracy = (move_accuracy_from_assessments(
             before, after, mover=mover,
             before_position=position_by_ply[ply - 1],
             after_position=position_by_ply[ply])
             if source == "stockfish" and ply - 1 in position_by_ply
             and ply in position_by_ply and before.get("depth") is not None
-            and after.get("depth") is not None else None)
+            and (after.get("depth") is not None or terminal_derived) else None)
+        accuracy_source = (f"{LOCAL_ACCURACY_SOURCE}:board-terminal"
+                           if accuracy is not None and terminal_derived
+                           and after.get("depth") is None else
+                           LOCAL_ACCURACY_SOURCE if accuracy is not None else None)
         facts.append({
             "ply": ply, "mover": mover, "source": source,
             "analysis_run_id": run_id,
             "white_cp_before": before.get("white_cp"), "mate_white_before": before.get("mate_white"),
             "white_cp_after": after.get("white_cp"), "mate_white_after": after.get("mate_white"),
             "cp_loss": cp_loss, "mate_discontinuity": int(has_mate),
-            "wdl_before_json": json.dumps(_white_wdl(before, ply - 1), sort_keys=True),
-            "wdl_after_json": json.dumps(_white_wdl(after, ply), sort_keys=True),
-            "wdl_model": WDL_MODEL if _typed_score(before) and _typed_score(after) else None,
+            "wdl_before_json": json.dumps(
+                _white_wdl(before, ply - 1, position_by_ply.get(ply - 1)), sort_keys=True),
+            "wdl_after_json": json.dumps(
+                _white_wdl(after, ply, position_by_ply.get(ply)), sort_keys=True),
+            "wdl_model": WDL_MODEL if (
+                _white_wdl(before, ply - 1, position_by_ply.get(ply - 1)) is not None
+                and _white_wdl(after, ply, position_by_ply.get(ply)) is not None) else None,
             "accuracy": accuracy,
-            "accuracy_source": LOCAL_ACCURACY_SOURCE if accuracy is not None else None,
+            "accuracy_source": accuracy_source,
             "accuracy_formula_id": FORMULA_ID if accuracy is not None else None,
             "severity": classify_severity(cp_loss),
             "severity_policy_version": SEVERITY_POLICY_VERSION,
@@ -162,7 +185,7 @@ def build_move_facts(assessments: list[dict[str, Any]], moves: list[dict[str, An
             if event_type is None:
                 continue
             events.append({
-                "event_key": f"{source}:{run_id}:mate:{event_type}:{ply}",
+                "event_key": f"{source}:{run_id}:mate:{event_type}:{ply}:v2",
                 "ply": ply, "event_type": event_type,
                 "confidence_state": "verified", "source": source,
                 "evidence_json": json.dumps({
@@ -175,11 +198,14 @@ def build_move_facts(assessments: list[dict[str, Any]], moves: list[dict[str, An
                     "white_cp_before": before.get("white_cp"),
                     "white_cp_after": after.get("white_cp"),
                     "accuracy": fact["accuracy"],
-                    "accuracy_formula_id": fact["accuracy_formula_id"],
+                "accuracy_formula_id": fact["accuracy_formula_id"],
+                    "accuracy_source": fact["accuracy_source"],
+                    "terminal_accuracy_derived": bool(
+                        fact["accuracy_source"] and fact["accuracy_source"].endswith("board-terminal")),
                     "line_revision_bound": True,
                     "analysis_run_id": run_id,
                 }, sort_keys=True),
-                "detector_version": "cc-mate-events-accuracy-a46b4e6d-v1",
+                "detector_version": "cc-mate-events-accuracy-a46b4e6d-v2",
                 "tags": ["mate"],
             })
     # A previous opponent move can create an opportunity; a substantial loss on
@@ -206,7 +232,7 @@ def build_move_facts(assessments: list[dict[str, Any]], moves: list[dict[str, An
             except (ValueError, chess.InvalidMoveError):
                 best_uci = None
         events.append({
-            "event_key": f"{source}:{run_id}:missed-opportunity:{fact['ply']}",
+            "event_key": f"{source}:{run_id}:missed-opportunity:{fact['ply']}:v2",
             "ply": fact["ply"], "event_type": "missed_opportunity",
             "confidence_state": "candidate", "source": source,
             "evidence_json": json.dumps({
@@ -220,6 +246,6 @@ def build_move_facts(assessments: list[dict[str, Any]], moves: list[dict[str, An
                 "analysis_run_id": run_id,
                 "reply_eval_white_cp": None if reply_eval is None else reply_eval.get("white_cp"),
             }, sort_keys=True),
-            "detector_version": "cc-opportunity-candidate-v1",
+            "detector_version": "cc-opportunity-candidate-v2",
         })
     return facts, events

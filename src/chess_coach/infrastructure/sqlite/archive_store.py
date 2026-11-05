@@ -291,7 +291,7 @@ class ArchiveStoreMixin:
                     db.execute("UPDATE analysis_runs SET status=?,finished_at=?,error=NULL WHERE run_id=?",
                                (eval_status, now, run_id))
                 existing_metrics = db.execute(
-                    "SELECT 1 FROM move_metrics WHERE run_id=? AND metric_version='cc-move-metrics-v2' LIMIT 1",
+                    "SELECT 1 FROM move_metrics WHERE run_id=? AND metric_version='cc-move-metrics-v3' LIMIT 1",
                     (run_id,)).fetchone()
                 if changed or not existing_metrics:
                     self._insert_derived_metrics_for_run(

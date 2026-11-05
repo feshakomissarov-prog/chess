@@ -99,7 +99,8 @@ def load_game_review(repository, game: dict[str, Any]) -> dict[str, Any]:
             white_cp=assessment.get("white_cp"), mate_white=assessment.get("mate_white"),
             depth=assessment.get("depth"), nodes=assessment.get("nodes"),
             local_accuracy=(float(metric["accuracy"]) if metric.get("accuracy") is not None
-                            and metric.get("accuracy_source") == "stockfish-local-lichess-method"
+                            and str(metric.get("accuracy_source") or "").startswith(
+                                "stockfish-local-lichess-method")
                             else None),
             local_accuracy_formula_id=metric.get("accuracy_formula_id")))
 

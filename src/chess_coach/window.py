@@ -669,7 +669,9 @@ class MainWindow(QMainWindow):
             account_id, self.settings.value("lichess/ready_analytics_paused", False, type=bool))
         # Archive/puzzle history synchronization is separate from optional
         # ready-analysis backfill and keeps its incremental periodic schedule.
-        if self.settings.value("lichess/auto_archive_sync", True, type=bool):
+        auto_archive = self.settings.value("lichess/auto_archive_sync", True, type=bool)
+        auto_puzzles = self.settings.value("lichess/auto_puzzle_history_sync", True, type=bool)
+        if auto_archive or auto_puzzles:
             QTimer.singleShot(3000, self._run_background_sync)
             self._auto_sync_timer.start()
         else:
@@ -4432,11 +4434,18 @@ class MainWindow(QMainWindow):
             sync_ready = bool(self._lichess_connected and self.lichess and
                               self._lichess_stream_ready_generation == getattr(
                                   self.lichess, "auth_generation", None))
-            if self.settings.value("lichess/auto_archive_sync", True, type=bool):
+            auto_archive = self.settings.value(
+                "lichess/auto_archive_sync", True, type=bool)
+            auto_puzzles = self.settings.value(
+                "lichess/auto_puzzle_history_sync", True, type=bool)
+            if auto_archive or auto_puzzles:
                 if sync_ready:
-                    if not auto_archive_was_enabled:
+                    if ((auto_archive and not auto_archive_was_enabled)
+                            or (auto_puzzles and not auto_puzzles_was_enabled)):
                         QTimer.singleShot(0, self._run_background_sync)
                     self._auto_sync_timer.start()
+                else:
+                    self._auto_sync_timer.stop()
             else:
                 self._auto_sync_timer.stop()
             if (auto_puzzles_was_enabled and not self.settings.value(
@@ -6140,7 +6149,10 @@ class MainWindow(QMainWindow):
             try:
                 if stop_event.is_set():
                     return
+                metrics_materialization = self.game_repository.materialize_stale_analysis_for_game(
+                    game_id)
                 review = load_game_review(self.game_repository, game)
+                review["metrics_materialization"] = metrics_materialization
                 if not stop_event.is_set():
                     self.library_detail_finished.emit(generation, game_id, review, None)
             except Exception as exc:
@@ -6174,6 +6186,13 @@ class MainWindow(QMainWindow):
         if detail_game is None or str(detail_game.get("game_id")) != str(game_id):
             return
         page.show_game_detail(detail_game, review, safety_allowed=True)
+        materialization = review.get("metrics_materialization") or {}
+        if int(materialization.get("total") or 0) > 0:
+            page.detail_status.setText(
+                "Метрики сохранённых анализов: пересчитано "
+                f"{int(materialization.get('processed') or 0)}/"
+                f"{int(materialization.get('total') or 0)}; "
+                f"осталось {int(materialization.get('remaining') or 0)}. Движок не запускался.")
         if target_match:
             self._library_detail_target_id = None
 

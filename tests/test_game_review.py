@@ -701,7 +701,7 @@ def test_review_advantage_bar_uses_mate_status_without_centipawn_fill(qtbot, tmp
         workspace.select_ply(3)
         assert workspace.advantage_bar.white_cp is None
         assert workspace.advantage_bar.mate_white == 3
-        assert "белые ставят мат через 3" in workspace.advantage_label.text()
+        assert "\u0431\u0435\u043b\u044b\u0435 \u0441\u0442\u0430\u0432\u044f\u0442 \u043c\u0430\u0442 \u0447\u0435\u0440\u0435\u0437 3 \u00b7 \u043f\u0435\u0440\u0441\u043f\u0435\u043a\u0442\u0438\u0432\u0430 \u0431\u0435\u043b\u044b\u0445" == workspace.advantage_label.text()
         assert "не фиктивную оценку" in workspace.advantage_bar.toolTip()
         # The negative side is painted from the typed mate sign as well; it
         # must not compare an absent CP value with zero.
@@ -762,7 +762,7 @@ def test_checkmate_review_shows_mate_bar_accuracy_and_terminal_event_without_fak
         assert workspace.advantage_bar.terminal_checkmate
         assert "Win%" in workspace.advantage_bar.toolTip()
         assert "100.0%" in workspace.move_detail.text()
-        assert "Мат в текущей позиции" in workspace.advantage_label.text()
+        assert "\u041c\u0430\u0442 \u00b7 \u0447\u0451\u0440\u043d\u044b\u0435 \u043f\u043e\u0431\u0435\u0434\u0438\u043b\u0438" == workspace.advantage_label.text()
         workspace.select_ply(3)
         assert "Динамика мата" in workspace.selected_move_summary.text()
         assert "Δх" not in workspace.selected_move_summary.text()

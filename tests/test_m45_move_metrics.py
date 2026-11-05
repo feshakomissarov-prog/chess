@@ -25,7 +25,7 @@ def test_metrics_keep_white_pov_but_compute_loss_from_each_movers_perspective():
     assert all(row["source"] == "stockfish" for row in facts)
     assert facts[0]["legacy_label"] == "mistake"
     assert facts[0]["severity_policy_version"] == "cc-cpl-thresholds-v2"
-    assert facts[0]["wdl_model"].startswith("python-chess-sf-v1:")
+    assert facts[0]["wdl_model"].startswith("python-chess-sf-v2-terminal-aware:")
     assert json.loads(facts[0]["wdl_before_json"]) is not None
 
 
@@ -213,13 +213,13 @@ def test_save_analysis_persists_versioned_facts_and_report_detail_without_mixing
                        "lichess_accuracy_black=69.0 WHERE game_id='metric-game'")
             run_id = db.execute("SELECT run_id FROM analysis_runs WHERE game_id='metric-game'").fetchone()[0]
             db.execute("DELETE FROM move_metrics WHERE run_id=?", (run_id,))
-        # Opening a legacy report derives metrics from persisted evals without UCI.
+        # A synchronous legacy report read derives metrics in memory without writes or UCI.
         detail = repository.latest_analysis_detail("metric-game", 1)
         assert detail
         assert detail["source"] == "lichess-pgn"
         assert len(detail["move_metrics"]) == 2
         assert {row["source"] for row in detail["move_metrics"]} == {"lichess-pgn"}
-        assert {row["metric_version"] for row in detail["move_metrics"]} == {"cc-move-metrics-v2"}
+        assert {row["metric_version"] for row in detail["move_metrics"]} == {"cc-move-metrics-v3"}
         assert all(row["accuracy"] is None and row["accuracy_source"] is None
                    for row in detail["move_metrics"])
         assert all(row["legacy_label"] == "good" for row in detail["move_metrics"])
@@ -227,9 +227,10 @@ def test_save_analysis_persists_versioned_facts_and_report_detail_without_mixing
         assert detail["official_game_accuracy_source"] == "lichess"
         assert detail["official_game_accuracy_color"] == "white"
         assert detail["local_game_accuracy"] is None
+        assert detail["metrics_materialization_pending"] is False  # non-Stockfish source
         with repository._connection() as db:
             assert db.execute("SELECT COUNT(*) FROM move_metrics WHERE run_id=?",
-                              (detail["run_id"],)).fetchone()[0] == 2
+                              (detail["run_id"],)).fetchone()[0] == 0
             assert db.execute("SELECT COUNT(*) FROM analysis_events WHERE run_id=?",
                               (detail["run_id"],)).fetchone()[0] == 0
     finally:

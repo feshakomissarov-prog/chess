@@ -415,6 +415,10 @@ class SQLiteMigrationMixin:
                     db.execute(f"RELEASE SAVEPOINT {savepoint}")
                     db.execute("UPDATE games SET import_error=? WHERE game_id=?",
                                (str(exc), row["game_id"]))
+            if int(version) < SCHEMA_VERSION:
+                # The coverage view encodes the active derived-metric version.
+                # Rebuild it exactly when an older schema is upgraded.
+                db.execute("DROP VIEW IF EXISTS analysis_coverage")
             self._migrate_m45_schema(db)
             db.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
 
@@ -512,7 +516,7 @@ class SQLiteMigrationMixin:
         db.execute("CREATE INDEX IF NOT EXISTS idx_analysis_alternatives_game "
                    "ON analysis_alternatives(game_id,line_revision,ply,run_id)")
         # The coverage view is a schema object, not startup-time cache. Rebuild it
-        # only while migrating an older schema; current v16 restarts are read-only
+        # only while migrating an older schema; current restarts are read-only
         # with respect to sqlite_master.
         schema_version = int(db.execute("PRAGMA user_version").fetchone()[0])
         coverage_view_exists = db.execute(
@@ -532,7 +536,7 @@ class SQLiteMigrationMixin:
                       AND (pa.white_cp IS NOT NULL OR pa.mate_white IS NOT NULL))
                        AS scored_positions,
                    (SELECT COUNT(*) FROM move_metrics mm
-                    WHERE mm.run_id=ar.run_id AND mm.metric_version='cc-move-metrics-v2')
+                    WHERE mm.run_id=ar.run_id AND mm.metric_version='cc-move-metrics-v3')
                        AS measured_moves,
                    (SELECT COUNT(*) FROM analysis_events ae
                     WHERE ae.run_id=ar.run_id AND ae.confidence_state='candidate')

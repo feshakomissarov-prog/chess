@@ -158,7 +158,7 @@ def dashboard_snapshot(repository, *, account_id: str | None = None,
          "value": f"{float(error_rate):.1f}" if error_rate is not None else "н/д",
          "detail": (f"Ошибки {int(summary['own_error_count'])} / {assessed} оценённых собственных ходов · "
                     f"всего собственных ходов {own_total}"),
-         "source": "Текущие версии cc-move-metrics-v2; знаменатель: оценённые собственные ходы"},
+         "source": "Текущие версии cc-move-metrics-v3; знаменатель: оценённые собственные ходы"},
     ]
     recent = repository.search_games(completed_only=True, page=0, page_size=3,
                                      account_id=account_id, clock=clock,
