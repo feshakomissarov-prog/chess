@@ -98,6 +98,37 @@
 
 **ТЗ:** CTA привязать к server readiness, auth gen и точному типу соперника; состояние `Ожидание соединения/429/Недоступно` с пояснением, без false click, либо открывать Play и показывать нужный status. Не создавать вызов автоматически; подтверждение соперника/AI уровня через форму. Qt tests finished game→offline/disconnect/429/auth switch/stream ready, button state, no duplicate challenge.
 
+
+### UI-04 · P1 · DEFECT — на вкладке «Играть» нет видимой отмены ожидающего вызова
+
+**Доказательство:** `PlayPage._emit_create` выставляет pending и выключает единственную главную кнопку; **PlayPage не содержит команды `Отменить вызов`**. `MainWindow._challenge_status` показывает `cancel_challenge_button`, но этот виджет создан в правом боковом блоке **game_page**, а пользователь по-прежнему находится на **play_page**, пока вызов ожидает ответа. Для friend URL аналогично: `_challenge_ready` показывает `cancel_invitation_button` на game_page, а ссылка — в отдельном modal QDialog. Есть вызовы service.cancel_username_challenge / cancel_open_invitation, но они недостижимы из видимого «Играть», где user инициировал запрос. Требование COV-03: pending имеет status **и cancel в том же контексте**. Также `_play_mode_page.set_status` сбрасывает форму pending при статусе «ожидаем», хотя `_awaiting_game_start` в window остаётся true.
+
+**ТЗ:** явная кнопка отмены в Play form (username friend AI creation phases according to supported API), идентичный request id и active challenge id; не принимать cancellation до появления id как серверный успех — при pending выставить локальный cancel flag и отменить серверный challenge сразу после позднего id; если POST уже подтверждён, API cancel + authoritative reconciliation; current generation guard. Не показывать модалку как единственный способ получить friend link: inline read-only link + Copy + Cancel в Play, модалка по решению владельца опционально, если не мешает навигации. Qt тесты waiting friend/username, created link, cancel before/after ID, reconnect, 429, switch to live game, no repeated POST.
+
+### UI-05 · P1 · DEFECT — редактируемое поле заметки сохраняет текст предыдущей выбранной партии в новую
+
+**Доказательство:** `LibraryPage.note` — одна `QLineEdit` вне списка. `LibraryPage._selection_changed` вызывает `show_game_detail(game)`, но **ни `_selection_changed`, ни `show_game_detail` не сбрасывают/привязывают `note` к game_id**. Обработчик `save_selected_note` берёт **актуальную выбранную** партию из QListWidget. Поэтому при вводе заметки для A, выборе B, нажатии «Сохранить» текст A записывается в B. Это документированное поведение кода, не просто cosmetic.
+
+**ТЗ:** привязать draft текста к выбранному `game_id` (и `line_revision`, если поле относится к ply 0); при переключении показать сохранённый draft соответствующей партии либо честный вопрос о несохранённых изменениях; не записывать draft A в B, disable Save на пустом поле/нет партии; при сохранении чёткое подтверждение, старые заметки доступны в Review tabs; ошибки хранения видимы. Тест A typed unsaved→B select→Save, A→B→A restore, line reimport, stale selection after async query, no UI thread blocking.
+
+### UI-06 · P2/P1 · DEFECT — «Прогресс» строит SQL filter options синхронно в QWidget constructor
+
+**Доказательство:** `StatisticsDialog.__init__` на GUI thread вызывает `options = self.service.filter_options()`, который выполняет SQLite query; любой вход через `MainWindow.show_statistics()` впервые создаёт `EmbeddedStatisticsPage` там же. Это противоречит согласованному RF-06 «никаких SQLite данных в QWidget constructors» и создаёт заморозку при длительной SQLite transaction/migration. На 1280×720 окно может выглядеть «не открылось», даже если фоновый statistics worker потом исправен.
+
+**ТЗ:** показать скелетон/загрузку без SQL в конструкторах; app-owned scoped data loader возвращает filter options с generation guard, безопасное сохранение ранее выбранных account/clock и контролем до новых option; no cross-thread QObject mutation; bounded SQLite; Qt test: задержать SQL read под отдельным write lock, открыть Progress и проверить, что paint/кнопки отвечают, filter options arrive without stale overwrites.
+
+### UI-07 · P2 · DEFECT — у пустого списка партий «Прогресса» неверный диапазон «Строки 1–0 из 0»
+
+**Доказательство:** `StatisticsDialog._apply_result` всегда рисует `f"Строки {self._page * 100 + 1}–{self._page * 100 + len(self._rows)} из {parties['total']}"`, даже при `rows=[]`, `total=0`. Это честное SQL-нулевое значение, но ложный номер начальной строки. Корректный empty-state уже есть (`games_empty`), нужно убрать противоречие.
+
+**ТЗ:** при total=0 выводить `Партий в выборке нет` и disabled pagination; после изменения фильтра/периода reset page без значений 1–0, stale selection disabled. Qt tests пустой archive, no score under Fair Play mask, source with zero matches.
+
+### UI-08 · P2 · HIGH-RISK CONTRACT — прогресс во время auto-миграции должен сохранять текущую страницу
+
+**Источник:** `StatisticsDialog._schedule_refresh()` безусловно делает `self._page=0`. После доработки CORE-03 новый автоматический requery ПОСЛЕ каждого batch через этот handler сбросит список на первую страницу и снимет выделенную партию. В первоначальном коде такого live reload ещё нет, поэтому это **не отдельный доказанный текущий баг**, а обязательный guard интеграции CORE-03.
+
+**ТЗ:** новый метод `refresh_data_preserving_filters_and_position()` (или явный `reset_page=False`) для событий пересчёта, stable game_id/page/scroll/active tab, nonblocking stale replies; тест на страницу 4/10 и открытый detail, migration batch завершён, UI не прыгает.
+
 ## 4. Блок II — список TODO матрицы UI / функциональной согласованности
 
 Требуются source review и тесты, чтобы отличить неактивный compatibility adapter от реально видимой кнопки:
