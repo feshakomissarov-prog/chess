@@ -1,6 +1,6 @@
 # ARCH-UX-01 REVIEW-FIX-06 — независимое ревью RF5: корректность Lichess, сохранение автоматической синхронизации и маршруты Home
 
-**Дата:** 05.11.2026. **Статус:** новое адресное исполняемое ТЗ для desktop Codex; **RF5 не принят для merge**.  
+**Дата:** 05.11.2026. **Статус:** действующее ТЗ RF6-01…RF6-11 для desktop Codex; **RF5 не принят для merge**. **Дополнение RF6-09…11 добавлено после передачи первоначального RF6 — перечитать документ.**  
 **Кодовый baseline:** [draft PR #44](https://github.com/feshakomissarov-prog/chess/pull/44), ветка `codex/arch-01-modular-refactor`, HEAD **`881a8d8f49c2cbdae7ffb1f5c4d79d0f091bafc9`**.  
 **CI baseline:** [Windows #41945044572](https://github.com/feshakomissarov-prog/chess/actions/runs/41945044572) **completed/SUCCESS на exact SHA**, **687 passed**, compileall, offline init на Windows Server 2025 / Python 3.12.10 / PySide6 6.12.0. Это достоверное подтверждение тестов, **не** live-PAT или пользовательской приёмки.  
 **Проверенная разница:** `f957f994275933e0b6eb19134fa8cb34c39286e3...881a8d8f49c2cbdae7ffb1f5c4d79d0f091bafc9`: 4 commits, 16 файлов. Просмотрены actual patches и код, source-backed tests и hosted CI job log. Это **не** повтор RF5-00…12.
@@ -86,3 +86,26 @@
 6. Сохранить шесть согласованных страниц, обычную Play form, ту же finished-game доску, часы/премувы/звуки, CSV/PGN/analysis provenance, Fair Play fail closed, API backoff, single SQLite и Windows build. **No merge, no main changes, no token resets.**
 
 **Acceptance:** RF6-01/02/03/04/05/06/07 закрыты воспроизводимыми тестами; 687 прежних тестов остаются, новые проходят; live session никогда не сбрасывается из-за необязательного аналитического endpoint; disconnect всегда доступен при pending; Home не смешивает профили и открывает нужную партию; привычная auto-sync либо эквивалентно сохранена, либо явным решением владельца изменена; safety повторная проверка восстанавливается без ослабления защиты; GUI не обрезается, sources честны. Код принят по тестам — только после **независимого** review; окончательное merge approval — только владелец.
+
+
+---
+
+## ДОПОЛНЕНИЕ 05.11.2026 — RF6-09…RF6-11: Lichess Accuracy и форсированные маты Stockfish
+
+**Новое согласованное требование владельца.** Предыдущий RF6-01…RF6-08 не отменяется. Codex, который уже получил RF6, должен **подхватить это дополнение в том же рабочем цикле PR #44 до финального SHA**, а не начинать отдельный PR или повторять весь ARCH-UX-01.
+
+**Полное верифицированное исследование + алгоритм + current-code map + golden fixtures + технический контракт:** [LICHESS_STOCKFISH_ACCURACY_MATE_V1](LICHESS_STOCKFISH_ACCURACY_MATE_V1.md). Приоритет этого документа над старой неофициальной аппроксимацией accuracy, если есть конфликт. Источники: официальная страница lichess.org/page/accuracy, свежие lila AccuracyPercent.scala/Advice.scala/tree eval, scalachess WinPercent и python-chess engine.Score. Исторический formula_id сохраняется как версия старых вычислений; новая реализация явно фиксирует исходный blob SHA Lichess.
+
+### RF6-09 — P1: проверить и завершить локальный game accuracy по текущему коду Lichess
+
+Проверить существующий domain/accuracy.py и integration lichess/game_review.py (они УЖЕ рассчитывают локальный процент по сохранённой полной линии). Привести golden parity к текущей Scala: Win% sigmoid, ±1000 CP cap для вероятности, accuracy с бонусом +1, взвешенное по волатильности + гармоническое среднее, POV каждого игрока, startColor, окно 2–8, Mate(0), proof of terminal checkmate. Локальный расчёт — «методика Lichess», **никогда не официальный процент Lichess**. Никаких значений при incomplete/stale/untrusted/unknown depth и никаких UCI/network при простом показе. Не создавать второй accuracy engine.
+
+### RF6-10 — P1: Stockfish mate ≠ CP, восстановить точность отдельных ходов
+
+Сейчас move_metrics.py оставляет accuracy=None для ВСЕХ отдельных ходов, а при мате дополнительно severity=unknown; position_analysis.py на quick eval использует искусственный score(mate_score=100000). Выполнить typed CP|Mate|MateGiven|Unknown с белым POV/позицией, **передавать CP=None при мате** и отдельно M±n, считать локальную accuracy для каждой достоверной пары before/after CP и/или Mate через Win% (не CPI surrogate); сохранять accuracy_source/formula_id/line_revision/hash. Отдельно доказательные события: упущен свой мат, допущен мат соперника, мат сохранён, мат уже поставлен; M5→M3 того же победителя не становится ошибкой только по расстоянию. CPL при матовом переходе остаётся NULL; mate events и per-move accuracy самостоятельны. Мат 0 только от корректного досочного терминала. Классификация по текущему Advice.scala лишь когда подходят условия.
+
+### RF6-11 — P1: Review, вертикальная шкала, Progress и тесты
+
+В GameReview сейчас вертикальный advantage bar получает None при любом mate — сделать осмысленную сторону/процент при matе **без выдуманного CP**, сохранённый текст M±n и осмысленная динамика матовой угрозы вместо всегда «Δ н/д». В summary отдельных ходов вывести доказанный per-move accuracy/матовую последовательность; для полной партии — оба локальных процента с формулой/глубиной/coverage и пометкой «неофициально», официальный Lichess не менять. В Progress локальный процент показывать отдельно от official и CPL только при подтверждённом источнике. Coverage n/N, source и Fair Play masking во всех text/tooltip/accessibility. Native Qt synthetic mate screenshots. Golden tests CP, оба POV, Mat(0), lost mate, same-side M5→M3, terminal checkmate without engine score, missing/incomplete/stale/line switches; full pytest/compileall/diff check и **новый exact-head Windows CI**. Никакого живого Stockfish в human online и автоматической UCI-дозагрузки личных архивов.
+
+**Merge gate:** RF6-01…RF6-11 все закрыты; точные источники Lichess и локальные вычисления воспроизводимы; мат в UI не превращается в фиктивные +100.00; физическая приёмка владельца и разрешение merge отдельно. Оба PR остаются draft.
