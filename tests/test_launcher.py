@@ -186,6 +186,9 @@ def test_cli_modes_reach_real_window_and_apply_runtime_ui_without_credentials_or
             visible=window.isVisible(),
             connection=window.connection.text(),
             connect_text=window.connect_button.text(),
+            connect_accessible_name=window.connect_button.accessibleName(),
+            connect_tooltip=window.connect_button.toolTip(),
+            sidebar_collapsed=window.sidebar.width() <= 60,
             connect_enabled=window.connect_button.isEnabled(),
             lichess_service=window.lichess,
             friend_visible=window.friend_link_button.isVisible(),
@@ -218,7 +221,12 @@ def test_cli_modes_reach_real_window_and_apply_runtime_ui_without_credentials_or
         assert not visible_state["runtime_isolated"]
         assert visible_state["runtime_manual"]
         assert visible_state["connection"] == "Ручной"
-        assert visible_state["connect_text"] == "Подключиться вручную"
+        assert visible_state["connect_accessible_name"] == "Подключиться вручную"
+        if visible_state["sidebar_collapsed"]:
+            assert visible_state["connect_text"] == "↗"
+            assert visible_state["connect_tooltip"] == "Подключиться вручную"
+        else:
+            assert visible_state["connect_text"] == "Подключиться вручную"
         assert visible_state["connect_enabled"]
         assert visible_state["runtime_data_root"] == tmp_path / "profile"
     window.close()

@@ -1407,7 +1407,11 @@ class MainWindow(QMainWindow):
         sidebar_collapsed = self.sidebar.width() <= 60
         if sidebar_collapsed:
             connect_text, disconnect_text = "↗", "⏻"
-            self.connect_button.setToolTip("Подключить Lichess")
+            connect_description = ("Подключиться вручную"
+                                   if self.manual_connect_mode and not self.lichess
+                                   else "Подключить Lichess")
+            self.connect_button.setToolTip(connect_description)
+            self.connect_button.setAccessibleName(connect_description)
             self.disconnect_button.setToolTip("Отключить Lichess")
             self.connect_button.setFixedWidth(34)
             self.disconnect_button.setFixedWidth(34)
@@ -1533,11 +1537,14 @@ class MainWindow(QMainWindow):
         if hasattr(self, "connect_button"):
             self.connect_button.setText("↗" if collapsed else "Подключить Lichess")
             self.disconnect_button.setText("⏻" if collapsed else "Отключить Lichess")
-            self.connect_button.setToolTip("Подключить Lichess" if collapsed else "")
+            connect_description = ("Подключиться вручную"
+                                   if self.manual_connect_mode and not self.lichess
+                                   else "Подключить Lichess")
+            self.connect_button.setToolTip(connect_description if collapsed else "")
             self.disconnect_button.setToolTip(
                 "Отключить Lichess" if collapsed else
                 "Остановить текущую Lichess-сессию, сохранив учётные данные.")
-            self.connect_button.setAccessibleName("Подключить Lichess")
+            self.connect_button.setAccessibleName(connect_description)
             self.disconnect_button.setAccessibleName("Отключить Lichess")
             self.connect_button.setFixedWidth(34 if collapsed else 188)
             self.disconnect_button.setFixedWidth(34 if collapsed else 188)
