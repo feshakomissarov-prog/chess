@@ -13,7 +13,7 @@
 
 ## 1. ДВА БЛОКА АУДИТА (checkpoint)
 
-- **БЛОК I — архитектура и данные:** Lichess auth, генерации/401/429, сетевые действия и очереди, игровые snapshots/часы/premove/takeback, Fair Play, SQLite migration+revisions, аналитика CP/mate/accuracy/WDL, архив/задачи и инкрементальные cursor, Stockfish/PGN, Qt worker lifecycle, performance, failures/restart/shutdown, privacy. Проверить исходники и уже существующие тесты; сохранить все находки в этом файле. Статус: **В РАБОТЕ**, см. §2.
+- **БЛОК I — архитектура и данные:** Lichess auth, генерации/401/429, сетевые действия и очереди, игровые snapshots/часы/premove/takeback, Fair Play, SQLite migration+revisions, аналитика CP/mate/accuracy/WDL, архив/задачи и инкрементальные cursor, Stockfish/PGN, Qt worker lifecycle, performance, failures/restart/shutdown, privacy. Проверить исходники и уже существующие тесты; сохранить все находки в этом файле. Статус: **ЗАВЕРШЁН КАК ПЕРВЫЙ ДОКУМЕНТИРОВАННЫЙ ПРОХОД**, §2 и §3; перед финалом провести перекрёстный sanity-check.
 - **БЛОК II — UI, кнопки и end-to-end:** утверждённые шесть основных экранов + Настройки/фон/игра/после игры/разбор/PGN-FEN/задачи/вложенные окна, каждая видимая команда и error/empty/loading states, geometry 1280×720/1366/1600/1920, DPI 125%/150%, accessibility, звуки AS-IS, переходы, сортировки, фильтры, счётчики, все 24 COV. Отдельная matrix кнопок: control→handler→предусловие→error→response→test→статус. Статус: **НЕ ЗАВЕРШЁН**.
 - **ФИНАЛЬНЫЙ GATE:** единый deduplicated P0/P1/P2 список, deterministic repro + тесты для каждого, отрицательные и cross-page сценарии, свидетельства CI и живого smoke. Только тогда заменить шапку на **ГОТОВО К ПЕРЕДАЧЕ CODEX**. Одного прохода по тестам нельзя назвать «всё без ошибок». Нельзя обещать математически найти абсолютно все баги.
 
@@ -76,6 +76,27 @@
 - P1: archive lastMoveAt vs createdAt, cursor inclusivity, limited NDJSON pagination, late games; Lichess API stream finite vs live resource gate; puzzle history retries and duplicate attempts; Lichess analysis backfill and Retry-After/resume.
 - P1: background thread/process leaks, concurrency priorities, durable SQLite writer, cancellation, GUI blocking, QSettings/threads at shutdown, UCI install verification/security and post-install rollback.
 - P1: tests for migrations from *realistic old schema*, many accounts/sources, long timestamps, high DPI, local PGN/FEN, invalid and corrupt data, 429 and auth switching. No acceptance with green CI alone.
+
+
+## 4A. Блок II — подтверждённые замечания UI, controls, navigation (СОХРАНЕНО, НЕ ФИНАЛЬНО)
+
+### UI-01 · P1 · DEFECT — кнопка «Назад» внутри Review обходит единый router
+
+**Доказательство:** `src/chess_coach/ui/game_review.py` связывает `back.clicked` с `return_requested`; `MainWindow` соединяет с `_return_from_review()`, который для **любой сохранённой** партии всегда вызывает `show_saved_games()`. Но сохранённую партию можно открыть из `Прогресс`, `Главная`, `Мои партии` и `Анализ`, а глобальная `navigate_back()` поддерживает `WorkspaceNavigator` и origin. В результате две кнопки «Назад» в одном окне возвращают в разные места; из «Прогресса» встроенная в Review кнопка неожиданно выбрасывает в «Мои партии», теряя исходный контекст и фильтр.
+
+**ТЗ:** `GameReviewWorkspace.return_requested` возвращает через **тот же navigation history/return target**, что и shell Back, с устойчивым `RouteEntry` для `Прогресс→Review`, `Мои партии→Review`, `Главная→Library→Review`, `Анализ→PGN/FEN→Review`. Предусмотреть fallback if origin destroyed и restored route; ephemeral PGN не записывается в архив. Qt tests: обе кнопки вернули одинаковый destination, сохранили source/account/page/scroll/selected game и активную онлайн игру.
+
+### UI-02 · P1 · DEFECT — «Разобрать» доступно до сохранения финальной линии, клики могут бездействовать или открыть старую редакцию
+
+**Доказательство:** `MainWindow._show_result` при `final_sync_pending` или `has_pending_write` честно сообщает «ожидаем финальную историю/сохраняем», но **`self.finished_review_button.setEnabled(bool(session.moves))`** (аналогично `result_review_button`), даже если финальная версия не подтверждена. `MainWindow.review_finished_game` делает `get_game` и `_open_saved_game` без сравнения сохранённой `moves/status/line_revision` с финальной `session`. Если запись отсутствует — нажатие молча ничего не делает; если хранится прежний snapshot — открывает старую партию.
+
+**ТЗ:** disable/relabel «Разобрать» пока `final_sync_pending`, SQLite in-flight или mismatch; после confirmed saved exact line/hash/current, enable, открыть только persisted completed version; при storage error — visible «Не удалось сохранить / Повторить» без запуска Stockfish, без потери уже подтверждённых ходов. Test delayed SQLite final write, stale previous line, failure/retry, double click, safe review state, same board/clock after finish.
+
+### UI-03 · P1 · DEFECT — послепартийная кнопка «Вызвать снова» может быть активна при отсутствии Lichess-соединения
+
+**Доказательство:** `_show_result` устанавливает `finished_challenge_button.setEnabled(not self.offline_mode)`, не проверяя `_online_actions_allowed()`, stream-ready/429. В результате в обычном режиме с отключённым Lichess CTA выглядит доступной; `_challenge_again()` вызывает `play_ai/challenge_username`, где `_online_actions_allowed` отвергает запрос без ясного сообщения в игровом workspace. Нет явного disabled reason/accessible tooltip.
+
+**ТЗ:** CTA привязать к server readiness, auth gen и точному типу соперника; состояние `Ожидание соединения/429/Недоступно` с пояснением, без false click, либо открывать Play и показывать нужный status. Не создавать вызов автоматически; подтверждение соперника/AI уровня через форму. Qt tests finished game→offline/disconnect/429/auth switch/stream ready, button state, no duplicate challenge.
 
 ## 4. Блок II — список TODO матрицы UI / функциональной согласованности
 
