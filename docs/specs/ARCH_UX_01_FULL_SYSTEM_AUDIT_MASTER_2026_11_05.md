@@ -50,6 +50,25 @@
 
 **ТЗ:** единый тип `milliseconds` в модели и `format_increment_ms` только для presentation; 2000→`+2 с`, 10_000→`+10 с`, sub-second без выдуманных округлений, clock snapshot/paused/offline. Не менять физическую валидацию миллисекунд. Test Qt: Lichess gameFull 3+2/15+10, оба пути _update_clock, correspondences, same board after finish. Подписанные часы/Control должны быть согласованы.
 
+
+### CORE-06 · P1 · DEFECT — импорт Lichess теряет известное точное время начала партии
+
+**Доказательство:** `src/chess_coach/infrastructure/sqlite/archive_store.py::import_archive_record` сначала использует `PGN headers.UTCDate/Date` (почти всегда присутствуют, только день) и записывает `started_at=датаT00:00:00UTC`, `game_time_precision='date_only'`; серверный **авторитетный `record.createdAt` в миллисекундах** читается лишь `if started_at is None`, то есть обычно отбрасывается. `commit_archive` дополнительно сохраняет `started_at=COALESCE(started_at, ?)` — уже занесённое ложное `00:00` невозможно улучшить простым повторным импортом. `StatisticsService._filter_sql` фильтрует по `g.started_at`, а Games fallback сортирует по нему. Следствие — неточное время и неверные граничные дни/периоды, несмотря на достаточный Lichess source timestamp.
+
+**ТЗ:** выбирать `createdAt` для `timestamp` при валидном серверном времени; `PGN UTCDate+UTCTime` только когда оба достоверны; `Date` даёт строго `date_only`, без invented wall time. При поступлении нового более точного `createdAt` **повысить** точность legacy `date_only` с сохранением первичной/последней timestamp provenance и without reordering via `updated_at`. При повреждённом createdAt оставить date-only, не invent UTC. Старую пользовательскую SQLite обновлять bounded/idempotent при **уже полученном** server event, не делать remote scan ради исправления времени. Test synthetic PGN Date + JSON createdAt known, import again, calendar boundary, account filters, lastMoveAt chronology and unknown/date_only cases.
+
+### CORE-07 · P1 · DEFECT — вкладка «Обучение → история задач» обращается к SQLite синхронно в GUI thread на вводе и переключениях
+
+**Доказательство:** `src/chess_coach/window.py::open_puzzle_history_local` и `show_puzzle_history` вызывают `game_repository.list_puzzle_accounts()` непосредственно из handler Qt; `render_page()` делает `game_repository.puzzle_history_page(... page_size=100)`, `refresh_account_summary()` делает `puzzle_statistics, puzzle_rating_trend, puzzle_sync_state`, и всё это вызывается из `search.textChanged`/page controls и account-selection. Эти операции читают локальную SQLite/агрегаты в **главном GUI потоке** без debounce и без app-owned worker. При большой истории/одновременной SQLite миграции можно заморозить/задержать интерфейс, нарушив ARCH-UX-01 требования к data-loading.
+
+**ТЗ:** использовать общий app-owned background query coordinator + generation-scoped cancel/stale-drop и debounce поисковых строк; вернуть только page-size dataset и aggregate, без тысяч QListWidget; при затяжном запросе не терять текущую игру/доску/фокус. Показать loading/empty/error; Qt tests с delayed SQLite read, вводом N клавиш, fast account switch и user actions во время write lock, QThread/Qt ownership, background-safe result dispatch. Не запускать сетевое puzzle API от просмотра истории и не заменять existing replay/reveal.
+
+### CORE-08 · P1 · DEFECT — действия «предложить ничью / сдаться / заявить ничью» не защищены от повторных POST и cross-generation callback
+
+**Доказательство:** `src/chess_coach/window.py::resign_online` показывает диалог, затем вызывает `self.lichess.resign/abort`; `handle_draw` сразу делает `self.lichess.draw(...True)`; `claim_draw_button.clicked` вызывает `lichess.claim_draw` напрямую. В `_refresh_online` эти кнопки enabled по `active`, **никакого in-flight request_id или disable-until-authoritative-answer** для resign/draw/claim. `LichessGameActionsMixin::_action` для каждого нажатия создаёт новый поток/POST, а HTTP ответ без отдельного typed command state. Пользователь может повторно отправить предложение/сдачу, особенно на медленном/429 соединении. Аналогичный fixed state уже есть у takeback — использовать ту же модель.
+
+**ТЗ:** явные typed one-shot pending states/operation generation на каждый game_id/action; coalescing duplicate click, disabled/visible progress, server authoritative stream acknowledgement и reconciliation после unknown POST (никогда не переотправлять неподтверждённый ход/сдачу «на всякий случай»), renew only when server state clearly permits; 401/403/429 и смена auth не позволят старому callback воздействовать на новый profile. Tests double click, delayed 200/error, reconnect, status changes during modal, stale request with second active game.
+
 ## 3. Блок I — контрольный перечень для дальнейшего изучения (НЕ ЯВЛЯЕТСЯ НАХОДКАМИ)
 
 - P0: full chain user account/PAT/OAuth/token store & reconnect; stale events/stream and human game safety; Lichess active games AI/HUMAN validator against real documented API; per-account live session commands; clock authority and game finalization writes.
