@@ -1,5 +1,12 @@
 # Chess Coach — дорожная карта
 
+## 05.11.2026 — дополнение к действующему REVIEW-FIX-06: точность Lichess и форсированный мат
+
+Владелец дополнил уже выданное Codex ТЗ: **[REVIEW-FIX-06 теперь RF6-01…RF6-11](specs/ARCH_UX_01_REVIEW_FIX_06_INDEPENDENT_REVIEW.md)**. Новые RF6-09/10/11: сопоставить существующий локальный подсчёт с **актуальным** Lichess AccuracyPercent.scala (Win% logistic, +1 бонус, weighted/harmonic), рассчитывать **точность отдельных Stockfish ходов даже при CP/Mate**, не переводить M3 в фиктивные CP, корректно рисовать мат в вертикальной шкале и Review, сохранять подробную provenance/coverage и Fair Play. Полная методика и зафиксированные первоисточники — [LICHESS_STOCKFISH_ACCURACY_MATE_V1](specs/LICHESS_STOCKFISH_ACCURACY_MATE_V1.md).
+
+**Исполнять одновременно с ещё не завершёнными RF6-01…08** в существующем draft PR #44, не заводить второй code PR, не merge. Повторные тесты и новый exact-head Windows CI; локальная точность не равна официальной Lichess. Главная/Play/сеть и фоновые очереди из предыдущего RF6 остаются обязательными.
+
+
 ## ВЕРХНИЙ GATE 05.11.2026 — независимое RF5 ревью / REVIEW-FIX-06
 
 Кодовый [draft PR #44](https://github.com/feshakomissarov-prog/chess/pull/44) на SHA `881a8d8f49c2cbdae7ffb1f5c4d79d0f091bafc9`: [Windows CI #41945044572](https://github.com/feshakomissarov-prog/chess/actions/runs/41945044572) **completed/SUCCESS, 687 tests**, и Codex сообщает о native synthetic GUI-проверке. **Несмотря на CI, независимое ревью выявило функциональные недочёты: RF5 пока НЕ ПРИНЯТ.**
