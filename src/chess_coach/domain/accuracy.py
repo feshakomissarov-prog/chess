@@ -6,7 +6,7 @@ accuracy and it refuses incomplete, stale, unsupported, or depth-unknown runs.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import math
 from typing import Any
 
@@ -31,6 +31,7 @@ class AccuracyResult:
     coverage: tuple[int, int] = (0, 0)
     depth_range: tuple[int, int] | None = None
     terminal_positions_derived: int = 0
+    phase_values: dict[str, dict[str, float | None]] = field(default_factory=dict)
 
 
 def win_percent_cp(cp: int) -> float:
@@ -129,7 +130,8 @@ def _accuracy_by_side(win_percents: list[float], start_color: str) -> dict[str, 
 
 def calculate_saved_game_accuracy(game: dict[str, Any], line: dict[str, Any],
                                   analysis: dict[str, Any] | None,
-                                  positions: list[chess.Board]) -> AccuracyResult:
+                                  positions: list[chess.Board], *,
+                                  phase_by_ply: dict[int, str] | None = None) -> AccuracyResult:
     """Calculate both sides only from a complete, same-run scored current line."""
     source = str((analysis or {}).get("source") or "") or None
     ply_count = len(str(line.get("moves") or "").split())
@@ -184,11 +186,20 @@ def calculate_saved_game_accuracy(game: dict[str, Any], line: dict[str, Any],
                               "Сохранённые оценки нельзя сопоставить с позициями.",
                               source=source, coverage=(scored, expected))
     start_color = "white" if positions[0].turn == chess.WHITE else "black"
+    phase_values = {}
+    for phase in ("opening", "middlegame", "endgame"):
+        plies = [ply for ply in range(1, expected) if (phase_by_ply or {}).get(ply) == phase]
+        if not plies or plies != list(range(plies[0], plies[-1] + 1)):
+            continue
+        first = plies[0] - 1
+        mover = "white" if positions[first].turn == chess.WHITE else "black"
+        phase_values[phase] = _accuracy_by_side(scores[first:plies[-1] + 1], mover)
     return AccuracyResult(_accuracy_by_side(scores, start_color), "complete",
                           "Локальный расчёт, методика Lichess; неофициальное значение.",
                           source=source, coverage=(scored, expected),
                           depth_range=(min(depths), max(depths)),
-                          terminal_positions_derived=int(terminal_derived))
+                          terminal_positions_derived=int(terminal_derived),
+                          phase_values=phase_values)
 
 
 def assessment_win_percent(row: dict[str, Any] | None,

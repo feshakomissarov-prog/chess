@@ -521,13 +521,16 @@ class AnalysisJobsStoreMixin:
                     skipped += 1
         return {"queued": queued, "already_present": skipped}
 
-    def pending_fast_analysis_parameters(self, engine_version: str) -> dict | None:
+    def pending_fast_analysis_parameters(self, engine_version: str, *,
+                                         account_id: str | None = None) -> dict | None:
         """Return the persisted configuration of the newest resumable fast queue."""
+        scope, values = self._analysis_jobs_scope(account_id)
         with self._connection() as db:
             row = db.execute(
                 "SELECT parameters_json FROM analysis_jobs WHERE analysis_pass='fast' "
                 "AND engine_version=? AND status IN ('queued','paused','running') "
-                "ORDER BY updated_at DESC,created_at DESC LIMIT 1", (engine_version,)).fetchone()
+                + scope + " ORDER BY updated_at DESC,created_at DESC LIMIT 1",
+                (engine_version, *values)).fetchone()
         if not row:
             return None
         try:
@@ -538,7 +541,7 @@ class AnalysisJobsStoreMixin:
 
     def claim_next_analysis_job(self, worker_id: str, *, engine_version: str,
                                 analysis_pass: str, parameters: dict | None = None,
-                                lease_seconds: int = 300) -> dict | None:
+                                lease_seconds: int = 300, account_id: str | None = None) -> dict | None:
         if not worker_id:
             raise ValueError("worker_id is required")
         lease_seconds = max(30, min(3600, int(lease_seconds)))
@@ -546,6 +549,7 @@ class AnalysisJobsStoreMixin:
         now_dt = datetime.now(timezone.utc)
         now = now_dt.isoformat()
         until = (now_dt + timedelta(seconds=lease_seconds)).isoformat()
+        scope, account_values = self._analysis_jobs_scope(account_id)
         with self._connection() as db:
             db.execute("BEGIN IMMEDIATE")
             while True:
@@ -553,10 +557,10 @@ class AnalysisJobsStoreMixin:
                 values = [analysis_pass, engine_version]
                 if params_json is not None:
                     values.append(params_json)
-                values.append(now)
+                values.extend((*account_values, now))
                 row = db.execute(
                     "SELECT * FROM analysis_jobs WHERE analysis_pass=? AND engine_version=? "
-                    + params_clause + " AND (status='queued' OR "
+                    + params_clause + scope + " AND (status='queued' OR "
                     "(status='running' AND (lease_until IS NULL OR lease_until<?))) "
                     "ORDER BY CASE WHEN priority_at IS NULL THEN 1 ELSE 0 END,"
                     "priority_at DESC,created_at,job_id LIMIT 1", values).fetchone()
@@ -660,56 +664,46 @@ class AnalysisJobsStoreMixin:
             if cursor.rowcount != 1:
                 raise RuntimeError("Analysis job lease was lost before it could be finalized.")
 
+    @staticmethod
+    def _analysis_jobs_scope(account_id: str | None) -> tuple[str, tuple[str, ...]]:
+        if account_id is None:
+            return "", ()
+        return (" AND EXISTS (SELECT 1 FROM account_games ag "
+                "WHERE ag.game_id=analysis_jobs.game_id AND ag.account_id=?)", (account_id,))
+
     def resume_paused_analysis_jobs(self, *, engine_version: str | None = None,
-                                    parameters: dict | None = None) -> int:
-        now = datetime.now(timezone.utc).isoformat()
-        params_json = (json.dumps(parameters, sort_keys=True, separators=(",", ":"))
-                       if parameters is not None else None)
-        with self._connection() as db:
-            if engine_version is None and params_json is None:
-                cursor = db.execute("UPDATE analysis_jobs SET status='queued',updated_at=? "
-                                    "WHERE status='paused'", (now,))
-            elif params_json is None:
-                cursor = db.execute("UPDATE analysis_jobs SET status='queued',updated_at=? "
-                                    "WHERE status='paused' AND engine_version=?",
-                                    (now, engine_version))
-            elif engine_version is None:
-                cursor = db.execute("UPDATE analysis_jobs SET status='queued',updated_at=? "
-                                    "WHERE status='paused' AND parameters_json=?",
-                                    (now, params_json))
-            else:
-                cursor = db.execute("UPDATE analysis_jobs SET status='queued',updated_at=? "
-                                    "WHERE status='paused' AND engine_version=? "
-                                    "AND parameters_json=?",
-                                    (now, engine_version, params_json))
-        return cursor.rowcount
+                                    parameters: dict | None = None,
+                                    account_id: str | None = None) -> int:
+        return self._transition_analysis_jobs("paused", "queued", engine_version, parameters,
+                                              account_id)
 
     def cancel_queued_analysis_jobs(self, *, engine_version: str | None = None,
-                                    parameters: dict | None = None) -> int:
+                                    parameters: dict | None = None,
+                                    account_id: str | None = None) -> int:
+        return self._transition_analysis_jobs("queued", "cancelled", engine_version, parameters,
+                                              account_id)
+
+    def _transition_analysis_jobs(self, previous: str, status: str, engine_version: str | None,
+                                  parameters: dict | None, account_id: str | None) -> int:
         now = datetime.now(timezone.utc).isoformat()
-        params_json = (json.dumps(parameters, sort_keys=True, separators=(",", ":"))
-                       if parameters is not None else None)
+        scope, account_values = self._analysis_jobs_scope(account_id)
+        values = [status, now, now if status == "cancelled" else None, previous]
+        conditions = "status=?"
+        if engine_version is not None:
+            conditions += " AND engine_version=?"
+            values.append(engine_version)
+        if parameters is not None:
+            conditions += " AND parameters_json=?"
+            values.append(json.dumps(parameters, sort_keys=True, separators=(",", ":")))
         with self._connection() as db:
-            if engine_version is None and params_json is None:
-                cursor = db.execute("UPDATE analysis_jobs SET status='cancelled',updated_at=?,"
-                                    "finished_at=? WHERE status='queued'", (now, now))
-            elif params_json is None:
-                cursor = db.execute("UPDATE analysis_jobs SET status='cancelled',updated_at=?,"
-                                    "finished_at=? WHERE status='queued' AND engine_version=?",
-                                    (now, now, engine_version))
-            elif engine_version is None:
-                cursor = db.execute("UPDATE analysis_jobs SET status='cancelled',updated_at=?,"
-                                    "finished_at=? WHERE status='queued' AND parameters_json=?",
-                                    (now, now, params_json))
-            else:
-                cursor = db.execute("UPDATE analysis_jobs SET status='cancelled',updated_at=?,"
-                                    "finished_at=? WHERE status='queued' AND engine_version=? "
-                                    "AND parameters_json=?",
-                                    (now, now, engine_version, params_json))
+            cursor = db.execute(
+                "UPDATE analysis_jobs SET status=?,updated_at=?,finished_at=? WHERE "
+                + conditions + scope, (*values, *account_values))
         return cursor.rowcount
 
     def analysis_job_counts(self, *, engine_version: str | None = None,
-                            parameters: dict | None = None) -> dict[str, int]:
+                            parameters: dict | None = None,
+                            account_id: str | None = None) -> dict[str, int]:
         clauses: list[str] = []
         values: list[str] = []
         if engine_version is not None:
@@ -718,6 +712,10 @@ class AnalysisJobsStoreMixin:
         if parameters is not None:
             clauses.append("parameters_json=?")
             values.append(json.dumps(parameters, sort_keys=True, separators=(",", ":")))
+        if account_id is not None:
+            clauses.append("EXISTS (SELECT 1 FROM account_games ag "
+                           "WHERE ag.game_id=analysis_jobs.game_id AND ag.account_id=?)")
+            values.append(account_id)
         where = " WHERE " + " AND ".join(clauses) if clauses else ""
         with self._connection() as db:
             rows = db.execute("SELECT status,COUNT(*) AS count FROM analysis_jobs" + where +

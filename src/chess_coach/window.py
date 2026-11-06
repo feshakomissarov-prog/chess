@@ -150,6 +150,11 @@ class EmbeddedBatchAnalysisPage(BatchAnalysisDialog):
 
     close_requested = Signal()
 
+    def _update_action_state(self) -> None:
+        super()._update_action_state()
+        self.resume_button.setVisible(not self._running)
+        self.resume_button.setEnabled(not self._running and self._readiness)
+
     def accept(self) -> None:
         self.close_requested.emit()
 
@@ -482,7 +487,7 @@ class MainWindow(QMainWindow):
         self._pending_play_request_generation: int | None = None
         self._pending_play_request_mode: str | None = None
         self._backfill_wakeup_identity: tuple[int, str] | None = None
-        self._backfill_deferred_for_human_game = False
+        self._backfill_deferred_for_live_game = False
         self._backfill_wakeup_timer = QTimer(self)
         self._backfill_wakeup_timer.setSingleShot(True)
         self._backfill_wakeup_timer.timeout.connect(self._lichess_backfill_wakeup)
@@ -990,13 +995,13 @@ class MainWindow(QMainWindow):
         if self.settings.value("lichess/ready_analytics_paused", False, type=bool):
             self.lichess_analysis_status.setText("Lichess · фоновая аналитика приостановлена")
             return
-        if any(session.status in {"started", "playing"} and not session.is_ai_opponent
+        if any(session.status in {"started", "playing"}
                for session in self._sessions_for_safety()):
-            self._backfill_deferred_for_human_game = True
+            self._backfill_deferred_for_live_game = True
             self.lichess_analysis_status.setText(
-                "Lichess · проверка отложена до завершения партии с человеком")
+                "Lichess · проверка отложена до завершения активной партии")
             return
-        self._backfill_deferred_for_human_game = False
+        self._backfill_deferred_for_live_game = False
         self.lichess_analysis_status.setText("Lichess · готовим дозагрузку готовых данных…")
         self._schedule_lichess_backfill_wakeup(
             generation, username, (datetime.now(timezone.utc) + timedelta(milliseconds=1200)).isoformat(),
@@ -1012,7 +1017,7 @@ class MainWindow(QMainWindow):
                 or (not manual and not self.settings.value(
                     "lichess/auto_ready_analytics", True, type=bool))
                 or self.settings.value("lichess/ready_analytics_paused", False, type=bool)
-                or any(session.status in {"started", "playing"} and not session.is_ai_opponent
+                or any(session.status in {"started", "playing"}
                        for session in self._sessions_for_safety())):
             return
         self.lichess.refresh_lichess_analysis_background(
@@ -1033,7 +1038,7 @@ class MainWindow(QMainWindow):
 
     def _reset_backfill_status(self, text: str = "Lichess · нет текущей фоновой операции") -> None:
         self._cancel_lichess_backfill_wakeup()
-        self._backfill_deferred_for_human_game = False
+        self._backfill_deferred_for_live_game = False
         self.lichess_analysis_status.setText(text)
         self.lichess_analysis_status.setToolTip("")
 
@@ -1053,7 +1058,7 @@ class MainWindow(QMainWindow):
                 or not self._lichess_connected
                 or not self.settings.value("lichess/auto_ready_analytics", True, type=bool)
                 or self.settings.value("lichess/ready_analytics_paused", False, type=bool)
-                or any(session.status in {"started", "playing"} and not session.is_ai_opponent
+                or any(session.status in {"started", "playing"}
                        for session in self._sessions_for_safety())):
             return
         try:
@@ -1095,7 +1100,7 @@ class MainWindow(QMainWindow):
         if not self._shutdown_requested and self._screen_mode == "home":
             self.refresh()
         if "человеческая/неизвестная активная партия" in state:
-            self._backfill_deferred_for_human_game = True
+            self._backfill_deferred_for_live_game = True
             self._cancel_lichess_backfill_wakeup()
             return
         if any(marker in state for marker in ("приостановлено", "отключена", "HTTP 401", "HTTP 403")):
@@ -1138,6 +1143,7 @@ class MainWindow(QMainWindow):
         metric_scope = (self.dashboard_account.currentData()
                         if hasattr(self, "dashboard_account") else None)
         operations = self.runtime.work_coordinator.snapshots()
+        engine_key = self._batch_engine_key
 
         def worker() -> None:
             try:
@@ -1149,6 +1155,9 @@ class MainWindow(QMainWindow):
                            if account_id else {})
                 metric_status = repository.analysis_metrics_migration_status(
                     account_id=str(metric_scope) if metric_scope else None)
+                jobs = (repository.analysis_job_counts(engine_version=engine_key,
+                                                      account_id=account_id)
+                        if account_id or self.offline_mode else {})
                 paused = bool(account_id and
                               repository.lichess_analysis_backfill_paused(account_id))
                 if stop_event.is_set():
@@ -1156,7 +1165,7 @@ class MainWindow(QMainWindow):
                 self.background_status_finished.emit(generation, {
                     "account_id": account_id, "username": username, "available": available,
                     "archive": archive, "puzzles": puzzles, "summary": summary,
-                    "paused": paused, "operations": operations,
+                    "paused": paused, "operations": operations, "jobs": jobs,
                     "metric_scope": metric_scope, "metric_status": metric_status,
                 })
             except Exception as exc:
@@ -1244,6 +1253,9 @@ class MainWindow(QMainWindow):
                      if summary.get("errors") else "")
             if not account_id:
                 statuses.append("Архив и задачи Lichess · аккаунт не выбран; личные данные не запрашивались")
+            jobs = payload.get("jobs") or {}
+            remaining = sum(jobs.get(key, 0) for key in ("queued", "running", "paused"))
+            complete, failed = jobs.get("complete", 0), jobs.get("failed", 0)
             self._background_operations_page.set_snapshot(
                 payload.get("operations", ()), source_summary=source_summary,
                 backfill_paused=bool(payload.get("paused")),
@@ -1258,11 +1270,11 @@ class MainWindow(QMainWindow):
                     "puzzles": (f"Сохранено попыток: {puzzles.get('imported_count', 0)} · {puzzle_phase}\n"
                                  f"Последнее успешное обновление: {puzzle_last}{puzzle_problem}"
                                  if account_id else "Аккаунт Lichess не выбран."),
-                    "stockfish": ("Массовый анализ выполняется."
-                                  if any(op.context.kind == "stockfish_batch_analysis" and op.status.value == "running"
-                                         for op in payload.get("operations", ()))
-                                  else "Активный массовый анализ отсутствует."),
-                })
+                    "stockfish": (f"Осталось: {remaining} · готово: {complete} · ошибки: {failed}"
+                                  if jobs else "Нет сохранённых заданий для текущего профиля."),
+                },
+                progress={"ready": (summary.get("checked", 0), summary.get("total", 0)),
+                          "stockfish": (complete, complete + remaining + failed)})
 
     @staticmethod
     def _format_legacy_metrics_status(status: dict) -> str:
@@ -2724,15 +2736,13 @@ class MainWindow(QMainWindow):
         self._latest_dashboard_snapshot = snapshot
         trend = snapshot.get("activity_trend") or []
         if trend:
-            points = [f"{item['month']}: {item['average_rating']} · {item['attempts']} попыток"
-                      for item in trend if item.get("average_rating") is not None]
+            points = [f"{item['month']}: решено {item['wins']} из {item['attempts']}"
+                      for item in trend]
             self._home_view.progress_trend.setText(
-                "Задачи Lichess · "
-                f"{sum(int(item.get('attempts') or 0) for item in trend)}. "
-                + (" → ".join(points[-4:]) if points else "Нет рейтинговых точек."))
+                "Рейтинг игрока недоступен. Попытки · " + " · ".join(points[-2:]))
             self._home_view.progress_trend.setToolTip(
                 "Источник: локально сохранённые попытки Lichess; сгруппировано по месяцу. "
-                "Это исторический прогресс, не рекомендация занятия.")
+                "Числа показывают результаты попыток, а не рейтинг игрока.")
         elif snapshot.get("filter", {}).get("account_id"):
             self._home_view.progress_trend.setText("Для этого профиля пока нет точек тренда.")
             self._home_view.progress_trend.setToolTip("Здесь отображается только сохранённая история.")
@@ -2840,6 +2850,7 @@ class MainWindow(QMainWindow):
                 row_layout.addWidget(statistics, 2)
                 if metrics.get("assessments"):
                     graph = ReviewGraph(metrics["assessments"], [])
+                    graph.compact = True
                     graph.setMinimumSize(0, 70)
                     graph.move_san = metrics.get("moves") or {}
                     graph.full_ply_count = len(graph.move_san)
@@ -3557,6 +3568,10 @@ class MainWindow(QMainWindow):
                 "Для запуска нужны подключённый аккаунт и проверенный Stockfish. "
                 "Неизвестная безопасность блокирует запуск.")
             return
+        if any(session.status in {"started", "playing"} for session in self._sessions_for_safety()):
+            dialog.progress_label.setText("Массовый анализ доступен после завершения активной партии.")
+            return
+        account_id = f"lichess:{username.lower()}"
         try:
             options = FastPassOptions(nodes=nodes, hash_mb=hash_mb)
             runner = self.engine_analysis.create_batch_runner(
@@ -3564,7 +3579,7 @@ class MainWindow(QMainWindow):
             resumed_original_budget = False
             if resume:
                 saved_parameters = self.game_repository.pending_fast_analysis_parameters(
-                    runner.engine_key)
+                    runner.engine_key, account_id=account_id)
                 if saved_parameters:
                     saved_nodes = int(saved_parameters.get("limit_value", nodes))
                     saved_hash = int(saved_parameters.get("hash_mb", hash_mb))
@@ -3596,11 +3611,15 @@ class MainWindow(QMainWindow):
 
         def work() -> None:
             try:
+                if stop.is_set() or pause.is_set() or generation != self._analysis_session_generation:
+                    dialog.worker_finished.emit(pause.is_set(), "Запуск очереди прерван.")
+                    return
+                self.game_repository.ensure_archive_account(username)
                 if resume:
                     available = self.game_repository.analysis_job_counts(
-                        engine_version=runner.engine_key, parameters=runner.parameters)
+                        engine_version=runner.engine_key, parameters=runner.parameters, account_id=account_id)
                     review_available = (self.game_repository.analysis_job_counts(
-                        engine_version=runner.review_engine_key) if selective_review else {})
+                        engine_version=runner.review_engine_key, account_id=account_id) if selective_review else {})
                     if not (any(available.get(status, 0)
                                 for status in ("queued", "paused", "running"))
                             or any(review_available.get(status, 0)
@@ -3609,23 +3628,23 @@ class MainWindow(QMainWindow):
                             False, "Для выбранного движка и бюджета нет незавершённой очереди.")
                         return
                     resumed = self.game_repository.resume_paused_analysis_jobs(
-                        engine_version=runner.engine_key, parameters=runner.parameters)
+                        engine_version=runner.engine_key, parameters=runner.parameters, account_id=account_id)
                     if selective_review:
                         resumed += self.game_repository.resume_paused_analysis_jobs(
-                            engine_version=runner.review_engine_key)
+                            engine_version=runner.review_engine_key, account_id=account_id)
                     enqueued = {"queued": 0, "already_present": 0}
                 else:
-                    if stop.is_set() or generation != self._analysis_session_generation:
+                    if stop.is_set() or pause.is_set() or generation != self._analysis_session_generation:
+                        dialog.worker_finished.emit(pause.is_set(), "Запуск очереди прерван.")
                         return
-                    account_id = self.game_repository.ensure_archive_account(username)
                     enqueued = runner.enqueue_missing(account_id=account_id, limit=limit,
                                                       retry_failed=retry_failed)
                     resumed = 0
                 unknown_preflight = threading.Event()
                 initial_counts = self.game_repository.analysis_job_counts(
-                    engine_version=runner.engine_key, parameters=runner.parameters)
+                    engine_version=runner.engine_key, parameters=runner.parameters, account_id=account_id)
                 review_counts = self.game_repository.analysis_job_counts(
-                    engine_version=runner.review_engine_key)
+                    engine_version=runner.review_engine_key, account_id=account_id)
                 dialog.worker_queue_status.emit(
                     f"Fast — добавлено: {enqueued['queued']} · очередь: {initial_counts.get('queued', 0)} · "
                     f"пауза: {initial_counts.get('paused', 0)} · готово: {initial_counts.get('complete', 0)} · "
@@ -3659,7 +3678,7 @@ class MainWindow(QMainWindow):
 
                 def progress(game_id: str, done: int, total: int) -> None:
                     counts = self.game_repository.analysis_job_counts(
-                        engine_version=runner.engine_key, parameters=runner.parameters)
+                        engine_version=runner.engine_key, parameters=runner.parameters, account_id=account_id)
                     dialog.worker_queue_status.emit(
                         f"Очередь: {counts.get('queued', 0)} · пауза: {counts.get('paused', 0)} · "
                         f"выполнены: {counts.get('complete', 0)} · ошибки: {counts.get('failed', 0)} · "
@@ -3679,9 +3698,9 @@ class MainWindow(QMainWindow):
                                     account_id=account_id,
                                     max_fast_jobs=limit)
                 counts = self.game_repository.analysis_job_counts(
-                    engine_version=runner.engine_key, parameters=runner.parameters)
+                    engine_version=runner.engine_key, parameters=runner.parameters, account_id=account_id)
                 review_counts = self.game_repository.analysis_job_counts(
-                    engine_version=runner.review_engine_key)
+                    engine_version=runner.review_engine_key, account_id=account_id)
                 dialog.worker_queue_status.emit(
                     f"Fast — очередь: {counts.get('queued', 0)} · пауза: {counts.get('paused', 0)} · "
                     f"готово: {counts.get('complete', 0)} · ошибки: {counts.get('failed', 0)} · "
@@ -4093,7 +4112,7 @@ class MainWindow(QMainWindow):
                                     key=lambda item: (item[1]["attempts"], item[0]), reverse=True)[:8]
                 theme_summary = ", ".join(_PUZZLE_THEME_LABELS.get(theme, theme)
                                             for theme, _stats in top_themes[:4]) or "нет данных"
-                trend_summary = (f"· средний рейтинг {rating_trend[-1]['average_rating']}"
+                trend_summary = (f"· средняя сложность задач {rating_trend[-1]['average_rating']}"
                                  if rating_trend and rating_trend[-1].get("average_rating") is not None
                                  else "")
                 summary.setText(
@@ -5751,6 +5770,7 @@ class MainWindow(QMainWindow):
         session.set_server_game_identity(game)
         if session is not self.online_session:
             self.board.clear_annotations()
+        self._pause_heavy_work_for_live_game()
         self.online_session = session
         self._selected_live_game_id = session.game_id
         self._review_session = None
@@ -6068,7 +6088,7 @@ class MainWindow(QMainWindow):
         if (self._shutdown_requested or self.offline_mode or not self._online_actions_allowed()
                 or self.lichess is None or not self.lichess.username):
             return
-        if any(s.status in {"started", "playing"} and not s.is_ai_opponent
+        if any(s.status in {"started", "playing"}
                for s in self._sessions_for_safety()):
             return  # Prioritize live play over background network traffic.
         generation = getattr(self.lichess, "auth_generation", None)
@@ -6345,6 +6365,16 @@ class MainWindow(QMainWindow):
                 button.setVisible(self._lichess_connected and self.online_session is None)
             self.game_status.setText("Приглашение отменено.")
 
+    def _pause_heavy_work_for_live_game(self) -> None:
+        self._cancel_lichess_backfill_wakeup()
+        self._backfill_deferred_for_live_game = True
+        if self._batch_pause is not None:
+            self._pause_batch_analysis()
+        for method in ("cancel_archive_sync", "cancel_puzzle_sync", "cancel_lichess_analysis_backfill"):
+            cancel = getattr(self.lichess, method, None)
+            if callable(cancel):
+                cancel()
+
     def _lichess_event(self, event: dict, *, generation: int | None = None) -> None:
         if generation is not None and not self._current_lichess_generation(generation):
             return
@@ -6374,11 +6404,10 @@ class MainWindow(QMainWindow):
             session.status = "started"
             session.set_server_game_identity(game)
             self.game_sessions.register(session)
+            self._pause_heavy_work_for_live_game()
             if not session.is_ai_opponent:
                 self._cancel_dashboard_safety_retry()
                 self._set_sidebar_safety_status("Аналитика скрыта · активная партия")
-                self._cancel_lichess_backfill_wakeup()
-                self._backfill_deferred_for_human_game = True
                 self._dashboard_analysis_safety_allowed = False
                 self._refresh_dashboard_analysis_visibility()
                 self._revoke_review_safety(
@@ -6391,8 +6420,6 @@ class MainWindow(QMainWindow):
                 self._disable_position_evaluation(
                     "Stockfish остановлен: получено событие о человеческой онлайн-партии.")
                 self._sync_position_eval_controls(self._position_eval_context_available())
-            if not session.is_ai_opponent and self._batch_pause is not None:
-                self._pause_batch_analysis()
             pending_id = self._pending_play_game_id
             if self._pending_play_request_mode == "challenge" and not pending_id:
                 challenge_id = getattr(self.lichess, "pending_username_challenge_id", None)
@@ -6427,18 +6454,16 @@ class MainWindow(QMainWindow):
                 if was_active and game_id == self._selected_live_game_id:
                     self.sound_player.play_game_end(game_id, len(session.board.move_stack))
                 self._refresh_batch_readiness()
-                if (self._backfill_deferred_for_human_game
+                if (self._backfill_deferred_for_live_game
                         and not any(item.status in {"started", "playing"}
-                                    and not item.is_ai_opponent
                                     for item in self._sessions_for_safety())
                         and self.lichess and self._lichess_connected
                         and self._lichess_stream_ready_generation == self.lichess.auth_generation):
-                    self._backfill_deferred_for_human_game = False
+                    self._backfill_deferred_for_live_game = False
                     self._schedule_lichess_backfill_wakeup(
                         self.lichess.auth_generation, str(self.lichess.username or ""),
                         datetime.now(timezone.utc).isoformat(), debounce_if_due=False)
                 if (not any(item.status in {"started", "playing"}
-                            and not item.is_ai_opponent
                             for item in self._sessions_for_safety())
                         and self.lichess and self._lichess_connected):
                     QTimer.singleShot(3000, self._run_background_sync)
@@ -6853,7 +6878,7 @@ class MainWindow(QMainWindow):
                        history_view or status_unknown or
                        (self._screen_mode == "online" and self._event_stream_recovery_pending))
         elapsed = (max(0, int((time.monotonic() - session._last_clock_at) * 1000))
-                   if not paused and not syncing else 0)
+                   if not paused and not syncing and session.can_interpolate_clock() else 0)
         white_text, white_warning = format_remaining_clock(
             session.white_ms, elapsed_ms=elapsed,
             active=(session.board.turn == chess.WHITE and not paused and not syncing), syncing=syncing)

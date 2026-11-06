@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from PySide6.QtCore import Signal
 from PySide6.QtWidgets import (
-    QFrame, QHBoxLayout, QLabel, QListWidget, QPushButton, QVBoxLayout, QWidget,
+    QFrame, QHBoxLayout, QLabel, QListWidget, QProgressBar, QPushButton, QVBoxLayout, QWidget,
 )
 
 
@@ -27,6 +27,7 @@ class BackgroundOperationsPage(QWidget):
         controls.addWidget(self.summary, 1)
         root.addWidget(banner)
         self.workflow_status = {}
+        self.workflow_progress = {}
         for key, caption in (
                 ("archive", "Синхронизация партий Lichess"),
                 ("ready", "Готовая аналитика Lichess"),
@@ -46,8 +47,14 @@ class BackgroundOperationsPage(QWidget):
             detail.setAccessibleName(caption)
             row.addWidget(title, 4)
             row.addWidget(detail, 6)
+            bar = QProgressBar()
+            bar.setAccessibleName(f"{caption} · прогресс")
+            bar.setMaximumWidth(220)
+            bar.hide()
+            row.addWidget(bar, 2)
             root.addWidget(card)
             self.workflow_status[key] = detail
+            self.workflow_progress[key] = bar
         self.details_toggle = QPushButton("Диагностика операций")
         self.details_toggle.setCheckable(True)
         root.addWidget(self.details_toggle)
@@ -88,17 +95,17 @@ class BackgroundOperationsPage(QWidget):
     def set_snapshot(self, operations, *, source_summary: str,
                      backfill_paused: bool, can_check: bool, can_pause: bool,
                      retry_status: str = "", durable_statuses=(),
-                     local_metrics_status: str | None = None, workflows=None) -> None:
+                     local_metrics_status: str | None = None, workflows=None, progress=None) -> None:
         durable_statuses = tuple(durable_statuses)
         self.operation_list.clear()
         for operation in operations:
             context = operation.context
-            progress = ""
+            progress_text = ""
             if context and operation.progress_total is not None:
-                progress = f" · {operation.progress_done or 0}/{operation.progress_total}"
+                progress_text = f" · {operation.progress_done or 0}/{operation.progress_total}"
             self.operation_list.addItem(
                 f"{context.kind if context else operation.lane.value} · "
-                f"{operation.status.value}{progress}")
+                f"{operation.status.value}{progress_text}")
         for status in durable_statuses:
             self.operation_list.addItem(str(status))
         if self.operation_list.count() == 0:
@@ -119,6 +126,12 @@ class BackgroundOperationsPage(QWidget):
             else "Сейчас активных задач нет")
         for key, label in self.workflow_status.items():
             label.setText((workflows or {}).get(key) or "Состояние не подтверждено.")
+            bar = self.workflow_progress[key]
+            done, total = (progress or {}).get(key, (0, 0))
+            bar.setVisible(total > 0)
+            if total > 0:
+                bar.setRange(0, total)
+                bar.setValue(max(0, min(done, total)))
         self.source_summary.setText(source_summary)
         if local_metrics_status is not None:
             self.local_metrics_status.setText(local_metrics_status)

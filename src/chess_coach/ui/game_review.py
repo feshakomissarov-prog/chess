@@ -113,6 +113,7 @@ class ReviewGraph(QWidget):
         self.analysis_source = ""
         self.analysis_status = ""
         self.delta_mode = False
+        self.compact = False
         self.markers_visible = False
         self.coverage_text = ""
         self.move_san: dict[int, str] = {}
@@ -230,10 +231,11 @@ class ReviewGraph(QWidget):
         painter.drawText(2, rect.top() + 5, axis_label(axis_limit))
         painter.drawText(18, rect.center().y() + 5, "0")
         painter.drawText(2, rect.bottom(), axis_label(-axis_limit))
-        painter.drawText(rect.left() + 3, rect.top() + 14,
-                         "Δ оценки за белых" if self.delta_mode else "Оценка за белых")
-        if not phase_segments:
-            painter.drawText(rect.right() - 150, rect.top() + 14, "Фазы не определены")
+        if not self.compact:
+            painter.drawText(rect.left() + 3, rect.top() + 14,
+                             "Δ оценки за белых" if self.delta_mode else "Оценка за белых")
+            if not phase_segments:
+                painter.drawText(rect.right() - 150, rect.top() + 14, "Фазы не определены")
         if not values:
             message = (self.safety_block_reason if not self.safety_allowed
                        else "Нет сохранённых оценок")
@@ -267,6 +269,9 @@ class ReviewGraph(QWidget):
                 painter.setPen(QPen(QColor(TOKENS.accent), 2))
                 for first, second in self._continuous_segments(values):
                     a, b = coordinate_by_ply[first[0]], coordinate_by_ply[second[0]]
+                    if self.compact:
+                        color = QColor("#43D98A" if a[4] + b[4] >= 0 else "#ED6A79")
+                        painter.setPen(QPen(color, 2))
                     painter.drawLine(a[0], a[1], b[0], b[1])
             mate_label_plies: set[int] = set()
             mate_group: list[tuple[int, int]] = []
@@ -1002,7 +1007,15 @@ class GameReviewWorkspace(QWidget):
                  [move for move in all_moves if phases.get(move.ply) == scope])
         owner, opponent = owner_color, ("black" if owner_color == "white" else "white")
         official = self.review.get("official_accuracy") or {}
-        accuracy_values = {"white": official.get("white"), "black": official.get("black")}
+        local = (self.review.get("local_game_accuracy") or {} if scope == "all" else
+                 (self.review.get("local_phase_accuracy") or {}).get(scope, {}))
+
+        def accuracy_cell(color: str) -> str:
+            if scope == "all" and official.get(color) is not None:
+                return f"{official[color]:.1f}% · Lichess"
+            if local.get(color) is not None:
+                return f"{local[color]:.1f}% · локально"
+            return "—"
 
         def count_cell(color: str, key: str) -> str:
             side_moves = [move for move in moves if move.mover == color]
@@ -1025,8 +1038,7 @@ class GameReviewWorkspace(QWidget):
             return str(sum(m.severity == key for m in assessed)) if assessed else "н/д"
 
         rows = [
-            ("Точность", *("н/д" if scope != "all" or accuracy_values.get(c) is None
-                            else f"{accuracy_values[c]}%" for c in (owner, opponent))),
+            ("Точность", accuracy_cell(owner), accuracy_cell(opponent)),
             ("Хорошие", count_cell(owner, "good"), count_cell(opponent, "good")),
             ("Неточности", count_cell(owner, "inaccuracy"), count_cell(opponent, "inaccuracy")),
             ("Ошибки", count_cell(owner, "mistake"), count_cell(opponent, "mistake")),
@@ -1039,13 +1051,13 @@ class GameReviewWorkspace(QWidget):
             for col_index, value in enumerate(values):
                 item = QTableWidgetItem(str(value))
                 if row_index == 0 and scope != "all":
-                    item.setToolTip("Точность по фазе не рассчитывается.")
+                    item.setToolTip("Локальная точность по сохранённым оценкам выбранной фазы.")
                 table.setItem(row_index, col_index, item)
         table.setAccessibleName(f"Статистика: {self.phase_selector.currentText()}")
         source = (self.review.get("analysis") or {}).get("source")
         game = self.review["game"]
         names = (game.get("white_player") or "Белые", game.get("black_player") or "Чёрные")
-        table.setToolTip(f"{source_short(source)[1]} · {names[0]} / {names[1]}; точность — только Lichess.")
+        table.setToolTip(f"{source_short(source)[1]} · {names[0]} / {names[1]}; официальная и локальная точность подписаны отдельно.")
         row_height = max(table.fontMetrics().height() + 3, 22)
         for row in range(table.rowCount()):
             table.setRowHeight(row, row_height)
@@ -1430,6 +1442,8 @@ class GameReviewWorkspace(QWidget):
         analysis = (self.review or {}).get("analysis") or {}
         phases = {int(row["ply"]): row.get("phase")
                   for row in analysis.get("move_metrics", [])}
+        phases.update({ply: phase for ply, phase in (self.review or {}).get("phase_by_ply", {}).items()
+                       if phase != "unknown"})
         for row in analysis.get("classifications", []):
             phase = row.get("phase")
             ply = int(row.get("ply", -1))

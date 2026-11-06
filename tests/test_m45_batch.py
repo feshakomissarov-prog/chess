@@ -785,6 +785,34 @@ def test_pause_event_interrupts_current_search_and_resume_keeps_remaining_jobs(t
         repository.shutdown()
 
 
+def test_saved_queue_is_claimed_resumed_and_cancelled_only_for_selected_account(tmp_path):
+    repository = GameRepository(tmp_path / "account-scoped-queue.sqlite3")
+    try:
+        timestamp = "2026-10-02T00:00:00+00:00"
+        for name in ("first", "second"):
+            _save_game(repository, name, timestamp)
+            account = repository.ensure_archive_account(name)
+            with repository._connection() as db:
+                db.execute(
+                    "INSERT INTO account_games(account_id,game_id,remote_id,imported_at) "
+                    "VALUES (?,?,?,?)", (account, name, name, timestamp))
+            candidates = repository.list_games_needing_fast_analysis(account_id=account)
+            repository.enqueue_analysis_jobs(candidates, analysis_pass="fast",
+                                             engine_version="synthetic", parameters={"nodes": 20})
+        scoped = {"engine_version": "synthetic", "account_id": "lichess:first"}
+        job = repository.claim_next_analysis_job("worker", analysis_pass="fast", **scoped)
+        assert job["game_id"] == "first"
+        repository.finish_analysis_job(job["job_id"], "worker", status="paused")
+        assert repository.pending_fast_analysis_parameters(**scoped) == {"nodes": 20}
+        assert repository.claim_next_analysis_job("worker", analysis_pass="fast", **scoped) is None
+        assert repository.resume_paused_analysis_jobs(**scoped) == 1
+        assert repository.cancel_queued_analysis_jobs(**scoped) == 1
+        assert repository.analysis_job_counts(**scoped) == {"cancelled": 1}
+        assert repository.analysis_job_counts(account_id="lichess:second") == {"queued": 1}
+    finally:
+        repository.shutdown()
+
+
 def test_expired_lease_is_reclaimed_and_stale_revision_is_never_analyzed(tmp_path):
     repository = GameRepository(tmp_path / "lease.sqlite3")
     try:

@@ -187,7 +187,17 @@ class LibraryPage(QWidget):
         self.detail_metrics = QLabel("")
         self.detail_metrics.setWordWrap(True)
         detail_layout.addWidget(self.detail_metrics)
+        self.phase_button = QPushButton("Точность по фазам")
+        self.phase_button.setCheckable(True)
+        self.phase_button.hide()
+        self.phase_detail = QLabel()
+        self.phase_detail.setWordWrap(True)
+        self.phase_detail.hide()
+        self.phase_button.toggled.connect(self.phase_detail.setVisible)
+        detail_layout.addWidget(self.phase_button)
+        detail_layout.addWidget(self.phase_detail)
         self.detail_graph = ReviewGraph([], [])
+        self.detail_graph.compact = True
         self.detail_graph.setMinimumWidth(0)
         self.detail_graph.setMaximumHeight(190)
         self.detail_graph.setMinimumHeight(120)
@@ -270,7 +280,14 @@ class LibraryPage(QWidget):
 
     def show_game_detail(self, game: dict | None, review: dict | None = None, *,
                          safety_allowed: bool = False) -> None:
+        previous = self._detail_game
         self._detail_game = dict(game) if game else None
+        if not safety_allowed or not previous or not game or any(
+                previous.get(key) != game.get(key) for key in ("game_id", "line_revision")):
+            self.phase_button.setChecked(False)
+        self.phase_button.hide()
+        self.phase_detail.clear()
+        self.phase_detail.hide()
         if not game:
             self.detail_title.setText("Выберите партию")
             self.detail_metadata.setText("Детали партии появятся здесь.")
@@ -329,6 +346,18 @@ class LibraryPage(QWidget):
         for label, key in (("Неточности", "inaccuracy"), ("Ошибки", "mistake"), ("Зевки", "blunder")):
             lines.append(f"{label} · {classified('white', key)} / {classified('black', key)}")
         self.detail_metrics.setText("\n".join(lines))
+        phase_values = review.get("local_phase_accuracy") or {}
+        if phase_values:
+            phase_lines = ["Локальная точность · белые / чёрные"]
+            for phase, label in (("opening", "Дебют"), ("middlegame", "Миттельшпиль"),
+                                 ("endgame", "Эндшпиль")):
+                values = phase_values.get(phase, {})
+                sides_text = ["—" if values.get(side) is None else f"{values[side]:.1f}%"
+                              for side in ("white", "black")]
+                phase_lines.append(f"{label}: {' / '.join(sides_text)}")
+            self.phase_detail.setText("\n".join(phase_lines))
+            self.phase_button.show()
+            self.phase_detail.setVisible(self.phase_button.isChecked())
         self.detail_graph.assessments = assessments
         self.detail_graph.markers = {int(row["ply"]): row for row in markers}
         self.detail_graph.full_ply_count = len(review.get("moves") or [])

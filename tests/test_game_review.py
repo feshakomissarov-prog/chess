@@ -422,7 +422,7 @@ def test_phase_summary_shows_both_sides_coverage_and_never_fabricates_accuracy(q
         assert workspace.phase_selector.currentData() == "opening"
         assert "Зевки" in _metrics_text(workspace.side_metrics_summary)
         assert "1" in _metrics_text(workspace.side_metrics_summary)
-        assert workspace.side_metrics_summary.item(0, 1).text() == "н/д"
+        assert workspace.side_metrics_summary.item(0, 1).text() == "—"
         assert "дебют" in workspace.phase_summary.toolTip()
     finally:
         repo.shutdown()

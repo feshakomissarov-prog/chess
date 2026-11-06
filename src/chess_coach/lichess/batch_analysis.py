@@ -178,7 +178,7 @@ class BatchAnalysisRunner:
                     job = self.repository.claim_next_analysis_job(
                         self.worker_id, engine_version=self.engine_key,
                         analysis_pass="fast", parameters=self.parameters,
-                        lease_seconds=self.lease_seconds)
+                        lease_seconds=self.lease_seconds, account_id=account_id)
                     if job is None and include_selective_review and not review_scheduled:
                         review_queued = self.enqueue_selected_reviews(
                             account_id=account_id, budget_per_game=review_budget_per_game,
@@ -190,7 +190,7 @@ class BatchAnalysisRunner:
                     job = self.repository.claim_next_analysis_job(
                         self.worker_id, engine_version=self.review_engine_key,
                         analysis_pass="review", parameters=None,
-                        lease_seconds=self.lease_seconds)
+                        lease_seconds=self.lease_seconds, account_id=account_id)
                 if job is None:
                     break
                 log_event("batch_job_claimed", "batch_analysis", run_id=run_id,
@@ -314,8 +314,9 @@ class BatchAnalysisRunner:
                 engine.quit()
             if cancelled:
                 self.repository.cancel_queued_analysis_jobs(
-                    engine_version=self.engine_key, parameters=self.parameters)
-                self.repository.cancel_queued_analysis_jobs(engine_version=self.review_engine_key)
+                    engine_version=self.engine_key, parameters=self.parameters, account_id=account_id)
+                self.repository.cancel_queued_analysis_jobs(
+                    engine_version=self.review_engine_key, account_id=account_id)
             reset_context(run_context)
         log_event("batch_run_finished", "batch_analysis", run_id=run_id,
                   duration_ms=(time.monotonic() - run_started) * 1000,
@@ -327,9 +328,9 @@ class BatchAnalysisRunner:
                 "last_failure": last_failure,
                 "attempted_fast": attempted_fast,
                 "queue": self.repository.analysis_job_counts(engine_version=self.engine_key,
-                                                               parameters=self.parameters),
+                                                           parameters=self.parameters, account_id=account_id),
                 "review_queue": self.repository.analysis_job_counts(
-                    engine_version=self.review_engine_key),
+                    engine_version=self.review_engine_key, account_id=account_id),
                 "review_queued": review_queued}
 
     def enqueue_selected_reviews(self, *, account_id: str | None = None,

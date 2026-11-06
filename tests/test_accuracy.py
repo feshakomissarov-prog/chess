@@ -188,3 +188,19 @@ def test_unknown_source_active_and_no_move_lines_are_not_presented_as_accuracy()
     game, line, analysis, positions = _fixture(moves="", rows=[
         {"ply": 0, "white_cp": 0, "depth": 20}])
     assert calculate_saved_game_accuracy(game, line, analysis, positions).status == "unavailable"
+
+
+def test_phase_accuracy_uses_position_before_phase_and_correct_moving_side():
+    game, line, analysis, positions = _fixture(rows=[
+        {"ply": i, "white_cp": cp, "depth": 16}
+        for i, cp in enumerate((0, 0, 200, 0))
+    ])
+    result = calculate_saved_game_accuracy(
+        game, line, analysis, positions, phase_by_ply={1: "opening", 2: "middlegame", 3: "middlegame"})
+    assert result.phase_values["opening"] == {"white": 100.0, "black": None}
+    assert result.phase_values["middlegame"]["black"] < 100
+    assert result.phase_values["middlegame"]["white"] < 100
+    assert "endgame" not in result.phase_values
+    analysis["status"] = "partial"
+    assert not calculate_saved_game_accuracy(
+        game, line, analysis, positions, phase_by_ply={1: "opening"}).phase_values

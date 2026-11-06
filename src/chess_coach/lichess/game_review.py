@@ -7,6 +7,7 @@ from typing import Any
 
 import chess
 from ..domain.accuracy import calculate_saved_game_accuracy
+from .phases import PHASE_FALLBACK_VERSION, infer_phase_boundaries, phase_at_ply
 
 ACCEPTANCE_POLICY_VERSION = "saved-stockfish-pv-improvement-v1"
 MIN_VERIFIED_DEPTH = 15
@@ -146,7 +147,19 @@ def load_game_review(repository, game: dict[str, Any], *,
     }
     server_backfill = (repository.lichess_analysis_backfill_state(
         str(account_id), game_id) if account_id and source_is_lichess else None)
-    local_accuracy = calculate_saved_game_accuracy(game, line, analysis, positions)
+    read_phases = getattr(repository, "phase_boundaries", None)
+    boundaries = read_phases(game_id, revision) if analysis and read_phases else None
+    if analysis and boundaries is None:
+        middle, end = infer_phase_boundaries(positions)
+        boundaries = {"middle_start_ply": middle, "end_start_ply": end,
+                      "source": PHASE_FALLBACK_VERSION}
+    phase_by_ply = {
+        move.ply: phase_at_ply(boundaries.get("middle_start_ply"),
+                               boundaries.get("end_start_ply"), move.ply)
+        for move in moves
+    } if boundaries else {}
+    local_accuracy = calculate_saved_game_accuracy(
+        game, line, analysis, positions, phase_by_ply=phase_by_ply)
     if analysis is not None:
         analysis["local_game_accuracy"] = dict(local_accuracy.values)
         analysis["local_game_accuracy_formula_id"] = local_accuracy.formula_id
@@ -169,6 +182,9 @@ def load_game_review(repository, game: dict[str, Any], *,
         "owner_color": owner_color if owner_color in {"white", "black"} else None,
         "per_side": per_side, "official_accuracy": official_accuracy,
         "local_game_accuracy": dict(local_accuracy.values),
+        "local_phase_accuracy": local_accuracy.phase_values,
+        "phase_by_ply": phase_by_ply,
+        "phase_source": boundaries.get("source") if boundaries else None,
         "local_accuracy_status": analysis.get("local_accuracy_status") if analysis else {
             "status": local_accuracy.status, "reason": local_accuracy.reason,
             "coverage": {"scored": local_accuracy.coverage[0],

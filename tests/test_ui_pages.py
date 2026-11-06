@@ -335,3 +335,16 @@ def test_extracted_ui_components_do_not_import_the_root_window():
                 imported.append(node.module)
         assert not any(name == "chess_coach.window" or name.endswith(".window")
                        for name in imported), f"{path.name} imports the root window"
+
+
+def test_visual_background_progress_requires_a_known_total(qtbot):
+    page = BackgroundOperationsPage()
+    qtbot.addWidget(page)
+    page.show()
+    page.set_snapshot((), source_summary="", backfill_paused=False, can_check=False,
+                      can_pause=False, progress={"ready": (7, 0), "stockfish": (2, 5)})
+    assert page.workflow_progress["ready"].isHidden()
+    bar = page.workflow_progress["stockfish"]
+    assert bar.isVisible()
+    assert bar.maximum() == 5 and bar.value() == 2
+    assert "активных задач нет" in page.summary.text()

@@ -412,6 +412,17 @@ class LichessGameSession:
             self.white_ms = self.black_ms = None
             self.clock_state_valid = False
 
+    def can_interpolate_clock(self) -> bool:
+        """Extrapolate only once the opening timer has started."""
+        if self.clock_state_valid is not True or self._clock_ply_seen != len(self.moves.split()):
+            return False
+        # Lichess starts ordinary games' clocks after the second ply. An
+        # authoritative deduction can also establish an earlier forced start.
+        active_ms = self.white_ms if self.board.turn == chess.WHITE else self.black_ms
+        return self._clock_ply_seen >= 2 or (
+            self.clock_initial > 0 and active_ms is not None and active_ms < self.clock_initial
+        )
+
     def _apply_clock_state(self, state: dict) -> None:
         """Validate live millisecond snapshots against the confirmed line and increments."""
         supplied = {"wtime": state.get("wtime", self.white_ms),

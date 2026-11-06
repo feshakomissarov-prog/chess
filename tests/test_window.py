@@ -1541,7 +1541,7 @@ def test_progress_cached_analytics_is_visually_masked_until_fresh_safety_snapsho
     window.close()
 
 
-def test_batch_queue_pauses_on_new_human_game_but_not_builtin_ai(qtbot):
+def test_batch_queue_pauses_on_new_human_game_and_builtin_ai(qtbot):
     human_window = MainWindow(offline_mode=True)
     qtbot.addWidget(human_window)
     human_window._batch_pause = threading.Event()
@@ -1556,7 +1556,7 @@ def test_batch_queue_pauses_on_new_human_game_but_not_builtin_ai(qtbot):
     ai_window._lichess_event({"type": "gameStart", "game": {
         "gameId": "ai-during-batch", "source": "ai", "color": "white",
         "opponent": {"ai": 3, "id": None}}})
-    assert not ai_window._batch_pause.is_set()
+    assert ai_window._batch_pause.is_set()
 
 
 def test_window_close_cancels_and_waits_for_batch_worker(qtbot):
@@ -4611,10 +4611,11 @@ def test_online_clocks_use_authoritative_snapshot_and_pause_in_history_or_unknow
     session.color = chess.BLACK
     session.status = "playing"
     session.awaiting_authoritative_snapshot = False
-    session.white_ms = 180_000
-    session.black_ms = 30_000
-    session.white_inc = 2000
-    session.black_inc = 3000
+    session.moves = "e2e4 e7e5"
+    session.board.push_uci("e2e4")
+    session.board.push_uci("e7e5")
+    session._apply_clock_state({"wtime": 180_000, "btime": 30_000,
+                                "winc": 2000, "binc": 3000})
     session._last_clock_at = 10.0
     window.online_session = session
     window.online_sessions[session.game_id] = session
@@ -4638,6 +4639,35 @@ def test_online_clocks_use_authoritative_snapshot_and_pause_in_history_or_unknow
     session.status = "mate"
     window._update_clock()
     assert window.opponent_clock_label.text() == "03:00"
+
+
+def test_opening_clock_keeps_server_snapshot_until_both_players_move(qtbot, tmp_path, monkeypatch):
+    window = MainWindow(QSettings(str(tmp_path / "opening-clock.ini"), QSettings.Format.IniFormat),
+                        offline_mode=True)
+    qtbot.addWidget(window)
+    session = LichessGameSession("opening-clock", window.game_repository)
+    session.status = "playing"
+    session.awaiting_authoritative_snapshot = False
+    session.clock_initial = 180_000
+    window.online_session = session
+    window._screen_mode = "online"
+    monkeypatch.setattr("chess_coach.window.time.monotonic", lambda: 30.0)
+
+    for line, white, black, own_text, other_text in (
+        ("", 180_000, 180_000, "03:00", "03:00"),
+        ("e2e4", 182_000, 180_000, "03:02", "03:00"),
+        ("e2e4 e7e5", 182_000, 182_000, "02:57", "03:02"),
+    ):
+        session.moves = line
+        session.board = chess.Board()
+        for uci in line.split():
+            session.board.push_uci(uci)
+        session._apply_clock_state({"wtime": white, "btime": black,
+                                    "winc": 2000, "binc": 2000})
+        session._last_clock_at = 25.0
+        window._update_clock()
+        assert window.you_clock_label.text().startswith(own_text)
+        assert window.opponent_clock_label.text().startswith(other_text)
 
 
 def test_clock_increment_is_converted_from_milliseconds():
