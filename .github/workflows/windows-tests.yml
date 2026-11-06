@@ -47,6 +47,50 @@ jobs:
           python-version: "3.12"
           cache: pip
       - run: python -m pip install -e .
+      - name: Configure runner display for approved reference sizes
+        shell: pwsh
+        run: |
+          Add-Type -TypeDefinition @'
+          using System;
+          using System.Runtime.InteropServices;
+          [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Auto)]
+          public struct DisplayMode {
+            [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 32)] public string dmDeviceName;
+            public short dmSpecVersion, dmDriverVersion, dmSize, dmDriverExtra;
+            public int dmFields;
+            public int dmPositionX, dmPositionY, dmDisplayOrientation, dmDisplayFixedOutput;
+            public short dmColor, dmDuplex, dmYResolution, dmTTOption, dmCollate;
+            [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 32)] public string dmFormName;
+            public short dmLogPixels;
+            public int dmBitsPerPel, dmPelsWidth, dmPelsHeight, dmDisplayFlags, dmDisplayFrequency;
+            public int dmICMMethod, dmICMIntent, dmMediaType, dmDitherType, dmReserved1, dmReserved2;
+            public int dmPanningWidth, dmPanningHeight;
+          }
+          public static class DisplayModeApi {
+            [DllImport("user32.dll", CharSet = CharSet.Auto)]
+            public static extern int EnumDisplaySettings(string deviceName, int modeNum, ref DisplayMode mode);
+            [DllImport("user32.dll", CharSet = CharSet.Auto)]
+            public static extern int ChangeDisplaySettings(ref DisplayMode mode, int flags);
+          }
+          '@
+          $mode = New-Object DisplayMode
+          $mode.dmSize = [Runtime.InteropServices.Marshal]::SizeOf($mode)
+          if ([DisplayModeApi]::EnumDisplaySettings($null, -1, [ref]$mode) -eq 0) {
+            throw "Unable to read runner display mode."
+          }
+          if ($mode.dmPelsWidth -lt 1672 -or $mode.dmPelsHeight -lt 941) {
+            $mode.dmPelsWidth = 1920
+            $mode.dmPelsHeight = 1080
+            $mode.dmFields = 0x00080000 -bor 0x00100000
+            $result = [DisplayModeApi]::ChangeDisplaySettings([ref]$mode, 0)
+            if ($result -ne 0) { throw "Unable to set runner display mode; ChangeDisplaySettings returned $result." }
+          }
+          Add-Type -AssemblyName System.Windows.Forms
+          $bounds = [System.Windows.Forms.Screen]::PrimaryScreen.Bounds
+          Write-Host "Primary display: $($bounds.Width)x$($bounds.Height)"
+          if ($bounds.Width -lt 1672 -or $bounds.Height -lt 941) {
+            throw "Runner display cannot fit the approved 1672x941 capture."
+          }
       - name: Capture native Windows Qt screens
         env:
           CC_VISUAL_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
