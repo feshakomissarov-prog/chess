@@ -2,14 +2,69 @@
 
 from __future__ import annotations
 
-from PySide6.QtCore import QSize, QTimer, Qt, Signal
+from PySide6.QtCore import QRect, QSize, QTimer, Qt, Signal
 from PySide6.QtGui import QColor
 from PySide6.QtWidgets import (
     QComboBox, QFrame, QGridLayout, QHBoxLayout, QLabel, QListWidget, QListWidgetItem,
-    QLayout, QLineEdit, QPushButton, QScrollArea, QSplitter, QVBoxLayout, QWidget,
+    QLayout, QLineEdit, QPushButton, QScrollArea, QSplitter, QStyle, QStyledItemDelegate,
+    QStyleOptionViewItem, QVBoxLayout, QWidget,
 )
-from ..display import format_clock_control, format_game_timeline
+from ..dashboard import game_card_text
+from ..display import (
+    format_clock_control, format_game_activity_time, format_game_timeline, russian_opening_name,
+)
 from ..game_review import ReviewGraph
+
+
+class LibraryRowDelegate(QStyledItemDelegate):
+    """Keep native selection, keyboard navigation and accessibility for card rows."""
+
+    def paint(self, painter, option, index):
+        game = index.data(Qt.ItemDataRole.UserRole)
+        if not isinstance(game, dict) or option.rect.width() < 350:
+            super().paint(painter, option, index)
+            return
+        shell = QStyleOptionViewItem(option)
+        self.initStyleOption(shell, index)
+        shell.text = ""
+        option.widget.style().drawControl(QStyle.ControlElement.CE_ItemViewItem, shell,
+                                          painter, option.widget)
+        rect = option.rect.adjusted(18, 8, -15, -8)
+        left = max(105, rect.width() * 29 // 100)
+        middle = rect.width() * 34 // 100
+        first, second = rect.left() + left, rect.left() + left + middle
+        heading, _ = game_card_text(game)
+        outcome = heading.partition(" с ")[0]
+        color = {"Победа": "#79E599", "Поражение": "#FF737C", "Ничья": "#E2E5F0"}.get(
+            outcome, "#AEB8CF")
+        glyph = {"Победа": "♜", "Поражение": "♛", "Ничья": "="}.get(outcome, "·")
+        painter.save()
+        painter.setClipRect(rect)
+
+        def text(value, x, y, width, height, *, size=14, color="#F5F6FD", bold=False):
+            font = painter.font()
+            font.setPixelSize(size)
+            font.setBold(bold)
+            painter.setFont(font)
+            painter.setPen(QColor(color))
+            content = painter.fontMetrics().elidedText(str(value), Qt.TextElideMode.ElideRight, width)
+            painter.drawText(QRect(x, y, width, height),
+                             Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft, content)
+
+        text(f"{glyph}  {outcome}", rect.left(), rect.top(), left - 10, rect.height(),
+             size=18, color=color, bold=True)
+        half = rect.height() // 2
+        text(game.get("account_opponent") or game.get("opponent") or "Соперник",
+             first, rect.top(), middle - 12, half, size=16, bold=True)
+        text(format_game_activity_time(game), first, rect.top() + half, middle - 12, half,
+             color="#AEB8CF")
+        painter.setPen(QColor("#303950"))
+        painter.drawLine(second, rect.top() + 4, second, rect.bottom() - 4)
+        width = rect.right() - second - 10
+        text(format_clock_control(game.get("clock")), second + 10, rect.top(), width, half)
+        text(russian_opening_name(game.get("opening_eco"), game.get("opening_name")),
+             second + 10, rect.top() + half, width, half, color="#AEB8CF")
+        painter.restore()
 
 
 class LibraryPage(QWidget):
@@ -146,6 +201,7 @@ class LibraryPage(QWidget):
         body.setChildrenCollapsible(False)
         self.body_splitter = body
         self.games = QListWidget()
+        self.games.setItemDelegate(LibraryRowDelegate(self.games))
         self.games.setAccessibleName("Завершённые партии")
         self.games.setStyleSheet("""
             QListWidget { background: transparent; border: none; }
@@ -173,13 +229,21 @@ class LibraryPage(QWidget):
         self.detail_panel.setObjectName("metricCard")
         detail_layout = QVBoxLayout(self.detail_panel)
         self.detail_title = QLabel("Выберите партию")
-        self.detail_title.setStyleSheet("font-size: 16px; font-weight: 700;")
+        self.detail_title.setStyleSheet("font-size: 24px; font-weight: 700;")
         self.detail_title.setWordWrap(True)
         detail_layout.addWidget(self.detail_title)
         self.detail_metadata = QLabel("Детали и оценки отображаются здесь.")
         self.detail_metadata.setObjectName("secondary")
         self.detail_metadata.setWordWrap(True)
         detail_layout.addWidget(self.detail_metadata)
+        self.detail_players = QLabel()
+        self.detail_players.setWordWrap(True)
+        self.detail_players.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.detail_players.setStyleSheet(
+            "background: #232B3E; border: 1px solid #303950; border-radius: 10px;"
+            "padding: 10px; font-size: 16px; font-weight: 600;")
+        self.detail_players.hide()
+        detail_layout.addWidget(self.detail_players)
         self.detail_status = QLabel("Оценки требуют актуальной проверки безопасности.")
         self.detail_status.setObjectName("secondary")
         self.detail_status.setWordWrap(True)
@@ -205,7 +269,9 @@ class LibraryPage(QWidget):
         detail_layout.addWidget(self.detail_graph)
         self.detail_open = QPushButton("Открыть разбор")
         self.detail_open.clicked.connect(lambda: self._emit_for_selected(self.open_requested))
-        detail_layout.addWidget(self.detail_open)
+        detail_actions = QHBoxLayout()
+        detail_actions.addWidget(self.detail_open)
+        self.detail_open.setObjectName("primaryAction")
         aside_layout.addWidget(self.detail_panel, 1)
         self.aside_scroll = QScrollArea()
         self.aside_scroll.setObjectName("libraryAsideScroll")
@@ -213,7 +279,13 @@ class LibraryPage(QWidget):
         self.aside_scroll.setFrameShape(QFrame.Shape.NoFrame)
         self.aside_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self.aside_scroll.setWidget(aside)
-        body.addWidget(self.aside_scroll)
+        inspector = QWidget()
+        inspector_layout = QVBoxLayout(inspector)
+        inspector_layout.setContentsMargins(0, 0, 0, 0)
+        inspector_layout.setSpacing(6)
+        inspector_layout.addWidget(self.aside_scroll, 1)
+        inspector_layout.addLayout(detail_actions)
+        body.addWidget(inspector)
         body.setStretchFactor(0, 1)
         body.setStretchFactor(1, 1)
         layout.addWidget(body, 1)
@@ -245,8 +317,10 @@ class LibraryPage(QWidget):
         # It is revealed only by an explicit diagnosed-recovery presentation.
         self.refresh_game.setVisible(False)
         self.close_button = QPushButton("Закрыть")
-        for button in (self.open_game, self.export_game, self.analyze_game,
-                       self.refresh_game, self.close_button):
+        self.open_game.hide()
+        for button in (self.export_game, self.analyze_game):
+            detail_actions.addWidget(button)
+        for button in (self.refresh_game, self.close_button):
             actions.addWidget(button)
         layout.addLayout(actions)
         self._typing_filter_timer = QTimer(self)
@@ -290,6 +364,9 @@ class LibraryPage(QWidget):
         self.phase_detail.hide()
         if not game:
             self.detail_title.setText("Выберите партию")
+            self.detail_title.setStyleSheet("font-size: 24px; font-weight: 700;")
+            self.detail_players.clear()
+            self.detail_players.hide()
             self.detail_metadata.setText("Детали партии появятся здесь.")
             self.detail_status.setText("Оценки требуют актуальной проверки безопасности.")
             self.detail_metrics.clear()
@@ -298,10 +375,21 @@ class LibraryPage(QWidget):
             self.detail_open.setEnabled(False)
             return
         title = str(game.get("account_opponent") or game.get("opponent") or "Соперник")
-        self.detail_title.setText(title)
+        heading, _ = game_card_text(game)
+        outcome = heading.partition(" с ")[0]
+        self.detail_title.setText(f"{outcome} · {title}")
+        outcome_color = {"Победа": "#79E599", "Поражение": "#FF737C"}.get(outcome, "#F5F6FD")
+        self.detail_title.setStyleSheet(f"font-size: 24px; font-weight: 700; color: {outcome_color};")
+        white, black = game.get("white_player"), game.get("black_player")
+        score = {"white": "1 – 0", "black": "0 – 1"}.get(game.get("winner"))
+        if outcome == "Ничья":
+            score = "½ – ½"
+        self.detail_players.setVisible(bool(white and black))
+        self.detail_players.setText(f"{white}   {score or '—'}   {black}" if white and black else "")
         date = format_game_timeline(game)
         clock = format_clock_control(game.get("clock"))
-        self.detail_metadata.setText(f"{date} · {clock}")
+        opening = russian_opening_name(game.get("opening_eco"), game.get("opening_name"))
+        self.detail_metadata.setText(f"{date} · {clock}\n{opening}")
         self.detail_open.setEnabled(True)
         if not safety_allowed:
             self.detail_status.setText("Оценки и график скрыты до подтверждения безопасности Lichess.")

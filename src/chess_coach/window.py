@@ -2839,7 +2839,7 @@ class MainWindow(QMainWindow):
             card_layout = QVBoxLayout()
             row_layout.addLayout(card_layout, 4)
             card_layout.setSpacing(4)
-            card.setMinimumHeight(126)
+            card.setMinimumHeight(116)
             card.setMaximumHeight(145)
             heading_label = QLabel(f"♟  {heading}")
             outcome_color = (VISUAL_TOKENS.success if heading.startswith("Победа")

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from PySide6.QtCore import Signal
+from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
     QFrame, QHBoxLayout, QLabel, QListWidget, QProgressBar, QPushButton, QVBoxLayout, QWidget,
 )
@@ -28,16 +28,22 @@ class BackgroundOperationsPage(QWidget):
         root.addWidget(banner)
         self.workflow_status = {}
         self.workflow_progress = {}
-        for key, caption in (
-                ("archive", "Синхронизация партий Lichess"),
-                ("ready", "Готовая аналитика Lichess"),
-                ("puzzles", "Задачи Lichess"),
-                ("stockfish", "Фоновый Stockfish")):
+        for key, glyph, caption in (
+                ("archive", "⟳", "Синхронизация партий Lichess"),
+                ("ready", "▱", "Готовая аналитика Lichess"),
+                ("puzzles", "✓", "Задачи Lichess"),
+                ("stockfish", "♞", "Фоновый Stockfish")):
             card = QFrame()
             card.setObjectName("metricCard")
-            card.setMinimumHeight(62)
+            card.setMinimumHeight(84)
             row = QHBoxLayout(card)
             row.setContentsMargins(18, 11, 18, 11)
+            icon = QLabel(glyph)
+            icon.setFixedSize(43, 43)
+            icon.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            icon.setStyleSheet("background: #39365E; color: #C8BBFF;"
+                               "border-radius: 10px; font-size: 26px;")
+            row.addWidget(icon)
             title = QLabel(caption)
             title.setStyleSheet("font-size: 18px; font-weight: 700;")
             title.setWordWrap(True)
@@ -50,6 +56,10 @@ class BackgroundOperationsPage(QWidget):
             bar = QProgressBar()
             bar.setAccessibleName(f"{caption} · прогресс")
             bar.setMaximumWidth(220)
+            bar.setStyleSheet(
+                "QProgressBar { background: #303950; border-radius: 7px;"
+                "color: #F5F6FD; min-height: 20px; text-align: center; }"
+                "QProgressBar::chunk { background: #43795B; border-radius: 7px; }")
             bar.hide()
             row.addWidget(bar, 2)
             root.addWidget(card)

@@ -174,7 +174,9 @@ def test_library_uses_bounded_three_zone_layout_at_laptop_size(qtbot):
     qtbot.wait(30)
 
     assert page.body_splitter.count() == 2
-    aside_scroll = page.body_splitter.widget(1)
+    inspector = page.body_splitter.widget(1)
+    aside_scroll = page.aside_scroll
+    assert inspector.isAncestorOf(aside_scroll)
     assert isinstance(aside_scroll, QScrollArea)
     aside = aside_scroll.widget()
     assert page.filter_panel.parentWidget() is aside
@@ -186,6 +188,21 @@ def test_library_uses_bounded_three_zone_layout_at_laptop_size(qtbot):
     assert page.search.height() >= 28
     assert page.account_filter.height() >= 28
     assert page.detail_open.height() > 0
+    assert inspector.isAncestorOf(page.export_game)
+    assert inspector.isAncestorOf(page.analyze_game)
+    game = {"game_id": "layout-test", "white_player": "White", "black_player": "Black",
+            "color": "white", "winner": "white", "status": "resign", "clock": "180+2"}
+    page.set_results([(game, "Победа", "Local")], page=0, pages=1, total=1)
+    page.show_game_detail(game)
+    assert page.detail_players.text() == "White   1 – 0   Black"
+    actions = []
+    page.open_requested.connect(lambda row: actions.append(("open", row["game_id"])))
+    page.export_requested.connect(lambda row: actions.append(("export", row["game_id"])))
+    page.analyze_requested.connect(lambda row: actions.append(("analyze", row["game_id"])))
+    for button in (page.detail_open, page.export_game, page.analyze_game):
+        assert button.isVisible()
+        button.click()
+    assert actions == [("open", "layout-test"), ("export", "layout-test"), ("analyze", "layout-test")]
 
 
 def test_settings_tab_contents_stay_top_aligned_and_reachable(qtbot, tmp_path):
