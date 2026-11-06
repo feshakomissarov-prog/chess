@@ -21,7 +21,7 @@ class LibraryRowDelegate(QStyledItemDelegate):
 
     def paint(self, painter, option, index):
         game = index.data(Qt.ItemDataRole.UserRole)
-        if not isinstance(game, dict) or option.rect.width() < 350:
+        if not isinstance(game, dict) or option.rect.width() < 430:
             super().paint(painter, option, index)
             return
         shell = QStyleOptionViewItem(option)
@@ -30,8 +30,8 @@ class LibraryRowDelegate(QStyledItemDelegate):
         option.widget.style().drawControl(QStyle.ControlElement.CE_ItemViewItem, shell,
                                           painter, option.widget)
         rect = option.rect.adjusted(18, 8, -15, -8)
-        left = max(105, rect.width() * 29 // 100)
-        middle = rect.width() * 34 // 100
+        left = max(145, rect.width() * 29 // 100)
+        middle = max(135, rect.width() * 34 // 100)
         first, second = rect.left() + left, rect.left() + left + middle
         heading, _ = game_card_text(game)
         outcome = heading.partition(" с ")[0]
@@ -56,7 +56,8 @@ class LibraryRowDelegate(QStyledItemDelegate):
         half = rect.height() // 2
         text(game.get("account_opponent") or game.get("opponent") or "Соперник",
              first, rect.top(), middle - 12, half, size=16, bold=True)
-        text(format_game_activity_time(game), first, rect.top() + half, middle - 12, half,
+        activity = format_game_activity_time(game)
+        text(activity.partition(": ")[2] or activity, first, rect.top() + half, middle - 12, half,
              color="#AEB8CF")
         painter.setPen(QColor("#303950"))
         painter.drawLine(second, rect.top() + 4, second, rect.bottom() - 4)
@@ -288,6 +289,7 @@ class LibraryPage(QWidget):
         body.addWidget(inspector)
         body.setStretchFactor(0, 1)
         body.setStretchFactor(1, 1)
+        body.setSizes([600, 600])
         layout.addWidget(body, 1)
         page_row = QHBoxLayout()
         self.previous = QPushButton("← Назад")
