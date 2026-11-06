@@ -472,16 +472,18 @@ class AnalysisJobsStoreMixin:
                                          limit: int = 1000,
                                          engine_version: str | None = None,
                                          parameters: dict | None = None,
-                                         retry_failed: bool = False) -> list[dict]:
+                                         retry_failed: bool = False,
+                                         retry_failed_before: str | None = None) -> list[dict]:
         """Page recent eligible lines, skipping work already represented for this config."""
         return self._fast_analysis_candidates(account_id, engine_version, parameters,
-                                              retry_failed, limit)
+                                              retry_failed, limit, retry_failed_before)
 
     def count_games_needing_fast_analysis(self, *, account_id: str,
                                          engine_version: str, parameters: dict) -> int:
         return self._fast_analysis_candidates(account_id, engine_version, parameters, False, None)
 
-    def _fast_analysis_candidates(self, account_id, engine_version, parameters, retry_failed, limit):
+    def _fast_analysis_candidates(self, account_id, engine_version, parameters, retry_failed, limit,
+                                  retry_failed_before=None):
         join = " JOIN account_games ag ON ag.game_id=g.game_id " if account_id else ""
         account_filter = "AND ag.account_id=? " if account_id else ""
         params: list[object] = [account_id] if account_id else []
@@ -490,18 +492,27 @@ class AnalysisJobsStoreMixin:
             params_json = json.dumps(parameters, sort_keys=True, separators=(",", ":"))
             represented_job_statuses = ("'queued','running','paused','complete'" if retry_failed
                                         else "'queued','running','paused','complete','failed','cancelled','stale'")
+            represented_retry_clause = ""
+            if retry_failed and retry_failed_before:
+                represented_job_statuses += ",'failed','cancelled','stale'"
+                # Failures older than the explicit run cutoff are retryable.
+                # A job that fails after this run began remains represented.
+                represented_retry_clause = "AND aj.updated_at >= ? "
             represented = (
                 "AND NOT EXISTS (SELECT 1 FROM analysis_jobs aj "
                 "WHERE aj.game_id=g.game_id AND aj.line_revision=gr.line_revision "
                 "AND aj.line_hash=gr.line_hash AND aj.analysis_pass='fast' "
                 "AND aj.engine_version=? AND aj.parameters_json=? "
-                f"AND aj.status IN ({represented_job_statuses})) "
+                f"AND aj.status IN ({represented_job_statuses}) "
+                + represented_retry_clause + ") "
                 "AND NOT EXISTS (SELECT 1 FROM analysis_runs ar "
                 "WHERE ar.game_id=g.game_id AND ar.line_revision=gr.line_revision "
                 "AND ar.line_hash=gr.line_hash AND ar.source='stockfish' "
                 "AND ar.engine_version=? AND ar.parameters_json=? AND ar.status='complete') "
             )
             params.extend([engine_version, params_json, engine_version, params_json])
+            if retry_failed and retry_failed_before:
+                params.insert(-2, retry_failed_before)
         projection = ("COUNT(*)" if limit is None else
                       "g.game_id,gr.line_revision,gr.line_hash,g.started_at,g.variant")
         order = ""
@@ -538,7 +549,8 @@ class AnalysisJobsStoreMixin:
 
     def enqueue_analysis_jobs(self, candidates: list[dict], *, analysis_pass: str,
                               engine_version: str, parameters: dict,
-                              retry_failed: bool = False) -> dict[str, int]:
+                              retry_failed: bool = False,
+                              retry_failed_before: str | None = None) -> dict[str, int]:
         if analysis_pass not in {"fast", "review"}:
             raise ValueError("Unknown analysis pass")
         params_json = json.dumps(parameters, sort_keys=True, separators=(",", ":"))
@@ -552,13 +564,16 @@ class AnalysisJobsStoreMixin:
                 line_hash = str(candidate["line_hash"])
                 job_id = uuid.uuid4().hex
                 if retry_failed:
+                    retry_time_clause = " AND updated_at < ?" if retry_failed_before else ""
                     requeued = db.execute(
                         "UPDATE analysis_jobs SET status='queued',attempts=0,lease_owner=NULL,"
                         "lease_until=NULL,result_run_id=NULL,error=NULL,started_at=NULL,finished_at=NULL,"
                         "updated_at=? WHERE game_id=? AND line_revision=? AND line_hash=? "
                         "AND analysis_pass=? AND engine_version=? AND parameters_json=? "
-                        "AND status IN ('failed','cancelled','stale')",
-                        (now, game_id, revision, line_hash, analysis_pass, engine_version, params_json))
+                        "AND status IN ('failed','cancelled','stale')" + retry_time_clause,
+                        ((now, game_id, revision, line_hash, analysis_pass, engine_version, params_json,
+                          retry_failed_before) if retry_failed_before else
+                         (now, game_id, revision, line_hash, analysis_pass, engine_version, params_json)))
                     if requeued.rowcount:
                         queued += 1
                         continue

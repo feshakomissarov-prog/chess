@@ -252,6 +252,61 @@ def test_batch_queue_pages_past_existing_jobs_and_retries_only_explicitly(tmp_pa
         repository.shutdown()
 
 
+def test_all_missing_retry_requeues_old_failures_once_per_account_and_run(tmp_path, monkeypatch):
+    repository = GameRepository(tmp_path / "all-missing-retry.sqlite3")
+    engines = []
+    try:
+        accounts = {name: repository.ensure_archive_account(name) for name in ("Account A", "Account B")}
+        runner = _runner(repository, tmp_path, engines)
+        for account_name, prefix in (("Account A", "a"), ("Account B", "b")):
+            account_id = accounts[account_name]
+            for state in ("complete", "failed", "cancelled", "stale"):
+                game_id = f"{prefix}-{state}"
+                _save_game(repository, game_id, f"2026-10-0{len(game_id)%8+1}T00:00:00+00:00")
+                line = repository.current_line(game_id)
+                with repository._connection() as db:
+                    db.execute("INSERT INTO account_games(account_id,game_id,remote_id,imported_at) "
+                               "VALUES(?,?,?,?)", (account_id, game_id, game_id, "2026-10-01T00:00:00+00:00"))
+                repository.enqueue_analysis_jobs(
+                    [{"game_id": game_id, "line_revision": line["line_revision"],
+                      "line_hash": line["line_hash"]}], analysis_pass="fast",
+                    engine_version=runner.engine_key, parameters=runner.parameters)
+                job = repository.claim_next_analysis_job(
+                    f"seed-{account_name}", engine_version=runner.engine_key,
+                    analysis_pass="fast", parameters=runner.parameters,
+                    account_id=account_id)
+                repository.finish_analysis_job(job["job_id"], f"seed-{account_name}", status=state)
+
+        # Routine all-missing scans preserve all terminal jobs.
+        untouched = runner.run(stop_event=threading.Event(), safety_check=lambda _job: True,
+                               account_id=accounts["Account A"], fill_backlog=True)
+        assert untouched["processed"] == 0
+        assert repository.analysis_job_counts(engine_version=runner.engine_key,
+                                              account_id=accounts["Account A"]) == {
+            "cancelled": 1, "complete": 1, "failed": 1, "stale": 1}
+
+        monkeypatch.setattr(runner, "_job_has_eligible_legal_line", lambda _job: True)
+        monkeypatch.setattr(runner.analyzer, "analyze", lambda *_args, **_kwargs: {"run_id": None})
+        retried = runner.run(stop_event=threading.Event(), safety_check=lambda _job: True,
+                             account_id=accounts["Account A"], fill_backlog=True,
+                             retry_failed=True)
+        assert retried["processed"] == 3
+        assert retried["failed"] == 0
+        assert repository.analysis_job_counts(engine_version=runner.engine_key,
+                                              account_id=accounts["Account A"]) == {"complete": 4}
+        # The same explicit opt-in does not reprocess failures created after this run's cutoff.
+        followup = runner.run(stop_event=threading.Event(), safety_check=lambda _job: True,
+                              account_id=accounts["Account A"], fill_backlog=True,
+                              retry_failed=True)
+        assert followup["processed"] == 0
+        assert repository.analysis_job_counts(engine_version=runner.engine_key,
+                                              account_id=accounts["Account B"]) == {
+            "cancelled": 1, "complete": 1, "failed": 1, "stale": 1}
+        assert len(engines) == 1
+    finally:
+        repository.shutdown()
+
+
 def test_guided_batch_run_has_a_hard_two_game_cap_even_with_a_larger_saved_queue(tmp_path):
     repository = GameRepository(tmp_path / "guided-cap.sqlite3")
     engines = []

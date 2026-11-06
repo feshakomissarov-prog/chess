@@ -293,6 +293,7 @@ def test_home_game_target_opens_by_id_while_saved_filters_exclude_it(qtbot, tmp_
                         lambda game: actions.append(("open", game["game_id"])) or True)
     monkeypatch.setattr(window, "_export_saved_pgn",
                         lambda game: actions.append(("export", game["game_id"])))
+    qtbot.waitUntil(lambda: window.library_page.detail_open.isEnabled(), timeout=5000)
     window.library_page.detail_open.click()
     window.library_page.export_game.click()
     assert actions == [("open", target), ("export", target)]

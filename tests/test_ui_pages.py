@@ -98,6 +98,21 @@ def test_library_page_emits_selected_game_actions_and_pagination(qtbot):
     assert page.background_button.text() == "Фоновые операции"
 
 
+def test_library_sort_help_never_opens_a_floating_window_on_reentry(qtbot):
+    page = LibraryPage()
+    qtbot.addWidget(page)
+    page.resize(1100, 700)
+    page.show()
+    qtbot.wait(20)
+    for width in (1100, 900, 1200, 760, 1100):
+        page.resize(width, 700)
+        qtbot.wait(5)
+        assert page.sort_description.parentWidget() is page
+        assert not page.sort_description.isWindow()
+        assert page.sort_description.isHidden()
+    assert "lastMoveAt" in page.search.toolTip()
+
+
 def test_library_typing_filters_coalesce_to_one_query(qtbot):
     page = LibraryPage()
     qtbot.addWidget(page)
@@ -179,8 +194,10 @@ def test_library_uses_bounded_three_zone_layout_at_laptop_size(qtbot):
     assert inspector.isAncestorOf(aside_scroll)
     assert isinstance(aside_scroll, QScrollArea)
     aside = aside_scroll.widget()
-    assert page.filter_panel.parentWidget() is aside
+    assert page.filter_panel.parentWidget() is page.left_panel
     assert page.detail_panel.parentWidget() is aside
+    assert page.left_panel.isAncestorOf(page.search_row)
+    assert page.left_panel.isAncestorOf(page.games)
     assert page.body_splitter.widget(0).width() >= 420
     assert page.body_splitter.widget(1).width() >= 320
     assert not isinstance(page, QScrollArea)
@@ -188,12 +205,17 @@ def test_library_uses_bounded_three_zone_layout_at_laptop_size(qtbot):
     assert page.search.height() >= 28
     assert page.account_filter.height() >= 28
     assert page.detail_open.height() > 0
+    assert not page.detail_open.isEnabled()
+    assert not page.export_game.isEnabled()
+    assert not page.analyze_game.isEnabled()
     assert inspector.isAncestorOf(page.export_game)
     assert inspector.isAncestorOf(page.analyze_game)
     game = {"game_id": "layout-test", "white_player": "White", "black_player": "Black",
             "color": "white", "winner": "white", "status": "resign", "clock": "180+2"}
     page.set_results([(game, "Победа", "Local")], page=0, pages=1, total=1)
-    page.show_game_detail(game)
+    assert not page.detail_open.isEnabled()  # row is selected, detail lookup is pending
+    assert page.export_game.isEnabled() and page.analyze_game.isEnabled()
+    page.show_game_detail(game, {})
     assert page.detail_players.text() == "White   1 – 0   Black"
     actions = []
     page.open_requested.connect(lambda row: actions.append(("open", row["game_id"])))
@@ -234,12 +256,15 @@ def test_background_operations_page_renders_shared_registry_and_pause_state(qtbo
                       backfill_paused=True, can_check=True,
                       can_pause=True,
                       retry_status="Retry-After учитывается")
-    assert page.operation_list.count() == 1
+    assert page.operation_list.count() == 2  # operation plus disclosed retry diagnostics
     assert "archive_sync" in page.operation_list.item(0).text()
     assert "3/8" in page.operation_list.item(0).text()
+    assert "Retry-After" in page.operation_list.item(1).text()
     assert page.pause_button.text() == "Возобновить Lichess"
     assert not page.manual_check_button.isEnabled()
     assert "Retry-After" in page.retry_status.text()
+    assert page.retry_status.isHidden()
+    assert page.recent_events.minimumHeight() >= 84
 
 
 def test_position_setup_uses_shared_board_and_emits_ephemeral_fen(qtbot):

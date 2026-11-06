@@ -433,6 +433,36 @@ def test_m46_shell_uses_expanded_sidebar_at_wide_home_and_compact_board(qtbot, t
     assert window.sidebar.width() == 60
 
 
+def test_visual_sidebar_recovers_after_wide_resize_and_routes_but_respects_explicit_choice(
+        qtbot, tmp_path):
+    window = MainWindow(QSettings(str(tmp_path / "visual-sidebar-responsive.ini"),
+                                  QSettings.Format.IniFormat), offline_mode=True)
+    qtbot.addWidget(window)
+    window.resize(1028, 720)
+    window.show()
+    qtbot.waitUntil(lambda: window.sidebar.width() == 60)
+
+    # A native window first opened at the compact size must expand when the
+    # owner drags it to the approved wide desktop size, without another click.
+    window.resize(1672, 941)
+    qtbot.waitUntil(lambda: window.sidebar.width() == 272)
+    qtbot.mouseClick(window._nav_buttons["games"], Qt.MouseButton.LeftButton)
+    assert window.sidebar.width() == 272
+    window.show_background_analytics()
+    assert window.sidebar.width() == 272
+    window.show_home()
+    assert window.sidebar.width() == 272
+
+    # An explicit collapse is a user preference, not a responsive default.
+    window._set_sidebar_collapsed(True, explicit=True)
+    window.resize(1280, 860)
+    qtbot.wait(20)
+    window.resize(1672, 941)
+    qtbot.wait(20)
+    assert window.sidebar.width() == 60
+    window.close()
+
+
 @pytest.mark.parametrize("size", [400, 480, 560, 720, -1])
 def test_m46_board_size_presets_are_available_and_persisted(qtbot, tmp_path, size):
     settings = QSettings(str(tmp_path / f"board-size-{size}.ini"), QSettings.Format.IniFormat)
@@ -1248,6 +1278,21 @@ def test_batch_analysis_controls_are_explicit_and_resume_after_pause(qtbot, tmp_
     assert not dialog.start_button.isHidden() and dialog.resume_button.isHidden()
     dialog.set_readiness("", False, False)
     assert not dialog.start_button.isEnabled() and not dialog.resume_button.isEnabled()
+
+
+def test_batch_all_missing_forwards_explicit_retry_checkbox(qtbot, tmp_path):
+    dialog = BatchAnalysisDialog()
+    qtbot.addWidget(dialog)
+    started = []
+    dialog.run_requested.connect(lambda *args: started.append(args))
+    engine = tmp_path / "synthetic-engine.exe"
+    engine.write_bytes(b"synthetic")
+    dialog.set_readiness(str(engine), True, True)
+    dialog.retry_failed.setChecked(True)
+
+    qtbot.mouseClick(dialog.start_all_button, Qt.MouseButton.LeftButton)
+
+    assert started == [(0, 20_000, 64, False, True, False)]
 
 
 def test_batch_queue_cancel_requires_confirmation_and_preserves_results(qtbot, monkeypatch):
@@ -3517,7 +3562,10 @@ def test_home_has_rating_kpi_and_three_recent_game_cards(qtbot, tmp_path):
     assert window._nav_buttons["training"].isVisible()
     kpi_widths = [window._home_view.dashboard_metrics[key].width() for key in ("games", "accuracy")]
     kpi_widths.append(window.home_progress_card.width())
-    assert max(kpi_widths) - min(kpi_widths) <= 4
+    # The approved reference intentionally gives the rating-history card more
+    # width for its sparkline; the two summary cards need not be equal-sized.
+    assert min(kpi_widths) >= 260
+    assert max(kpi_widths) <= 440
     assert window.home_activity_button.parentWidget() is window.home_play_card
     assert not isinstance(window.home_page, QScrollArea)
     assert not hasattr(window._home_view, "home_pilot_import_button")

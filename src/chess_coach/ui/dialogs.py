@@ -191,7 +191,7 @@ class BatchAnalysisDialog(QDialog):
         self.start_all_button = QPushButton("Все недостающие (фоновая очередь)")
         self.start_all_button.setObjectName("primaryAction")
         self.start_all_button.clicked.connect(lambda: self.run_requested.emit(
-            0, self.nodes.value(), self.hash_mb.value(), False, False,
+            0, self.nodes.value(), self.hash_mb.value(), False, self.retry_failed.isChecked(),
             self.selective_review.isChecked()))
         self.resume_button = QPushButton("Продолжить очередь")
         # A persistent queue may have been paused by a previous application run,

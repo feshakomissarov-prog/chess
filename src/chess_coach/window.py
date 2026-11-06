@@ -1590,20 +1590,26 @@ class MainWindow(QMainWindow):
         content = QWidget()
         shell.addWidget(content, 1)
         outer = QVBoxLayout(content)
+        self._outer_content_layout = outer
         outer.setContentsMargins(24, 0, 24, 20)
         outer.setSpacing(12)
         header = QHBoxLayout()
         header.setContentsMargins(0, 0, 0, 0)
         header_widget = QWidget()
         self.header_widget = header_widget
-        header_widget.setFixedHeight(64)
+        header_widget.setObjectName("appHeader")
+        # Keep the utility row compact so the approved workspace screens start
+        # near the top of the content area instead of losing a full toolbar row.
+        header_widget.setFixedHeight(32)
         header_widget.setLayout(header)
         self.back_button = QPushButton("← Назад")
+        self.back_button.setFixedHeight(30)
         self.back_button.setAccessibleName("Назад по разделам")
         self.back_button.clicked.connect(self.navigate_back)
         self.back_button.setVisible(False)
         header.addWidget(self.back_button)
         self.return_to_game_button = QPushButton("Вернуться к партии")
+        self.return_to_game_button.setFixedHeight(30)
         self.return_to_game_button.setAccessibleName("Вернуться к активной партии")
         self.return_to_game_button.clicked.connect(self.resume_current_game)
         self.return_to_game_button.setVisible(False)
@@ -1630,6 +1636,7 @@ class MainWindow(QMainWindow):
         self.background_operations_button = QPushButton("Фоновые операции")
         self.background_operations_button.clicked.connect(self.show_background_analytics)
         self.background_operations_button.setText("Фон")
+        self.background_operations_button.setFixedHeight(30)
         self.background_operations_button.setToolTip("Статус и управление фоновыми операциями")
         header.addWidget(self.background_operations_button)
         self.connect_button = QPushButton("Подключить Lichess")
@@ -1985,9 +1992,23 @@ class MainWindow(QMainWindow):
 
     def resizeEvent(self, event) -> None:
         super().resizeEvent(event)
-        if (hasattr(self, "sidebar") and not self._sidebar_explicit_override
-                and self.width() < 1160):
-            self._set_sidebar_collapsed(True)
+        if (hasattr(self, "sidebar") and hasattr(self, "screen_stack")
+                and not self._sidebar_explicit_override):
+            current = self.screen_stack.currentWidget()
+            board_route = current in (
+                self.game_page, self.result_page, getattr(self, "review_workspace", None))
+            should_collapse = self.width() < 1160 or board_route
+            if (self.sidebar.width() <= 60) != should_collapse:
+                self._set_sidebar_collapsed(should_collapse)
+            elif not should_collapse:
+                # A window enlarged from compact startup must regain the full
+                # approved navigation width without requiring a route click.
+                visual_route = current in (
+                    self.home_page, getattr(self, "library_page", None),
+                    getattr(self, "_background_operations_page", None))
+                target_width = 272 if visual_route and self.width() >= 1500 else 212
+                if self.sidebar.width() != target_width:
+                    self._set_sidebar_collapsed(False)
         self._update_sidebar_profile_label()
         self._apply_board_size()
         if hasattr(self, "game_splitter"):
@@ -2130,7 +2151,7 @@ class MainWindow(QMainWindow):
         visual_route = current in (getattr(self, "home_page", None),
                                    getattr(self, "library_page", None),
                                    getattr(self, "_background_operations_page", None))
-        expanded_width = 264 if visual_route and self.width() >= 1500 else 212
+        expanded_width = 272 if visual_route and self.width() >= 1500 else 212
         self.sidebar.setFixedWidth(60 if collapsed else expanded_width)
         self.sidebar_brand.setVisible(not collapsed)
         self.sidebar_profile_label.setVisible(not collapsed)
@@ -2219,6 +2240,15 @@ class MainWindow(QMainWindow):
         is_board = self.screen_stack.currentWidget() in (
             self.game_page, self.result_page, getattr(self, "review_workspace", None))
         current = self.screen_stack.currentWidget()
+        visual_route = current in (
+            getattr(self, "home_page", None), getattr(self, "library_page", None),
+            getattr(self, "_background_operations_page", None))
+        if hasattr(self, "_outer_content_layout"):
+            margins = self._outer_content_layout.contentsMargins()
+            target_bottom = 8 if visual_route else 20
+            if margins.bottom() != target_bottom:
+                self._outer_content_layout.setContentsMargins(
+                    margins.left(), margins.top(), margins.right(), target_bottom)
         self.screen_title.setVisible(current is not self.review_workspace)
         visual_screen = current in (self.home_page, getattr(self, "library_page", None),
                                     getattr(self, "_background_operations_page", None))
@@ -2921,13 +2951,13 @@ class MainWindow(QMainWindow):
             card.setAccessibleDescription("Нажмите Enter или пробел, чтобы открыть разбор.")
             card.setToolTip("Открыть разбор партии")
             row_layout = QHBoxLayout(card)
-            row_layout.setContentsMargins(18, 9, 18, 9)
+            row_layout.setContentsMargins(18, 6, 18, 6)
             row_layout.setSpacing(18)
             card_layout = QVBoxLayout()
             row_layout.addLayout(card_layout, 4)
             card_layout.setSpacing(4)
-            card.setMinimumHeight(126)
-            card.setMaximumHeight(145)
+            card.setMinimumHeight(140)
+            card.setMaximumHeight(150)
             outcome, _, opponent = heading.partition(" с ")
             heading_label = QLabel(f"♟  {outcome}")
             outcome_color = (VISUAL_TOKENS.success if heading.startswith("Победа")
@@ -3395,7 +3425,7 @@ class MainWindow(QMainWindow):
 
     def show_home(self) -> None:
         if self.sidebar.width() > 60:
-            self.sidebar.setFixedWidth(264 if self.width() >= 1500 else 212)
+            self.sidebar.setFixedWidth(272 if self.width() >= 1500 else 212)
         self._screen_mode = "home"
         self.screen_title.setText("Главная")
         self.screen_stack.setCurrentWidget(self.home_page)
@@ -3407,15 +3437,18 @@ class MainWindow(QMainWindow):
         if active and active.status in {"started", "playing"}:
             self.resume_game_button.setVisible(True)
             self.home_status.setText(f"Идёт партия против {active.opponent}. Её можно продолжить позже.")
+            self.home_status.show()
         elif self.manual_connect_mode and not self.lichess:
             self.resume_game_button.setVisible(False)
             self.home_status.setText(
                 "Ручной режим: до нажатия «Подключиться вручную» приложение не обращается к "
                 "Lichess и не восстанавливает OAuth-сессию. Локальные партии доступны."
             )
+            self.home_status.show()
         else:
             self.resume_game_button.setVisible(False)
-            self.home_status.setText("Откройте завершённую партию или начните новую игру.")
+            self.home_status.clear()
+            self.home_status.hide()
         self._update_home_game_actions()
         self.home_archive_button.setEnabled(self._online_actions_allowed())
         self.home_batch_analysis_button.setEnabled(True)
@@ -3894,6 +3927,7 @@ class MainWindow(QMainWindow):
                                     safety_check=safety_check, progress=progress,
                                     include_selective_review=selective_review,
                                     account_id=account_id,
+                                    retry_failed=retry_failed,
                                     max_fast_jobs=None if all_missing else limit,
                                     fill_backlog=all_missing)
                 counts = self.game_repository.analysis_job_counts(

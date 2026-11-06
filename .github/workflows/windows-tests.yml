@@ -54,6 +54,13 @@ jobs:
           foreach ($scale in @("1", "1.25", "1.5")) {
             $env:QT_SCALE_FACTOR = $scale
             $env:CC_VISUAL_OUTPUT = "visual-evidence/scale-$scale"
+            if ($scale -eq "1") {
+              Remove-Item Env:CC_VISUAL_TARGET_SIZES -ErrorAction SilentlyContinue
+            } elseif ($scale -eq "1.25") {
+              $env:CC_VISUAL_TARGET_SIZES = "1280x720"
+            } else {
+              $env:CC_VISUAL_TARGET_SIZES = "1120x640"
+            }
             python -X faulthandler scripts/capture_visual_master.py
             if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           }

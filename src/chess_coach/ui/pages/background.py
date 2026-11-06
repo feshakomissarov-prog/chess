@@ -18,9 +18,12 @@ class BackgroundOperationsPage(QWidget):
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
         root = QVBoxLayout(self)
+        self._root_layout = root
         root.setSpacing(12)
         banner = QFrame()
+        self._banner = banner
         banner.setObjectName("metricCard")
+        banner.setMinimumHeight(76)
         controls = QHBoxLayout(banner)
         self.summary = QLabel("Загружаю состояние фоновых операций…")
         self.summary.setWordWrap(True)
@@ -30,6 +33,7 @@ class BackgroundOperationsPage(QWidget):
         self.workflow_status = {}
         self.workflow_badges = {}
         self.workflow_progress = {}
+        self._workflow_cards = []
         for key, glyph, caption in (
                 ("archive", "⟳", "Синхронизация партий Lichess"),
                 ("ready", "▱", "Готовая аналитика Lichess"),
@@ -37,7 +41,7 @@ class BackgroundOperationsPage(QWidget):
                 ("stockfish", "♞", "Фоновый Stockfish")):
             card = QFrame()
             card.setObjectName("metricCard")
-            card.setMinimumHeight(84)
+            card.setMinimumHeight(100)
             row = QHBoxLayout(card)
             row.setContentsMargins(18, 11, 18, 11)
             icon = QLabel(glyph)
@@ -47,6 +51,7 @@ class BackgroundOperationsPage(QWidget):
                                "border-radius: 10px; font-size: 26px;")
             row.addWidget(icon)
             title = QLabel(caption)
+            self._workflow_cards.append((card, icon, title))
             title.setStyleSheet("font-size: 18px; font-weight: 700;")
             title.setWordWrap(True)
             detail = QLabel("Загружаю состояние…")
@@ -85,7 +90,12 @@ class BackgroundOperationsPage(QWidget):
         root.addWidget(self.recent_events_title)
         self.recent_events = QListWidget()
         self.recent_events.setAccessibleName("Последние сохранённые события")
-        self.recent_events.setMaximumHeight(135)
+        self.recent_events.setMinimumHeight(162)
+        self.recent_events.setMaximumHeight(170)
+        # The shared visual theme gives list rows generous 5px padding. Recent
+        # events need a denser, still readable 1px vertical rhythm so four
+        # saved rows fit in the approved desktop card without scrolling.
+        self.recent_events.setStyleSheet("QListWidget::item { padding: 1px 8px; }")
         root.addWidget(self.recent_events)
         root.addWidget(self.details_toggle, 0, Qt.AlignmentFlag.AlignLeft)
         self.source_summary = QLabel("")
@@ -96,10 +106,12 @@ class BackgroundOperationsPage(QWidget):
         self.local_metrics_status.setWordWrap(True)
         self.local_metrics_status.setObjectName("secondary")
         self.local_metrics_status.setAccessibleName("Фоновое обновление метрик сохранённой аналитики")
+        self.local_metrics_status.hide()
         root.addWidget(self.local_metrics_status)
         self.retry_status = QLabel("")
         self.retry_status.setWordWrap(True)
         self.retry_status.setObjectName("secondary")
+        self.retry_status.hide()
         root.addWidget(self.retry_status)
         self.pause_button = QPushButton("Приостановить Lichess")
         self.pause_button.clicked.connect(
@@ -120,6 +132,27 @@ class BackgroundOperationsPage(QWidget):
         root.addWidget(self.close_button)
         self._paused = False
 
+    def resizeEvent(self, event) -> None:
+        super().resizeEvent(event)
+        compact = self.height() < 740
+        self._root_layout.setSpacing(6 if compact else 8)
+        self._banner.setMinimumHeight(58 if compact else 76)
+        self.summary.setStyleSheet(
+            f"font-size: {16 if compact else 19}px; font-weight: 700;")
+        for card, icon, title in self._workflow_cards:
+            card.setMinimumHeight(76 if compact else 92)
+            icon.setFixedSize(36 if compact else 43, 36 if compact else 43)
+            icon.setStyleSheet(
+                "background: #39365E; color: #C8BBFF; border-radius: 10px; "
+                f"font-size: {22 if compact else 26}px;")
+            title.setStyleSheet(
+                f"font-size: {16 if compact else 18}px; font-weight: 700;")
+        # Keep all four approved desktop event rows inside the list viewport.
+        self.recent_events.setMinimumHeight(84 if compact else 162)
+        self.recent_events.setMaximumHeight(104 if compact else 170)
+        self.recent_events_title.setStyleSheet(
+            f"font-size: {19 if compact else 23}px; font-weight: 700;")
+
     def set_snapshot(self, operations, *, source_summary: str,
                      backfill_paused: bool, can_check: bool, can_pause: bool,
                      retry_status: str = "", durable_statuses=(),
@@ -139,6 +172,12 @@ class BackgroundOperationsPage(QWidget):
                 f"{operation.status.value}{progress_text}")
         for status in durable_statuses:
             self.operation_list.addItem(str(status))
+        if local_metrics_status is not None:
+            self.local_metrics_status.setText(local_metrics_status)
+            if local_metrics_status.strip():
+                self.operation_list.addItem(f"Метрики: {local_metrics_status}")
+        if retry_status.strip():
+            self.operation_list.addItem(f"Ограничение/повтор: {retry_status}")
         if self.operation_list.count() == 0:
             self.operation_list.addItem("Активных фоновых операций нет.")
         active = [operation for operation in operations
@@ -166,8 +205,6 @@ class BackgroundOperationsPage(QWidget):
                 bar.setRange(0, total)
                 bar.setValue(max(0, min(done, total)))
         self.source_summary.setText(source_summary)
-        if local_metrics_status is not None:
-            self.local_metrics_status.setText(local_metrics_status)
         self.retry_status.setText(retry_status)
         self._paused = bool(backfill_paused)
         self.pause_button.setText("Возобновить Lichess" if self._paused

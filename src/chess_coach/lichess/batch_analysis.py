@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 import json
 import threading
@@ -81,14 +82,16 @@ class BatchAnalysisRunner:
         self.worker_id = uuid.uuid4().hex
 
     def enqueue_missing(self, *, account_id: str | None = None,
-                        limit: int = 1000, retry_failed: bool = False) -> dict[str, int]:
+                        limit: int = 1000, retry_failed: bool = False,
+                        retry_failed_before: str | None = None) -> dict[str, int]:
         candidates = self.repository.list_games_needing_fast_analysis(
             account_id=account_id, limit=max(1, min(10_000, int(limit))),
             engine_version=self.engine_key, parameters=self.parameters,
-            retry_failed=retry_failed)
+            retry_failed=retry_failed, retry_failed_before=retry_failed_before)
         return self.repository.enqueue_analysis_jobs(
             candidates, analysis_pass="fast", engine_version=self.engine_key,
-            parameters=self.parameters, retry_failed=retry_failed)
+            parameters=self.parameters, retry_failed=retry_failed,
+            retry_failed_before=retry_failed_before)
 
     def run(self, *, stop_event: threading.Event, safety_check: Callable[[dict], bool | None],
             pause_event: threading.Event | None = None,
@@ -97,6 +100,7 @@ class BatchAnalysisRunner:
             account_id: str | None = None,
             max_fast_jobs: int | None = None,
             fill_backlog: bool = False,
+            retry_failed: bool = False,
             review_budget_per_game: int = 12,
             review_budget_total: int = 100) -> dict[str, int | bool | str | None]:
         if safety_check is None:
@@ -116,6 +120,12 @@ class BatchAnalysisRunner:
         safety_lost = threading.Event()
         safety_failure: list[str] = []
         analysis_pass = "fast"
+        # Retry only failures that predate this explicit user run. Jobs failing
+        # during this run get a newer updated_at and cannot cycle back through
+        # the refill query.
+        retry_failed_before = (datetime.now(timezone.utc).isoformat()
+                               if retry_failed and fill_backlog else None)
+        retry_failures_enabled = bool(retry_failed)
         review_scheduled = False
         review_queued = 0
         run_id = uuid.uuid4().hex
@@ -181,7 +191,10 @@ class BatchAnalysisRunner:
                         analysis_pass="fast", parameters=self.parameters,
                         lease_seconds=self.lease_seconds, account_id=account_id)
                     if job is None and fill_backlog:
-                        added = self.enqueue_missing(account_id=account_id, limit=64)
+                        added = self.enqueue_missing(
+                            account_id=account_id, limit=64,
+                            retry_failed=retry_failures_enabled,
+                            retry_failed_before=retry_failed_before)
                         if added["queued"]:
                             continue
                     if job is None and include_selective_review and not review_scheduled:

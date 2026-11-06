@@ -100,11 +100,15 @@ class LibraryPage(QWidget):
         layout.addWidget(self.active_games)
         self.summary = QLabel("Завершённые партии · загрузка выборки…")
         self.summary.setObjectName("secondary")
-        self.sort_description = QLabel("Сортировка: последняя дата хода, затем дата начала")
+        self.sort_description = QLabel(
+            "Сортировка: последняя дата хода, затем дата начала", self)
         self.sort_description.setObjectName("muted")
-        self.sort_description.setToolTip(
+        sort_help = (
             "Порядок использует lastMoveAt, затем подтверждённое время/дату начала; "
             "обновление аналитики его не меняет.")
+        self.sort_description.setToolTip(sort_help)
+        # This is diagnostic ordering help, not a separate floating window or
+        # another row in the approved compact library layout.
         self.summary.hide()
         self.sort_description.hide()
         self.sync_button = QPushButton("Синхронизировать")
@@ -120,12 +124,16 @@ class LibraryPage(QWidget):
         self.search = QLineEdit()
         self.search.setPlaceholderText("Поиск по сопернику, дебюту или дате")
         self.search.setAccessibleName("Поиск по партиям")
+        self.search.setToolTip(sort_help)
         self.filters_toggle = QPushButton("Фильтры")
         self.filters_toggle.setCheckable(True)
-        search_row = QHBoxLayout()
+        search_widget = QWidget(self)
+        search_widget.setObjectName("librarySearchRow")
+        search_row = QHBoxLayout(search_widget)
+        search_row.setContentsMargins(0, 0, 0, 0)
         search_row.addWidget(self.search, 1)
         search_row.addWidget(self.filters_toggle)
-        layout.addLayout(search_row)
+        self.search_row = search_widget
         self.account_filter = QComboBox()
         self.account_filter.addItem("Все аккаунты", None)
         for account in accounts or []:
@@ -180,6 +188,8 @@ class LibraryPage(QWidget):
                         self.source_filter, self.clock_filter, self.analysis_filter,
                         self.analysis_source_filter, self.period_filter):
             control.setMinimumHeight(28)
+        self.search.setMinimumHeight(44)
+        self.filters_toggle.setMinimumHeight(44)
         filter_grid = QGridLayout()
         filter_grid.setContentsMargins(0, 0, 0, 0)
         filter_grid.setHorizontalSpacing(6)
@@ -207,8 +217,14 @@ class LibraryPage(QWidget):
                 background: #343153; color: #f5f6fd; border: 2px solid #aa9bef;
             }
         """)
-        body.addWidget(self.games)
+        left_panel = QWidget()
+        self.left_panel = left_panel
+        left_layout = QVBoxLayout(left_panel)
+        left_layout.setContentsMargins(0, 0, 0, 0)
+        left_layout.setSpacing(18)
+        left_layout.addWidget(self.search_row)
         aside = QWidget()
+        self.detail_aside = aside
         aside_layout = QVBoxLayout(aside)
         aside_layout.setContentsMargins(0, 0, 0, 0)
         aside_layout.setSpacing(8)
@@ -216,7 +232,7 @@ class LibraryPage(QWidget):
         # Keep the filter grid and selected-game actions at readable heights;
         # compact windows scroll this inspector instead of compressing controls.
         aside.setMinimumHeight(520)
-        aside_layout.addWidget(filter_panel)
+        left_layout.addWidget(filter_panel)
         filter_panel.hide()
         self.filters_toggle.toggled.connect(filter_panel.setVisible)
         self.detail_panel = QFrame()
@@ -298,10 +314,12 @@ class LibraryPage(QWidget):
         inspector_layout.setSpacing(6)
         inspector_layout.addWidget(self.aside_scroll, 1)
         inspector_layout.addLayout(detail_actions)
+        left_layout.addWidget(self.games, 1)
+        body.addWidget(left_panel)
         body.addWidget(inspector)
         body.setStretchFactor(0, 1)
         body.setStretchFactor(1, 1)
-        body.setSizes([600, 600])
+        body.setSizes([650, 650])
         layout.addWidget(body, 1)
         page_row = QHBoxLayout()
         self.previous = QPushButton("← Назад")
@@ -334,6 +352,9 @@ class LibraryPage(QWidget):
         self.open_game = QPushButton("Открыть для просмотра")
         self.export_game = QPushButton("Экспорт PGN")
         self.analyze_game = QPushButton("Анализ Stockfish")
+        # Selection-dependent actions must never look clickable in the empty state.
+        for button in (self.detail_open, self.export_game, self.analyze_game):
+            button.setEnabled(False)
         self.refresh_game = QPushButton("Обновить эту партию из Lichess")
         # Per-game refresh is a recovery action, not a normal catalog command.
         # It is revealed only by an explicit diagnosed-recovery presentation.
@@ -369,9 +390,6 @@ class LibraryPage(QWidget):
 
     def resizeEvent(self, event) -> None:
         super().resizeEvent(event)
-        # Keep ordering help available as a tooltip while giving the game count
-        # enough room on compact windows. The action buttons have their own row.
-        self.sort_description.setVisible(self.width() >= 760)
 
     def show_game_detail(self, game: dict | None, review: dict | None = None, *,
                          safety_allowed: bool = False) -> None:
@@ -400,7 +418,8 @@ class LibraryPage(QWidget):
             self.detail_metrics.clear()
             self.detail_graph.setVisible(False)
             self.detail_graph.set_safety_gate(False, "Выберите партию")
-            self.detail_open.setEnabled(False)
+            for button in (self.detail_open, self.export_game, self.analyze_game):
+                button.setEnabled(False)
             return
         title = str(game.get("account_opponent") or game.get("opponent") or "Соперник")
         heading, _ = game_card_text(game)
@@ -418,7 +437,12 @@ class LibraryPage(QWidget):
         clock = format_clock_control(game.get("clock"))
         opening = russian_opening_name(game.get("opening_eco"), game.get("opening_name"))
         self.detail_metadata.setText(f"{date} · {clock}\n{opening}")
-        self.detail_open.setEnabled(True)
+        # The selected row is a loaded local record. Export and analysis do not
+        # require an analysis payload; review navigation waits for the detail
+        # lookup to finish, so an empty/loading pane cannot claim success.
+        self.export_game.setEnabled(True)
+        self.analyze_game.setEnabled(True)
+        self.detail_open.setEnabled(review is not None)
         if not safety_allowed:
             self.detail_status.setText("Оценки и график скрыты до подтверждения безопасности Lichess.")
             self.detail_metrics.clear()

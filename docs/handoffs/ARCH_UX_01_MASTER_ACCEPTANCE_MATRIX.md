@@ -180,3 +180,17 @@ Windows, обычный Qt backend `windows`, 1360×860, временная SQLi
 | Фоновые операции | Native Windows, четыре карточки и пустое состояние; pytest на очереди двух аккаунтов | Отрисовано. Реальная загрузка и полная история всех операций не проверены. |
 | Часы и игровые состояния | Qt с синтетическими снимками 3+2 до и после первых ходов, история и потеря синхронизации | Автотесты PASS. Реальные таймеры Lichess и физический DPI 125/150% не проверены. |
 | Разбор | Тесты локальной точности по полной линии, границ фаз, цвета и Fail Closed | Целевые проверки. Живой Stockfish и личные данные не использовались. |
+## VIS4 addendum — дополнительные проверки и состояния
+
+| Пункт / действие | Регрессия и ожидаемое действие | Native visual evidence | Статус / ограничение |
+|---|---|---|---|
+| VIS4-01 Главная | Возврат Home→Library→Background→Home и resize 1028→1672; sidebar разворачивается автоматически, если владелец явно не сворачивал его; 3 последние карточки содержат реальные synthetic source-aware метрики и графики | `pair-home-*.png`, кадры Home для трёх target sizes | PASS по синтетике; композицию с утверждённым артом ожидает независимое визуальное ревью |
+| VIS4-01 Мои партии | Штатная загрузка временной SQLite; минимум 3 строки, выбранные `game_id` и `line_revision`, загруженный review, два источника, метрики и график до кадра | `pair-games-*.png`, `capture.txt` содержит фактические ID/размеры | PASS по строгим capture assertions; живые данные не использованы |
+| VIS4-01 Фоновые операции | Отдельные active и offline состояния; archive/Stockfish running, analytics waiting, puzzle completed и 4 durable events | `pair-background-active-*.png`, `pair-background-offline-*.png` | PASS synthetic; реальные сетевые операции не выполнялись |
+| VIS4-02 capture validity | Любая незагруженная/пустая выбранная партия или отсутствие graph/metrics вызывает ошибку capture; используется обычный `MainWindow` и production workers | Workflow публикует исходные кадры и пары | PASS локально; hosted artifact ждёт финального CI |
+| VIS4-03 фактические размеры | Assertion по `QWidget.size()`, `QImage.size()` и DPR; target не маркируется по одному имени файла | `capture.txt` для scale 1/1.25/1.5 | PASS на перечисленных логических размерах; физические DPI 125/150% не проверялись |
+| VIS4-04 Все недостающие + retry | Старые failed/cancelled/stale повторяются только при явном checkbox, по одному разу на запуск, без цикла; аккаунты изолированы | Неприменимо | PASS: `test_all_missing_retry_requeues_old_failures_once_per_account_and_run`, dialog forwarding regression |
+| VIS4-05 Library controls / sort tooltip | Нет доступных действий без выбранной загруженной записи; повторный вход/resize не открывает плавающее окно сортировки | Library кадры и проверка widget parent/visibility | PASS: `test_library_sort_help_never_opens_a_floating_window_on_reentry`; физическая мышь не использовалась |
+| VIS4-06 сохранность VIS3 | Auto-resume, актуальность ply, progress coalescing и backlog продолжают проходить существующие регрессии | Background active state | PASS по локальному полному pytest; реальные Lichess/Stockfish не запускались |
+
+Файлы финальных кадров локально не добавляются в репозиторий; доступная независимому ревью выдача — артефакт Windows Actions после публикации exact-head commit. См. [execution log](ARCH_UX_01_EXECUTION_LOG.md) для полного статуса, команд и непроверенных физических сценариев.

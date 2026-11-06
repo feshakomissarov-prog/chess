@@ -53,7 +53,7 @@ def stylesheet(t: Theme = TOKENS) -> str:
     QFrame#appSidebar QLabel#sidebarProfile {{ font-size: 17px; font-weight: 600; }}
     """ if t is VISUAL_TOKENS else ""
     return f"""
-    QWidget {{ background: {t.app}; color: {t.text}; font-size: 14px; }}
+    QWidget {{ background: {t.app}; color: {t.text}; font-size: {16 if t is VISUAL_TOKENS else 14}px; }}
     QMainWindow, QDialog {{ background: {t.app}; }}
     QLabel {{ background: transparent; }}
     QStatusBar#inlineNoticeBar {{ background: {t.sidebar}; color: {t.secondary}; border-top: 1px solid {t.border}; }}
@@ -71,6 +71,7 @@ def stylesheet(t: Theme = TOKENS) -> str:
         border-radius: 8px; padding: 9px 14px; min-height: 22px;
     }}
     QPushButton:hover, QToolButton:hover {{ background: {t.hover}; }}
+    QWidget#appHeader QPushButton {{ padding-top: 2px; padding-bottom: 2px; }}
     QPushButton:pressed, QToolButton:pressed {{ background: {t.accent_pressed}; color: {t.on_accent}; }}
     QPushButton:focus, QToolButton:focus {{ border: 2px solid {t.accent}; }}
     QPushButton:disabled, QToolButton:disabled {{ color: {t.muted}; background: {t.surface}; }}

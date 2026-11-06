@@ -79,7 +79,11 @@ class HomePage(QWidget):
         self.home_status.setObjectName("secondary")
         self.home_status.setWordWrap(False)
         self.home_status.setMaximumHeight(24)
+        self.home_status.hide()
         layout.addWidget(self.home_status)
+        # The status row is hidden on Home; retain only a small rhythm gap so
+        # all three approved recent-game cards fit at the reference height.
+        layout.addSpacing(2)
 
         # Account scope is shared with the authenticated profile. Keep the old
         # controls as hidden compatibility adapters; Home is not a filter page.
@@ -141,14 +145,17 @@ class HomePage(QWidget):
         # Error-rate detail belongs in Progress; retain the existing read-model
         # field for compatibility without giving it KPI prominence on Home.
         self.dashboard_metrics["errors"].hide()
+        for key in ("games", "accuracy"):
+            self.dashboard_metrics[key].setMinimumHeight(240)
         layout.addLayout(metrics_grid)
+        layout.addSpacing(10)
 
         top_row = QHBoxLayout()
         self.home_primary_actions = top_row
         top_row.setSpacing(9)
         self.home_progress_card = QFrame(self)
         self.home_progress_card.setObjectName("metricCard")
-        self.home_progress_card.setMinimumHeight(140)
+        self.home_progress_card.setMinimumHeight(240)
         progress_layout = QVBoxLayout(self.home_progress_card)
         progress_layout.setContentsMargins(11, 8, 11, 8)
         progress_layout.setSpacing(4)
@@ -202,9 +209,10 @@ class HomePage(QWidget):
         recent_card.setObjectName("recentGames")
         recent_layout = QVBoxLayout(recent_card)
         recent_layout.setContentsMargins(11, 8, 11, 8)
+        recent_layout.setSpacing(20)
         recent_title_row = QHBoxLayout()
         recent_title = QLabel("Последние партии")
-        recent_title.setStyleSheet("font-size: 28px; font-weight: 700;")
+        recent_title.setStyleSheet("font-size: 30px; font-weight: 700;")
         recent_title_row.addWidget(recent_title)
         recent_title_row.addStretch(1)
         self.home_games_button = QPushButton("Все партии")
@@ -319,7 +327,12 @@ class HomePage(QWidget):
         self._dashboard_metric_columns = columns
         while grid.count():
             grid.takeAt(0)
+        # Match the approved hierarchy: the rating trend receives more space,
+        # while the two numeric summaries remain compact and balanced.
+        visual_stretch = (81, 75, 102)
         for column in range(3):
-            grid.setColumnStretch(column, int(column < columns))
+            grid.setColumnStretch(
+                column,
+                visual_stretch[column] if columns == 3 else int(column < columns))
         for index, card in enumerate(cards):
             grid.addWidget(card, index // columns, index % columns)
