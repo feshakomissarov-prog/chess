@@ -3515,6 +3515,9 @@ def test_home_has_rating_kpi_and_three_recent_game_cards(qtbot, tmp_path):
     qtbot.wait(20)
     assert not window.home_activity_button.isVisible()
     assert window._nav_buttons["training"].isVisible()
+    kpi_widths = [window._home_view.dashboard_metrics[key].width() for key in ("games", "accuracy")]
+    kpi_widths.append(window.home_progress_card.width())
+    assert max(kpi_widths) - min(kpi_widths) <= 4
     assert window.home_activity_button.parentWidget() is window.home_play_card
     assert not isinstance(window.home_page, QScrollArea)
     assert not hasattr(window._home_view, "home_pilot_import_button")

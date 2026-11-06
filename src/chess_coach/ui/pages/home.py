@@ -319,5 +319,7 @@ class HomePage(QWidget):
         self._dashboard_metric_columns = columns
         while grid.count():
             grid.takeAt(0)
+        for column in range(3):
+            grid.setColumnStretch(column, int(column < columns))
         for index, card in enumerate(cards):
             grid.addWidget(card, index // columns, index % columns)

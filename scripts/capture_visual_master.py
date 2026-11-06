@@ -78,6 +78,10 @@ for width, height in ((1672, 941), (1360, 860), (1280, 720)):
         if name == "01-home":
             assert w._home_view.puzzle_rating.text().isdigit(), w._home_view.puzzle_rating.text()
             assert w._dashboard_metric_values["accuracy"].text().endswith("%")
+            if width == 1672:
+                cards = [w._home_view.dashboard_metrics[key] for key in ("games", "accuracy")]
+                widths = [card.width() for card in (*cards, w.home_progress_card)]
+                assert max(widths) - min(widths) <= 4, widths
         if name == "02-games":
             lib = w.library_page
             assert lib.detail_open.isVisible() and lib.export_game.isVisible()
