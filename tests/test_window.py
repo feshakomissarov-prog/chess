@@ -1559,10 +1559,32 @@ def test_batch_queue_pauses_on_new_human_game_and_builtin_ai(qtbot):
     assert ai_window._batch_pause.is_set()
 
 
-def test_batch_opt_in_is_account_scoped_and_manual_pause_survives(qtbot, monkeypatch):
+def test_background_live_progress_updates_only_current_account(qtbot, monkeypatch):
     from types import SimpleNamespace
 
     window = MainWindow(offline_mode=True)
+    qtbot.addWidget(window)
+    monkeypatch.setattr(window, "_refresh_background_operations_page", lambda: None)
+    window.show_background_analytics()
+    service = SimpleNamespace(username="AccountA")
+    monkeypatch.setattr(window, "lichess", service)
+    generation = window._analysis_session_generation
+    page = window._background_operations_page
+    window.batch_live_progress.emit("lichess:accounta", generation, 1, 10)
+    assert page.workflow_progress["stockfish"].value() == 1
+    window.batch_live_progress.emit("lichess:accounta", generation, 8, 10)
+    assert "8/10" in page.summary.text()
+    assert page.workflow_progress["stockfish"].value() == 8
+    service.username = "AccountB"
+    window.batch_live_progress.emit("lichess:accounta", generation, 9, 10)
+    assert page.workflow_progress["stockfish"].value() == 8
+
+
+def test_batch_opt_in_is_account_scoped_and_manual_pause_survives(qtbot, monkeypatch, tmp_path):
+    from types import SimpleNamespace
+
+    window = MainWindow(QSettings(str(tmp_path / "batch.ini"), QSettings.Format.IniFormat),
+                        offline_mode=True)
     qtbot.addWidget(window)
     service = SimpleNamespace(username="AccountA")
     monkeypatch.setattr(window, "lichess", service)
@@ -3482,14 +3504,17 @@ def test_home_has_rating_kpi_and_three_recent_game_cards(qtbot, tmp_path):
     cards = [window._recent_games_layout.itemAt(i).widget() for i in range(3)]
     from PySide6.QtWidgets import QLabel, QScrollArea, QWidget
     headings = [card.findChild(QLabel).text() for card in cards]
-    assert all("Победа с Opponent" in heading for heading in headings)
+    assert headings == ["♟  Победа"] * 3
+    assert all(f"Opponent {index}" in [label.text() for label in card.findChildren(QLabel)]
+               for index, card in enumerate(cards))
     assert all("Queen's Pawn Game" not in heading for heading in headings)
     assert window.dashboard_account.currentIndex() == 0
     assert window.dashboard_clock.isHidden()
     window.setFixedSize(1360, 860)
     window.show()
     qtbot.wait(20)
-    assert window.home_activity_button.isVisible()
+    assert not window.home_activity_button.isVisible()
+    assert window._nav_buttons["training"].isVisible()
     assert window.home_activity_button.parentWidget() is window.home_play_card
     assert not isinstance(window.home_page, QScrollArea)
     assert not hasattr(window._home_view, "home_pilot_import_button")

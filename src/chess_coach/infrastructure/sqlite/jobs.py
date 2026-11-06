@@ -467,7 +467,14 @@ class AnalysisJobsStoreMixin:
                                          parameters: dict | None = None,
                                          retry_failed: bool = False) -> list[dict]:
         """Page recent eligible lines, skipping work already represented for this config."""
-        limit = max(1, min(10_000, int(limit)))
+        return self._fast_analysis_candidates(account_id, engine_version, parameters,
+                                              retry_failed, limit)
+
+    def count_games_needing_fast_analysis(self, *, account_id: str,
+                                         engine_version: str, parameters: dict) -> int:
+        return self._fast_analysis_candidates(account_id, engine_version, parameters, False, None)
+
+    def _fast_analysis_candidates(self, account_id, engine_version, parameters, retry_failed, limit):
         join = " JOIN account_games ag ON ag.game_id=g.game_id " if account_id else ""
         account_filter = "AND ag.account_id=? " if account_id else ""
         params: list[object] = [account_id] if account_id else []
@@ -488,9 +495,15 @@ class AnalysisJobsStoreMixin:
                 "AND ar.engine_version=? AND ar.parameters_json=? AND ar.status='complete') "
             )
             params.extend([engine_version, params_json, engine_version, params_json])
-        params.append(limit)
+        projection = ("COUNT(*)" if limit is None else
+                      "g.game_id,gr.line_revision,gr.line_hash,g.started_at,g.variant")
+        order = ""
+        if limit is not None:
+            params.append(max(1, min(10_000, int(limit))))
+            order = ("ORDER BY CASE WHEN g.started_at IS NULL THEN 1 ELSE 0 END,"
+                     "g.started_at DESC,g.game_id DESC LIMIT ?")
         sql = (
-            "SELECT DISTINCT g.game_id,gr.line_revision,gr.line_hash,g.started_at,g.variant "
+            f"SELECT {projection} "
             "FROM games g " + join +
             "JOIN game_revisions gr ON gr.game_id=g.game_id AND gr.is_current=1 "
             "WHERE g.status IN ('mate','resign','stalemate','timeout','draw','outoftime',"
@@ -501,12 +514,13 @@ class AnalysisJobsStoreMixin:
             + account_filter +
             "AND NOT EXISTS (" + _COMPLETE_SERVER_RUN.format(
                 game="g.game_id", revision="gr.line_revision", line_hash="gr.line_hash") + ") "
-            + represented +
-            "ORDER BY CASE WHEN g.started_at IS NULL THEN 1 ELSE 0 END,"
-            "g.started_at DESC,g.game_id DESC LIMIT ?")
+            + represented + order)
         with self._connection() as db:
             db.create_function("cc_checkmate", 1, _is_checkmate, deterministic=True)
-            rows = db.execute(sql, params).fetchall()
+            cursor = db.execute(sql, params)
+            if limit is None:
+                return int(cursor.fetchone()[0])
+            rows = cursor.fetchall()
         return [dict(row) for row in rows]
 
     def has_complete_server_analysis(self, game_id: str, revision: int, line_hash: str) -> bool:

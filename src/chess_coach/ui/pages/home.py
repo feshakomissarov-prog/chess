@@ -118,12 +118,21 @@ class HomePage(QWidget):
             caption = QLabel(label)
             caption.setStyleSheet("font-size: 17px; font-weight: 600;")
             caption.setWordWrap(False)
+            caption_row = QHBoxLayout()
+            if key in {"games", "accuracy"}:
+                icon = QLabel("♟" if key == "games" else "◎")
+                icon.setAlignment(Qt.AlignmentFlag.AlignCenter)
+                icon.setFixedSize(42, 42)
+                icon.setStyleSheet("background: #39365E; color: #C8BBFF;"
+                                   "border-radius: 10px; font-size: 25px;")
+                caption_row.addWidget(icon)
+            caption_row.addWidget(caption, 1)
             value = QLabel("—")
             value.setStyleSheet("font-size: 48px; font-weight: 700;")
             detail = QLabel("Локальные данные")
             detail.setObjectName("muted")
             detail.setWordWrap(True)
-            card_layout.addWidget(caption)
+            card_layout.addLayout(caption_row)
             card_layout.addWidget(value)
             card_layout.addWidget(detail)
             self._dashboard_metric_values[key] = value

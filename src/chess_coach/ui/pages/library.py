@@ -105,25 +105,18 @@ class LibraryPage(QWidget):
         self.sort_description.setToolTip(
             "Порядок использует lastMoveAt, затем подтверждённое время/дату начала; "
             "обновление аналитики его не меняет.")
-        summary_row = QHBoxLayout()
-        summary_row.addWidget(self.summary, 1)
-        summary_row.addWidget(self.sort_description, 0, Qt.AlignmentFlag.AlignRight)
-        layout.addLayout(summary_row)
-        action_row = QHBoxLayout()
+        self.summary.hide()
+        self.sort_description.hide()
         self.sync_button = QPushButton("Синхронизировать")
         self.sync_button.clicked.connect(self.sync_requested.emit)
         self.background_button = QPushButton("Фоновые операции")
         self.background_button.clicked.connect(self.background_requested.emit)
         self.settings_button = QPushButton("Настройки загрузки")
         self.settings_button.clicked.connect(self.settings_requested.emit)
-        for button in (self.sync_button, self.background_button, self.settings_button):
-            action_row.addWidget(button)
-        action_row.addStretch(1)
-        layout.addLayout(action_row)
         self.sync_status = QLabel("")
         self.sync_status.setWordWrap(True)
         self.sync_status.setObjectName("secondary")
-        layout.addWidget(self.sync_status)
+        self.sync_status.hide()
         self.search = QLineEdit()
         self.search.setPlaceholderText("Поиск по сопернику, дебюту или дате")
         self.search.setAccessibleName("Поиск по партиям")
@@ -317,6 +310,11 @@ class LibraryPage(QWidget):
         page_row.addWidget(self.previous)
         page_row.addWidget(self.page_label, 1)
         page_row.addWidget(self.following)
+        note_toggle = QPushButton("Заметка")
+        note_toggle.setCheckable(True)
+        page_row.addWidget(note_toggle)
+        for button in (self.sync_button, self.background_button, self.settings_button):
+            page_row.addWidget(button)
         layout.addLayout(page_row)
         note_row = QHBoxLayout()
         self.note = QLineEdit()
@@ -328,8 +326,11 @@ class LibraryPage(QWidget):
         self.save_note.setEnabled(False)
         note_row.addWidget(self.note, 1)
         note_row.addWidget(self.save_note)
-        layout.addLayout(note_row)
-        actions = QHBoxLayout()
+        note_panel = QWidget()
+        note_panel.setLayout(note_row)
+        note_panel.hide()
+        note_toggle.toggled.connect(note_panel.setVisible)
+        layout.addWidget(note_panel)
         self.open_game = QPushButton("Открыть для просмотра")
         self.export_game = QPushButton("Экспорт PGN")
         self.analyze_game = QPushButton("Анализ Stockfish")
@@ -341,9 +342,8 @@ class LibraryPage(QWidget):
         self.open_game.hide()
         for button in (self.export_game, self.analyze_game):
             detail_actions.addWidget(button)
-        for button in (self.refresh_game, self.close_button):
-            actions.addWidget(button)
-        layout.addLayout(actions)
+        page_row.addWidget(self.refresh_game)
+        self.close_button.hide()  # Global Back and Home already remain available.
         self._typing_filter_timer = QTimer(self)
         self._typing_filter_timer.setSingleShot(True)
         self._typing_filter_timer.setInterval(275)
@@ -597,6 +597,8 @@ class LibraryPage(QWidget):
 
     def set_sync_status(self, text: str) -> None:
         self.sync_status.setText(str(text))
+        self.sync_button.setToolTip(str(text))
+        self.sync_button.setAccessibleDescription(str(text))
 
     def set_filter_options(self, options: dict) -> None:
         pending = getattr(self, "_pending_filter_values", {})

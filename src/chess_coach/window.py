@@ -498,6 +498,8 @@ class MainWindow(QMainWindow):
         self._analysis_stop: threading.Event | None = None
         self._analysis_thread: threading.Thread | None = None
         self._batch_thread: threading.Thread | None = None
+        self._batch_position_progress = None
+        self._batch_status_refresh_at = 0.0
         self._batch_resume_timer = QTimer(self)
         self._batch_resume_timer.setSingleShot(True)
         self._batch_resume_timer.timeout.connect(self._resume_opted_in_batch)
@@ -1123,11 +1125,18 @@ class MainWindow(QMainWindow):
             page.manual_check_requested.connect(self._manual_lichess_analytics_check)
             page.refresh_requested.connect(self._refresh_background_operations_page)
             page.close_requested.connect(self.navigate_back)
+            page.batch_requested.connect(self._background_batch_action)
             self._background_operations_page = page
             self.screen_stack.addWidget(page)
         self._refresh_background_operations_page()
         self.screen_title.setText("Фоновые операции")
         self.screen_stack.setCurrentWidget(page)
+
+    def _background_batch_action(self) -> None:
+        if self._batch_thread is not None and self._batch_thread.is_alive():
+            self._pause_batch_analysis()
+        else:
+            self.show_batch_analysis()
 
     def _show_batch_live_progress(self, account_id: str, generation: int,
                                   done: int, total: int) -> None:
@@ -1140,12 +1149,17 @@ class MainWindow(QMainWindow):
         if total > 0:
             if self._batch_pause is not None and self._batch_pause.is_set():
                 return
+            self._batch_position_progress = (account_id, generation, done, total)
             page.summary.setText(f"Сейчас: Stockfish · позиции {done}/{total}")
             page.set_workflow_state("stockfish", "Идёт")
             page.workflow_progress["stockfish"].setRange(0, total)
             page.workflow_progress["stockfish"].setValue(done)
             page.workflow_progress["stockfish"].show()
+            if time.monotonic() - self._batch_status_refresh_at >= 5:
+                self._batch_status_refresh_at = time.monotonic()
+                self._refresh_background_operations_page()
         else:
+            self._batch_position_progress = None
             self._refresh_background_operations_page()
 
     def _refresh_background_operations_page(self) -> None:
@@ -1154,6 +1168,12 @@ class MainWindow(QMainWindow):
             return
         username = str(getattr(self.lichess, "username", "") or "").strip()
         account_id = f"lichess:{username.casefold()}" if username else None
+        scope = (account_id, self._analysis_session_generation)
+        if getattr(self, "_background_visible_scope", None) != scope:
+            self._background_visible_scope = scope
+            self._batch_position_progress = None
+            page.set_snapshot((), source_summary="", backfill_paused=False,
+                              can_check=False, can_pause=False)
         available = bool(
             self.lichess and not self.offline_mode and self._lichess_connected
             and self._lichess_stream_ready_generation == getattr(
@@ -1168,7 +1188,10 @@ class MainWindow(QMainWindow):
         metric_scope = (self.dashboard_account.currentData()
                         if hasattr(self, "dashboard_account") else None)
         operations = self.runtime.work_coordinator.snapshots()
-        engine_key = self._batch_engine_key
+        plan = self.settings.value(f"batch/plan/{account_id}", {}) if account_id else {}
+        engine_key = plan.get("engine") if plan else self._batch_engine_key
+        parameters = (FastPassOptions(nodes=plan["nodes"], hash_mb=plan["hash"]).parameters()
+                      if plan else None)
 
         def worker() -> None:
             try:
@@ -1181,8 +1204,12 @@ class MainWindow(QMainWindow):
                 metric_status = repository.analysis_metrics_migration_status(
                     account_id=str(metric_scope) if metric_scope else None)
                 jobs = (repository.analysis_job_counts(engine_version=engine_key,
+                                                      parameters=parameters,
                                                       account_id=account_id)
                         if account_id or self.offline_mode else {})
+                unqueued = (repository.count_games_needing_fast_analysis(
+                    account_id=account_id, engine_version=engine_key, parameters=parameters)
+                    if account_id and parameters else None)
                 last_job = (repository.latest_analysis_job_event(account_id=account_id)
                             if account_id or self.offline_mode else None)
                 paused = bool(account_id and
@@ -1193,7 +1220,7 @@ class MainWindow(QMainWindow):
                     "account_id": account_id, "username": username, "available": available,
                     "archive": archive, "puzzles": puzzles, "summary": summary,
                     "paused": paused, "operations": operations, "jobs": jobs, "last_job": last_job,
-                    "metric_scope": metric_scope, "metric_status": metric_status,
+                    "metric_scope": metric_scope, "metric_status": metric_status, "unqueued": unqueued,
                 })
             except Exception as exc:
                 if not stop_event.is_set():
@@ -1329,8 +1356,11 @@ class MainWindow(QMainWindow):
                     "puzzles": (f"Сохранено попыток: {puzzles.get('imported_count', 0)} · {puzzle_phase}\n"
                                  f"Последнее успешное обновление: {puzzle_last}{puzzle_problem}"
                                  if account_id else "Аккаунт Lichess не выбран."),
-                    "stockfish": (f"Осталось: {remaining} · готово: {complete} · ошибки: {failed}"
-                                  if jobs else "Нет сохранённых заданий для текущего профиля."),
+                    "stockfish": (f"В очереди: {remaining} · готово: {complete} · ошибки: {failed}"
+                                  + (f"\nЕщё не поставлено: {payload['unqueued']}"
+                                     if payload.get("unqueued") is not None else "")
+                                  if jobs or payload.get("unqueued") is not None
+                                  else "Нет сохранённых заданий для текущего профиля."),
                 },
                 recent_events=recent_events,
                 states={
@@ -1348,6 +1378,9 @@ class MainWindow(QMainWindow):
                 },
                 progress={"ready": (summary.get("checked", 0), summary.get("total", 0)),
                           "stockfish": (complete, complete + remaining + failed)})
+            if self._batch_position_progress and self._batch_position_progress[:2] == (
+                    account_id, self._analysis_session_generation):
+                self._show_batch_live_progress(*self._batch_position_progress)
 
     @staticmethod
     def _format_legacy_metrics_status(status: dict) -> str:
@@ -3823,7 +3856,7 @@ class MainWindow(QMainWindow):
                 def progress(game_id: str, done: int, total: int) -> None:
                     nonlocal last_progress_at
                     now = time.monotonic()
-                    if 0 < done < total and now - last_progress_at < 0.4:
+                    if now - last_progress_at < 0.4:
                         return
                     last_progress_at = now
                     self.batch_live_progress.emit(account_id, generation, done, total)

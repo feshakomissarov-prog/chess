@@ -13,6 +13,7 @@ class BackgroundOperationsPage(QWidget):
     manual_check_requested = Signal()
     refresh_requested = Signal()
     close_requested = Signal()
+    batch_requested = Signal()
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
@@ -56,6 +57,7 @@ class BackgroundOperationsPage(QWidget):
             badge = QLabel("Ожидает")
             badge.setAlignment(Qt.AlignmentFlag.AlignCenter)
             badge.setMinimumWidth(95)
+            badge.setMaximumHeight(34)
             row.addWidget(badge)
             row.addWidget(detail, 6)
             bar = QProgressBar()
@@ -73,7 +75,6 @@ class BackgroundOperationsPage(QWidget):
             self.workflow_progress[key] = bar
         self.details_toggle = QPushButton("Диагностика операций")
         self.details_toggle.setCheckable(True)
-        root.addWidget(self.details_toggle)
         self.operation_list = QListWidget()
         self.operation_list.setAccessibleName("Текущие фоновые операции")
         root.addWidget(self.operation_list)
@@ -86,6 +87,7 @@ class BackgroundOperationsPage(QWidget):
         self.recent_events.setAccessibleName("Последние сохранённые события")
         self.recent_events.setMaximumHeight(135)
         root.addWidget(self.recent_events)
+        root.addWidget(self.details_toggle, 0, Qt.AlignmentFlag.AlignLeft)
         self.source_summary = QLabel("")
         self.source_summary.setWordWrap(True)
         self.source_summary.setObjectName("secondary")
@@ -109,6 +111,9 @@ class BackgroundOperationsPage(QWidget):
         controls.addWidget(self.pause_button)
         controls.addWidget(self.manual_check_button)
         controls.addWidget(self.refresh_button)
+        self.batch_button = QPushButton("Очередь Stockfish")
+        self.batch_button.clicked.connect(self.batch_requested.emit)
+        controls.addWidget(self.batch_button)
         root.addStretch(1)
         self.close_button = QPushButton("Назад")
         self.close_button.clicked.connect(self.close_requested.emit)
@@ -176,5 +181,7 @@ class BackgroundOperationsPage(QWidget):
         background, foreground = colors.get(state, ("#383349", "#E3D8FF"))
         badge = self.workflow_badges[key]
         badge.setText(state)
+        if key == "stockfish":
+            self.batch_button.setText("Пауза Stockfish" if state == "Идёт" else "Очередь Stockfish")
         badge.setStyleSheet(f"background: {background}; color: {foreground}; "
                             "border-radius: 8px; padding: 6px; font-weight: 600;")

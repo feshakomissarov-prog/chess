@@ -1,5 +1,6 @@
 from pathlib import Path
 import os
+import time
 from tempfile import TemporaryDirectory
 from hashlib import sha256
 from PySide6.QtGui import QImage, QPainter, QColor
@@ -58,25 +59,37 @@ if index < 0:
 w.dashboard_account.setCurrentIndex(index)
 w._refresh_home_dashboard()
 assert QTest.qWaitForWindowExposed(w,3000)
-for width,height in ((1672,941),(1360,860),(1280,720)):
- w.resize(width,height)
- QTest.qWait(300)
- for name,route in (("01-home",w.show_home),("02-games",w.show_saved_games),
-                   ("03-background",w.show_background_analytics)):
-    assert w.isVisible(), "visible smoke window was closed"
-    route()
-    import time
-    for _ in range(30):
-        QTest.qWait(25)
-        time.sleep(0.01)
-    if name=="01-home":
-        assert w._home_view.puzzle_rating.text().isdigit(), w._home_view.puzzle_rating.text()
-        assert w._dashboard_metric_values["accuracy"].text().endswith("%")
-    if name=="02-games":
-        lib=w.library_page
-        assert lib.detail_open.isVisible() and lib.export_game.isVisible()
-    assert w.grab().save(str(out/(f"{width}x{height}-{name}.png")))
-    print(name,w.size().width(),w.size().height())
+geometry = []
+routes = (
+    ("01-home", lambda: QTest.mouseClick(w._nav_buttons["home"], Qt.MouseButton.LeftButton)),
+    ("02-games", lambda: QTest.mouseClick(w._nav_buttons["games"], Qt.MouseButton.LeftButton)),
+    ("03-background", lambda: QTest.mouseClick(w.library_page.background_button,
+                                               Qt.MouseButton.LeftButton)),
+)
+for width, height in ((1672, 941), (1360, 860), (1280, 720)):
+    w.resize(width, height)
+    QTest.qWait(300)
+    for name, route in routes:
+        assert w.isVisible(), "visible smoke window was closed"
+        route()
+        for _ in range(30):
+            QTest.qWait(25)
+            time.sleep(0.01)
+        if name == "01-home":
+            assert w._home_view.puzzle_rating.text().isdigit(), w._home_view.puzzle_rating.text()
+            assert w._dashboard_metric_values["accuracy"].text().endswith("%")
+        if name == "02-games":
+            lib = w.library_page
+            assert lib.detail_open.isVisible() and lib.export_game.isVisible()
+        if name == "03-background":
+            assert w._background_operations_page.isVisible()
+        capture = w.grab()
+        filename = f"{width}x{height}-{name}.png"
+        assert capture.save(str(out / filename))
+        line = (f"{filename}: window {w.width()}x{w.height()} logical px, "
+                f"capture {capture.width()}x{capture.height()} px, DPR {capture.devicePixelRatio()}")
+        geometry.append(line)
+        print(line)
 w.close()
 app.processEvents()
 refs = Path(__file__).resolve().parent.parent / "tests" / "visual" / "reference"
@@ -101,6 +114,7 @@ for art, screen, checksum in expected:
 (out / "capture.txt").write_text(
     f"SHA: {os.environ.get('CC_VISUAL_SHA', 'local working tree')}\n"
     f"Platform: {app.platformName()} · QT_SCALE_FACTOR={os.environ.get('QT_SCALE_FACTOR', '1')}\n"
-    "Left: approved reference. Right: visible Windows Qt application, synthetic SQLite.\n",
+    "Left: approved reference. Right: visible Windows Qt application, synthetic SQLite.\n"
+    + "\n".join(geometry) + "\n",
     encoding="utf-8",
 )
