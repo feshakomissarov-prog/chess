@@ -105,6 +105,9 @@ def test_server_coverage_checks_exact_plies_and_rechecks_queued_jobs(tmp_path):
         save_run("missing-baseline", (1, 2, 3, 4), "lichess-json")
         save_run("gap", (0, 1, 3, 4), "lichess-pgn")
         save_run("full", range(5), "lichess-pgn")
+        repository.save_snapshot("terminal", "startpos", "f2f3 e7e5 g2g4 d8h4",
+                                 "white", "Fixture", False, "blitz", "mate", "black")
+        save_run("terminal", range(4), "lichess-json")
         assert {game["game_id"] for game in repository.list_games_needing_fast_analysis()} == {
             "missing-baseline", "gap", "late"}
         assert runner.enqueue_missing()["queued"] == 3
@@ -113,6 +116,9 @@ def test_server_coverage_checks_exact_plies_and_rechecks_queued_jobs(tmp_path):
         assert result["processed"] == 2
         assert result["queue"] == {"complete": 2, "stale": 1}
         assert len(engines) == 1
+        repository.save_snapshot("full", "startpos", "d2d4 d7d5 c2c4 e7e6",
+                                 "white", "Fixture", False, "blitz", "finished", "white")
+        assert "full" in {game["game_id"] for game in repository.list_games_needing_fast_analysis()}
     finally:
         repository.shutdown()
 

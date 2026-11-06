@@ -14,8 +14,15 @@ _COMPLETE_SERVER_RUN = """
     WHERE ar.game_id={game} AND ar.line_revision={revision}
       AND ar.line_hash={line_hash} AND ar.source IN ('lichess-pgn','lichess-json')
       AND ar.status='complete'
+      AND EXISTS (SELECT 1 FROM game_positions gp WHERE gp.game_id=ar.game_id
+                  AND gp.line_revision=ar.line_revision AND gp.ply=0)
       AND EXISTS (SELECT 1 FROM game_moves gm
                   WHERE gm.game_id=ar.game_id AND gm.line_revision=ar.line_revision)
+      AND NOT EXISTS (
+          SELECT 1 FROM game_moves gm WHERE gm.game_id=ar.game_id AND gm.line_revision=ar.line_revision
+          AND NOT EXISTS (SELECT 1 FROM game_positions gp WHERE gp.game_id=gm.game_id
+                          AND gp.line_revision=gm.line_revision AND gp.ply=gm.ply)
+      )
       AND NOT EXISTS (
           SELECT 1 FROM game_positions gp
           LEFT JOIN position_assessments pa ON pa.run_id=ar.run_id AND pa.ply=gp.ply

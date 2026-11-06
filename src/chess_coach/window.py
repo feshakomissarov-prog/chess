@@ -3684,6 +3684,7 @@ class MainWindow(QMainWindow):
         dialog.lichess_inspector_requested.connect(self.show_background_analytics)
         dialog.pause_requested.connect(self._pause_batch_analysis)
         dialog.cancel_requested.connect(self._cancel_batch_analysis)
+        dialog.worker_finished.connect(self._schedule_batch_rate_limit_retry)
         dialog.setModal(False)
         dialog.setWindowFlags(Qt.WindowType.Widget)
         dialog.close_requested.connect(self.show_analysis)
@@ -3694,7 +3695,12 @@ class MainWindow(QMainWindow):
             self.screen_stack.setCurrentWidget(dialog)
 
     def _resume_opted_in_batch(self) -> None:
-        if self._shutdown_requested or not self._online_actions_allowed():
+        if self._shutdown_requested:
+            return
+        if self._lichess_connected and self._lichess_rate_limit_remaining():
+            self._schedule_batch_rate_limit_retry(True)
+            return
+        if not self._online_actions_allowed():
             return
         if any(s.status in {"created", "started", "playing"} or s.final_sync_pending
                for s in self._sessions_for_safety()):
@@ -3710,6 +3716,15 @@ class MainWindow(QMainWindow):
         self.show_batch_analysis(navigate=False)
         self._start_batch_analysis(self._batch_dialog, 0, plan["nodes"], plan["hash"],
                                    True, selective_review=plan["review"], automatic=True)
+
+    def _schedule_batch_rate_limit_retry(self, paused: bool, _message: str = "") -> None:
+        username = str(getattr(self.lichess, "username", "") or "").strip().lower()
+        if not paused or not username or self._shutdown_requested:
+            return
+        plan = self.settings.value(f"batch/plan/lichess:{username}", {})
+        remaining = self._lichess_rate_limit_remaining()
+        if plan and not plan.get("manual_pause") and remaining:
+            self._batch_resume_timer.start((remaining + 1) * 1000)
 
     def _start_batch_analysis(self, dialog: BatchAnalysisDialog, limit: int, nodes: int,
                               hash_mb: int, resume: bool, retry_failed: bool = False,

@@ -103,11 +103,15 @@ def test_library_inspector_scrolls_instead_of_clipping_filters_on_compact_window
 
     assert page.filter_panel.isHidden()
     page.filters_toggle.click()
-    qtbot.waitUntil(lambda: page.aside_scroll.verticalScrollBar().maximum() > 0)
+    qtbot.waitUntil(page.filter_panel.isVisible)
+    viewport = page.aside_scroll.viewport()
+    bottom = page.filter_panel.mapTo(viewport, page.filter_panel.rect().bottomLeft()).y()
+    scroll = page.aside_scroll.verticalScrollBar()
+    assert bottom - (scroll.maximum() - scroll.value()) < viewport.height()
     assert page.search.height() >= 28
     assert page.account_filter.height() >= 28
     assert page.detail_open.height() > 0
-    assert page.sync_button.geometry().intersects(page.summary.geometry()) is False
+    assert page.sync_button.geometry().intersects(page.search.geometry()) is False
     assert page.background_button.geometry().intersects(page.settings_button.geometry()) is False
     window.close()
 
