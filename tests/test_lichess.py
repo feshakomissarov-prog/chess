@@ -3205,7 +3205,10 @@ def test_server_clock_accepts_correspondence_units_and_rejects_corruption(tmp_pa
     assert session.clock_state_valid is None
 
 
-def test_live_clock_budget_accumulates_each_confirmed_increment_and_keeps_latest_frame(tmp_path):
+def test_live_clock_budget_accumulates_each_confirmed_increment_and_keeps_latest_frame(
+        tmp_path, monkeypatch):
+    now = [100.0]
+    monkeypatch.setattr("chess_coach.lichess.session.time.monotonic", lambda: now[0])
     session = LichessGameSession("increment-bank", GameRepository(tmp_path / "increment-bank.sqlite3"))
     session.apply_event({
         "type": "gameFull", "initialFen": "startpos",
@@ -3226,6 +3229,8 @@ def test_live_clock_budget_accumulates_each_confirmed_increment_and_keeps_latest
                          "winc": 2_000, "binc": 2_000})
     assert session.clock_state_valid is True
     assert (session.white_ms, session.black_ms) == (188_000, 188_000)
+    assert session._last_clock_at == 100.0
+    now[0] = 110.0
 
     # A delayed shorter line cannot roll back either the board or clock display.
     session.apply_event({"type": "gameState", "moves": six_plies, "status": "started",
@@ -3238,6 +3243,15 @@ def test_live_clock_budget_accumulates_each_confirmed_increment_and_keeps_latest
                          "wtime": 188_000, "btime": 188_000,
                          "winc": 2_000, "binc": 2_000})
     assert session.clock_state_valid is True
+    assert session._last_clock_at == 100.0
+    session.apply_event({
+        "type": "gameFull", "initialFen": "startpos",
+        "clock": {"initial": 180_000, "increment": 2_000},
+        "state": {"moves": eight_plies, "status": "started", "wtime": 187_000,
+                  "btime": 188_000, "winc": 2_000, "binc": 2_000},
+    })
+    assert session._last_clock_at == 110.0
+    assert (session.white_ms, session.black_ms) == (187_000, 188_000)
 
 
 def test_live_clock_increment_bounds_cover_both_colors_and_reject_bad_payloads(tmp_path):

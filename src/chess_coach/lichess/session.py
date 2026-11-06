@@ -281,7 +281,6 @@ class LichessGameSession:
                 # retain the confirmed line until this client explicitly accepts.
                 if opponent_takeback_flag:
                     self.takeback_requested_by_opponent = True
-                    self._last_clock_at = time.monotonic()
                 return self.snapshot()
         elif confirmed_moves and not is_extension:
             return self.snapshot()
@@ -306,7 +305,7 @@ class LichessGameSession:
                 # A server-confirmed takeback starts a new clock-line baseline.
                 self._clock_ply_seen = None
                 self.clock_state_valid = None
-            self._apply_clock_state(state)
+            self._apply_clock_state(state, reanchor=kind == "gameFull")
             self.winner = state.get("winner", self.winner)
             own_draw_flag = "bdraw" if self.color == chess.WHITE else "wdraw"
             self.draw_offered_by_opponent = bool(state.get(own_draw_flag, False))
@@ -369,7 +368,6 @@ class LichessGameSession:
                     self._clear_pending()
             self.accepted_snapshot_sequence += 1
             self._save()
-        self._last_clock_at = time.monotonic()
         return self.snapshot()
 
     def configure_players(self, white: dict, black: dict, my_color: str) -> None:
@@ -423,7 +421,7 @@ class LichessGameSession:
             self.clock_initial > 0 and active_ms is not None and active_ms < self.clock_initial
         )
 
-    def _apply_clock_state(self, state: dict) -> None:
+    def _apply_clock_state(self, state: dict, *, reanchor: bool = False) -> None:
         """Validate live millisecond snapshots against the confirmed line and increments."""
         supplied = {"wtime": state.get("wtime", self.white_ms),
                     "btime": state.get("btime", self.black_ms),
@@ -464,11 +462,12 @@ class LichessGameSession:
                 and self.white_ms is not None and self.black_ms is not None):
             if plies < previous_ply:
                 return
-            if plies == previous_ply:
-                if (times[0] > self.white_ms + _CLOCK_EVENT_TOLERANCE_MS
-                        or times[1] > self.black_ms + _CLOCK_EVENT_TOLERANCE_MS):
+            if plies == previous_ply and not reanchor:
+                if times[0] > self.white_ms or times[1] > self.black_ms:
                     return
-            else:
+                if times == (self.white_ms, self.black_ms):
+                    return
+            elif plies > previous_ply:
                 white_advanced = (plies + 1) // 2 - (previous_ply + 1) // 2
                 black_advanced = plies // 2 - previous_ply // 2
                 white_gain = self.white_inc * white_advanced
@@ -480,6 +479,7 @@ class LichessGameSession:
         self.white_inc, self.black_inc = increments
         self.clock_state_valid = True
         self._clock_ply_seen = plies
+        self._last_clock_at = time.monotonic()
 
     def _apply_final_sync_event(self, event: dict, kind: str, state: dict,
                                 incoming_fen: str, incoming_moves: tuple[str, ...],
@@ -501,14 +501,13 @@ class LichessGameSession:
         self.status = str(incoming_status)
         if "winner" in state:
             self.winner = state.get("winner")
-        self._apply_clock_state(state)
+        self._apply_clock_state(state, reanchor=kind == "gameFull")
         self.board = board
         if kind == "gameFull":
             self.awaiting_authoritative_snapshot = False
         self.final_sync_pending = False
         self._clear_pending()
         self.premove = None
-        self._last_clock_at = time.monotonic()
         self.accepted_snapshot_sequence += 1
         self._save()
         return self.snapshot()
