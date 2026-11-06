@@ -268,7 +268,7 @@ class LibraryPage(QWidget):
         self.detail_graph.setVisible(False)
         detail_layout.addWidget(self.detail_graph)
         self.detail_open = QPushButton("Открыть разбор")
-        self.detail_open.clicked.connect(lambda: self._emit_for_selected(self.open_requested))
+        self.detail_open.clicked.connect(lambda: self._emit_for_detail(self.open_requested))
         detail_actions = QHBoxLayout()
         detail_actions.addWidget(self.detail_open)
         self.detail_open.setObjectName("primaryAction")
@@ -334,10 +334,10 @@ class LibraryPage(QWidget):
         self.following.clicked.connect(lambda _checked=False: self._request_page(self._page + 1))
         self.games.itemDoubleClicked.connect(lambda _item: self._open_selected())
         self.open_game.clicked.connect(lambda _checked=False: self._open_selected())
-        self.export_game.clicked.connect(lambda _checked=False: self._emit_for_selected(
+        self.export_game.clicked.connect(lambda _checked=False: self._emit_for_detail(
             self.export_requested))
         self.save_note.clicked.connect(lambda _checked=False: self._emit_note())
-        self.analyze_game.clicked.connect(lambda _checked=False: self._emit_for_selected(
+        self.analyze_game.clicked.connect(lambda _checked=False: self._emit_for_detail(
             self.analyze_requested))
         self.refresh_game.clicked.connect(lambda _checked=False: self._emit_for_selected(
             self.refresh_requested))
@@ -579,6 +579,10 @@ class LibraryPage(QWidget):
         game = self.selected_game()
         if game is not None:
             signal.emit(game)
+
+    def _emit_for_detail(self, signal) -> None:
+        if self._detail_game is not None:
+            signal.emit(dict(self._detail_game))
 
     def _open_selected(self) -> None:
         self._emit_for_selected(self.open_requested)
