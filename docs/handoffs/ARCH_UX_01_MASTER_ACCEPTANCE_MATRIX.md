@@ -207,3 +207,28 @@ Windows, обычный Qt backend `windows`, 1360×860, временная SQLi
 | Capture state integrity | production workers + temp SQLite; strict assertions на selected IDs/revision, источники, график и геометрию | 18 кадров/состояний в `visual-evidence/final-native/` | PASS локально; артефакты CI появятся только после exact-head Windows CI. |
 
 Полный локальный прогон после обновления fake-сигнатуры: **829 PASS** с worker warnings-as-errors; Python 3.12.10. `compileall -q src scripts tests`, `git diff --check` и native Windows GUI smoke **18/18 PASS**. Windows CI #42278388653: SUCCESS на SHA `062cef0592bbc2fd80f2ea029beee5a9f5ac6723` (829 PASS, compileall, offline init, native visual-artifact PASS): https://github.com/feshakomissarov-prog/chess/actions/runs/42278388653. Exact-head проверка документационного follow-up будет запущена отдельно. Реальный OAuth/Lichess, пользовательские данные/SQLite, Stockfish и физический display DPI не использовались.
+
+## VIS6-01…05 — acceptance matrix (локальная проверка)
+
+| Пункт | Обработчик / regression | Native visual evidence | Статус |
+|---|---|---|---|
+| VIS6-01 Home быстрый preview | dashboard_preview_snapshot + независимый interactive OperationHandle; Qt stale-generation, 3500 партий, account A→B, queued writer | Home 1672×941 / 1360×860 / 1280×720; быстрое обновление текущего account | PASS на synthetic SQLite; конкретная задержка личной БД не воспроизведена |
+| VIS6-02 Lichess ready analytics | SQLite summary/next eligible + fake transport; 429, Retry-After, budget, pause, no-data TTL | Background active/offline; видимая причина и срок следующей проверки | PASS на fake state; реальное расписание аккаунта не проверено |
+| VIS6-03 утверждённые экраны | canonical opening, truthful source/coverage; пары Home, Library, Background | 3 пары × 3 окна в visual-evidence/vis6-final; capture.txt проверяет реальные dimensions | PASS capture/data readiness; эстетический GO только после независимого сравнения |
+| VIS6-04 общая система экранов | theme token regression, Qt rating-graph pixel test, screen safety regressions | 25 состояний: Play, Analysis, Training, Progress tabs, Settings tabs, active game, saved review + эталонные экраны | PASS в обычном Windows Qt при масштабе 100%; hardware DPI не проверялся |
+| VIS6-05 скорость/evidence | 5-run benchmark + EXPLAIN, strict production MainWindow capture | synthetic benchmark: 100 = 5.37 ms median; 3500 = 26.67 ms median; 25 кадра/состояния | PASS локально; exact Windows CI pending |
+
+Не выполнялись реальные OAuth/PAT, Lichess, пользовательская SQLite/PGN, Stockfish, звук и физические DPI 125/150%. Артефакт GitHub Actions будет приложен запуском на финальном SHA. PR #44 остаётся draft, main не меняется.
+
+### VIS6 exact local test checkpoint — 07.11.2026
+
+| Gate | Итог |
+|---|---|
+| Полный pytest, Qt worker warnings as errors | **837 PASS / 262.13 s** |
+| compileall src/scripts/tests | PASS |
+| git diff --check | PASS |
+| Native Windows screenshot gate после финальных правок | **25 strict states PASS**, 1672×941 / 1360×860 / 1280×720, Qt scale 100% |
+| Benchmark 100 / 3500 synthetic games | **5.59 ms / 26.60 ms median** за 5 проб; планы индексов проверены |
+| GitHub Windows CI на финальном commit | Ожидается |
+
+Реальные Lichess/OAuth, пользовательская SQLite/PGN, настоящий Stockfish, physical Windows DPI и устройство вывода звука не проверялись.

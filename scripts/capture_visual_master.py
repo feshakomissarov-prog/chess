@@ -26,6 +26,7 @@ from chess_coach.application.dashboard import dashboard_snapshot
 from chess_coach.application.background_work import OperationLane
 from chess_coach.lichess.batch_analysis import BatchAnalysisRunner, FastPassOptions
 from chess_coach.ui.game_review import ReviewGraph
+from chess_coach.ui.pages.puzzles import PuzzleHistoryPage
 from chess_coach.window import MainWindow
 
 
@@ -62,6 +63,7 @@ def seed_synthetic_repository(repo, settings) -> tuple[str, str]:
     settings.setValue("workspace/sidebar_collapsed", False)
     opponents = ("Synthetic Owl", "Synthetic Fox", "Synthetic Rook")
     for index in range(8):
+        days_ago = max(0, 7 - index)
         game_id = str(index)
         winner = "white" if index % 3 else "black"
         opponent = opponents[index % 3]
@@ -70,15 +72,18 @@ def seed_synthetic_repository(repo, settings) -> tuple[str, str]:
             opponent,
             False, "180+2", "resign", winner,
             white_player="Visual Coach", black_player=opponent,
-            started_at=f"2026-11-{index + 1:02d}T18:30:00+00:00")
+            started_at=(datetime.now(timezone.utc) - timedelta(days=days_ago)).replace(
+                hour=18, minute=30, second=0, microsecond=0).isoformat())
     repo.wait_for_writes()
     with repo._connection() as db:
         db.executemany(
-            "INSERT INTO account_games(account_id,game_id,remote_id,imported_at,color,opponent) "
-            "VALUES (?,?,?,?,?,?)",
+            "INSERT INTO account_games(account_id,game_id,remote_id,imported_at,color,opponent,"
+            "player_rating,opponent_rating) VALUES (?,?,?,?,?,?,?,?)",
             [(account_id, str(index), f"synthetic-{index}",
-              f"2026-11-{index + 1:02d}T18:30:00+00:00", "white",
-              opponents[index % 3]) for index in range(8)])
+              (datetime.now(timezone.utc) - timedelta(days=max(0, 7 - index))).replace(
+                  hour=18, minute=30, second=0, microsecond=0).isoformat(), "white",
+              opponents[index % 3], 1680 + index * 7, 1660 + index * 5)
+             for index in range(8)])
         db.execute("UPDATE games SET source='lichess_archive',source_game_id='synthetic-0' "
                    "WHERE game_id='0'")
         db.execute("UPDATE games SET source='lichess_archive',source_game_id='synthetic-1' "
@@ -108,6 +113,14 @@ def seed_synthetic_repository(repo, settings) -> tuple[str, str]:
         [day.year, day.month - 1, day.day, 1640 + n * 9 + (n % 4) * 13]
         for n, day in enumerate(today - timedelta(days=57 - 3 * n)
                                  for n in range(20))])
+    puzzle_fen = "r1bqkbnr/pppp1ppp/2n5/4p3/4P3/5N2/PPPP1PPP/RNBQKB1R w KQkq - 2 3"
+    repo.import_puzzle_activities("visual-synthetic", [
+        {"date": int((today - timedelta(days=index)).timestamp() * 1000),
+         "win": bool(index % 3),
+         "puzzle": {"id": f"visual-puzzle-{index:02}", "fen": puzzle_fen,
+                    "solution": ["f1c4", "g8f6"], "themes": ["opening", "developing"],
+                    "rating": 1320 + index * 17, "plays": 90 + index * 11}}
+        for index in range(18)])
 
     # Seed durable but synthetic background states through their public stores.
     repo.finish_archive_incremental(account_id, 1_799_000_000_000, last_sync_new_count=8)
@@ -347,6 +360,8 @@ def wait_background(window, *, active: bool) -> None:
 
 
 def capture(window: MainWindow, output: Path, name: str, width: int, height: int) -> QImage:
+    if window.isMaximized() or window.isFullScreen():
+        window.showNormal()
     window.resize(width, height)
     QTest.qWait(30)
     current = window.screen_stack.currentWidget()
@@ -520,14 +535,29 @@ def main() -> None:
             QTest.qWait(80)
             assert window.screen_stack.currentWidget() is (
                 window.play_page if route == "play" else window.analysis_page)
+            if route == "analysis":
+                window.analysis_page.external_text.setPlainText(
+                    '[Event "Synthetic visual review"]\n[White "Visual Coach"]\n'
+                    '[Black "Synthetic Opponent"]\n[Result "*"]\n\n'
+                    "1. e4 e5 2. Nf3 Nc6 3. Bb5 a6 *")
+                window.analysis_page.set_external_status(
+                    "Синтетическая PGN для проверки формы; архив и сеть не изменяются.")
             image = capture(window, output, route, width, height)
             captured[route] = image
 
         QTest.mouseClick(window._nav_buttons["training"], Qt.MouseButton.LeftButton)
-        wait_for(lambda: window.screen_stack.currentWidget() is window._puzzle_page
-                 and not any(label.text().startswith("Читаю локальную историю")
-                             for label in window._puzzle_page.findChildren(QLabel)),
-                 "local synthetic training history page", timeout=30)
+        wait_for(lambda: window._puzzle_page is not None
+                 and window.screen_stack.currentWidget() is window._puzzle_page
+                 and window._puzzle_page.findChild(PuzzleHistoryPage) is not None,
+                 "local training history page creation", timeout=30)
+        training = window._puzzle_page.findChild(PuzzleHistoryPage)
+        wait_for(lambda: training is not None and training.history.count() > 0
+                 and not training.summary.text().startswith(
+                     ("Загружаем", "Читаю")),
+                 "populated local synthetic training history", timeout=30)
+        training.history.setCurrentRow(0)
+        wait_for(lambda: training.solution.text().startswith("Задача "),
+                 "selected synthetic exercise and board position")
         captured["training"] = capture(window, output, "training", width, height)
 
         QTest.mouseClick(window._nav_buttons["progress"], Qt.MouseButton.LeftButton)
@@ -535,14 +565,51 @@ def main() -> None:
                  and not window._statistics_dialog.summary_label.text().startswith(
                      ("Обновляем статистику", "Загружаем статистику")),
                  "local progress summary", timeout=60)
-        captured["progress"] = capture(window, output, "progress", width, height)
+        progress = window._statistics_dialog
+        wait_for(lambda: progress.account.findData(account_id) >= 0,
+                 "synthetic account in progress filters", timeout=30)
+        progress.account.setCurrentIndex(progress.account.findData(account_id))
+        wait_for(lambda: progress._rows
+                 and f"Аккаунт: {progress.account.currentText()}" in progress.mixed_warning.text()
+                 and progress.summary_label.text().startswith("Партии: 8 ·"),
+            "account-scoped progress statistics", timeout=60)
+        wait_for(lambda: bool(progress.trend.points),
+                 "synthetic account rating trend in Progress overview", timeout=20)
+        progress.tabs.setCurrentIndex(0)
+        captured["progress-overview"] = capture(
+            window, output, "progress-overview", width, height)
+        progress.tabs.setCurrentIndex(1)
+        wait_for(lambda: progress.games.count() > 0 or progress.games_empty.isVisible(),
+                 "account-scoped progress game table")
+        captured["progress-games"] = capture(window, output, "progress-games", width, height)
+        progress.tabs.setCurrentIndex(2)
+        QTest.mouseClick(progress.opening_refresh_button, Qt.MouseButton.LeftButton)
+        wait_for(lambda: progress.opening_table.count() > 0
+                 or "нет данных" in progress.opening_summary.text().casefold()
+                 or "ошиб" in progress.opening_summary.text().casefold(),
+                 "account-scoped local opening/phase analysis", timeout=60)
+        captured["progress-openings"] = capture(
+            window, output, "progress-openings", width, height)
+        progress.tabs.setCurrentIndex(3)
+        QTest.qWait(100)
+        captured["progress-critical"] = capture(
+            window, output, "progress-critical", width, height)
 
         window.open_settings()
         assert window.screen_stack.currentWidget() is window._settings_dialog
-        captured["settings"] = capture(window, output, "settings", width, height)
+        tabs = window._settings_dialog.settings_tabs
+        for tab_index in range(tabs.count()):
+            tabs.setCurrentIndex(tab_index)
+            QTest.qWait(80)
+            tab_name = "-".join(tabs.tabText(tab_index).casefold().replace("/", " ").split())
+            captured[f"settings-{tab_index}"] = capture(
+                window, output, f"settings-{tab_name}", width, height)
 
         window.start_local_game()
         assert window.screen_stack.currentWidget() is window.game_page
+        for uci in ("e2e4", "e7e5", "g1f3", "b8c6"):
+            window.on_move_intent(chess.Move.from_uci(uci))
+        assert window.controller.ply == 4
         captured["active-game"] = capture(window, output, "active-game", width, height)
 
         navigate_to_games(window, selected_game_id)
@@ -552,7 +619,9 @@ def main() -> None:
         wait_review_workspace(window.review_workspace, selected_game_id)
         captured["game-review"] = capture(window, output, "game-review", width, height)
 
-        expected_count = 3 * len(target_sizes) + len(offline_sizes) + 7
+        # Settings are captured once per tab at the largest target size.
+        expected_count = (3 * len(target_sizes) + len(offline_sizes) + 9
+                          + tabs.count())
         assert len(captured) == expected_count, (
             f"Expected {expected_count} screenshot states, got {len(captured)}"
         )
@@ -583,7 +652,7 @@ def main() -> None:
         f"Logical targets: {target_sizes}\n"
         + "\n".join(details) + "\n",
         encoding="utf-8")
-    print(f"VIS5 native visual smoke: PASS ({len(captured)} strict synthetic states; "
+    print(f"VIS6 native visual smoke: PASS ({len(captured)} strict synthetic states; "
           f"logical targets {target_sizes}; actual window and pixel dimensions verified)")
 
 

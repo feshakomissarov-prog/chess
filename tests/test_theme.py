@@ -1,4 +1,4 @@
-from chess_coach.ui.theme import TOKENS, contrast_ratio, stylesheet
+from chess_coach.ui.theme import TOKENS, VISUAL_TOKENS, contrast_ratio, stylesheet
 
 
 def test_m46_theme_matches_approved_dark_tokens():
@@ -17,3 +17,10 @@ def test_primary_and_secondary_text_meet_normal_text_contrast_on_surfaces():
     for foreground in (TOKENS.text, TOKENS.secondary):
         for background in (TOKENS.app, TOKENS.sidebar, TOKENS.surface):
             assert contrast_ratio(foreground, background) >= 4.5
+
+
+def test_visual_master_styles_grouped_forms_as_cards():
+    css = stylesheet(VISUAL_TOKENS)
+    assert "QGroupBox { background: #191F30" in css
+    assert "border-radius: 14px" in css
+    assert "QGroupBox::title" in css

@@ -167,9 +167,11 @@ class AnalysisJobsStoreMixin:
 
     def lichess_analysis_backfill_next_eligible_at(self, account_id: str, *,
                                                     daily_limit: int = 25,
-                                                    force_retry: bool = False) -> str | None:
+                                                    force_retry: bool = False,
+                                                    enqueue: bool = True) -> str | None:
         """Return the durable earliest eligibility time for queued work, if any."""
-        self.enqueue_lichess_analysis_backfill(account_id)
+        if enqueue:
+            self.enqueue_lichess_analysis_backfill(account_id)
         if self.lichess_analysis_backfill_paused(account_id):
             return None
         now = datetime.now(timezone.utc)
@@ -294,21 +296,46 @@ class AnalysisJobsStoreMixin:
                 SUM(accuracy_status='queued' OR evals_status='queued' OR accuracy_status='running' OR evals_status='running') pending,
                 SUM(accuracy_checked_at IS NOT NULL OR evals_checked_at IS NOT NULL) checked,
                 MAX(MAX(COALESCE(accuracy_checked_at,''),COALESCE(evals_checked_at,''))) last_checked_at,
+                MAX(MAX(CASE WHEN accuracy_status IN ('has_data','partial','no_server_data')
+                             THEN COALESCE(accuracy_checked_at,'') ELSE '' END,
+                        CASE WHEN evals_status IN ('has_data','partial','no_server_data')
+                             THEN COALESCE(evals_checked_at,'') ELSE '' END)) last_success_at,
+                MAX(CASE WHEN attempts>0 THEN updated_at ELSE '' END) last_attempt_at,
                 MAX(updated_at) updated_at,
                 MIN(accuracy_next_retry_at) accuracy_retry_at,
-                MIN(evals_next_retry_at) evals_retry_at
+                MIN(evals_next_retry_at) evals_retry_at,
+                COUNT(DISTINCT CASE WHEN
+                    (accuracy_status IN ('no_server_data','partial','error','rate_limited','stale_line')
+                     AND accuracy_next_retry_at IS NOT NULL) OR
+                    (evals_status IN ('no_server_data','partial','error','rate_limited','stale_line')
+                     AND evals_next_retry_at IS NOT NULL)
+                    THEN game_id END) retry_waiting
               FROM lichess_analysis_backfill WHERE account_id=?
             """, (account_id,)).fetchone()
         summary = {key: row[key] for key in row.keys()} if row else {
             "total": 0, "accuracy": 0, "evals": 0, "no_data": 0,
             "errors": 0, "pending": 0, "checked": 0,
-            "updated_at": None, "accuracy_retry_at": None, "evals_retry_at": None}
+            "last_checked_at": None, "last_success_at": None, "last_attempt_at": None,
+            "updated_at": None,
+            "accuracy_retry_at": None, "evals_retry_at": None, "retry_waiting": 0}
         retry_values = [str(summary[key]) for key in ("accuracy_retry_at", "evals_retry_at")
                         if summary.get(key)]
         account_retry = self.lichess_analysis_retry_after(account_id)
         if account_retry:
             retry_values.append(str(account_retry))
         summary["retry_at"] = min(retry_values) if retry_values else None
+        with self._connection() as db:
+            budget = db.execute(
+                "SELECT utc_day,requests,paused,retry_after_at FROM "
+                "lichess_analysis_backfill_budget WHERE account_id=?", (account_id,)).fetchone()
+        today = datetime.now(timezone.utc).date().isoformat()
+        summary["requests_today"] = (int(budget["requests"] or 0)
+                                     if budget and budget["utc_day"] == today else 0)
+        summary["paused"] = bool(budget and budget["paused"])
+        summary["retry_after_at"] = (str(budget["retry_after_at"])
+                                      if budget and budget["retry_after_at"] else None)
+        summary["last_attempt_at"] = (str(summary["last_attempt_at"])
+                                       if summary.get("last_attempt_at") else None)
         return summary
 
     def lichess_analysis_backfill_state(self, account_id: str, game_id: str) -> dict | None:

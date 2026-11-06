@@ -87,8 +87,11 @@ def stylesheet(t: Theme = TOKENS) -> str:
     QListWidget::item {{ padding: 5px; }}
     QListWidget::item:hover {{ background: {t.hover}; }}
     QHeaderView::section {{ background: {t.raised}; color: {t.text}; border: 1px solid {t.border}; padding: 6px; }}
-    QGroupBox {{ border: 1px solid {t.border}; border-radius: 8px; margin-top: 10px; padding-top: 8px; }}
-    QGroupBox::title {{ subcontrol-origin: margin; left: 10px; padding: 0 4px; }}
+    QGroupBox {{ background: {t.surface}; border: 1px solid {t.border};
+        border-radius: {14 if t is VISUAL_TOKENS else 8}px;
+        margin-top: 12px; padding: 10px 10px 6px 10px; }}
+    QGroupBox::title {{ subcontrol-origin: margin; left: 12px; padding: 0 6px;
+        color: {t.secondary}; background: {t.app}; }}
     QTabWidget::pane {{ background: {t.surface}; border: 1px solid {t.border}; border-radius: 10px; top: -1px; }}
     QTabBar::tab {{ background: {t.raised}; color: {t.secondary}; border: 1px solid {t.border};
         border-top-left-radius: 8px; border-top-right-radius: 8px; padding: 9px 16px; min-height: 24px; }}

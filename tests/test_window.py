@@ -20,6 +20,8 @@ from chess_coach.lichess.session import LichessGameSession
 from chess_coach.lichess.repository import GameRepository
 from chess_coach.application.fair_play import playing_snapshot_allows_analysis as _batch_safety_from_games
 from chess_coach.ui.workspace_state import geometry_intersects_available, reposition_visible_frame
+from chess_coach.ui.analytics_dialogs import RatingTrendGraph
+from chess_coach.ui.theme import VISUAL_TOKENS
 
 
 @pytest.fixture(autouse=True)
@@ -269,6 +271,21 @@ def test_statistics_empty_states_and_account_action_are_truthful(qtbot, tmp_path
     assert not dialog.previous_page.isEnabled() and not dialog.next_page.isEnabled()
     dialog.close()
     repository.shutdown()
+
+
+def test_progress_rating_graph_renders_with_shared_visual_accent(qtbot):
+    graph = RatingTrendGraph([
+        {"rating": 1600, "game_id": "trend-a"},
+        {"rating": 1700, "game_id": "trend-b"},
+    ])
+    qtbot.addWidget(graph)
+    graph.resize(480, 180)
+    graph.show()
+    qtbot.wait(20)
+    image = graph.grab().toImage().convertToFormat(QImage.Format.Format_ARGB32)
+    target = QColor(VISUAL_TOKENS.success).rgba()
+    assert any(image.pixel(x, y) == target
+               for y in range(image.height()) for x in range(image.width()))
 
 
 def test_analysis_position_editor_open_action_fits_1280x720_viewport(qtbot, tmp_path):
@@ -4334,7 +4351,8 @@ def test_home_dashboard_refresh_is_background_and_drops_stale_generation(
     assert not release.is_set()
     window._refresh_home_dashboard()  # supersede generation one while it is in flight
     release.set()
-    qtbot.waitUntil(lambda: len(calls) == 2 and window._dashboard_thread is None,
+    qtbot.waitUntil(lambda: len(calls) == 2 and window._dashboard_thread is None
+                    and window._dashboard_preview_thread is None,
                     timeout=3000)
     assert all(value.text() == "новая" for value in window._dashboard_metric_values.values())
     window.close()
@@ -5007,6 +5025,57 @@ def test_backfill_wakeup_uses_persisted_due_time_not_cumulative_checked_count(qt
     window._lichess_backfill_wakeup()
     assert calls == []
     window.close()
+
+
+def test_ready_analytics_next_check_explains_pause_retry_and_daily_limit(qtbot, tmp_path):
+    from datetime import datetime, timedelta, timezone
+
+    window = MainWindow(QSettings(str(tmp_path / "analytics-next-check.ini"),
+                                  QSettings.Format.IniFormat), offline_mode=True)
+    qtbot.addWidget(window)
+    base = {"available": True, "daily_limit": 25,
+            "next_eligible_at": (datetime.now(timezone.utc) + timedelta(minutes=17)).isoformat(),
+            "summary": {"requests_today": 25, "retry_after_at": None, "retry_waiting": 1}}
+    try:
+        text = window._format_ready_analytics_next_check(
+            {**base, "paused": False}, account_id="lichess:synthetic", active_game=False,
+            active_operations=set())
+        assert "дневной лимит исчерпан" in text
+        assert "не ранее" in text
+
+        text = window._format_ready_analytics_next_check(
+            {**base, "paused": True}, account_id="lichess:synthetic", active_game=False,
+            active_operations=set())
+        assert "после снятия паузы" in text
+
+        text = window._format_ready_analytics_next_check(
+            {**base, "paused": False, "summary": {"requests_today": 0,
+             "retry_after_at": None, "retry_waiting": 1}},
+            account_id="lichess:synthetic", active_game=True, active_operations=set())
+        assert "после завершения активной партии" in text
+    finally:
+        window.close()
+
+
+def test_dashboard_preview_does_not_render_after_leaving_home(qtbot, tmp_path):
+    from chess_coach.application.dashboard import dashboard_preview_snapshot
+
+    window = MainWindow(QSettings(str(tmp_path / "dashboard-preview-route.ini"),
+                                  QSettings.Format.IniFormat), offline_mode=True)
+    qtbot.addWidget(window)
+    try:
+        qtbot.waitUntil(lambda: window._dashboard_thread is None, timeout=10000)
+        previous_snapshot = window._latest_dashboard_snapshot
+        generation = window.dashboard_queries.begin_request()
+        snapshot = dashboard_preview_snapshot(window.game_repository)
+        window._dashboard_metric_values["games"].setText("route sentinel")
+        window._screen_mode = "play"
+        window.screen_stack.setCurrentWidget(window.play_page)
+        window._dashboard_preview_result_ready(generation, snapshot, None, None)
+        assert window._dashboard_metric_values["games"].text() == "route sentinel"
+        assert window._latest_dashboard_snapshot is previous_snapshot
+    finally:
+        window.close()
 
 
 def test_analytics_stream_ready_is_ignored_for_offline_or_stale_auth(qtbot, tmp_path):
@@ -6236,4 +6305,93 @@ def test_home_shows_local_archive_preview_while_full_dashboard_aggregate_is_pend
     finally:
         release_aggregate.set()
         qtbot.waitUntil(lambda: window._dashboard_thread is None, timeout=15000)
+        window.close()
+
+
+def test_home_account_switch_preview_is_not_queued_behind_old_full_snapshot(
+        qtbot, tmp_path, monkeypatch):
+    """A stalled source aggregate for A must not hide B's committed game list."""
+    import threading
+    from time import monotonic
+    from concurrent.futures import ThreadPoolExecutor
+    from chess_coach.bootstrap import create_runtime
+
+    runtime = create_runtime(offline_mode=True)
+    window = MainWindow(runtime=runtime)
+    qtbot.addWidget(window)
+    qtbot.waitUntil(lambda: window._dashboard_thread is None, timeout=10000)
+    repo = runtime.repository
+    repo._writer = ThreadPoolExecutor(max_workers=1, thread_name_prefix="preview-test-writer")
+    account_a = repo.ensure_archive_account("preview-a")
+    account_b = repo.ensure_archive_account("preview-b")
+    with repo._connection() as db:
+        db.executemany(
+            "INSERT INTO games(game_id,initial_fen,moves,color,opponent,rated,clock,status,winner,"
+            "updated_at,pgn,started_at,game_time_precision) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            [(f"large-preview-{i}", "startpos", "", "white", f"Opponent {i}", 0,
+              "3+2", "resign", "white", f"2026-11-{i % 28 + 1:02d}T12:00:00Z", "",
+              f"2026-11-{i % 28 + 1:02d}T12:00:00Z", "timestamp")
+             for i in range(3500)])
+        db.executemany(
+            "INSERT INTO account_games(account_id,game_id,remote_id,imported_at,color,opponent) "
+            "VALUES (?,?,?,?,?,?)",
+            [(account_b, f"large-preview-{i}", f"remote-{i}",
+              "2026-11-06T12:00:00Z", "white", f"Opponent {i}")
+             for i in range(3500)])
+
+    old_started, release_old = threading.Event(), threading.Event()
+    writer_started, release_writer = threading.Event(), threading.Event()
+    original_snapshot = window.dashboard_queries.snapshot
+
+    def slow_writer_barrier():
+        writer_started.set()
+        assert release_writer.wait(15), "test must release queued SQLite writer"
+
+    def stalled_snapshot(*, account_id, clock, query=None):
+        if account_id == account_a:
+            old_started.set()
+            assert release_old.wait(15), "test must release the stale account aggregate"
+        return original_snapshot(account_id=account_id, clock=clock, query=query)
+
+    monkeypatch.setattr(window.dashboard_queries, "snapshot", stalled_snapshot)
+    try:
+        repo._submit_writer(slow_writer_barrier)
+        assert writer_started.wait(3), "queued SQLite writer should be active before account switch"
+        window.dashboard_account.addItem("preview-a", account_a)
+        window.dashboard_account.addItem("preview-b", account_b)
+        window.dashboard_account.setCurrentIndex(window.dashboard_account.findData(account_a))
+        window._refresh_home_dashboard()
+        qtbot.waitUntil(old_started.is_set, timeout=3000)
+
+        window._home_view.select_profile(account_b, notify=False)
+        window._clear_dashboard_scope("Загружаем данные выбранного аккаунта…")
+        assert window._dashboard_metric_values["games"].text() != "0"
+        started = monotonic()
+        window._refresh_home_dashboard()
+        qtbot.waitUntil(lambda: window._dashboard_metric_values["games"].text() == "3500",
+                        timeout=2_000)
+        assert monotonic() - started < 2.0
+        assert window.dashboard_account.currentData() == account_b
+        assert window._latest_dashboard_snapshot["filter"]["account_id"] == account_b
+        assert not release_old.is_set()
+    finally:
+        release_writer.set()
+        release_old.set()
+        qtbot.waitUntil(lambda: not (window._dashboard_thread and
+                                     window._dashboard_thread.is_alive())
+                        and not (getattr(window, "_dashboard_preview_thread", None)
+                                 and window._dashboard_preview_thread.is_alive()),
+                        timeout=20000)
+        window.close()
+
+
+def test_dashboard_scope_loading_never_reports_a_false_zero(qtbot, tmp_path):
+    window = MainWindow(QSettings(str(tmp_path / "dashboard-loading.ini"),
+                                  QSettings.Format.IniFormat), offline_mode=True)
+    qtbot.addWidget(window)
+    try:
+        window._clear_dashboard_scope("Загружаем данные выбранного аккаунта…")
+        assert window._dashboard_metric_values["games"].text() in {"—", "Загружаем…"}
+        assert "загружа" in window._dashboard_metric_details["games"].text().casefold()
+    finally:
         window.close()

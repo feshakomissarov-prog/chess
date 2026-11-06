@@ -274,7 +274,17 @@ def test_background_operations_page_renders_shared_registry_and_pause_state(qtbo
     assert page.pause_button.text() == "Возобновить Lichess"
     assert not page.manual_check_button.isEnabled()
     assert "Retry-After" in page.retry_status.text()
-    assert page.retry_status.isHidden()
+    assert not page.retry_status.isHidden()
+    due = "Следующая проверка не ранее 07.11.2026 18:30 (Retry-After)"
+    detail = ("Проверено 4/12 · точность 3 · с оценками 2 · нет анализа 1 · ошибки 1 · повтор 1\n"
+              + due)
+    tooltip = detail + "\nПоследняя попытка: 07.11.2026 · источник: JSON export"
+    page.set_snapshot((), source_summary="Источник: JSON export",
+                      backfill_paused=False, can_check=True, can_pause=True,
+                      workflows={"ready": detail},
+                      workflow_tooltips={"ready": tooltip})
+    assert due in page.workflow_status["ready"].text()
+    assert "Последняя попытка" in page.workflow_status["ready"].toolTip()
     assert page.recent_events.minimumHeight() >= 84
 
 

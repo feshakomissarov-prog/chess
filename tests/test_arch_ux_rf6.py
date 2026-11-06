@@ -239,7 +239,7 @@ def test_new_account_home_scope_never_falls_back_to_all_accounts(qtbot, tmp_path
 
     assert window.dashboard_account.currentData() == "lichess:syntheticb"
     assert window._latest_dashboard_snapshot is None
-    assert window._dashboard_metric_values["games"].text() in {"0", "н/д"}
+    assert window._dashboard_metric_values["games"].text() in {"—", "0", "н/д"}
     qtbot.waitUntil(lambda: window._dashboard_thread is None, timeout=5000)
     qtbot.wait(30)
     assert window._latest_dashboard_snapshot is not None

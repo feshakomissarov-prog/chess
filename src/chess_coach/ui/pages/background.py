@@ -29,10 +29,18 @@ class BackgroundOperationsPage(QWidget):
         self.summary.setWordWrap(True)
         self.summary.setStyleSheet("font-size: 19px; font-weight: 700;")
         controls.addWidget(self.summary, 1)
+        self.pause_button = QPushButton("Приостановить Lichess")
+        self.pause_button.clicked.connect(
+            lambda: self.pause_requested.emit(not self._paused))
+        self.refresh_button = QPushButton("Обновить статус")
+        self.refresh_button.clicked.connect(self.refresh_requested.emit)
+        controls.addWidget(self.pause_button)
+        controls.addWidget(self.refresh_button)
         root.addWidget(banner)
         self.workflow_status = {}
         self.workflow_badges = {}
         self.workflow_progress = {}
+        self._workflow_rows = {}
         self._workflow_cards = []
         for key, glyph, caption in (
                 ("archive", "⟳", "Синхронизация партий Lichess"),
@@ -41,7 +49,7 @@ class BackgroundOperationsPage(QWidget):
                 ("stockfish", "♞", "Фоновый Stockfish")):
             card = QFrame()
             card.setObjectName("metricCard")
-            card.setMinimumHeight(100)
+            card.setMinimumHeight(112)
             row = QHBoxLayout(card)
             row.setContentsMargins(18, 11, 18, 11)
             icon = QLabel(glyph)
@@ -64,7 +72,19 @@ class BackgroundOperationsPage(QWidget):
             badge.setMinimumWidth(95)
             badge.setMaximumHeight(34)
             row.addWidget(badge)
-            row.addWidget(detail, 6)
+            detail_column = QVBoxLayout()
+            detail_column.setSpacing(6)
+            detail_column.addWidget(detail, 1)
+            if key == "ready":
+                self.manual_check_button = QPushButton("Проверить сейчас")
+                self.manual_check_button.setObjectName("secondaryAction")
+                self.manual_check_button.clicked.connect(self.manual_check_requested.emit)
+                detail_column.addWidget(self.manual_check_button, 0, Qt.AlignmentFlag.AlignLeft)
+            elif key == "stockfish":
+                self.batch_button = QPushButton("Очередь Stockfish")
+                self.batch_button.clicked.connect(self.batch_requested.emit)
+                detail_column.addWidget(self.batch_button, 0, Qt.AlignmentFlag.AlignLeft)
+            row.addLayout(detail_column, 6)
             bar = QProgressBar()
             bar.setAccessibleName(f"{caption} · прогресс")
             bar.setMaximumWidth(220)
@@ -78,6 +98,7 @@ class BackgroundOperationsPage(QWidget):
             self.workflow_status[key] = detail
             self.workflow_badges[key] = badge
             self.workflow_progress[key] = bar
+            self._workflow_rows[key] = row
         self.details_toggle = QPushButton("Диагностика операций")
         self.details_toggle.setCheckable(True)
         self.operation_list = QListWidget()
@@ -113,19 +134,6 @@ class BackgroundOperationsPage(QWidget):
         self.retry_status.setObjectName("secondary")
         self.retry_status.hide()
         root.addWidget(self.retry_status)
-        self.pause_button = QPushButton("Приостановить Lichess")
-        self.pause_button.clicked.connect(
-            lambda: self.pause_requested.emit(not self._paused))
-        self.manual_check_button = QPushButton("Проверить готовые данные")
-        self.manual_check_button.clicked.connect(self.manual_check_requested.emit)
-        self.refresh_button = QPushButton("Обновить статус")
-        self.refresh_button.clicked.connect(self.refresh_requested.emit)
-        controls.addWidget(self.pause_button)
-        controls.addWidget(self.manual_check_button)
-        controls.addWidget(self.refresh_button)
-        self.batch_button = QPushButton("Очередь Stockfish")
-        self.batch_button.clicked.connect(self.batch_requested.emit)
-        controls.addWidget(self.batch_button)
         root.addStretch(1)
         self.close_button = QPushButton("Назад")
         self.close_button.clicked.connect(self.close_requested.emit)
@@ -140,7 +148,7 @@ class BackgroundOperationsPage(QWidget):
         self.summary.setStyleSheet(
             f"font-size: {16 if compact else 19}px; font-weight: 700;")
         for card, icon, title in self._workflow_cards:
-            card.setMinimumHeight(76 if compact else 92)
+            card.setMinimumHeight(94 if compact else 112)
             icon.setFixedSize(36 if compact else 43, 36 if compact else 43)
             icon.setStyleSheet(
                 "background: #39365E; color: #C8BBFF; border-radius: 10px; "
@@ -157,7 +165,7 @@ class BackgroundOperationsPage(QWidget):
                      backfill_paused: bool, can_check: bool, can_pause: bool,
                      retry_status: str = "", durable_statuses=(),
                      local_metrics_status: str | None = None, workflows=None, progress=None,
-                     recent_events=(), states=None) -> None:
+                     recent_events=(), states=None, workflow_tooltips=None) -> None:
         self.recent_events.clear()
         self.recent_events.addItems(list(recent_events) or ["Нет сохранённых событий."])
         durable_statuses = tuple(durable_statuses)
@@ -196,6 +204,7 @@ class BackgroundOperationsPage(QWidget):
             else "Сейчас активных задач нет")
         for key, label in self.workflow_status.items():
             label.setText((workflows or {}).get(key) or "Состояние не подтверждено.")
+            label.setToolTip((workflow_tooltips or {}).get(key, ""))
             state = (states or {}).get(key, "Ожидает")
             self.set_workflow_state(key, state)
             bar = self.workflow_progress[key]
@@ -210,6 +219,10 @@ class BackgroundOperationsPage(QWidget):
                 bar.setValue(max(0, min(done, total)))
         self.source_summary.setText(source_summary)
         self.retry_status.setText(retry_status)
+        self.retry_status.setVisible(bool(retry_status.strip()))
+        self.retry_status.setStyleSheet(
+            "background: #232B3E; border: 1px solid #303950; border-radius: 10px; "
+            "padding: 10px 14px; color: #D5D9E5;")
         self._paused = bool(backfill_paused)
         self.pause_button.setText("Возобновить Lichess" if self._paused
                                   else "Приостановить Lichess")

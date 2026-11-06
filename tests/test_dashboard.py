@@ -150,6 +150,34 @@ def test_dashboard_preview_returns_committed_local_rows_without_waiting_for_queu
         repo.shutdown()
 
 
+def test_dashboard_preview_uses_current_official_then_local_accuracy_without_loading_all_games(
+        tmp_path):
+    repo = GameRepository(tmp_path / "dashboard-preview-accuracy.sqlite3")
+    try:
+        account_id = repo.ensure_archive_account("preview-accuracy")
+        _save_scored(repo, "preview-official", "stockfish")
+        _save_scored(repo, "preview-local", "stockfish")
+        with repo._connection() as db:
+            db.execute("UPDATE games SET source='lichess_archive',source_game_id='remote-1',"
+                       "lichess_accuracy_white=82.5 WHERE game_id='preview-official'")
+            db.executemany("INSERT INTO account_games(account_id,game_id,remote_id,imported_at,color) "
+                           "VALUES (?,?,?,'fixture','white')",
+                           [(account_id, game_id, f"remote-{index}")
+                            for index, game_id in enumerate(("preview-official", "preview-local"))])
+        repo.materialize_game_accuracy_batch()
+        preview = dashboard_preview_snapshot(repo, account_id=account_id)
+        full = dashboard_snapshot(repo, account_id=account_id, wait_for_writes=False)
+        preview_accuracy = next(row for row in preview["metrics"] if row["key"] == "accuracy")
+        full_accuracy = next(row for row in full["metrics"] if row["key"] == "accuracy")
+        assert preview_accuracy["value"] == full_accuracy["value"]
+        assert preview_accuracy["detail"].replace(" · ", "\n") == full_accuracy["detail"]
+        assert preview_accuracy["value"] != "—"
+        assert all(game["review_metrics"]["status"] == "loading"
+                   for game in preview["recent_games"])
+    finally:
+        repo.shutdown()
+
+
 def test_dashboard_snapshot_can_read_committed_data_without_waiting_for_writer_queue(tmp_path):
     repo = GameRepository(tmp_path / "dashboard-nonblocking.sqlite3")
     try:

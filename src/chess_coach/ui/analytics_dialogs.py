@@ -21,6 +21,7 @@ from .dialog_support import _clock_filter_sort_key, _game_date_label, _result_la
 from .display import (format_clock_control, game_opening_name, opening_tooltip,
                       russian_opening_name, source_short)
 from .statistics_workers import StatisticsWorkerHub
+from .theme import VISUAL_TOKENS
 
 
 class EvaluationGraph(QWidget):
@@ -144,10 +145,12 @@ class RatingTrendGraph(QWidget):
 
     def paintEvent(self, _event) -> None:
         painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
         rect = self.rect().adjusted(42, 12, -12, -28)
-        painter.setPen(QPen(QColor("#777777"), 1))
+        painter.setPen(QPen(QColor(VISUAL_TOKENS.border), 1))
         painter.drawRect(rect)
         if not self.points:
+            painter.setPen(QColor(VISUAL_TOKENS.muted))
             painter.drawText(rect, Qt.AlignmentFlag.AlignCenter, "Нет рейтинговых точек")
             return
         ratings = [int(item["rating"]) for item in self.points]
@@ -159,13 +162,13 @@ class RatingTrendGraph(QWidget):
             x = rect.left() + int(rect.width() * index / max(1, len(ratings) - 1))
             y = rect.bottom() - int(rect.height() * (rating - low) / max(1, high - low))
             coords.append((x, y))
-        painter.setPen(QPen(QColor("#315f9b"), 2))
+        painter.setPen(QPen(QColor(VISUAL_TOKENS.success), 2))
         for first, second in zip(coords, coords[1:]):
             painter.drawLine(*first, *second)
-        painter.setBrush(QColor("#315f9b"))
+        painter.setBrush(QColor(VISUAL_TOKENS.success))
         for x, y in coords:
             painter.drawEllipse(x - 3, y - 3, 6, 6)
-        painter.setPen(QPen(QColor("#555555"), 1))
+        painter.setPen(QPen(QColor(VISUAL_TOKENS.secondary), 1))
         painter.drawText(2, rect.top() + 8, str(maximum))
         painter.drawText(2, rect.bottom(), str(minimum))
 

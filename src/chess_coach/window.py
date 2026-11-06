@@ -68,7 +68,7 @@ from .application.app_state import ReviewResumeTarget, WorkspaceSnapshot, Worksp
 from .application.game_sessions import GameSessionCoordinator
 from .application.game_finalization import GameFinalizationCoordinator, FinalizationPhase
 from .application.routes import WorkspaceNavigator, WorkspaceRoute
-from .application.background_work import OperationLane
+from .application.background_work import OperationHandle, OperationLane
 from .application.fair_play import playing_snapshot_allows_analysis
 from .application.archive_sync import ArchiveSyncCoordinator
 from .application.library import GameLibraryQueryCoordinator
@@ -359,7 +359,7 @@ class MainWindow(QMainWindow):
     position_eval_finished = Signal(int, object, object)
     position_eval_update = Signal(int, object)
     dashboard_finished = Signal(int, object, object, object)
-    dashboard_preview_ready = Signal(int, object)
+    dashboard_preview_ready = Signal(int, object, object, object)
     library_query_finished = Signal(int, object, object)
     library_target_finished = Signal(int, str, object, object)
     library_detail_finished = Signal(int, str, object, object)
@@ -514,6 +514,10 @@ class MainWindow(QMainWindow):
         self._statistics_options_handle = None
         self._statistics_hub_connected = False
         self._dashboard_thread: threading.Thread | None = None
+        self._dashboard_full_rendered_generation: int | None = None
+        self._dashboard_preview_thread: OperationHandle | None = None
+        self._dashboard_preview_stop: threading.Event | None = None
+        self._dashboard_preview_pending: tuple[int, str | None, str | None] | None = None
         self._position_eval_generation = 0
         self._position_eval_thread: threading.Thread | None = None
         self._position_eval_stop: threading.Event | None = None
@@ -1041,6 +1045,13 @@ class MainWindow(QMainWindow):
         if not self._accept_backfill_status(generation, username):
             return
         self.lichess_analysis_status.setText(f"Lichess · фоновая аналитика: {done}/{total} партий")
+        page = getattr(self, "_background_operations_page", None)
+        if page is not None and self.screen_stack.currentWidget() is page:
+            page.summary.setText("Сейчас: проверка готовой аналитики Lichess")
+            page.set_workflow_state("ready", "Идёт")
+            page.workflow_status["ready"].setText(
+                f"Проверено в этой порции: {done} из {total} партий · "
+                "источник: JSON export Lichess. Следующий статус обновится после порции.")
 
     def _accept_backfill_status(self, generation: int, username: str) -> bool:
         return bool(self._current_lichess_generation(generation) and self.lichess
@@ -1109,6 +1120,9 @@ class MainWindow(QMainWindow):
             "Локальные оценки Stockfish хранятся отдельно.")
         if not self._shutdown_requested and self._screen_mode == "home":
             self.refresh()
+        page = getattr(self, "_background_operations_page", None)
+        if page is not None and self.screen_stack.currentWidget() is page:
+            self._refresh_background_operations_page()
         if "человеческая/неизвестная активная партия" in state:
             self._backfill_deferred_for_live_game = True
             self._cancel_lichess_backfill_wakeup()
@@ -1203,6 +1217,13 @@ class MainWindow(QMainWindow):
                 puzzles = repository.puzzle_sync_state(account_id) if account_id else {}
                 summary = (repository.lichess_analysis_backfill_summary(account_id)
                            if account_id else {})
+                daily_limit = self.settings.value(
+                    "lichess/ready_analytics_daily_limit", 25, type=int)
+                next_eligible_at = (
+                    repository.lichess_analysis_backfill_next_eligible_at(
+                        account_id, daily_limit=daily_limit, enqueue=False)
+                    if account_id and hasattr(
+                        repository, "lichess_analysis_backfill_next_eligible_at") else None)
                 metric_status = repository.analysis_metrics_migration_status(
                     account_id=str(metric_scope) if metric_scope else None)
                 jobs = (repository.analysis_job_counts(engine_version=engine_key,
@@ -1223,6 +1244,7 @@ class MainWindow(QMainWindow):
                     "archive": archive, "puzzles": puzzles, "summary": summary,
                     "paused": paused, "operations": operations, "jobs": jobs, "last_job": last_job,
                     "metric_scope": metric_scope, "metric_status": metric_status, "unqueued": unqueued,
+                    "next_eligible_at": next_eligible_at, "daily_limit": daily_limit,
                 })
             except Exception as exc:
                 if not stop_event.is_set():
@@ -1303,7 +1325,8 @@ class MainWindow(QMainWindow):
                 "Chess Coach не запрашивает создание серверного анализа."
                 if account_id else
                 "Lichess не подключён; локальные фоновые задачи могут работать отдельно.")
-            retry = (f"Следующая разрешённая попытка: {summary['retry_at']}"
+            retry = (f"Следующая разрешённая попытка: "
+                     f"{format_game_date(summary['retry_at'], precision='timestamp')}"
                      if summary.get("retry_at") else
                      "Ограничение запросов Lichess и Retry-After учитываются сервисом."
                      if summary.get("errors") else "")
@@ -1333,6 +1356,28 @@ class MainWindow(QMainWindow):
             active_operations = {operation.context.kind for operation in payload.get("operations", ())
                                  if operation.context is not None and operation.status.value == "running"}
 
+            next_check = self._format_ready_analytics_next_check(
+                payload, account_id=account_id, active_game=active_game,
+                active_operations=active_operations)
+            last_attempt = format_game_date(summary.get("last_attempt_at"), precision="timestamp")
+            last_success = format_game_date(summary.get("last_success_at"), precision="timestamp")
+            ready_counts = (
+                f"Проверено {summary.get('checked', 0)}/{summary.get('total', 0)} · "
+                f"точность {summary.get('accuracy', 0)} · с оценками {summary.get('evals', 0)} · "
+                f"нет анализа {summary.get('no_data', 0)} · ошибки {summary.get('errors', 0)} · "
+                f"повтор {summary.get('retry_waiting', 0)}")
+            ready_detail = (
+                f"{ready_counts}\n{next_check}\n"
+                f"Попытка: {last_attempt} · данные получены: {last_success} · "
+                f"запросы сегодня: {summary.get('requests_today', 0)}/"
+                f"{payload.get('daily_limit', 25)} · до 10 партий за запуск")
+            ready_tooltip = (
+                f"{ready_counts}\nПоследняя попытка: {last_attempt}\n"
+                f"Последние данные получены: {last_success}\n{next_check}\n"
+                f"Запросов сегодня: {summary.get('requests_today', 0)}/"
+                f"{payload.get('daily_limit', 25)}. Источник: документированный JSON export Lichess. "
+                "Локальный Stockfish хранится отдельно; создание серверного анализа не запрашивается.")
+
             def state(kind: str, *, error=False, complete=False, paused=False) -> str:
                 if active_game:
                     return "Пауза из-за игры"
@@ -1354,7 +1399,7 @@ class MainWindow(QMainWindow):
                     "archive": (f"Сохранено партий: {archive.get('imported_count', 0)} · {archive_phase}\n"
                                 f"Последнее успешное обновление: {archive_last}{archive_problem}"
                                 if account_id else "Аккаунт Lichess не выбран."),
-                    "ready": source_summary,
+                    "ready": ready_detail if account_id else source_summary,
                     "puzzles": (f"Сохранено попыток: {puzzles.get('imported_count', 0)} · {puzzle_phase}\n"
                                  f"Последнее успешное обновление: {puzzle_last}{puzzle_problem}"
                                  if account_id else "Аккаунт Lichess не выбран."),
@@ -1365,6 +1410,7 @@ class MainWindow(QMainWindow):
                                   else "Нет сохранённых заданий для текущего профиля."),
                 },
                 recent_events=recent_events,
+                workflow_tooltips={"ready": ready_tooltip},
                 states={
                     "archive": state("lichess_archive_sync", error=bool(archive.get("last_error")),
                                      complete=bool(archive.get("backfill_complete"))),
@@ -1378,11 +1424,60 @@ class MainWindow(QMainWindow):
                     "stockfish": state("stockfish_batch_analysis", error=bool(failed),
                                        paused=bool(jobs.get("paused")), complete=bool(complete and not remaining)),
                 },
-                progress={"ready": (summary.get("checked", 0), summary.get("total", 0)),
+                progress={"ready": (0, 0),
                           "stockfish": (complete, complete + remaining + failed)})
             if self._batch_position_progress and self._batch_position_progress[:2] == (
                     account_id, self._analysis_session_generation):
                 self._show_batch_live_progress(*self._batch_position_progress)
+
+    def _format_ready_analytics_next_check(self, payload: dict, *, account_id: str | None,
+                                           active_game: bool,
+                                           active_operations: set[str]) -> str:
+        if not account_id:
+            return "Следующая проверка: подключите Lichess"
+        if not payload.get("available"):
+            return "Следующая проверка: после восстановления игрового потока Lichess"
+        if payload.get("paused") or self.settings.value(
+                "lichess/ready_analytics_paused", False, type=bool):
+            return "Следующая проверка: после снятия паузы"
+        if not self.settings.value("lichess/auto_ready_analytics", True, type=bool):
+            return "Следующая проверка: автоматическая проверка выключена"
+        if active_game:
+            return "Следующая проверка: после завершения активной партии"
+        if "lichess_analysis_backfill" in active_operations:
+            return "Сейчас проверяются партии (не более 10 за запуск)"
+        eligible = payload.get("next_eligible_at")
+        if not eligible:
+            return "Следующая проверка: очередь пуста или серверных данных больше не ожидается"
+        try:
+            due = datetime.fromisoformat(str(eligible).replace("Z", "+00:00"))
+            if due.tzinfo is None:
+                raise ValueError("timezone is required")
+        except (TypeError, ValueError, OverflowError):
+            return "Следующая проверка: время повтора неизвестно; обновите статус"
+        now = datetime.now(timezone.utc)
+        retry_after = payload.get("summary", {}).get("retry_after_at")
+        try:
+            server_retry = datetime.fromisoformat(str(retry_after).replace("Z", "+00:00"))
+            retry_limited = server_retry.tzinfo is not None and server_retry > now
+        except (TypeError, ValueError, OverflowError):
+            retry_limited = False
+        summary = payload.get("summary", {})
+        limit = int(payload.get("daily_limit", 25))
+        used = int(summary.get("requests_today", 0))
+        reason = ("дневной лимит исчерпан" if used >= limit else
+                  "ожидается Retry-After Lichess" if retry_limited else
+                  "ожидается срок повтора отдельных партий" if summary.get("retry_waiting") else
+                  "плановая дозагрузка")
+        if due <= now:
+            timer = getattr(self, "_backfill_wakeup_timer", None)
+            if timer is not None and timer.isActive():
+                due = now + timedelta(milliseconds=timer.remainingTime())
+                reason = "планировщик соблюдает паузу между порциями"
+            else:
+                return f"Следующая проверка: готова к запуску ({reason})"
+        return (f"Следующая проверка не ранее {format_game_date(due.isoformat(), precision='timestamp')} "
+                f"({reason})")
 
     @staticmethod
     def _format_legacy_metrics_status(status: dict) -> str:
@@ -2801,18 +2896,56 @@ class MainWindow(QMainWindow):
                         break
         clock = None
         generation = self.dashboard_queries.begin_request()
+        self._dashboard_full_rendered_generation = None
         for detail in self._dashboard_metric_details.values():
             if detail.text() in {"Локальные данные", "Обновляем локальную сводку…"}:
                 detail.setText("Обновляем локальную сводку…")
+        self._request_dashboard_preview(generation, account_id, clock)
         if self._dashboard_thread is not None and self._dashboard_thread.is_alive():
             self.dashboard_queries.defer((generation, account_id, clock))
             return
         self._launch_dashboard_snapshot(generation, account_id, clock)
 
+    def _request_dashboard_preview(self, generation: int, account_id: str | None,
+                                   clock: str | None) -> None:
+        """Run the small local Home read independently of a slow aggregate."""
+        thread = self._dashboard_preview_thread
+        if thread is not None and thread.is_alive():
+            self._dashboard_preview_pending = (generation, account_id, clock)
+            if self._dashboard_preview_stop is not None:
+                self._dashboard_preview_stop.set()
+            return
+        stop_event = threading.Event()
+        self._dashboard_preview_stop = stop_event
+
+        handle_ref: list[object] = []
+
+        def work():
+            preview: dict = {"_preview_cancelled": True}
+            try:
+                preview = dashboard_preview_snapshot(
+                    self.game_repository, account_id=account_id, clock=clock,
+                    stop_event=stop_event)
+                if not self._dashboard_options_loaded:
+                    preview["_selector_options"] = dashboard_options(self.game_repository)
+            except Exception as exc:
+                preview = ({"_preview_cancelled": True} if stop_event.is_set()
+                           else {"_preview_error": type(exc).__name__})
+            if stop_event.is_set():
+                preview = {"_preview_cancelled": True}
+            self.dashboard_preview_ready.emit(
+                generation, preview, threading.current_thread(), handle_ref[0])
+
+        handle = self._start_registered_work(
+            work, kind="dashboard_preview_read", lane=OperationLane.INTERACTIVE,
+            thread_name="chess-coach-dashboard-preview")
+        handle_ref.append(handle)
+        self._dashboard_preview_thread = handle
+
     def _clear_dashboard_scope(self, message: str) -> None:
         """Immediately remove previous-account dashboard values during a switch."""
         for key, value in self._dashboard_metric_values.items():
-            value.setText("0" if key == "games" else "н/д")
+            value.setText("—")
         for detail in self._dashboard_metric_details.values():
             detail.setText(message)
             detail.setToolTip("")
@@ -2832,11 +2965,6 @@ class MainWindow(QMainWindow):
                                    clock: str | None) -> None:
         def work():
             try:
-                preview = dashboard_preview_snapshot(
-                    self.game_repository, account_id=account_id, clock=clock)
-                if not self._dashboard_options_loaded:
-                    preview["_selector_options"] = dashboard_options(self.game_repository)
-                self.dashboard_preview_ready.emit(generation, preview)
                 result = self.dashboard_queries.snapshot(
                     account_id=account_id, clock=clock, query=dashboard_snapshot)
                 if not self._dashboard_options_loaded:
@@ -2850,18 +2978,52 @@ class MainWindow(QMainWindow):
             thread_name="chess-coach-dashboard-read")
         self._dashboard_thread = thread
 
-    def _dashboard_preview_result_ready(self, generation: int, snapshot: object) -> None:
+    def _dashboard_preview_result_ready(self, generation: int, snapshot: object,
+                                        thread: object, handle: object) -> None:
         """Render the bounded committed local rows while aggregate work continues."""
+        if isinstance(thread, threading.Thread):
+            thread.join(timeout=0.05)
+            if thread.is_alive():
+                QTimer.singleShot(10, lambda: self._dashboard_preview_result_ready(
+                    generation, snapshot, thread, handle))
+                return
+        if self._dashboard_preview_thread is handle:
+            self._dashboard_preview_thread = None
+            self._dashboard_preview_stop = None
         if (self._shutdown_requested or not self.dashboard_queries.is_current(generation)
                 or not isinstance(snapshot, dict)):
+            self._launch_pending_dashboard_preview()
+            return
+        if snapshot.get("_preview_cancelled"):
+            self._launch_pending_dashboard_preview()
+            return
+        if self._screen_mode != "home" or self.screen_stack.currentWidget() is not self.home_page:
+            self._dashboard_preview_pending = None
+            return
+        if snapshot.get("_preview_error"):
+            self._launch_pending_dashboard_preview()
             return
         selector_options = snapshot.get("_selector_options")
         if isinstance(selector_options, dict):
             self._home_view.set_selector_options(selector_options)
             self._dashboard_options_loaded = True
         if self.dashboard_account.currentData() != snapshot.get("filter", {}).get("account_id"):
+            self._launch_pending_dashboard_preview()
+            return
+        if self._dashboard_full_rendered_generation == generation:
+            self._launch_pending_dashboard_preview()
             return
         self._render_dashboard_snapshot(snapshot)
+        self._launch_pending_dashboard_preview()
+
+    def _launch_pending_dashboard_preview(self) -> None:
+        pending, self._dashboard_preview_pending = self._dashboard_preview_pending, None
+        if (pending is not None and not self._shutdown_requested
+                and self._screen_mode == "home"
+                and self.screen_stack.currentWidget() is self.home_page):
+            generation, account_id, clock = pending
+            if self.dashboard_queries.is_current(generation):
+                self._request_dashboard_preview(generation, account_id, clock)
 
     def _dashboard_result_ready(self, generation: int, snapshot: object, error: object,
                                 thread: object) -> None:
@@ -2893,6 +3055,7 @@ class MainWindow(QMainWindow):
                         != snapshot.get("filter", {}).get("account_id")):
                     self._refresh_home_dashboard()
                 else:
+                    self._dashboard_full_rendered_generation = generation
                     self._render_dashboard_snapshot(snapshot)
         pending = self.dashboard_queries.take_pending()
         if pending is not None and not self._shutdown_requested:
@@ -2941,7 +3104,7 @@ class MainWindow(QMainWindow):
             self._dashboard_metric_values[metric["key"]].setText(
                 "скрыто" if masked else metric["value"])
             detail_text = str(metric["detail"])
-            if preview and metric["key"] != "games":
+            if preview and metric["key"] not in {"games", "accuracy"}:
                 self._dashboard_metric_values[metric["key"]].setText("—")
                 self._dashboard_metric_details[metric["key"]].setText(detail_text)
                 self._dashboard_metric_values[metric["key"]].setToolTip(detail_text)
@@ -8186,6 +8349,16 @@ class MainWindow(QMainWindow):
         dashboard_running = bool(dashboard_thread and dashboard_thread.is_alive())
         if not dashboard_running:
             self._dashboard_thread = None
+        dashboard_preview_thread = self._dashboard_preview_thread
+        if dashboard_preview_thread is not None and dashboard_preview_thread.is_alive():
+            if self._dashboard_preview_stop is not None:
+                self._dashboard_preview_stop.set()
+        if dashboard_preview_thread is not None and dashboard_preview_thread.is_alive():
+            dashboard_preview_thread.join(timeout=0.5)
+        dashboard_preview_running = bool(
+            dashboard_preview_thread and dashboard_preview_thread.is_alive())
+        if not dashboard_preview_running:
+            self._dashboard_preview_thread = None
         if analysis_running or batch_running:
             if self._analysis_shutdown_deadline is None:
                 self._analysis_shutdown_deadline = time.monotonic() + 10.0
@@ -8222,7 +8395,7 @@ class MainWindow(QMainWindow):
         # has observed and released that child, even if state() already says stopped.
         engine_probes_stopped = not self._engine_probe_processes
         if (not workers_stopped or not analysis_stopped or not batch_stopped or not install_stopped
-                or not statistics_stopped or dashboard_running
+                or not statistics_stopped or dashboard_running or dashboard_preview_running
                 or not engine_probes_stopped or self.game_repository.has_pending_writes()):
             event.ignore()
             self.home_status.setText(

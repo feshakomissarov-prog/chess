@@ -194,6 +194,39 @@ def test_backfill_due_facets_are_independent_and_cooldown_is_preserved(tmp_path)
     repository.shutdown()
 
 
+def test_backfill_summary_exposes_attempt_success_retry_and_daily_budget(tmp_path):
+    from datetime import datetime, timedelta, timezone
+
+    repository = GameRepository(tmp_path / "backfill-visible-status.sqlite3")
+    game_id = _import_games(repository, 1)[0]
+    repository.enqueue_lichess_analysis_backfill("lichess:me")
+    row = repository.list_lichess_analysis_backfill("lichess:me", limit=1)[0]
+    repository.mark_lichess_analysis_backfill_running(
+        "lichess:me", game_id, line_revision=row["line_revision"],
+        line_hash=row["line_hash"])
+    assert repository.reserve_lichess_analysis_request("lichess:me", daily_limit=4)
+    repository.record_lichess_analysis_backfill(
+        "lichess:me", game_id, accuracy_status="has_data", evals_status="partial",
+        retry_after_seconds=1800, line_revision=row["line_revision"], line_hash=row["line_hash"])
+    summary = repository.lichess_analysis_backfill_summary("lichess:me")
+    assert summary["last_attempt_at"]
+    assert summary["last_success_at"]
+    assert summary["checked"] == 1
+    assert summary["accuracy"] == summary["evals"] == 1
+    assert summary["retry_waiting"] == 1
+    assert summary["requests_today"] == 1
+    assert summary["retry_at"]
+    due = repository.lichess_analysis_backfill_next_eligible_at(
+        "lichess:me", daily_limit=4, enqueue=False)
+    assert due and datetime.fromisoformat(due) > datetime.now(timezone.utc)
+    last_attempt = summary["last_attempt_at"]
+    repository.set_lichess_analysis_backfill_paused("lichess:me", True)
+    paused_summary = repository.lichess_analysis_backfill_summary("lichess:me")
+    assert paused_summary["last_attempt_at"] == last_attempt
+    assert paused_summary["paused"] is True
+    repository.shutdown()
+
+
 def test_backfill_next_eligibility_tracks_due_queue_retry_after_and_daily_reset(tmp_path):
     from datetime import datetime, timedelta, timezone
 

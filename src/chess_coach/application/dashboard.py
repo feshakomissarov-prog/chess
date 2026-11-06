@@ -51,7 +51,8 @@ class DashboardQueryCoordinator:
 
 
 def dashboard_preview_snapshot(repository, *, account_id: str | None = None,
-                               clock: str | None = None) -> dict[str, Any]:
+                               clock: str | None = None,
+                               stop_event: threading.Event | None = None) -> dict[str, Any]:
     """Read the local game count and latest rows without waiting on queued writes.
 
     This bounded preview is emitted before the more expensive source-aware
@@ -76,31 +77,54 @@ def dashboard_preview_snapshot(repository, *, account_id: str | None = None,
                       "WHEN g.game_time_precision='timestamp' THEN unixepoch(g.started_at) "
                       "WHEN g.game_time_precision='date_only' "
                       "THEN unixepoch(substr(g.started_at,1,10)) ELSE NULL END")
+    if stop_event is not None and stop_event.is_set():
+        raise RuntimeError("dashboard preview superseded")
     with repository._connection() as db:
+        db.set_progress_handler(
+            lambda: 1 if stop_event is not None and stop_event.is_set() else 0, 1000)
+        db.execute("PRAGMA busy_timeout=250")
         total = int(db.execute(f"SELECT COUNT(DISTINCT g.game_id) FROM games g{join} "
                                f"WHERE {where}", params).fetchone()[0] or 0)
         rows = db.execute(
             f"SELECT g.*, {opponent}, {player}, {color_value} FROM games g{join} "
             f"WHERE {where} ORDER BY ({activity_epoch}) IS NULL,{activity_epoch} DESC,"
             "g.game_id DESC LIMIT 3", params).fetchall()
+        accuracy_stats = _dashboard_accuracy_stats(db, join=join, color=color,
+                                                   where=where, params=params)
+        db.set_progress_handler(None, 0)
+    if stop_event is not None and stop_event.is_set():
+        raise RuntimeError("dashboard preview superseded")
     games = []
     for row in rows:
         game = dict(row)
         game["review_metrics"] = {"status": "loading", "coverage": "—", "source": "—"}
         games.append(game)
+    official_mean = accuracy_stats["official_mean"]
+    stockfish_mean = accuracy_stats["stockfish_mean"]
+    accuracy = accuracy_stats["combined_mean"]
+    combined_n = int(accuracy_stats["combined_count"] or 0)
+    source_detail = (
+        f"Lichess: {f'{official_mean:.1f}%' if official_mean is not None else '—'} "
+        f"({int(accuracy_stats['official_count'] or 0)}) · "
+        f"Stockfish: {f'{stockfish_mean:.1f}%' if stockfish_mean is not None else '—'} "
+        f"({int(accuracy_stats['stockfish_count'] or 0)})"
+    )
+    scope = "Выбранный аккаунт" if account_id else "Все локальные партии"
+    if clock:
+        scope += f" · {clock}"
     metrics = [
         {"key": "games", "label": "Завершённые партии", "value": str(total),
          "detail": "Локальные записи SQLite", "source": "games + account_games"},
-        {"key": "accuracy", "label": "Точность", "value": "—",
-         "detail": "Проверяем сохранённые источники точности…", "source": "SQLite"},
+        {"key": "accuracy", "label": "Точность",
+         "value": f"{float(accuracy):.1f}%" if accuracy is not None else "—",
+         "detail": source_detail if combined_n else "Нет локально рассчитанной точности",
+         "source": (f"{combined_n} партий · официальный Lichess с приоритетом над локальным "
+                    "расчётом; выборки источников могут пересекаться")},
         {"key": "analysis", "label": "Партии с анализом", "value": "—",
          "detail": "Подготавливаем сводку охвата…", "source": "SQLite"},
         {"key": "errors", "label": "Ошибки на 100 оценённых ходов", "value": "—",
          "detail": "Подготавливаем статистику ходов…", "source": "SQLite"},
     ]
-    scope = "Выбранный аккаунт" if account_id else "Все локальные партии"
-    if clock:
-        scope += f" · {clock}"
     puzzle_rating = (repository.puzzle_player_rating(account_id)
                      if account_id and hasattr(repository, "puzzle_player_rating") else {})
     activity_trend = (repository.puzzle_rating_trend(account_id, limit=6)
@@ -109,6 +133,51 @@ def dashboard_preview_snapshot(repository, *, account_id: str | None = None,
             "puzzle_player_rating": puzzle_rating, "activity_trend": activity_trend,
             "scope": scope,
             "filter": {"account_id": account_id, "clock": clock}, "is_preview": True}
+
+
+def _dashboard_accuracy_stats(db, *, join: str, color: str, where: str,
+                              params: list[object]) -> dict[str, Any]:
+    """Fast source-aware archive accuracy aggregate shared by preview and full read."""
+    row = db.execute(f"""
+        WITH scoped AS (
+            SELECT g.game_id,g.line_revision,{color} AS player_color,
+                CASE WHEN g.source IN ('lichess','lichess_archive') OR g.source_game_id IS NOT NULL
+                     THEN CASE {color} WHEN 'white' THEN g.lichess_accuracy_white
+                                       WHEN 'black' THEN g.lichess_accuracy_black END END official
+            FROM games g{join} WHERE {where}
+        ), candidates AS (
+            SELECT s.game_id, ar.run_id, ar.finished_at, ar.source,
+                CASE s.player_color WHEN 'white' THEN ac.white_accuracy
+                                    WHEN 'black' THEN ac.black_accuracy END value
+            FROM scoped s JOIN analysis_runs ar ON ar.game_id=s.game_id
+            JOIN game_revisions gr ON gr.game_id=ar.game_id AND gr.is_current=1
+                AND ar.line_revision=s.line_revision AND gr.line_revision=ar.line_revision
+                AND gr.line_hash=ar.line_hash
+            JOIN analysis_game_accuracy ac ON ac.run_id=ar.run_id
+                AND ac.formula_id=? AND ac.run_finished_at IS ar.finished_at
+            WHERE ar.status='complete' AND NOT EXISTS (
+                SELECT 1 FROM analysis_jobs aj WHERE aj.result_run_id=ar.run_id
+                AND aj.analysis_pass='review')
+        ), ranked AS (
+            SELECT *,ROW_NUMBER() OVER (PARTITION BY game_id,source='stockfish'
+                ORDER BY CASE source WHEN 'stockfish' THEN 0 WHEN 'lichess-json' THEN 1 ELSE 2 END,
+                         finished_at DESC,run_id DESC) priority
+            FROM candidates WHERE value IS NOT NULL
+        ), scores AS (
+            SELECT s.game_id,CASE WHEN s.official BETWEEN 0 AND 100 THEN s.official END official,
+                MAX(CASE WHEN r.source='stockfish' THEN r.value END) stockfish,
+                MAX(CASE WHEN r.source<>'stockfish' THEN r.value END) server_local
+            FROM scoped s LEFT JOIN ranked r ON r.game_id=s.game_id AND r.priority=1
+            GROUP BY s.game_id
+        )
+        SELECT AVG(official) official_mean,COUNT(official) official_count,
+            AVG(stockfish) stockfish_mean,COUNT(stockfish) stockfish_count,
+            COUNT(CASE WHEN official IS NOT NULL AND stockfish IS NOT NULL THEN 1 END) overlap,
+            COUNT(COALESCE(official,stockfish,server_local)) combined_count,
+            AVG(COALESCE(official,stockfish,server_local)) combined_mean
+        FROM scores
+    """, (*params, FORMULA_ID)).fetchone()
+    return dict(row)
 
 
 def dashboard_options(repository) -> dict[str, list[dict[str, str]]]:
