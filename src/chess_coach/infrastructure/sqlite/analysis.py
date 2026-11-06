@@ -20,6 +20,17 @@ from ...domain.analysis_scope import (analysis_run_has_position_scores,
 
 class AnalysisStoreMixin:
 
+    def game_analysis_sources(self, game_id: str, revision: int, line_hash: str) -> set[str]:
+        with self._connection() as db:
+            rows = db.execute(
+                "SELECT DISTINCT ar.source FROM analysis_runs ar "
+                "WHERE ar.game_id=? AND ar.line_revision=? AND ar.line_hash=? "
+                "AND ar.status IN ('complete','partial') AND EXISTS ("
+                "SELECT 1 FROM position_assessments pa WHERE pa.run_id=ar.run_id "
+                "AND (pa.white_cp IS NOT NULL OR pa.mate_white IS NOT NULL))",
+                (game_id, revision, line_hash))
+            return {row["source"] for row in rows}
+
     def materialize_game_accuracy_batch(self, *, limit: int = 10,
                                         cancel_check: Callable[[], bool] = lambda: False) -> dict:
         """Project saved runs in bounded batches without rereading archived PGNs."""

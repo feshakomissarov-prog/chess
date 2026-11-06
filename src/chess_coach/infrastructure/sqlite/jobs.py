@@ -5,8 +5,38 @@ from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 import json
 import uuid
+import chess
 
 from .constants import MAX_PAGE_SIZE
+
+_COMPLETE_SERVER_RUN = """
+    SELECT 1 FROM analysis_runs ar
+    WHERE ar.game_id={game} AND ar.line_revision={revision}
+      AND ar.line_hash={line_hash} AND ar.source IN ('lichess-pgn','lichess-json')
+      AND ar.status='complete'
+      AND EXISTS (SELECT 1 FROM game_moves gm
+                  WHERE gm.game_id=ar.game_id AND gm.line_revision=ar.line_revision)
+      AND NOT EXISTS (
+          SELECT 1 FROM game_positions gp
+          LEFT JOIN position_assessments pa ON pa.run_id=ar.run_id AND pa.ply=gp.ply
+          WHERE gp.game_id=ar.game_id AND gp.line_revision=ar.line_revision
+            AND NOT (
+                CASE WHEN gp.ply > 0 AND gp.ply = (
+                    SELECT MAX(last.ply) FROM game_positions last
+                    WHERE last.game_id=gp.game_id AND last.line_revision=gp.line_revision)
+                    AND cc_checkmate(gp.fen) THEN 1 ELSE 0 END
+                OR (pa.depth IS NOT NULL AND
+                    (pa.white_cp IS NOT NULL OR COALESCE(pa.mate_white,0)<>0))
+            )
+      )
+"""
+
+
+def _is_checkmate(fen: str) -> int:
+    try:
+        return int(chess.Board(fen).is_checkmate())
+    except ValueError:
+        return 0
 
 class AnalysisJobsStoreMixin:
 
@@ -469,20 +499,21 @@ class AnalysisJobsStoreMixin:
             "AND (g.pgn LIKE '%[Result \"1-0\"]%' OR g.pgn LIKE '%[Result \"0-1\"]%' "
             "OR g.pgn LIKE '%[Result \"1/2-1/2\"]%') AND g.variant='standard' "
             + account_filter +
-            "AND NOT EXISTS (SELECT 1 FROM analysis_runs ar "
-            "WHERE ar.game_id=g.game_id AND ar.line_revision=gr.line_revision "
-            "AND ar.line_hash=gr.line_hash AND ar.source IN ('lichess-pgn','lichess-json') "
-            "AND ar.status='complete' AND "
-            "(SELECT COUNT(*) FROM position_assessments pa WHERE pa.run_id=ar.run_id "
-            "AND (pa.white_cp IS NOT NULL OR pa.mate_white IS NOT NULL)) >= "
-            "(SELECT COUNT(*) FROM game_moves gm WHERE gm.game_id=g.game_id "
-            "AND gm.line_revision=gr.line_revision)) "
+            "AND NOT EXISTS (" + _COMPLETE_SERVER_RUN.format(
+                game="g.game_id", revision="gr.line_revision", line_hash="gr.line_hash") + ") "
             + represented +
             "ORDER BY CASE WHEN g.started_at IS NULL THEN 1 ELSE 0 END,"
             "g.started_at DESC,g.game_id DESC LIMIT ?")
         with self._connection() as db:
+            db.create_function("cc_checkmate", 1, _is_checkmate, deterministic=True)
             rows = db.execute(sql, params).fetchall()
         return [dict(row) for row in rows]
+
+    def has_complete_server_analysis(self, game_id: str, revision: int, line_hash: str) -> bool:
+        sql = _COMPLETE_SERVER_RUN.format(game="?", revision="?", line_hash="?")
+        with self._connection() as db:
+            db.create_function("cc_checkmate", 1, _is_checkmate, deterministic=True)
+            return db.execute(sql, (game_id, revision, line_hash)).fetchone() is not None
 
     def enqueue_analysis_jobs(self, candidates: list[dict], *, analysis_pass: str,
                               engine_version: str, parameters: dict,

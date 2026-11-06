@@ -27,6 +27,7 @@ class BackgroundOperationsPage(QWidget):
         controls.addWidget(self.summary, 1)
         root.addWidget(banner)
         self.workflow_status = {}
+        self.workflow_badges = {}
         self.workflow_progress = {}
         for key, glyph, caption in (
                 ("archive", "⟳", "Синхронизация партий Lichess"),
@@ -52,6 +53,10 @@ class BackgroundOperationsPage(QWidget):
             detail.setWordWrap(True)
             detail.setAccessibleName(caption)
             row.addWidget(title, 4)
+            badge = QLabel("Ожидает")
+            badge.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            badge.setMinimumWidth(95)
+            row.addWidget(badge)
             row.addWidget(detail, 6)
             bar = QProgressBar()
             bar.setAccessibleName(f"{caption} · прогресс")
@@ -64,6 +69,7 @@ class BackgroundOperationsPage(QWidget):
             row.addWidget(bar, 2)
             root.addWidget(card)
             self.workflow_status[key] = detail
+            self.workflow_badges[key] = badge
             self.workflow_progress[key] = bar
         self.details_toggle = QPushButton("Диагностика операций")
         self.details_toggle.setCheckable(True)
@@ -113,7 +119,7 @@ class BackgroundOperationsPage(QWidget):
                      backfill_paused: bool, can_check: bool, can_pause: bool,
                      retry_status: str = "", durable_statuses=(),
                      local_metrics_status: str | None = None, workflows=None, progress=None,
-                     recent_events=()) -> None:
+                     recent_events=(), states=None) -> None:
         self.recent_events.clear()
         self.recent_events.addItems(list(recent_events) or ["Нет сохранённых событий."])
         durable_statuses = tuple(durable_statuses)
@@ -146,6 +152,8 @@ class BackgroundOperationsPage(QWidget):
             else "Сейчас активных задач нет")
         for key, label in self.workflow_status.items():
             label.setText((workflows or {}).get(key) or "Состояние не подтверждено.")
+            state = (states or {}).get(key, "Ожидает")
+            self.set_workflow_state(key, state)
             bar = self.workflow_progress[key]
             done, total = (progress or {}).get(key, (0, 0))
             bar.setVisible(total > 0)
@@ -161,3 +169,12 @@ class BackgroundOperationsPage(QWidget):
                                   else "Приостановить Lichess")
         self.pause_button.setEnabled(bool(can_pause))
         self.manual_check_button.setEnabled(bool(can_check and not self._paused))
+
+    def set_workflow_state(self, key: str, state: str) -> None:
+        colors = {"Идёт": ("#234B38", "#79E599"), "Готово": ("#234B38", "#79E599"),
+                  "Ошибка": ("#4B2936", "#FFB1B7")}
+        background, foreground = colors.get(state, ("#383349", "#E3D8FF"))
+        badge = self.workflow_badges[key]
+        badge.setText(state)
+        badge.setStyleSheet(f"background: {background}; color: {foreground}; "
+                            "border-radius: 8px; padding: 6px; font-weight: 600;")

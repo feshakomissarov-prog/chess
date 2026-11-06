@@ -119,7 +119,7 @@ class HomePage(QWidget):
             caption.setStyleSheet("font-size: 17px; font-weight: 600;")
             caption.setWordWrap(False)
             value = QLabel("—")
-            value.setStyleSheet("font-size: 38px; font-weight: 700;")
+            value.setStyleSheet("font-size: 48px; font-weight: 700;")
             detail = QLabel("Локальные данные")
             detail.setObjectName("muted")
             detail.setWordWrap(True)
@@ -147,7 +147,7 @@ class HomePage(QWidget):
         progress_title.setStyleSheet("font-size: 17px; font-weight: 600;")
         progress_layout.addWidget(progress_title)
         self.puzzle_rating = QLabel("—")
-        self.puzzle_rating.setStyleSheet("font-size: 32px; font-weight: 700;")
+        self.puzzle_rating.setStyleSheet("font-size: 48px; font-weight: 700;")
         progress_layout.addWidget(self.puzzle_rating)
         self.puzzle_sparkline = PuzzleRatingSparkline(self.home_progress_card)
         progress_layout.addWidget(self.puzzle_sparkline)
@@ -217,7 +217,8 @@ class HomePage(QWidget):
         self.recent_scroll.setWidget(recent_rows)
         recent_layout.addWidget(self.recent_scroll, 1)
         layout.addWidget(recent_card, 1)
-        layout.addLayout(top_row)
+        # Training remains available through the primary sidebar route.
+        self.home_play_card.hide()
 
         # Preserve shell callbacks and old tests as hidden compatibility hooks.
         self.home_friend_button = QPushButton("Играть с другом по ссылке")

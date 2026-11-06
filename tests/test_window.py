@@ -1559,6 +1559,40 @@ def test_batch_queue_pauses_on_new_human_game_and_builtin_ai(qtbot):
     assert ai_window._batch_pause.is_set()
 
 
+def test_batch_opt_in_is_account_scoped_and_manual_pause_survives(qtbot, monkeypatch):
+    from types import SimpleNamespace
+
+    window = MainWindow(offline_mode=True)
+    qtbot.addWidget(window)
+    service = SimpleNamespace(username="AccountA")
+    monkeypatch.setattr(window, "lichess", service)
+    monkeypatch.setattr(window, "_online_actions_allowed", lambda: True)
+    games = [SimpleNamespace(status="started", final_sync_pending=False),
+             SimpleNamespace(status="started", final_sync_pending=False)]
+    monkeypatch.setattr(window, "_sessions_for_safety", lambda: games)
+    starts = []
+    monkeypatch.setattr(window, "show_batch_analysis", lambda **_: None)
+    monkeypatch.setattr(window, "_start_batch_analysis", lambda *args, **kwargs: starts.append((args, kwargs)))
+    window.settings.setValue("batch/plan/lichess:accounta",
+                             {"engine": "synthetic", "nodes": 30000, "hash": 64, "review": True})
+    window._resume_opted_in_batch()
+    games.pop()
+    window._resume_opted_in_batch()
+    assert not starts
+    games.clear()
+    service.username = "AccountB"
+    window._resume_opted_in_batch()
+    assert not starts
+    service.username = "AccountA"
+    window._resume_opted_in_batch()
+    assert starts[0][0][1:] == (0, 30000, 64, True)
+    assert starts[0][1] == {"selective_review": True, "automatic": True}
+    window._pause_batch_analysis()
+    window._resume_opted_in_batch()
+    assert len(starts) == 1
+    assert window.settings.value("batch/plan/lichess:accounta", {})["manual_pause"]
+
+
 def test_window_close_cancels_and_waits_for_batch_worker(qtbot):
     window = MainWindow(offline_mode=True)
     qtbot.addWidget(window)

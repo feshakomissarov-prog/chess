@@ -85,6 +85,73 @@ def _runner(repository, tmp_path, engines, *, options=FastPassOptions()):
                                analyzer=CompletedGameAnalyzer(repository, factory))
 
 
+def test_server_coverage_checks_exact_plies_and_rechecks_queued_jobs(tmp_path):
+    repository = GameRepository(tmp_path / "server-coverage.sqlite3")
+    engines = []
+    try:
+        runner = _runner(repository, tmp_path, engines)
+        for game_id in ("missing-baseline", "gap", "full", "late"):
+            repository.save_snapshot(game_id, "startpos", "e2e4 e7e5 g1f3 b8c6",
+                                     "white", "Fixture", False, "blitz", "finished", "white")
+
+        def save_run(game_id, plies, source):
+            line = repository.current_line(game_id)
+            repository.save_analysis(
+                game_id, line_revision=line["line_revision"], line_hash=line["line_hash"],
+                source=source, engine_name="Synthetic", engine_version=None,
+                parameters={}, assessments=[{"ply": ply, "white_cp": 12, "depth": 16}
+                                            for ply in plies], classifications=[])
+
+        save_run("missing-baseline", (1, 2, 3, 4), "lichess-json")
+        save_run("gap", (0, 1, 3, 4), "lichess-pgn")
+        save_run("full", range(5), "lichess-pgn")
+        assert {game["game_id"] for game in repository.list_games_needing_fast_analysis()} == {
+            "missing-baseline", "gap", "late"}
+        assert runner.enqueue_missing()["queued"] == 3
+        save_run("late", range(5), "lichess-json")
+        result = runner.run(stop_event=threading.Event(), safety_check=lambda _: True)
+        assert result["processed"] == 2
+        assert result["queue"] == {"complete": 2, "stale": 1}
+        assert len(engines) == 1
+    finally:
+        repository.shutdown()
+
+
+def test_full_backlog_refills_bounded_pages_until_exhausted(tmp_path, monkeypatch):
+    repository = GameRepository(tmp_path / "full-backlog.sqlite3")
+    engines = []
+    try:
+        _save_game(repository, "fixture", "2026-10-01T00:00:00+00:00")
+        repository.wait_for_writes()
+        with repository._connection() as db:
+            for i in range(1002):
+                game_id = f"fixture-{i:04d}"
+                for table in ("games", "game_revisions", "game_moves"):
+                    columns = [row[1] for row in db.execute(f"PRAGMA table_info({table})")]
+                    projection = ",".join("?" if name == "game_id" else name for name in columns)
+                    db.execute(f"INSERT INTO {table} SELECT {projection} FROM {table} WHERE game_id='fixture'",
+                               (game_id,))
+        runner = _runner(repository, tmp_path, engines)
+        sizes = []
+        original = runner.enqueue_missing
+
+        def enqueue(**kwargs):
+            result = original(**kwargs)
+            sizes.append(result["queued"])
+            return result
+
+        monkeypatch.setattr(runner, "enqueue_missing", enqueue)
+        monkeypatch.setattr(runner, "_job_has_eligible_legal_line", lambda job: True)
+        monkeypatch.setattr(runner.analyzer, "analyze", lambda *a, **k: {"run_id": None})
+        result = runner.run(stop_event=threading.Event(), safety_check=lambda _: True,
+                            fill_backlog=True)
+        assert result["processed"] == 1003
+        assert sum(sizes) == 1003 and max(sizes) <= 64 and sizes[-1] == 0
+        assert len(engines) == 1
+    finally:
+        repository.shutdown()
+
+
 def test_batch_queue_is_idempotent_recent_first_and_reuses_one_fake_engine(tmp_path):
     repository = GameRepository(tmp_path / "batch.sqlite3")
     engines = []

@@ -369,6 +369,7 @@ class MainWindow(QMainWindow):
     archive_account_ready_finished = Signal(int, str, object, object)
     external_study_finished = Signal(int, object, object)
     background_status_finished = Signal(int, object)
+    batch_live_progress = Signal(str, int, int, int)
     legacy_metrics_finished = Signal(int, object)
     puzzle_history_finished = Signal(str, object, object)
     statistics_filter_options_finished = Signal(int, object, object)
@@ -497,6 +498,9 @@ class MainWindow(QMainWindow):
         self._analysis_stop: threading.Event | None = None
         self._analysis_thread: threading.Thread | None = None
         self._batch_thread: threading.Thread | None = None
+        self._batch_resume_timer = QTimer(self)
+        self._batch_resume_timer.setSingleShot(True)
+        self._batch_resume_timer.timeout.connect(self._resume_opted_in_batch)
         self._batch_stop: threading.Event | None = None
         self._batch_pause: threading.Event | None = None
         self._batch_dialog: BatchAnalysisDialog | None = None
@@ -589,6 +593,7 @@ class MainWindow(QMainWindow):
         self.archive_account_ready_finished.connect(self._archive_account_ready_result)
         self.external_study_finished.connect(self._external_study_parse_finished)
         self.background_status_finished.connect(self._background_operations_result_ready)
+        self.batch_live_progress.connect(self._show_batch_live_progress)
         self.legacy_metrics_finished.connect(self._legacy_metrics_batch_finished)
         self.puzzle_history_finished.connect(self._puzzle_history_result_ready)
         self.statistics_filter_options_finished.connect(
@@ -947,6 +952,7 @@ class MainWindow(QMainWindow):
         self._refresh_online_controls()
         self._request_dashboard_display_safety()
         self._cancel_legacy_metrics_batch("account_switched")
+        self._batch_resume_timer.start(500)
         if self._archive_account_ready_generation == generation:
             self._start_connected_account_background_work(generation, username)
 
@@ -1123,6 +1129,25 @@ class MainWindow(QMainWindow):
         self.screen_title.setText("Фоновые операции")
         self.screen_stack.setCurrentWidget(page)
 
+    def _show_batch_live_progress(self, account_id: str, generation: int,
+                                  done: int, total: int) -> None:
+        page = getattr(self, "_background_operations_page", None)
+        username = str(getattr(self.lichess, "username", "") or "").strip().lower()
+        if (page is None or self.screen_stack.currentWidget() is not page
+                or generation != self._analysis_session_generation
+                or account_id != f"lichess:{username}"):
+            return
+        if total > 0:
+            if self._batch_pause is not None and self._batch_pause.is_set():
+                return
+            page.summary.setText(f"Сейчас: Stockfish · позиции {done}/{total}")
+            page.set_workflow_state("stockfish", "Идёт")
+            page.workflow_progress["stockfish"].setRange(0, total)
+            page.workflow_progress["stockfish"].setValue(done)
+            page.workflow_progress["stockfish"].show()
+        else:
+            self._refresh_background_operations_page()
+
     def _refresh_background_operations_page(self) -> None:
         page = getattr(self, "_background_operations_page", None)
         if page is None or self._shutdown_requested:
@@ -1274,6 +1299,22 @@ class MainWindow(QMainWindow):
             ]
             remaining = sum(jobs.get(key, 0) for key in ("queued", "running", "paused"))
             complete, failed = jobs.get("complete", 0), jobs.get("failed", 0)
+            active_game = any(item.status in {"started", "playing"}
+                              for item in self._sessions_for_safety())
+            active_operations = {operation.context.kind for operation in payload.get("operations", ())
+                                 if operation.context is not None and operation.status.value == "running"}
+
+            def state(kind: str, *, error=False, complete=False, paused=False) -> str:
+                if active_game:
+                    return "Пауза из-за игры"
+                if paused:
+                    return "Пауза"
+                if kind in active_operations:
+                    return "Идёт"
+                if error:
+                    return "Ошибка"
+                return "Готово" if complete else "Ожидает"
+
             self._background_operations_page.set_snapshot(
                 payload.get("operations", ()), source_summary=source_summary,
                 backfill_paused=bool(payload.get("paused")),
@@ -1292,6 +1333,19 @@ class MainWindow(QMainWindow):
                                   if jobs else "Нет сохранённых заданий для текущего профиля."),
                 },
                 recent_events=recent_events,
+                states={
+                    "archive": state("lichess_archive_sync", error=bool(archive.get("last_error")),
+                                     complete=bool(archive.get("backfill_complete"))),
+                    "ready": state("lichess_analysis_backfill", paused=bool(payload.get("paused")),
+                                   error=bool(summary.get("errors") and not summary.get("retry_at")),
+                                   complete=bool(summary.get("total") and not summary.get("pending")
+                                                 and not summary.get("retry_at"))),
+                    "puzzles": state("lichess_puzzle_sync",
+                                     error=bool((payload.get("puzzles") or {}).get("last_error")),
+                                     complete=bool((payload.get("puzzles") or {}).get("backfill_complete"))),
+                    "stockfish": state("stockfish_batch_analysis", error=bool(failed),
+                                       paused=bool(jobs.get("paused")), complete=bool(complete and not remaining)),
+                },
                 progress={"ready": (summary.get("checked", 0), summary.get("total", 0)),
                           "stockfish": (complete, complete + remaining + failed)})
 
@@ -2839,9 +2893,10 @@ class MainWindow(QMainWindow):
             card_layout = QVBoxLayout()
             row_layout.addLayout(card_layout, 4)
             card_layout.setSpacing(4)
-            card.setMinimumHeight(116)
+            card.setMinimumHeight(126)
             card.setMaximumHeight(145)
-            heading_label = QLabel(f"♟  {heading}")
+            outcome, _, opponent = heading.partition(" с ")
+            heading_label = QLabel(f"♟  {outcome}")
             outcome_color = (VISUAL_TOKENS.success if heading.startswith("Победа")
                              else VISUAL_TOKENS.danger if heading.startswith("Поражение")
                              else VISUAL_TOKENS.text)
@@ -2849,7 +2904,14 @@ class MainWindow(QMainWindow):
                 f"color: {outcome_color}; font-size: 22px; font-weight: 700;")
             heading_label.setWordWrap(False)
             card_layout.addWidget(heading_label)
-            description = QLabel(details)
+            if opponent:
+                opponent_label = QLabel(opponent)
+                opponent_label.setTextFormat(Qt.TextFormat.PlainText)
+                opponent_label.setStyleSheet("font-size: 16px;")
+                card_layout.addWidget(opponent_label)
+            opening = russian_opening_name(game.get("eco") or game.get("opening_eco"),
+                                           game.get("opening_name"))
+            description = QLabel(details.removesuffix(f" · {opening}"))
             description.setObjectName("secondary")
             description.setWordWrap(True)
             description.setToolTip(opening_tooltip(game.get("opening_name")))
@@ -2871,11 +2933,18 @@ class MainWindow(QMainWindow):
             card_layout.addWidget(coverage)
             if analysis_allowed:
                 accuracy = metrics.get("accuracy")
+                accuracy_group = QVBoxLayout()
+                accuracy_group.setAlignment(Qt.AlignmentFlag.AlignVCenter)
+                opening_label = QLabel(opening)
+                opening_label.setWordWrap(True)
+                opening_label.setStyleSheet("font-size: 16px; font-weight: 600;")
+                accuracy_group.addWidget(opening_label)
                 accuracy_label = QLabel(
                     f"Точность: {accuracy} · {metrics['accuracy_source']}"
                     if metrics.get("accuracy_source") else "Нет рассчитанной точности")
                 accuracy_label.setWordWrap(True)
-                row_layout.addWidget(accuracy_label, 2)
+                accuracy_group.addWidget(accuracy_label)
+                row_layout.addLayout(accuracy_group, 2)
                 rows = ["Я / соперник"]
                 for title, key in (("Неточности", "inaccuracies"), ("Ошибки", "mistakes"),
                                    ("Зевки", "blunders")):
@@ -3563,10 +3632,11 @@ class MainWindow(QMainWindow):
         dialog.accept()
         self._open_analysis_position(game_id, 0, analysis_source=analysis_source)
 
-    def show_batch_analysis(self) -> None:
+    def show_batch_analysis(self, *, navigate: bool = True) -> None:
         if self._batch_dialog is not None:
-            self.screen_title.setText("Массовый анализ")
-            self.screen_stack.setCurrentWidget(self._batch_dialog)
+            if navigate:
+                self.screen_title.setText("Массовый анализ")
+                self.screen_stack.setCurrentWidget(self._batch_dialog)
             return
         dialog = EmbeddedBatchAnalysisPage(self)
         dialog.nodes.setValue(self.settings.value("batch_analysis_nodes", 20_000, type=int))
@@ -3586,12 +3656,31 @@ class MainWindow(QMainWindow):
         dialog.close_requested.connect(self.show_analysis)
         self._batch_dialog = dialog
         self.screen_stack.addWidget(dialog)
-        self.screen_title.setText("Массовый анализ")
-        self.screen_stack.setCurrentWidget(dialog)
+        if navigate:
+            self.screen_title.setText("Массовый анализ")
+            self.screen_stack.setCurrentWidget(dialog)
+
+    def _resume_opted_in_batch(self) -> None:
+        if self._shutdown_requested or not self._online_actions_allowed():
+            return
+        if any(s.status in {"created", "started", "playing"} or s.final_sync_pending
+               for s in self._sessions_for_safety()):
+            return
+        service = self.lichess
+        account_id = f"lichess:{str(service.username or '').lower()}"
+        plan = self.settings.value(f"batch/plan/{account_id}", {})
+        if not plan or plan.get("manual_pause"):
+            return
+        if self._batch_thread and self._batch_thread.is_alive():
+            self._batch_resume_timer.start(500)
+            return
+        self.show_batch_analysis(navigate=False)
+        self._start_batch_analysis(self._batch_dialog, 0, plan["nodes"], plan["hash"],
+                                   True, selective_review=plan["review"], automatic=True)
 
     def _start_batch_analysis(self, dialog: BatchAnalysisDialog, limit: int, nodes: int,
                               hash_mb: int, resume: bool, retry_failed: bool = False,
-                              selective_review: bool = False) -> None:
+                              selective_review: bool = False, *, automatic: bool = False) -> None:
         if self._shutdown_requested or (self._batch_thread and self._batch_thread.is_alive()):
             return
         service = self.lichess
@@ -3599,6 +3688,9 @@ class MainWindow(QMainWindow):
         engine_path = str(self.settings.value("stockfish_path", "", type=str)).strip()
         verified_path = str(self.settings.value("stockfish_verified_path", "", type=str)).strip()
         if not service or not username or not engine_path or verified_path != engine_path:
+            if automatic:
+                dialog.progress_label.setText("Ожидает безопасного подключения и проверки Stockfish.")
+                return
             QMessageBox.warning(dialog, "Анализ партий не готов",
                 "Для запуска нужны подключённый аккаунт и проверенный Stockfish. "
                 "Неизвестная безопасность блокирует запуск.")
@@ -3607,12 +3699,17 @@ class MainWindow(QMainWindow):
             dialog.progress_label.setText("Массовый анализ доступен после завершения активной партии.")
             return
         account_id = f"lichess:{username.lower()}"
+        plan_key = f"batch/plan/{account_id}"
+        plan = self.settings.value(plan_key, {})
+        all_missing = limit == 0 or (resume and bool(plan))
+        if resume and plan:
+            nodes, hash_mb, selective_review = plan["nodes"], plan["hash"], plan["review"]
         try:
             options = FastPassOptions(nodes=nodes, hash_mb=hash_mb)
             runner = self.engine_analysis.create_batch_runner(
                 self.game_repository, engine_path, options=options)
             resumed_original_budget = False
-            if resume:
+            if resume and not all_missing:
                 saved_parameters = self.game_repository.pending_fast_analysis_parameters(
                     runner.engine_key, account_id=account_id)
                 if saved_parameters:
@@ -3632,6 +3729,15 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(dialog, "Массовый анализ", str(exc))
             return
         config = (engine_path, runner.options.nodes, runner.options.hash_mb)
+        if automatic and plan.get("engine") != runner.engine_key:
+            dialog.progress_label.setText("Движок изменился. Подтвердите запуск очереди вручную.")
+            return
+        if all_missing and not automatic:
+            self.settings.setValue(plan_key, {"engine": runner.engine_key, "nodes": runner.options.nodes,
+                                             "hash": runner.options.hash_mb, "review": selective_review})
+            self.settings.sync()
+        elif not all_missing and not resume and plan:
+            self._mark_batch_plan_paused()
         self._batch_config = config
         self._batch_engine_key = runner.engine_key
         self._batch_stop = threading.Event()
@@ -3655,7 +3761,7 @@ class MainWindow(QMainWindow):
                         engine_version=runner.engine_key, parameters=runner.parameters, account_id=account_id)
                     review_available = (self.game_repository.analysis_job_counts(
                         engine_version=runner.review_engine_key, account_id=account_id) if selective_review else {})
-                    if not (any(available.get(status, 0)
+                    if not all_missing and not (any(available.get(status, 0)
                                 for status in ("queued", "paused", "running"))
                             or any(review_available.get(status, 0)
                                    for status in ("queued", "paused", "running"))):
@@ -3672,8 +3778,9 @@ class MainWindow(QMainWindow):
                     if stop.is_set() or pause.is_set() or generation != self._analysis_session_generation:
                         dialog.worker_finished.emit(pause.is_set(), "Запуск очереди прерван.")
                         return
-                    enqueued = runner.enqueue_missing(account_id=account_id, limit=limit,
-                                                      retry_failed=retry_failed)
+                    enqueued = ({"queued": 0, "already_present": 0} if all_missing else
+                                runner.enqueue_missing(account_id=account_id, limit=limit,
+                                                       retry_failed=retry_failed))
                     resumed = 0
                 unknown_preflight = threading.Event()
                 initial_counts = self.game_repository.analysis_job_counts(
@@ -3711,7 +3818,15 @@ class MainWindow(QMainWindow):
                         unknown_preflight.set()
                     return safety
 
+                last_progress_at = 0.0
+
                 def progress(game_id: str, done: int, total: int) -> None:
+                    nonlocal last_progress_at
+                    now = time.monotonic()
+                    if 0 < done < total and now - last_progress_at < 0.4:
+                        return
+                    last_progress_at = now
+                    self.batch_live_progress.emit(account_id, generation, done, total)
                     counts = self.game_repository.analysis_job_counts(
                         engine_version=runner.engine_key, parameters=runner.parameters, account_id=account_id)
                     dialog.worker_queue_status.emit(
@@ -3731,7 +3846,8 @@ class MainWindow(QMainWindow):
                                     safety_check=safety_check, progress=progress,
                                     include_selective_review=selective_review,
                                     account_id=account_id,
-                                    max_fast_jobs=limit)
+                                    max_fast_jobs=None if all_missing else limit,
+                                    fill_backlog=all_missing)
                 counts = self.game_repository.analysis_job_counts(
                     engine_version=runner.engine_key, parameters=runner.parameters, account_id=account_id)
                 review_counts = self.game_repository.analysis_job_counts(
@@ -3756,26 +3872,43 @@ class MainWindow(QMainWindow):
                     f"{result.get('last_failure') or 'ошибок в этом запуске нет'}")
             except Exception as exc:
                 dialog.worker_finished.emit(False, f"Очередь не запущена или остановлена: {exc}")
+            finally:
+                self.batch_live_progress.emit(account_id, generation, 0, 0)
 
         thread = self._start_registered_work(
             work, kind="stockfish_batch_analysis", lane=OperationLane.ENGINE,
             stop_event=stop, thread_name="chess-coach-batch-analysis")
         self._batch_thread = thread
 
-    def _pause_batch_analysis(self) -> None:
+    def _pause_batch_analysis(self, *, manual: bool = True) -> None:
+        if manual:
+            self._mark_batch_plan_paused()
         if self._batch_pause is not None:
             self._batch_pause.set()
             if self._batch_dialog is not None:
                 self._batch_dialog.pause_button.setEnabled(False)
                 self._batch_dialog.progress_label.setText("Пауза запрошена; завершаем текущую позицию…")
+            if getattr(self, "_background_operations_page", None) is not None:
+                self._refresh_background_operations_page()
 
     def _cancel_batch_analysis(self) -> None:
+        self._mark_batch_plan_paused()
         if self._batch_stop is not None:
             self._batch_stop.set()
             if self._batch_dialog is not None:
                 self._batch_dialog.pause_button.setEnabled(False)
                 self._batch_dialog.cancel_button.setEnabled(False)
                 self._batch_dialog.progress_label.setText("Отмена запрошена; останавливаем движок…")
+
+    def _mark_batch_plan_paused(self) -> None:
+        username = str(getattr(self.lichess, "username", "") or "").strip().lower()
+        if not username:
+            return
+        key = f"batch/plan/lichess:{username}"
+        plan = self.settings.value(key, {})
+        if plan:
+            self.settings.setValue(key, {**plan, "manual_pause": True})
+            self.settings.sync()
 
     def _statistics_worker_started(self, thread: threading.Thread) -> None:
         self._statistics_workers.add(thread)
@@ -4538,6 +4671,7 @@ class MainWindow(QMainWindow):
         confirmed = bool(result.get("confirmed"))
         pending = bool(result.get("pending"))
         if confirmed:
+            self._batch_resume_timer.start(500)
             game = result.get("game")
             if isinstance(game, dict):
                 self._confirmed_terminal_games[str(game_id)] = dict(game)
@@ -5644,7 +5778,7 @@ class MainWindow(QMainWindow):
         self._lichess_connected = False
         self._set_sidebar_safety_status("Аналитика скрыта · отключено")
         self._reset_backfill_status("Lichess · отключено")
-        self._pause_batch_analysis()
+        self._pause_batch_analysis(manual=False)
         if self.lichess:
             self.lichess.disconnect_account()
         if getattr(self, "_background_operations_page", None) is not None:
@@ -5662,7 +5796,7 @@ class MainWindow(QMainWindow):
         self._revoke_review_safety(
             "Заблокировано: изменилось состояние подключения; проверьте безопасность повторно.",
             preserve_offline=True)
-        self._pause_batch_analysis()
+        self._pause_batch_analysis(manual=False)
         self._disable_position_evaluation(
             "Проверка Stockfish остановлена: изменилось состояние подключения Lichess.")
         if self._analysis_safety_phase == "preflight" and self._analysis_safety_request_id:
@@ -6407,7 +6541,7 @@ class MainWindow(QMainWindow):
         self._cancel_legacy_metrics_batch("live_game")
         self._backfill_deferred_for_live_game = True
         if self._batch_pause is not None:
-            self._pause_batch_analysis()
+            self._pause_batch_analysis(manual=False)
         for method in ("cancel_archive_sync", "cancel_puzzle_sync", "cancel_lichess_analysis_backfill"):
             cancel = getattr(self.lichess, method, None)
             if callable(cancel):
@@ -6505,6 +6639,7 @@ class MainWindow(QMainWindow):
                             for item in self._sessions_for_safety())
                         and self.lichess and self._lichess_connected):
                     QTimer.singleShot(3000, self._run_background_sync)
+                    self._batch_resume_timer.start(500)
                 if (game_id == self._selected_live_game_id
                         and self.online_session is session
                         and self._screen_mode == "online"):
@@ -7940,7 +8075,9 @@ class MainWindow(QMainWindow):
                 self._analysis_stop.set()
             if analysis_running and self._analysis_dialog is not None:
                 self._analysis_dialog.setLabelText("Останавливаем Stockfish перед закрытием приложения…")
-            if batch_running and self._batch_stop is not None:
+            if batch_running and self._batch_pause is not None:
+                self._batch_pause.set()
+            elif batch_running and self._batch_stop is not None:
                 self._batch_stop.set()
             if batch_running and self._batch_dialog is not None:
                 self._batch_dialog.progress_label.setText(

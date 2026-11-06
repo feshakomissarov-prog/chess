@@ -251,7 +251,26 @@ class LibraryPage(QWidget):
         detail_layout.addWidget(self.detail_status)
         self.detail_metrics = QLabel("")
         self.detail_metrics.setWordWrap(True)
-        detail_layout.addWidget(self.detail_metrics)
+        self.detail_metrics.hide()
+        badges = QHBoxLayout()
+        self.source_badges = {name: QLabel() for name in ("Stockfish", "Lichess")}
+        for badge in self.source_badges.values():
+            badge.setStyleSheet("background: #232B3E; border-radius: 8px; padding: 6px;")
+            badge.hide()
+            badges.addWidget(badge, 1)
+        detail_layout.addLayout(badges)
+        metrics_grid = QGridLayout()
+        self.metric_rows = {}
+        for index, name in enumerate(("Точность", "Неточности", "Ошибки", "Зевки", "Охват")):
+            caption, value = QLabel(name), QLabel()
+            value.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+            value.setWordWrap(True)
+            caption.hide()
+            value.hide()
+            metrics_grid.addWidget(caption, index, 0)
+            metrics_grid.addWidget(value, index, 1)
+            self.metric_rows[name] = (caption, value)
+        detail_layout.addLayout(metrics_grid)
         self.phase_button = QPushButton("Точность по фазам")
         self.phase_button.setCheckable(True)
         self.phase_button.hide()
@@ -364,6 +383,13 @@ class LibraryPage(QWidget):
         self.phase_button.hide()
         self.phase_detail.clear()
         self.phase_detail.hide()
+        for badge in self.source_badges.values():
+            badge.clear()
+            badge.hide()
+        for caption, value in self.metric_rows.values():
+            caption.hide()
+            value.clear()
+            value.hide()
         if not game:
             self.detail_title.setText("Выберите партию")
             self.detail_title.setStyleSheet("font-size: 24px; font-weight: 700;")
@@ -420,6 +446,15 @@ class LibraryPage(QWidget):
         sides = review.get("per_side") or {}
         official = review.get("official_accuracy") or {}
         local = review.get("local_game_accuracy") or {}
+        available = review.get("available_sources") or set()
+        for name, present in (
+            ("Stockfish", "stockfish" in available),
+            ("Lichess", any(src.startswith("lichess") for src in available)
+             or any(official.get(side) is not None for side in ("white", "black"))),
+        ):
+            badge = self.source_badges[name]
+            badge.setText(f"{name} · {'Есть данные' if present else 'Нет данных'}")
+            badge.show()
 
         def accuracy_for(side):
             if official.get(side) is not None:
@@ -436,6 +471,16 @@ class LibraryPage(QWidget):
         for label, key in (("Неточности", "inaccuracy"), ("Ошибки", "mistake"), ("Зевки", "blunder")):
             lines.append(f"{label} · {classified('white', key)} / {classified('black', key)}")
         self.detail_metrics.setText("\n".join(lines))
+        coverage = review.get("coverage") or {}
+        values = [f"{accuracy_for('white')} / {accuracy_for('black')}",
+                  *(f"{classified('white', key)} / {classified('black', key)}"
+                    for key in ("inaccuracy", "mistake", "blunder")),
+                  f"{coverage.get('scored', 0)}/{coverage.get('total', 0)} позиций"]
+        for (caption, value), content in zip(self.metric_rows.values(), values):
+            value.setText(content)
+            value.setAccessibleName(f"{caption.text()} · белые / чёрные")
+            caption.show()
+            value.show()
         phase_values = review.get("local_phase_accuracy") or {}
         if phase_values:
             phase_lines = ["Локальная точность · белые / чёрные"]

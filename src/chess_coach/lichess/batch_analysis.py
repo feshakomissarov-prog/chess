@@ -96,6 +96,7 @@ class BatchAnalysisRunner:
             include_selective_review: bool = False,
             account_id: str | None = None,
             max_fast_jobs: int | None = None,
+            fill_backlog: bool = False,
             review_budget_per_game: int = 12,
             review_budget_total: int = 100) -> dict[str, int | bool | str | None]:
         if safety_check is None:
@@ -179,6 +180,10 @@ class BatchAnalysisRunner:
                         self.worker_id, engine_version=self.engine_key,
                         analysis_pass="fast", parameters=self.parameters,
                         lease_seconds=self.lease_seconds, account_id=account_id)
+                    if job is None and fill_backlog:
+                        added = self.enqueue_missing(account_id=account_id, limit=64)
+                        if added["queued"]:
+                            continue
                     if job is None and include_selective_review and not review_scheduled:
                         review_queued = self.enqueue_selected_reviews(
                             account_id=account_id, budget_per_game=review_budget_per_game,
@@ -193,6 +198,12 @@ class BatchAnalysisRunner:
                         lease_seconds=self.lease_seconds, account_id=account_id)
                 if job is None:
                     break
+                if analysis_pass == "fast" and self.repository.has_complete_server_analysis(
+                        job["game_id"], job["line_revision"], job["line_hash"]):
+                    self.repository.finish_analysis_job(
+                        job["job_id"], self.worker_id, status="stale",
+                        error="Compatible server analysis became available.")
+                    continue
                 log_event("batch_job_claimed", "batch_analysis", run_id=run_id,
                           job_id=job.get("job_id"), mode=(fast_mode if analysis_pass == "fast"
                                                           else "review"))

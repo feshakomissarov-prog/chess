@@ -271,6 +271,15 @@ class ReviewGraph(QWidget):
                     a, b = coordinate_by_ply[first[0]], coordinate_by_ply[second[0]]
                     if self.compact:
                         color = QColor("#43D98A" if a[4] + b[4] >= 0 else "#ED6A79")
+                        shade = QColor(color)
+                        shade.setAlpha(42)
+                        baseline = rect.center().y()
+                        painter.setPen(Qt.PenStyle.NoPen)
+                        painter.setBrush(shade)
+                        painter.drawPolygon(QPolygonF([
+                            QPointF(a[0], baseline), QPointF(a[0], a[1]),
+                            QPointF(b[0], b[1]), QPointF(b[0], baseline),
+                        ]))
                         painter.setPen(QPen(color, 2))
                     painter.drawLine(a[0], a[1], b[0], b[1])
             mate_label_plies: set[int] = set()

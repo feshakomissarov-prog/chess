@@ -173,7 +173,9 @@ def load_game_review(repository, game: dict[str, Any], *,
             "official": False,
         }
     coverage = (analysis or {}).get("coverage") or {}
+    sources = getattr(repository, "game_analysis_sources", None)
     return {
+        "available_sources": sources(game_id, revision, line["line_hash"]) if sources else set(),
         "game": dict(game), "line": dict(line), "revision": revision, "moves": moves,
         "positions": positions, "analysis": analysis, "analysis_source":
             (analysis or {}).get("source"), "analysis_status": (analysis or {}).get("status"),

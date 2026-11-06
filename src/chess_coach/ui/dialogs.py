@@ -188,6 +188,11 @@ class BatchAnalysisDialog(QDialog):
         controls = QHBoxLayout()
         self.start_button = QPushButton("Проанализировать 2 последние недостающие")
         self.start_button.clicked.connect(self._emit_start_request)
+        self.start_all_button = QPushButton("Все недостающие (фоновая очередь)")
+        self.start_all_button.setObjectName("primaryAction")
+        self.start_all_button.clicked.connect(lambda: self.run_requested.emit(
+            0, self.nodes.value(), self.hash_mb.value(), False, False,
+            self.selective_review.isChecked()))
         self.resume_button = QPushButton("Продолжить очередь")
         # A persistent queue may have been paused by a previous application run,
         # but no queue may start before engine/account readiness is visible.
@@ -204,6 +209,7 @@ class BatchAnalysisDialog(QDialog):
         self.cancel_button.setEnabled(False)
         self.cancel_button.setVisible(False)
         self.cancel_button.clicked.connect(self._confirm_cancel)
+        controls.addWidget(self.start_all_button)
         controls.addWidget(self.start_button); controls.addWidget(self.resume_button)
         controls.addWidget(self.pause_button); controls.addWidget(self.cancel_button)
         layout.addLayout(controls)
@@ -287,6 +293,8 @@ class BatchAnalysisDialog(QDialog):
     def _update_action_state(self) -> None:
         idle = not self._running
         self.start_button.setEnabled(idle and self._readiness and not self._paused)
+        self.start_all_button.setEnabled(idle and self._readiness and not self._paused)
+        self.start_all_button.setVisible(not self._paused)
         self.resume_button.setEnabled(idle and self._readiness and self._paused)
         self.start_button.setVisible(not self._paused)
         self.resume_button.setVisible(self._paused)
