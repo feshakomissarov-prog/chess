@@ -79,7 +79,7 @@
 | 06 | Shell → `Прогресс` / `show_statistics` | Открыть Progress с независимыми фильтрами и пустыми состояниями | `test_progress_filter_options_load_in_background_not_dialog_constructor` | `progress.png` | PASS (test + visible render), synthetic empty DB |
 | 07 | Shell → кнопка «Назад» / `navigate_back` | Вернуть предыдущую страницу/контекст | `test_saved_review_return_uses_the_same_origin_as_shell_back` | На скриншотах видна кнопка «Назад» | PASS (test); физический клик не выполнялся |
 | 08 | Shell → сворачивание sidebar | Свернуть/развернуть левое меню без потери маршрута | `test_shell_has_six_typed_routes_and_games_analysis_progress_are_in_stack` | Все шесть route labels видны | PASS (test); pixel-state click не выполнялся |
-| 09 | Главная → «Все партии» / Library route | Открыть список сохранённых партий | `test_home_has_two_columns_and_three_recent_game_cards` | `home.png` | PASS (test + видимая кнопка) |
+| 09 | Главная → «Все партии» / Library route | Открыть список сохранённых партий | `test_home_has_rating_kpi_and_three_recent_game_cards` | `home.png` | PASS (test + видимая кнопка) |
 | 10 | Главная → клик по карточке партии | Открыть именно выбранную партию | `test_recent_game_card_does_not_show_zero_coverage_when_analysis_is_missing` | Synthetic card rendered | PASS (test); настоящий архив не использовался |
 | 11 | Главная → KPI/источник accuracy | Показывать только достоверный источник и охват | `test_home_dashboard_masks_cached_analysis_when_safety_is_pending_or_human_game_starts` | `home.png` показывает честное н/д | PASS (test + visual) |
 | 12 | Играть → режим «Свободная доска» / `_create_play_request` | Создать локальную доску для обеих сторон | `test_embedded_play_form_uses_existing_lichess_facade_and_prevents_duplicate_requests` | `play.png` | PASS (test + visible render); онлайн POST отсутствует |
@@ -165,3 +165,8 @@
 | Дополнительная гонка навигации | CORE-07, COV-17, 21 / 05–07, 53 | `test_rv2_delayed_puzzle_account_read_cannot_reopen_training`: задержанный ответ истории задач не перехватывает навигацию из «Прогресса». |
 
 Windows, обычный Qt backend `windows`, 1360×860, временная SQLite и настройки. `QTest.mouseClick` прошёл шесть основных маршрутов, «Настройки», запуск локальной доски, экспорт в временный файл и открытие разбора. Сохранено 10 кадров в `%TEMP%/chess-rv2-native-lc12ultx`. Диалог выбора файла заменён фиксированным временным путём. Физическая мышь, полный проход остальных контролов, DPI 125/150%, живые OAuth/PAT, Stockfish и звук на устройстве — **НЕ ЗАПУСКАЛОСЬ**.
+
+
+## VISUAL MASTER — промежуточная проверка 06.11.2026
+
+Затронуты COV-02, 03, 04, 07, 11, 12, 15, 22, 23. Новый визуальный gate ещё открыт. В журнале указаны каталоги трёх пар и незавершённые требования. `test_visual_master_dashboard_refresh_renders_after_selector_bootstrap` подтверждает повторную отрисовку снимка аккаунта, `test_batch_queue_and_remote_active_games_stay_inside_workspace` проверяет явное открытие выбранной активной партии из Play. Сравнения Windows выполнялись на синтетической SQLite. Полный connected click-through и DPI 125/150% — НЕ ЗАПУСКАЛИСЬ.

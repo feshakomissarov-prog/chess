@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 
 @dataclass(frozen=True)
@@ -31,10 +31,18 @@ class Theme:
 
 
 TOKENS = Theme()
+VISUAL_TOKENS = replace(
+    TOKENS, app="#0F1322", sidebar="#15192A", surface="#191F30",
+    raised="#232B3E", hover="#343C54", border="#303950", text="#F5F6FD",
+    secondary="#AEB8CF", muted="#9AA6BF", accent="#AA9BEF",
+    accent_hover="#BBACFF", accent_pressed="#9F8BE8", on_accent="#16142A",
+    success="#79E599", danger="#FF737C", warning="#F0BE55",
+)
 
 
-def stylesheet() -> str:
-    t = TOKENS
+def stylesheet(t: Theme = TOKENS) -> str:
+    radius = 16 if t is VISUAL_TOKENS else 12
+    selected = "#39365E" if t is VISUAL_TOKENS else t.raised
     return f"""
     QWidget {{ background: {t.app}; color: {t.text}; font-size: 14px; }}
     QMainWindow, QDialog {{ background: {t.app}; }}
@@ -43,7 +51,7 @@ def stylesheet() -> str:
     QStatusBar#inlineNoticeBar::item {{ border: none; }}
     QFrame#appSidebar {{ background: {t.sidebar}; border-right: 1px solid {t.border}; }}
     QFrame#card, QFrame#metricCard, QFrame#gameCard {{
-        background: {t.surface}; border: 1px solid {t.border}; border-radius: 12px;
+        background: {t.surface}; border: 1px solid {t.border}; border-radius: {radius}px;
     }}
     QLabel#secondary, QLabel#muted, QLabel#connectionStatus {{ color: {t.secondary}; }}
     QLabel#pageTitle {{ font-size: 22px; font-weight: 700; }}
@@ -58,7 +66,7 @@ def stylesheet() -> str:
     QPushButton#primaryAction {{ background: {t.accent}; color: {t.on_accent}; font-weight: 700; }}
     QPushButton#primaryAction:hover {{ background: {t.accent_hover}; }}
     QPushButton#navItem {{ text-align: left; padding: 10px 12px; min-height: 22px; border: none; }}
-    QPushButton#navItem[active="true"] {{ background: {t.raised}; border-left: 3px solid {t.accent}; }}
+    QPushButton#navItem[active="true"] {{ background: {selected}; border-left: 3px solid {t.accent}; }}
     QLineEdit, QTextEdit, QComboBox, QSpinBox, QListWidget, QTableWidget {{
         background: {t.surface}; color: {t.text}; border: 1px solid {t.border};
         border-radius: 6px; padding: 5px;

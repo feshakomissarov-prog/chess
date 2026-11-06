@@ -306,7 +306,7 @@ def test_library_detail_reuses_review_graph_and_masks_until_safety_gate(qtbot):
     assert "Завершена: 04.11.2026" in page.detail_metadata.text()
     assert page.detail_graph._values() == [(0, 10, None), (1, -25, None)]
     assert page.detail_graph.full_ply_count == 1
-    assert "95.0 / 90.0" in page.detail_metrics.text()
+    assert "95.0% · Lichess / 90.0% · Lichess" in page.detail_metrics.text()
     positions = []
     page.detail_position_requested.connect(lambda selected, ply: positions.append((selected, ply)))
     page.detail_graph.selected_ply.emit(1)

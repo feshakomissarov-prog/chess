@@ -562,7 +562,8 @@ def test_background_inspector_reads_archive_and_puzzle_checkpoints_off_ui(
     assert any("Архив Lichess" in row for row in rows)
     assert any("Задачи Lichess · сохранено 0 попыток" in row for row in rows)
     assert all("synthetic-secret-error" not in row for row in rows)
-    assert "сохранённых статусов: 2" in page.summary.text()
+    assert "Сохранено партий: " in page.workflow_status["archive"].text()
+    assert "Сохранено попыток: " in page.workflow_status["puzzles"].text()
     assert read_threads and read_threads[0] != gui_thread
     window.close()
 
@@ -1446,12 +1447,12 @@ def test_batch_queue_and_remote_active_games_stay_inside_workspace(
 
     window.lichess = FakeService()
     window.show_active_games()
-    qtbot.waitUntil(lambda: hasattr(window, "library_page"), timeout=3000)
-    page = window.library_page
+    page = window._play_mode_page
     assert window.screen_stack.currentWidget() is page
     assert page.active_games.count() == 1
     assert "Synthetic" in page.active_games.item(0).text()
-    page._open_active(page.active_games.item(0))
+    page.active_games.setCurrentRow(0)
+    page.active_open.click()
     assert opened == [{
         "gameId": "remote-game", "color": "white", "speed": "blitz",
         "isMyTurn": True, "opponent": {"username": "Synthetic"},
@@ -3422,7 +3423,7 @@ def test_m46_home_has_progress_activity_and_no_legacy_action_drawer(qtbot, tmp_p
     window.game_repository.shutdown()
 
 
-def test_home_has_two_columns_and_three_recent_game_cards(qtbot, tmp_path):
+def test_home_has_rating_kpi_and_three_recent_game_cards(qtbot, tmp_path):
     window = MainWindow(QSettings(str(tmp_path / "home-columns.ini"),
                                   QSettings.Format.IniFormat), offline_mode=True)
     qtbot.addWidget(window)
@@ -3430,8 +3431,8 @@ def test_home_has_two_columns_and_three_recent_game_cards(qtbot, tmp_path):
     # Let that generation finish before installing this test's synthetic data,
     # otherwise its later render can delete the card wrappers retained below.
     qtbot.waitUntil(lambda: window._dashboard_thread is None, timeout=3000)
-    assert window.home_primary_actions.itemAt(0).widget() is window.home_progress_card
-    assert window.home_primary_actions.itemAt(1).widget() is window.home_play_card
+    assert window._home_view.dashboard_metrics_grid.indexOf(window.home_progress_card) >= 0
+    assert window.home_primary_actions.itemAt(0).widget() is window.home_play_card
     assert window.home_friend_button.isHidden()
     games = [{
         "game_id": f"synthetic-{index}", "status": "mate", "winner": "white",
@@ -3442,7 +3443,8 @@ def test_home_has_two_columns_and_three_recent_game_cards(qtbot, tmp_path):
                             "opponent_coverage": "0/12", "source": "нет данных"},
     } for index in range(3)]
     window._render_dashboard_snapshot({"metrics": [], "recent_games": games})
-    assert window._recent_games_layout.count() == 3
+    assert sum(window._recent_games_layout.itemAt(i).widget() is not None
+               for i in range(window._recent_games_layout.count())) == 3
     cards = [window._recent_games_layout.itemAt(i).widget() for i in range(3)]
     from PySide6.QtWidgets import QLabel, QScrollArea, QWidget
     headings = [card.findChild(QLabel).text() for card in cards]
@@ -6034,4 +6036,16 @@ def test_rv2_export_rejects_revision_changed_before_worker_read(qtbot, tmp_path,
         window.library_page.export_requested.emit(selected)
     assert completed.args[3]
     assert target.read_bytes() == b"existing file"
+    window.close()
+
+
+def test_visual_master_dashboard_refresh_renders_after_selector_bootstrap(qtbot, tmp_path):
+    window = MainWindow(QSettings(str(tmp_path / "visual-home.ini"),
+                                  QSettings.Format.IniFormat), offline_mode=True)
+    qtbot.addWidget(window)
+    qtbot.waitUntil(lambda: window._dashboard_options_loaded)
+    generation = window.dashboard_queries.begin_request()
+    snapshot = {"metrics": [], "recent_games": [], "filter": {"account_id": None}}
+    window._dashboard_result_ready(generation, snapshot, None, None)
+    assert window._latest_dashboard_snapshot is snapshot
     window.close()

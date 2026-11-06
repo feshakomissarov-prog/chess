@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from PySide6.QtCore import QTimer, Qt, Signal
+from PySide6.QtCore import QSize, QTimer, Qt, Signal
+from PySide6.QtGui import QColor
 from PySide6.QtWidgets import (
     QComboBox, QFrame, QGridLayout, QHBoxLayout, QLabel, QListWidget, QListWidgetItem,
     QLayout, QLineEdit, QPushButton, QScrollArea, QSplitter, QVBoxLayout, QWidget,
@@ -68,7 +69,14 @@ class LibraryPage(QWidget):
         self.sync_status.setObjectName("secondary")
         layout.addWidget(self.sync_status)
         self.search = QLineEdit()
-        self.search.setPlaceholderText("Поиск по сопернику, игроку, ID или статусу")
+        self.search.setPlaceholderText("Поиск по сопернику, дебюту или дате")
+        self.search.setAccessibleName("Поиск по партиям")
+        self.filters_toggle = QPushButton("Фильтры")
+        self.filters_toggle.setCheckable(True)
+        search_row = QHBoxLayout()
+        search_row.addWidget(self.search, 1)
+        search_row.addWidget(self.filters_toggle)
+        layout.addLayout(search_row)
         self.account_filter = QComboBox()
         self.account_filter.addItem("Все аккаунты", None)
         for account in accounts or []:
@@ -112,7 +120,6 @@ class LibraryPage(QWidget):
         filter_title = QLabel("Фильтры")
         filter_title.setStyleSheet("font-weight: 700;")
         filter_layout.addWidget(filter_title)
-        filter_layout.addWidget(self.search)
         self.opponent_filter = QLineEdit()
         self.opponent_filter.setPlaceholderText("Соперник")
         filter_layout.addWidget(self.opponent_filter)
@@ -139,6 +146,17 @@ class LibraryPage(QWidget):
         body.setChildrenCollapsible(False)
         self.body_splitter = body
         self.games = QListWidget()
+        self.games.setAccessibleName("Завершённые партии")
+        self.games.setStyleSheet("""
+            QListWidget { background: transparent; border: none; }
+            QListWidget::item {
+                background: #191f30; border: 1px solid #303950;
+                border-radius: 12px; margin: 3px; padding: 8px 12px;
+            }
+            QListWidget::item:selected {
+                background: #343153; color: #f5f6fd; border: 2px solid #aa9bef;
+            }
+        """)
         body.addWidget(self.games)
         aside = QWidget()
         aside_layout = QVBoxLayout(aside)
@@ -149,6 +167,8 @@ class LibraryPage(QWidget):
         # compact windows scroll this inspector instead of compressing controls.
         aside.setMinimumHeight(520)
         aside_layout.addWidget(filter_panel)
+        filter_panel.hide()
+        self.filters_toggle.toggled.connect(filter_panel.setVisible)
         self.detail_panel = QFrame()
         self.detail_panel.setObjectName("metricCard")
         detail_layout = QVBoxLayout(self.detail_panel)
@@ -169,8 +189,8 @@ class LibraryPage(QWidget):
         detail_layout.addWidget(self.detail_metrics)
         self.detail_graph = ReviewGraph([], [])
         self.detail_graph.setMinimumWidth(0)
-        self.detail_graph.setMaximumHeight(110)
-        self.detail_graph.setMinimumHeight(72)
+        self.detail_graph.setMaximumHeight(190)
+        self.detail_graph.setMinimumHeight(120)
         self.detail_graph.setVisible(False)
         detail_layout.addWidget(self.detail_graph)
         self.detail_open = QPushButton("Открыть разбор")
@@ -184,8 +204,8 @@ class LibraryPage(QWidget):
         self.aside_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self.aside_scroll.setWidget(aside)
         body.addWidget(self.aside_scroll)
-        body.setStretchFactor(0, 3)
-        body.setStretchFactor(1, 2)
+        body.setStretchFactor(0, 1)
+        body.setStretchFactor(1, 1)
         layout.addWidget(body, 1)
         page_row = QHBoxLayout()
         self.previous = QPushButton("← Назад")
@@ -263,9 +283,8 @@ class LibraryPage(QWidget):
         title = str(game.get("account_opponent") or game.get("opponent") or "Соперник")
         self.detail_title.setText(title)
         date = format_game_timeline(game)
-        result = str(game.get("status") or "Завершена")
         clock = format_clock_control(game.get("clock"))
-        self.detail_metadata.setText(f"{date} · {clock} · {result} · {game.get('source') or 'локально'}")
+        self.detail_metadata.setText(f"{date} · {clock}")
         self.detail_open.setEnabled(True)
         if not safety_allowed:
             self.detail_status.setText("Оценки и график скрыты до подтверждения безопасности Lichess.")
@@ -284,20 +303,32 @@ class LibraryPage(QWidget):
         analysis = review.get("analysis") or {}
         assessments = list(analysis.get("assessments") or [])
         markers = list(analysis.get("move_metrics") or [])
+        source = analysis.get("source") or ""
+        source_name = ("Stockfish" if source == "stockfish" else
+                       "Lichess" if source.startswith("lichess") else "Сохранённые оценки")
         self.detail_status.setText(
-            f"{analysis.get('source') or 'нет данных'} · {analysis.get('status') or 'без анализа'} · "
+            f"{source_name} · "
             f"охват {review.get('coverage', {}).get('scored', 0)}/"
             f"{review.get('coverage', {}).get('total', 0)} позиций")
         sides = review.get("per_side") or {}
-        owner = review.get("owner_color")
-        own = sides.get(owner, {}) if owner in {"white", "black"} else {}
-        accuracy = review.get("official_accuracy") or {}
-        self.detail_metrics.setText(
-            f"Белые: {sides.get('white', {}).get('assessed', 0)} оценено · "
-            f"чёрные: {sides.get('black', {}).get('assessed', 0)} оценено · "
-            f"точность Lichess Б/Ч: {accuracy.get('white') if accuracy.get('white') is not None else 'н/д'} / "
-            f"{accuracy.get('black') if accuracy.get('black') is not None else 'н/д'} · "
-            f"ошибки своей стороны: {own.get('mistake', 0) + own.get('blunder', 0)}")
+        official = review.get("official_accuracy") or {}
+        local = review.get("local_game_accuracy") or {}
+
+        def accuracy_for(side):
+            if official.get(side) is not None:
+                return f"{official[side]:.1f}% · Lichess"
+            if local.get(side) is not None:
+                return f"{local[side]:.1f}% · локально"
+            return "—"
+
+        def classified(side, key):
+            counts = sides.get(side) or {}
+            return str(counts.get(key, 0)) if counts.get("assessed") else "—"
+
+        lines = [f"Точность · белые / чёрные: {accuracy_for('white')} / {accuracy_for('black')}"]
+        for label, key in (("Неточности", "inaccuracy"), ("Ошибки", "mistake"), ("Зевки", "blunder")):
+            lines.append(f"{label} · {classified('white', key)} / {classified('black', key)}")
+        self.detail_metrics.setText("\n".join(lines))
         self.detail_graph.assessments = assessments
         self.detail_graph.markers = {int(row["ply"]): row for row in markers}
         self.detail_graph.full_ply_count = len(review.get("moves") or [])
@@ -369,6 +400,11 @@ class LibraryPage(QWidget):
         selected_item = None
         for game, row_text, source_label in rows:
             item = QListWidgetItem(row_text)
+            item.setSizeHint(QSize(0, 74))
+            if row_text.startswith("Победа"):
+                item.setForeground(QColor("#79E599"))
+            elif row_text.startswith("Поражение"):
+                item.setForeground(QColor("#FF737C"))
             item.setToolTip(f"Источник: {source_label}")
             item.setData(Qt.ItemDataRole.UserRole, game)
             item.setData(Qt.ItemDataRole.AccessibleDescriptionRole,

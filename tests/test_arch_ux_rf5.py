@@ -101,7 +101,9 @@ def test_library_inspector_scrolls_instead_of_clipping_filters_on_compact_window
     qtbot.wait(40)
     page = window.library_page
 
-    assert page.aside_scroll.verticalScrollBar().maximum() > 0
+    assert page.filter_panel.isHidden()
+    page.filters_toggle.click()
+    qtbot.waitUntil(lambda: page.aside_scroll.verticalScrollBar().maximum() > 0)
     assert page.search.height() >= 28
     assert page.account_filter.height() >= 28
     assert page.detail_open.height() > 0
@@ -144,10 +146,10 @@ def test_home_metric_details_wrap_at_compact_width(qtbot, tmp_path):
     qtbot.wait(20)
     detail = window._dashboard_metric_details["analysis"]
     assert detail.wordWrap()
-    assert detail.text() == "Полный 5 · частичный 3 · мои ходы: 21/40"
+    assert detail.text() == "С оценками: 8\nStockfish: 6 · Lichess с оценками: 2"
     assert "Stockfish: 6" in detail.toolTip()
     assert "Lichess с оценками: 2" in detail.toolTip()
-    assert detail.geometry().bottom() < window.dashboard_metrics["analysis"].rect().height()
+    assert detail.geometry().bottom() < window.dashboard_metrics["games"].rect().height()
     window.close()
 
 

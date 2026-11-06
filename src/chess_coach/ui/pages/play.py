@@ -6,7 +6,7 @@ from collections.abc import Callable
 
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (QCheckBox, QComboBox, QApplication, QFrame, QGridLayout, QHBoxLayout,
-                               QLabel, QLineEdit, QPushButton, QSpinBox, QVBoxLayout, QWidget)
+                               QLabel, QLineEdit, QListWidget, QListWidgetItem, QPushButton, QSpinBox, QVBoxLayout, QWidget)
 
 
 class PlayPage(QWidget):
@@ -15,6 +15,7 @@ class PlayPage(QWidget):
     create_requested = Signal(object)
     cancel_requested = Signal()
     cancel_invitation_requested = Signal()
+    active_game_requested = Signal(dict)
 
     _MODES = (
         ("Локально", "Свободная доска для двух сторон.", "Свободная доска", "local", True),
@@ -118,6 +119,24 @@ class PlayPage(QWidget):
         form_layout.addWidget(self.start_button)
         form_layout.addWidget(self.cancel_pending_button)
         layout.addWidget(form)
+        self.active_panel = QFrame()
+        self.active_panel.setObjectName("activeGamesPanel")
+        active_layout = QVBoxLayout(self.active_panel)
+        self.active_status = QLabel()
+        self.active_status.setWordWrap(True)
+        self.active_games = QListWidget()
+        self.active_games.setAccessibleName("Активные партии Lichess")
+        self.active_games.setMaximumHeight(130)
+        self.active_open = QPushButton("Продолжить выбранную партию")
+        self.active_open.setEnabled(False)
+        self.active_open.clicked.connect(self._open_selected_active_game)
+        self.active_games.currentItemChanged.connect(
+            lambda item, _old: self.active_open.setEnabled(item is not None))
+        active_layout.addWidget(self.active_status)
+        active_layout.addWidget(self.active_games)
+        active_layout.addWidget(self.active_open)
+        self.active_panel.hide()
+        layout.addWidget(self.active_panel)
         self.mode_selector.currentIndexChanged.connect(self._update_form)
         self.clock.currentIndexChanged.connect(self._update_form)
         self.start_button.clicked.connect(self._emit_create)
@@ -201,6 +220,26 @@ class PlayPage(QWidget):
             "clock_increment": increment, "level": int(self.level.currentData()),
             "rated": self.rated.isChecked(), "username": self.username.text().strip(),
         })
+
+    def set_active_games(self, games=(), *, status: str = "") -> None:
+        self.active_games.clear()
+        for game in games:
+            if not game.get("gameId"):
+                continue
+            opponent = game.get("opponent") or {}
+            name = opponent.get("username") or opponent.get("id") or "Соперник"
+            item = QListWidgetItem(str(name))
+            item.setData(Qt.ItemDataRole.UserRole, dict(game))
+            self.active_games.addItem(item)
+        self.active_status.setText(status or (
+            "Выберите партию для продолжения." if self.active_games.count()
+            else "Активных партий нет."))
+        self.active_panel.show()
+
+    def _open_selected_active_game(self) -> None:
+        item = self.active_games.currentItem()
+        if item is not None:
+            self.active_game_requested.emit(item.data(Qt.ItemDataRole.UserRole))
 
     def set_status(self, text: str) -> None:
         self.form_status.setText(str(text))

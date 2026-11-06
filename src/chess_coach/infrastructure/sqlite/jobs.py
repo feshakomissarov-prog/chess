@@ -369,7 +369,7 @@ class AnalysisJobsStoreMixin:
                 "('created','started','started_soon','playing') AND g.variant='standard' "
                 "AND NOT EXISTS (SELECT 1 FROM analysis_runs ar "
                 "WHERE ar.game_id=g.game_id AND ar.line_revision=gr.line_revision "
-                "AND ar.line_hash=gr.line_hash AND ar.source='lichess-pgn' "
+                "AND ar.line_hash=gr.line_hash AND ar.source IN ('lichess-pgn','lichess-json') "
                 "AND ar.status='complete' AND "
                 "(SELECT COUNT(*) FROM position_assessments pa WHERE pa.run_id=ar.run_id "
                 "AND (pa.white_cp IS NOT NULL OR pa.mate_white IS NOT NULL)) >= "
@@ -470,7 +470,7 @@ class AnalysisJobsStoreMixin:
             + account_filter +
             "AND NOT EXISTS (SELECT 1 FROM analysis_runs ar "
             "WHERE ar.game_id=g.game_id AND ar.line_revision=gr.line_revision "
-            "AND ar.line_hash=gr.line_hash AND ar.source='lichess-pgn' "
+            "AND ar.line_hash=gr.line_hash AND ar.source IN ('lichess-pgn','lichess-json') "
             "AND ar.status='complete' AND "
             "(SELECT COUNT(*) FROM position_assessments pa WHERE pa.run_id=ar.run_id "
             "AND (pa.white_cp IS NOT NULL OR pa.mate_white IS NOT NULL)) >= "

@@ -86,8 +86,8 @@ def dashboard_snapshot(repository, *, account_id: str | None = None,
             "THEN g.game_id END) AS losses,"
             "COUNT(DISTINCT CASE WHEN g.status IN ('draw','stalemate','repetition','50moves',"
             "'insufficientMaterial') THEN g.game_id END) AS draws,"
-            f"AVG(CASE {color} WHEN 'white' THEN g.lichess_accuracy_white "
-            "WHEN 'black' THEN g.lichess_accuracy_black END) AS owner_accuracy,"
+            f"AVG(CASE WHEN g.source IN ('lichess','lichess_archive') OR g.source_game_id IS NOT NULL THEN CASE {color} WHEN 'white' THEN g.lichess_accuracy_white "
+            "WHEN 'black' THEN g.lichess_accuracy_black END END) AS owner_accuracy,"
             f"COUNT(DISTINCT CASE WHEN (CASE {color} WHEN 'white' THEN g.lichess_accuracy_white "
             "WHEN 'black' THEN g.lichess_accuracy_black END) IS NOT NULL "
             "AND (g.source IN ('lichess','lichess_archive') OR g.source_game_id IS NOT NULL) "
@@ -172,7 +172,7 @@ def dashboard_snapshot(repository, *, account_id: str | None = None,
             "scope": scope, "filter": {"account_id": account_id, "clock": clock}}
 
 
-def game_card_metrics(repository, game: dict[str, Any]) -> dict[str, str]:
+def game_card_metrics(repository, game: dict[str, Any]) -> dict[str, Any]:
     """Summarize one bounded line and its current saved assessment, never UCI."""
     color = game.get("account_color") or game.get("color")
     try:
@@ -188,6 +188,11 @@ def game_card_metrics(repository, game: dict[str, Any]) -> dict[str, str]:
     own_color_accuracy = view["official_accuracy"].get(color) if color in {"white", "black"} else None
     opponent_accuracy = (view["official_accuracy"].get(opponent_color)
                          if opponent_color else None)
+    accuracy_source = "Lichess" if own_color_accuracy is not None else None
+    if own_color_accuracy is None:
+        own_color_accuracy = (view.get("local_game_accuracy") or {}).get(color)
+        if own_color_accuracy is not None:
+            accuracy_source = "Stockfish · локально" if analysis.get("source") == "stockfish" else "Локальный расчёт"
     coverage = int(side.get("assessed") or 0)
     total = int(side.get("total") or 0)
     errors = int(side.get("inaccuracy") or 0) + int(side.get("mistake") or 0) + int(side.get("blunder") or 0)
@@ -195,6 +200,9 @@ def game_card_metrics(repository, game: dict[str, Any]) -> dict[str, str]:
     # Candidate best_move_confirmed is intentionally not presented as verified.
     return {
         "accuracy": f"{float(own_color_accuracy):.1f}%" if own_color_accuracy is not None else "н/д",
+        "accuracy_source": accuracy_source,
+        "assessments": list(analysis.get("assessments") or []),
+        "moves": {int(move.ply): str(move.san) for move in view.get("moves") or []},
         "errors": str(errors) if coverage else "н/д",
         "inaccuracies": str(int(side.get("inaccuracy") or 0)) if coverage else "н/д",
         "mistakes": str(int(side.get("mistake") or 0)) if coverage else "н/д",

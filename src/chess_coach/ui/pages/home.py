@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
-    QComboBox, QFrame, QGridLayout, QHBoxLayout, QLabel, QPushButton,
+    QComboBox, QFrame, QGridLayout, QHBoxLayout, QLabel, QPushButton, QScrollArea,
     QVBoxLayout, QWidget,
 )
 
@@ -41,7 +41,7 @@ class HomePage(QWidget):
         metrics_grid = QGridLayout()
         self.dashboard_metrics_grid = metrics_grid
         metrics_grid.setContentsMargins(0, 0, 0, 0)
-        metrics_grid.setHorizontalSpacing(9)
+        metrics_grid.setHorizontalSpacing(16)
         metrics_grid.setVerticalSpacing(0)
         self._dashboard_metric_values = {}
         self._dashboard_metric_details = {}
@@ -53,13 +53,13 @@ class HomePage(QWidget):
             card = QFrame(self)
             card.setObjectName("metricCard")
             card_layout = QVBoxLayout(card)
-            card_layout.setContentsMargins(10, 7, 10, 7)
+            card_layout.setContentsMargins(16, 13, 16, 13)
             card_layout.setSpacing(2)
             caption = QLabel(label)
             caption.setObjectName("secondary")
             caption.setWordWrap(False)
             value = QLabel("—")
-            value.setStyleSheet("font-size: 20px; font-weight: 700;")
+            value.setStyleSheet("font-size: 38px; font-weight: 700;")
             detail = QLabel("Локальные данные")
             detail.setObjectName("muted")
             detail.setWordWrap(True)
@@ -72,7 +72,6 @@ class HomePage(QWidget):
         # Error-rate detail belongs in Progress; retain the existing read-model
         # field for compatibility without giving it KPI prominence on Home.
         self.dashboard_metrics["errors"].hide()
-        self.layout_metrics()
         layout.addLayout(metrics_grid)
 
         top_row = QHBoxLayout()
@@ -80,11 +79,11 @@ class HomePage(QWidget):
         top_row.setSpacing(9)
         self.home_progress_card = QFrame(self)
         self.home_progress_card.setObjectName("metricCard")
-        self.home_progress_card.setMaximumHeight(160)
+        self.home_progress_card.setMinimumHeight(140)
         progress_layout = QVBoxLayout(self.home_progress_card)
         progress_layout.setContentsMargins(11, 8, 11, 8)
         progress_layout.setSpacing(4)
-        progress_title = QLabel("Мой прогресс")
+        progress_title = QLabel("Рейтинг задач")
         progress_title.setStyleSheet("font-size: 16px; font-weight: 700;")
         progress_layout.addWidget(progress_title)
         self.progress_trend = QLabel("Нет сохранённых точек тренда.")
@@ -95,12 +94,19 @@ class HomePage(QWidget):
         self.home_all_progress_button = QPushButton("Весь прогресс")
         self.home_all_progress_button.clicked.connect(actions["show_statistics"])
         progress_layout.addWidget(self.home_all_progress_button, 0, Qt.AlignmentFlag.AlignLeft)
-        top_row.addWidget(self.home_progress_card, 1)
+        self.dashboard_metrics["games"].layout().addWidget(
+            self._dashboard_metric_values["analysis"])
+        self._dashboard_metric_values["analysis"].setStyleSheet("font-size: 14px;")
+        self.dashboard_metrics["games"].layout().addWidget(
+            self._dashboard_metric_details["analysis"])
+        self._dashboard_metric_values["analysis"].hide()
+        self.dashboard_metrics["analysis"].hide()
+        self.layout_metrics()
 
         self.home_play_card = QFrame(self)
         self.home_play_card.setObjectName("metricCard")
         self.home_play_card.setMaximumHeight(160)
-        activity_layout = QVBoxLayout(self.home_play_card)
+        activity_layout = QHBoxLayout(self.home_play_card)
         activity_layout.setContentsMargins(11, 8, 11, 8)
         activity_layout.setSpacing(4)
         activity_title = QLabel("Следующее занятие")
@@ -114,18 +120,17 @@ class HomePage(QWidget):
         self.home_activity_button = QPushButton("Открыть обучение")
         self.home_activity_button.setObjectName("primaryAction")
         self.home_activity_button.clicked.connect(actions["open_puzzle_history_local"])
-        activity_layout.addWidget(self.home_activity_button, 0, Qt.AlignmentFlag.AlignLeft)
+        activity_layout.addWidget(self.home_activity_button)
         top_row.addWidget(self.home_play_card, 1)
-        layout.addLayout(top_row)
 
         recent_card = QFrame(self)
         self.home_recent_card = recent_card
-        recent_card.setObjectName("metricCard")
+        recent_card.setObjectName("recentGames")
         recent_layout = QVBoxLayout(recent_card)
         recent_layout.setContentsMargins(11, 8, 11, 8)
         recent_title_row = QHBoxLayout()
         recent_title = QLabel("Последние партии")
-        recent_title.setStyleSheet("font-size: 16px; font-weight: 700;")
+        recent_title.setStyleSheet("font-size: 24px; font-weight: 700;")
         recent_title_row.addWidget(recent_title)
         recent_title_row.addStretch(1)
         self.home_games_button = QPushButton("Все партии")
@@ -136,10 +141,18 @@ class HomePage(QWidget):
         self.recent_safety_notice.setObjectName("muted")
         self.recent_safety_notice.setMaximumHeight(20)
         recent_layout.addWidget(self.recent_safety_notice)
-        self._recent_games_layout = QVBoxLayout()
-        self._recent_games_layout.setSpacing(5)
-        recent_layout.addLayout(self._recent_games_layout, 1)
+        recent_rows = QWidget()
+        self._recent_games_layout = QVBoxLayout(recent_rows)
+        self._recent_games_layout.setContentsMargins(0, 0, 0, 0)
+        self._recent_games_layout.setSpacing(12)
+        self.recent_scroll = QScrollArea()
+        self.recent_scroll.setFrameShape(QFrame.Shape.NoFrame)
+        self.recent_scroll.setWidgetResizable(True)
+        self.recent_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.recent_scroll.setWidget(recent_rows)
+        recent_layout.addWidget(self.recent_scroll, 1)
         layout.addWidget(recent_card, 1)
+        layout.addLayout(top_row)
 
         # Preserve shell callbacks and old tests as hidden compatibility hooks.
         self.home_friend_button = QPushButton("Играть с другом по ссылке")
@@ -220,7 +233,8 @@ class HomePage(QWidget):
 
     def layout_metrics(self, width: int | None = None) -> None:
         grid = self.dashboard_metrics_grid
-        cards = [self.dashboard_metrics[key] for key in ("games", "analysis", "accuracy")]
+        cards = [self.dashboard_metrics["games"], self.dashboard_metrics["accuracy"],
+                 self.home_progress_card]
         if not cards:
             return
         available = int(width if width is not None else self.width())

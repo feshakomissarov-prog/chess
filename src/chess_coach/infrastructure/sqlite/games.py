@@ -50,8 +50,10 @@ class GamesStoreMixin:
         term = query.strip()
         if term:
             clauses.append(f"(g.game_id LIKE ? OR {opponent_expr} LIKE ? OR g.white_player LIKE ? "
-                           "OR g.black_player LIKE ? OR g.status LIKE ?)")
-            params.extend([f"%{term}%"] * 5)
+                           "OR g.black_player LIKE ? OR g.status LIKE ? OR g.opening_name LIKE ? "
+                           "OR g.opening_eco LIKE ? OR g.started_at LIKE ? "
+                           "OR strftime('%d.%m.%Y',g.started_at) LIKE ?)")
+            params.extend([f"%{term}%"] * 9)
         if completed_only:
             clauses.append("status NOT IN ('created','started','started_soon','playing')")
         if clock:
