@@ -18,7 +18,8 @@ from ..lichess.analysis import CLASSIFIER_VERSION
 from ..lichess.repository import GameRepository
 from ..lichess.statistics import StatisticsService
 from .dialog_support import _clock_filter_sort_key, _game_date_label, _result_label
-from .display import format_clock_control, opening_tooltip, russian_opening_name, source_short
+from .display import (format_clock_control, game_opening_name, opening_tooltip,
+                      russian_opening_name, source_short)
 from .statistics_workers import StatisticsWorkerHub
 
 
@@ -215,7 +216,7 @@ class StatisticsGameDialog(QDialog):
                         if opening else "Справочник дебютов: совпадения пока нет")
         if opening and opening.get("lichess_conflict"):
             opening_text += (f" · название Lichess отличается: "
-                             f"{russian_opening_name(game.get('opening_eco'), game.get('opening_name'))}")
+                             f"{game_opening_name(game)}")
         phase_text = (f"Фазы: {phases['source']} / {phases['method_version']} · "
                       f"middlegame={phases['middle_start_ply']}, endgame={phases['end_start_ply']}"
                       if phases else "Границы фаз неизвестны")
@@ -224,7 +225,7 @@ class StatisticsGameDialog(QDialog):
             f"{game.get('white_player') or 'Белые'} — {game.get('black_player') or 'Чёрные'}\n"
             f"Ваш цвет: {color}; соперник: {opponent}; результат: {result}\n"
             f"Источник оценки: {source}; дебют: "
-            f"{russian_opening_name(game.get('opening_eco'), game.get('opening_name'))}\n"
+            f"{game_opening_name(game)}\n"
             f"{opening_text}\n{accuracy_text}\n{phase_text}")
         header.setWordWrap(True)
         source_opening = opening_tooltip(opening.get("name") if opening else game.get("opening_name"))

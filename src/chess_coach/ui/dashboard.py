@@ -5,7 +5,7 @@ from __future__ import annotations
 from typing import Any
 
 from ..application.dashboard import dashboard_options, dashboard_snapshot, game_card_metrics
-from .display import format_clock_control, format_game_activity_time, russian_opening_name
+from .display import format_clock_control, format_game_activity_time, game_opening_name
 
 def game_card_text(game: dict[str, Any]) -> tuple[str, str]:
     opponent = str(game.get("account_opponent") or game.get("opponent") or "Соперник неизвестен")
@@ -20,6 +20,6 @@ def game_card_text(game: dict[str, Any]) -> tuple[str, str]:
     details = " · ".join((
         format_game_activity_time(game),
         format_clock_control(game.get("clock")),
-        russian_opening_name(game.get("eco"), game.get("opening_name")),
+        game_opening_name(game),
     ))
     return f"{result} с {opponent}", details

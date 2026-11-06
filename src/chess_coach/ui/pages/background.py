@@ -200,7 +200,11 @@ class BackgroundOperationsPage(QWidget):
             self.set_workflow_state(key, state)
             bar = self.workflow_progress[key]
             done, total = (progress or {}).get(key, (0, 0))
-            bar.setVisible(total > 0)
+            # Ready analytics is a deferred API worklist: retries, Retry-After
+            # and not-yet-due games make checked/total a misleading completion
+            # percentage. Its truthful counters and next attempt live in the
+            # explanatory status text instead.
+            bar.setVisible(total > 0 and key != "ready")
             if total > 0:
                 bar.setRange(0, total)
                 bar.setValue(max(0, min(done, total)))

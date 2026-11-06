@@ -134,6 +134,8 @@ def load_game_review(repository, game: dict[str, Any], *,
                 best_matches += int(best == chess.Move.from_uci(move.uci))
         per_side[color] = {
             "total": len(side_moves), "assessed": len(assessed),
+            "classified": sum(move.severity in {"good", "inaccuracy", "mistake", "blunder"}
+                              for move in side_moves),
             "best_known": best_known, "best_matches": best_matches,
             "good": sum(move.severity == "good" for move in assessed),
             "inaccuracy": sum(move.severity == "inaccuracy" for move in assessed),

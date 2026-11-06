@@ -34,9 +34,11 @@ class GamesStoreMixin:
                      color: str | None = None, outcome: str | None = None,
                      analysis: str | None = None, analysis_source: str | None = None,
                      updated_after: str | None = None,
-                     order_by_game_time: bool = False) -> dict:
+                     order_by_game_time: bool = False,
+                     wait_for_writes: bool = True) -> dict:
         """Search the local library without loading every PGN into a widget."""
-        self._wait_before_read()
+        if wait_for_writes:
+            self._wait_before_read()
         page = max(0, int(page))
         page_size = min(MAX_PAGE_SIZE, max(1, int(page_size)))
         clauses: list[str] = []

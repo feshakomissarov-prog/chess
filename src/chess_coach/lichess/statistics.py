@@ -123,9 +123,11 @@ class StatisticsService:
                 analysis_source: str | None = None, side: str | None = None,
                 rating_min: int | None = None, rating_max: int | None = None,
                 opening: str | None = None, result: str | None = None,
-                analyzed: str | None = None) -> dict[str, Any]:
+                analyzed: str | None = None,
+                wait_for_writes: bool = True) -> dict[str, Any]:
         cache_key = ("summary", account_id, since, until, opponent, clock, game_source,
-                     analysis_source, side, rating_min, rating_max, opening, result, analyzed)
+                     analysis_source, side, rating_min, rating_max, opening, result,
+                     analyzed, wait_for_writes)
         cached = self._get_cached(cache_key)
         if cached is not None:
             return cached
@@ -151,7 +153,8 @@ class StatisticsService:
                   "WHERE aj.result_run_id=ar.run_id AND aj.analysis_pass='review') "
                   + source_clause + ")")
         selected = filtered + latest + ", chosen AS (SELECT * FROM latest WHERE rank=1)"
-        self.repository._wait_before_read()
+        if wait_for_writes:
+            self.repository._wait_before_read()
         with self.repository._connection() as db:
             # Keep all aggregate reads on one SQLite snapshot while a background writer
             # may be importing more games.

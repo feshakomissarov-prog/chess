@@ -11,7 +11,7 @@ from PySide6.QtWidgets import (
 )
 from ..dashboard import game_card_text
 from ..display import (
-    format_clock_control, format_game_activity_time, format_game_timeline, russian_opening_name,
+    format_clock_control, format_game_activity_time, format_game_timeline, game_opening_name,
 )
 from ..game_review import ReviewGraph
 
@@ -27,6 +27,10 @@ class LibraryRowDelegate(QStyledItemDelegate):
         shell = QStyleOptionViewItem(option)
         self.initStyleOption(shell, index)
         shell.text = ""
+        # Selection is already drawn by the rounded card background; suppress
+        # the platform's second inset focus frame, which looks like a stray
+        # white card border in the dark library layout.
+        shell.state &= ~QStyle.StateFlag.State_HasFocus
         option.widget.style().drawControl(QStyle.ControlElement.CE_ItemViewItem, shell,
                                           painter, option.widget)
         rect = option.rect.adjusted(18, 8, -15, -8)
@@ -63,7 +67,7 @@ class LibraryRowDelegate(QStyledItemDelegate):
         painter.drawLine(second, rect.top() + 4, second, rect.bottom() - 4)
         width = rect.right() - second - 10
         text(format_clock_control(game.get("clock")), second + 10, rect.top(), width, half)
-        text(russian_opening_name(game.get("opening_eco"), game.get("opening_name")),
+        text(game_opening_name(game),
              second + 10, rect.top() + half, width, half, color="#AEB8CF")
         painter.restore()
 
@@ -100,17 +104,12 @@ class LibraryPage(QWidget):
         layout.addWidget(self.active_games)
         self.summary = QLabel("Завершённые партии · загрузка выборки…")
         self.summary.setObjectName("secondary")
-        self.sort_description = QLabel(
-            "Сортировка: последняя дата хода, затем дата начала", self)
-        self.sort_description.setObjectName("muted")
         sort_help = (
             "Порядок использует lastMoveAt, затем подтверждённое время/дату начала; "
             "обновление аналитики его не меняет.")
-        self.sort_description.setToolTip(sort_help)
-        # This is diagnostic ordering help, not a separate floating window or
-        # another row in the approved compact library layout.
+        # Keep ordering provenance in an accessible description without a
+        # permanently hidden label that can be surfaced as a stray Qt window.
         self.summary.hide()
-        self.sort_description.hide()
         self.sync_button = QPushButton("Синхронизировать")
         self.sync_button.clicked.connect(self.sync_requested.emit)
         self.background_button = QPushButton("Фоновые операции")
@@ -124,7 +123,8 @@ class LibraryPage(QWidget):
         self.search = QLineEdit()
         self.search.setPlaceholderText("Поиск по сопернику, дебюту или дате")
         self.search.setAccessibleName("Поиск по партиям")
-        self.search.setToolTip(sort_help)
+        self.search.setAccessibleDescription(sort_help)
+        self.search.setToolTip("")
         self.filters_toggle = QPushButton("Фильтры")
         self.filters_toggle.setCheckable(True)
         search_widget = QWidget(self)
@@ -435,7 +435,7 @@ class LibraryPage(QWidget):
         self.detail_players.setText(f"{white}   {score or '—'}   {black}" if white and black else "")
         date = format_game_timeline(game)
         clock = format_clock_control(game.get("clock"))
-        opening = russian_opening_name(game.get("opening_eco"), game.get("opening_name"))
+        opening = game_opening_name(game)
         self.detail_metadata.setText(f"{date} · {clock}\n{opening}")
         # The selected row is a loaded local record. Export and analysis do not
         # require an analysis payload; review navigation waits for the detail
@@ -489,7 +489,7 @@ class LibraryPage(QWidget):
 
         def classified(side, key):
             counts = sides.get(side) or {}
-            return str(counts.get(key, 0)) if counts.get("assessed") else "—"
+            return str(counts.get(key, 0)) if counts.get("classified") else "—"
 
         lines = [f"Точность · белые / чёрные: {accuracy_for('white')} / {accuracy_for('black')}"]
         for label, key in (("Неточности", "inaccuracy"), ("Ошибки", "mistake"), ("Зевки", "blunder")):

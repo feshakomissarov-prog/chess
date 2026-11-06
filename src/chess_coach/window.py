@@ -73,7 +73,7 @@ from .application.fair_play import playing_snapshot_allows_analysis
 from .application.archive_sync import ArchiveSyncCoordinator
 from .application.library import GameLibraryQueryCoordinator
 from .application.dashboard import (DashboardQueryCoordinator, dashboard_options,
-                                    dashboard_snapshot)
+                                    dashboard_preview_snapshot, dashboard_snapshot)
 from .lichess.session import LichessGameSession, classify_lichess_opponent
 from .lichess.game_review import load_game_review
 from .lichess.statistics import StatisticsService
@@ -101,8 +101,8 @@ from .ui.analytics_dialogs import (EvaluationGraph, RatingTrendGraph,
                                    StatisticsGameDialog, StatisticsDialog)
 from .ui.dialog_support import (_clock_filter_sort_key, _game_date_label, _result_label)
 from .ui.display import (format_clock_control, format_game_date,
-                         format_game_timeline,
-                         format_remaining_clock, opening_tooltip, russian_opening_name,
+                         format_game_timeline, game_opening_name,
+                         format_remaining_clock, opening_tooltip,
                          source_short)
 
 
@@ -301,7 +301,7 @@ def _archive_row_presentation(game: dict) -> tuple[str, str]:
         heading = heading.replace("Результат н/д", "Мат", 1)
     timeline = format_game_timeline(game)
     clock = format_clock_control(game.get("clock"))
-    opening = russian_opening_name(game.get("opening_eco"), game.get("opening_name"))
+    opening = game_opening_name(game)
     text = f"{heading}\n{timeline} · {clock} · {opening}"
     if game.get("import_error") or game.get("variant", "standard") != "standard":
         text += f" · просмотр недоступен ({game.get('variant') or 'вариант'})"
@@ -359,6 +359,7 @@ class MainWindow(QMainWindow):
     position_eval_finished = Signal(int, object, object)
     position_eval_update = Signal(int, object)
     dashboard_finished = Signal(int, object, object, object)
+    dashboard_preview_ready = Signal(int, object)
     library_query_finished = Signal(int, object, object)
     library_target_finished = Signal(int, str, object, object)
     library_detail_finished = Signal(int, str, object, object)
@@ -584,6 +585,7 @@ class MainWindow(QMainWindow):
         self.position_eval_finished.connect(self._position_eval_finished)
         self.position_eval_update.connect(self._position_eval_update)
         self.dashboard_finished.connect(self._dashboard_result_ready)
+        self.dashboard_preview_ready.connect(self._dashboard_preview_result_ready)
         self.library_query_finished.connect(self._library_query_result_ready)
         self.library_target_finished.connect(self._library_target_result_ready)
         self.library_detail_finished.connect(self._library_detail_result_ready)
@@ -2250,8 +2252,11 @@ class MainWindow(QMainWindow):
                 self._outer_content_layout.setContentsMargins(
                     margins.left(), margins.top(), margins.right(), target_bottom)
         self.screen_title.setVisible(current is not self.review_workspace)
-        visual_screen = current in (self.home_page, getattr(self, "library_page", None),
-                                    getattr(self, "_background_operations_page", None))
+        # The approved dark visual tokens are the application-wide design
+        # system. Previously only Home/Library/Background activated them,
+        # leaving Play, Analysis, Training, Progress and nested game screens
+        # on the legacy palette after every navigation.
+        visual_screen = True
         if visual_screen != getattr(self, "_visual_theme_active", False):
             self.setStyleSheet(desktop_stylesheet(VISUAL_TOKENS if visual_screen else TOKENS))
             self._visual_theme_active = visual_screen
@@ -2827,6 +2832,11 @@ class MainWindow(QMainWindow):
                                    clock: str | None) -> None:
         def work():
             try:
+                preview = dashboard_preview_snapshot(
+                    self.game_repository, account_id=account_id, clock=clock)
+                if not self._dashboard_options_loaded:
+                    preview["_selector_options"] = dashboard_options(self.game_repository)
+                self.dashboard_preview_ready.emit(generation, preview)
                 result = self.dashboard_queries.snapshot(
                     account_id=account_id, clock=clock, query=dashboard_snapshot)
                 if not self._dashboard_options_loaded:
@@ -2839,6 +2849,19 @@ class MainWindow(QMainWindow):
             work, kind="dashboard_read", lane=OperationLane.NETWORK_BACKGROUND,
             thread_name="chess-coach-dashboard-read")
         self._dashboard_thread = thread
+
+    def _dashboard_preview_result_ready(self, generation: int, snapshot: object) -> None:
+        """Render the bounded committed local rows while aggregate work continues."""
+        if (self._shutdown_requested or not self.dashboard_queries.is_current(generation)
+                or not isinstance(snapshot, dict)):
+            return
+        selector_options = snapshot.get("_selector_options")
+        if isinstance(selector_options, dict):
+            self._home_view.set_selector_options(selector_options)
+            self._dashboard_options_loaded = True
+        if self.dashboard_account.currentData() != snapshot.get("filter", {}).get("account_id"):
+            return
+        self._render_dashboard_snapshot(snapshot)
 
     def _dashboard_result_ready(self, generation: int, snapshot: object, error: object,
                                 thread: object) -> None:
@@ -2877,6 +2900,7 @@ class MainWindow(QMainWindow):
 
     def _render_dashboard_snapshot(self, snapshot: dict) -> None:
         self._latest_dashboard_snapshot = snapshot
+        preview = bool(snapshot.get("is_preview"))
         trend = snapshot.get("activity_trend") or []
         puzzle_rating = snapshot.get("puzzle_player_rating") or {}
         self._home_view.puzzle_rating.setText(str(puzzle_rating.get("latest", "—")))
@@ -2895,6 +2919,10 @@ class MainWindow(QMainWindow):
             self._home_view.progress_trend.setToolTip(
                 "Источник: локально сохранённые попытки Lichess; сгруппировано по месяцу. "
                 "Числа показывают результаты попыток, а не рейтинг игрока.")
+        elif preview:
+            self._home_view.progress_trend.setText("Сводка статистики загружается из SQLite…")
+            self._home_view.progress_trend.setToolTip(
+                "Показаны уже сохранённые данные. Источник: локальная история попыток Lichess.")
         elif snapshot.get("filter", {}).get("account_id"):
             self._home_view.progress_trend.setText("Для этого профиля пока нет точек тренда.")
             self._home_view.progress_trend.setToolTip("Здесь отображается только сохранённая история.")
@@ -2913,6 +2941,12 @@ class MainWindow(QMainWindow):
             self._dashboard_metric_values[metric["key"]].setText(
                 "скрыто" if masked else metric["value"])
             detail_text = str(metric["detail"])
+            if preview and metric["key"] != "games":
+                self._dashboard_metric_values[metric["key"]].setText("—")
+                self._dashboard_metric_details[metric["key"]].setText(detail_text)
+                self._dashboard_metric_values[metric["key"]].setToolTip(detail_text)
+                self._dashboard_metric_details[metric["key"]].setToolTip(detail_text)
+                continue
             if metric["key"] == "analysis" and not masked:
                 parts = detail_text.split(" · ")
                 if len(parts) >= 5 and parts[0].startswith("Полный охват:"):
@@ -2972,14 +3006,14 @@ class MainWindow(QMainWindow):
                 opponent_label.setTextFormat(Qt.TextFormat.PlainText)
                 opponent_label.setStyleSheet("font-size: 16px;")
                 card_layout.addWidget(opponent_label)
-            opening = russian_opening_name(game.get("eco") or game.get("opening_eco"),
-                                           game.get("opening_name"))
+            opening = game_opening_name(game)
             description = QLabel(details.removesuffix(f" · {opening}"))
             description.setObjectName("secondary")
             description.setWordWrap(True)
             description.setToolTip(opening_tooltip(game.get("opening_name")))
             card_layout.addWidget(description)
-            coverage_text = ("оценок пока нет" if metrics.get("status") == "без анализа" else
+            coverage_text = ("Загружаем сохранённые оценки…" if metrics.get("status") == "loading" else
+                             "оценок пока нет" if metrics.get("status") == "без анализа" else
                              f"Оценённые ходы: {metrics.get('coverage', '—')}")
             coverage = QLabel(coverage_text if analysis_allowed else "Оценки скрыты до проверки безопасности")
             coverage.setObjectName("dashboardAnalysisCoverage")
@@ -3003,6 +3037,8 @@ class MainWindow(QMainWindow):
                 opening_label.setStyleSheet("font-size: 16px; font-weight: 600;")
                 accuracy_group.addWidget(opening_label)
                 accuracy_label = QLabel(
+                    "Сверяем локально сохранённую аналитику…"
+                    if metrics.get("status") == "loading" else
                     f"Точность: {accuracy} · {metrics['accuracy_source']}"
                     if metrics.get("accuracy_source") else "Нет рассчитанной точности")
                 accuracy_label.setWordWrap(True)

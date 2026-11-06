@@ -89,6 +89,23 @@ def stylesheet(t: Theme = TOKENS) -> str:
     QHeaderView::section {{ background: {t.raised}; color: {t.text}; border: 1px solid {t.border}; padding: 6px; }}
     QGroupBox {{ border: 1px solid {t.border}; border-radius: 8px; margin-top: 10px; padding-top: 8px; }}
     QGroupBox::title {{ subcontrol-origin: margin; left: 10px; padding: 0 4px; }}
+    QTabWidget::pane {{ background: {t.surface}; border: 1px solid {t.border}; border-radius: 10px; top: -1px; }}
+    QTabBar::tab {{ background: {t.raised}; color: {t.secondary}; border: 1px solid {t.border};
+        border-top-left-radius: 8px; border-top-right-radius: 8px; padding: 9px 16px; min-height: 24px; }}
+    QTabBar::tab:selected {{ background: {selected}; color: {t.text}; border-color: {t.accent}; }}
+    QTabBar::tab:hover:!selected {{ background: {t.hover}; color: {t.text}; }}
+    QTabBar::tab:disabled {{ color: {t.muted}; }}
+    QCheckBox, QRadioButton {{ spacing: 8px; }}
+    QCheckBox::indicator, QRadioButton::indicator {{ width: 18px; height: 18px;
+        border: 1px solid {t.border}; background: {t.surface}; border-radius: 4px; }}
+    QRadioButton::indicator {{ border-radius: 9px; }}
+    QCheckBox::indicator:checked, QRadioButton::indicator:checked {{ background: {t.accent};
+        border-color: {t.accent}; }}
+    QComboBox QAbstractItemView {{ background: {t.surface}; color: {t.text};
+        border: 1px solid {t.border}; selection-background-color: {selected}; }}
+    QProgressBar {{ background: {t.raised}; color: {t.text}; border: 1px solid {t.border};
+        border-radius: 7px; min-height: 18px; text-align: center; }}
+    QProgressBar::chunk {{ background: {t.success}; border-radius: 6px; }}
     QScrollBar:vertical {{ background: {t.app}; width: 12px; }}
     QScrollBar::handle:vertical {{ background: {t.hover}; min-height: 24px; border-radius: 5px; }}
     QToolTip {{ background: {t.raised}; color: {t.text}; border: 1px solid {t.border}; }}

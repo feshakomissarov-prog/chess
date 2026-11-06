@@ -276,6 +276,19 @@ def russian_opening_name(eco: Any, name: Any) -> str:
     return "Дебют не определён" if not raw else "Дебют не классифицирован"
 
 
+def game_opening_name(game: dict[str, Any] | Any) -> str:
+    """Return the canonical opening label for a persisted game row.
+
+    Lichess imports store the ECO in ``opening_eco`` while older/local rows may
+    use ``eco``. Prefer the imported canonical value so every screen presents
+    the same opening for the same game.
+    """
+    if not hasattr(game, "get"):
+        return russian_opening_name(None, None)
+    return russian_opening_name(game.get("opening_eco") or game.get("eco"),
+                                game.get("opening_name"))
+
+
 def opening_tooltip(name: Any) -> str:
     """Keep the catalog's exact English name available as secondary detail."""
     value = str(name or "").strip()

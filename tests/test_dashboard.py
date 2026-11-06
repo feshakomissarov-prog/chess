@@ -1,5 +1,7 @@
 from chess_coach.lichess.repository import GameRepository
-from chess_coach.ui.dashboard import dashboard_snapshot, game_card_text
+from chess_coach.ui.dashboard import game_card_text
+from chess_coach.application.dashboard import dashboard_preview_snapshot, dashboard_snapshot
+from chess_coach.ui.display import game_opening_name
 
 
 def _save(repo, game_id, *, color="white", winner="white", status="mate", opponent="Friend"):
@@ -108,6 +110,65 @@ def test_recent_game_card_does_not_invent_result_without_owner_color():
     })
     assert title == "Результат н/д с Unknown color"
     assert "02.11.2026" in detail
+
+
+def test_dashboard_opening_uses_imported_eco_consistently_and_unknown_only_when_absent():
+    game = {"eco": None, "opening_eco": "C60", "opening_name": "Ruy Lopez"}
+    assert game_opening_name(game) == "C60 · Испанская партия"
+    _title, details = game_card_text({**game, "opponent": "Friend", "color": "white",
+                                      "winner": "white", "status": "mate"})
+    assert "Дебют не классифицирован" not in details
+    assert "C60 · Испанская партия" in details
+    assert game_opening_name({"eco": None, "opening_eco": None, "opening_name": None}) == (
+        "Дебют не определён")
+
+
+def test_dashboard_preview_returns_committed_local_rows_without_waiting_for_queued_writes(tmp_path):
+    repo = GameRepository(tmp_path / "dashboard-preview.sqlite3")
+    try:
+        _save(repo, "preview-1", opponent="Preview One")
+        _save(repo, "preview-2", opponent="Preview Two")
+        repo._wait_before_read = lambda *_args: (_ for _ in ()).throw(
+            AssertionError("preview must not wait for the SQLite writer queue"))
+        preview = dashboard_preview_snapshot(repo)
+        metrics = {row["key"]: row for row in preview["metrics"]}
+        assert preview["is_preview"] is True
+        assert metrics["games"]["value"] == "2"
+        assert metrics["accuracy"]["value"] == "—"
+        assert len(preview["recent_games"]) == 2
+        assert {row["opponent"] for row in preview["recent_games"]} == {
+            "Preview One", "Preview Two"}
+        assert all(row["review_metrics"]["status"] == "loading"
+                   for row in preview["recent_games"])
+        # Stored puzzle rating is already local and cheap to read; it should not
+        # disappear while the account-wide SQL summaries are being assembled.
+        account_id = repo.ensure_archive_account("preview-user")
+        repo.save_puzzle_player_rating(account_id, [[2026, 10, 6, 1675]])
+        scoped = dashboard_preview_snapshot(repo, account_id=account_id)
+        assert scoped["puzzle_player_rating"]["latest"] == 1675
+    finally:
+        repo.shutdown()
+
+
+def test_dashboard_snapshot_can_read_committed_data_without_waiting_for_writer_queue(tmp_path):
+    repo = GameRepository(tmp_path / "dashboard-nonblocking.sqlite3")
+    try:
+        _save(repo, "committed-1", opponent="Already Saved")
+        original_wait = repo._wait_before_read
+        waited_game_ids = []
+
+        def reject_global_wait(game_id=None):
+            assert game_id is not None, "dashboard aggregate must not wait for the whole writer queue"
+            waited_game_ids.append(game_id)
+            return original_wait(game_id)
+
+        repo._wait_before_read = reject_global_wait
+        snapshot = dashboard_snapshot(repo, wait_for_writes=False)
+        assert snapshot["metrics"][0]["value"] == "1"
+        assert snapshot["recent_games"][0]["opponent"] == "Already Saved"
+        assert waited_game_ids == ["committed-1"]
+    finally:
+        repo.shutdown()
 
 
 def test_source_filters_and_dashboard_count_distinct_usable_current_line_games(tmp_path):
@@ -374,5 +435,25 @@ def test_dashboard_card_reports_current_analysis_coverage_and_unknown_strong_mov
         assert int(card["mistakes"]) + int(card["blunders"]) >= 1
         assert card["strong"] == "н/д"
         assert "классификатор отсутствует" in card["strong_detail"]
+    finally:
+        repo.shutdown()
+
+
+def test_dashboard_does_not_report_zero_classifications_when_saved_run_has_no_classifier(tmp_path):
+    from chess_coach.application.dashboard import game_card_metrics
+
+    repo = GameRepository(tmp_path / "dashboard-unclassified.sqlite3")
+    try:
+        _save(repo, "unclassified-card")
+        line = repo.current_line("unclassified-card")
+        repo.save_analysis(repo.get_game("unclassified-card")["game_id"],
+                           line_revision=line["line_revision"], line_hash=line["line_hash"],
+                           source="stockfish", engine_name="Fixture", engine_version="test",
+                           parameters={}, assessments=[], classifications=[], status="complete")
+        card = game_card_metrics(repo, repo.get_game("unclassified-card"))
+        assert card["coverage"] != "0/0"
+        assert card["inaccuracies"] == "н/д"
+        assert card["mistakes"] == "н/д"
+        assert card["blunders"] == "н/д"
     finally:
         repo.shutdown()

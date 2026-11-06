@@ -4314,7 +4314,7 @@ def test_home_dashboard_refresh_is_background_and_drops_stale_generation(
     started, release = threading.Event(), threading.Event()
     calls = []
 
-    def fake_snapshot(_repository, *, account_id=None, clock=None):
+    def fake_snapshot(_repository, *, account_id=None, clock=None, wait_for_writes=True):
         calls.append((account_id, clock))
         started.set()
         release.wait(2)
@@ -6189,3 +6189,51 @@ def test_visual_master_dashboard_refresh_renders_after_selector_bootstrap(qtbot,
     window._dashboard_result_ready(generation, snapshot, None, None)
     assert window._latest_dashboard_snapshot is snapshot
     window.close()
+def test_home_shows_local_archive_preview_while_full_dashboard_aggregate_is_pending(
+        qtbot, tmp_path, monkeypatch):
+    import threading
+    from chess_coach.bootstrap import create_runtime
+    from chess_coach.ui.game_review import ReviewGraph
+
+    runtime = create_runtime(offline_mode=True)
+    window = MainWindow(runtime=runtime)
+    qtbot.addWidget(window)
+    qtbot.waitUntil(lambda: window._dashboard_thread is None, timeout=10000)
+    with runtime.repository._connection() as db:
+        db.executemany(
+            "INSERT INTO games(game_id,initial_fen,moves,color,opponent,rated,clock,status,winner,"
+            "updated_at,pgn,white_player,black_player,started_at,game_time_precision) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            [(f"preview-{index:04d}", "startpos", "", "white", f"Opponent {index}", 0,
+              "3+2", "resign", "white", f"2026-11-{index % 28 + 1:02d}T12:00:00Z", "",
+              "Me", f"Opponent {index}", f"2026-11-{index % 28 + 1:02d}T12:00:00Z",
+              "timestamp") for index in range(2500)])
+
+    aggregate_entered = threading.Event()
+    release_aggregate = threading.Event()
+    original_snapshot = window.dashboard_queries.snapshot
+
+    def delayed_aggregate(**kwargs):
+        aggregate_entered.set()
+        assert release_aggregate.wait(10), "test must release the aggregate worker"
+        return original_snapshot(**kwargs)
+
+    monkeypatch.setattr(window.dashboard_queries, "snapshot", delayed_aggregate)
+    try:
+        window._refresh_home_dashboard()
+        qtbot.waitUntil(aggregate_entered.is_set, timeout=5000)
+        qtbot.waitUntil(lambda: window._dashboard_metric_values["games"].text() == "2500",
+                        timeout=5000)
+        assert window._dashboard_thread is not None and window._dashboard_thread.is_alive()
+        assert window._dashboard_metric_values["accuracy"].text() == "—"
+        recent_cards = [window._home_view._recent_games_layout.itemAt(index).widget()
+                        for index in range(window._home_view._recent_games_layout.count())
+                        if window._home_view._recent_games_layout.itemAt(index).widget()
+                        and window._home_view._recent_games_layout.itemAt(index).widget().objectName()
+                        == "metricCard"]
+        assert len(recent_cards) == 3
+        assert all(card.findChild(ReviewGraph) is None for card in recent_cards)
+    finally:
+        release_aggregate.set()
+        qtbot.waitUntil(lambda: window._dashboard_thread is None, timeout=15000)
+        window.close()

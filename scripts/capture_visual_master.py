@@ -19,7 +19,7 @@ import chess
 from PySide6.QtCore import QSize, Qt
 from PySide6.QtGui import QColor, QImage, QPainter
 from PySide6.QtTest import QTest
-from PySide6.QtWidgets import QApplication, QListWidgetItem
+from PySide6.QtWidgets import QApplication, QLabel, QListWidgetItem, QWidget
 
 from chess_coach.bootstrap import create_runtime
 from chess_coach.application.dashboard import dashboard_snapshot
@@ -60,14 +60,16 @@ def seed_synthetic_repository(repo, settings) -> tuple[str, str]:
     settings.setValue("workspace/selected_account", account_id)
     settings.setValue("workspace/sidebar_explicit", False)
     settings.setValue("workspace/sidebar_collapsed", False)
+    opponents = ("Synthetic Owl", "Synthetic Fox", "Synthetic Rook")
     for index in range(8):
         game_id = str(index)
         winner = "white" if index % 3 else "black"
+        opponent = opponents[index % 3]
         repo.save_snapshot(
             game_id, "startpos", MOVE_TEXT, "white",
-            ("Synthetic Owl", "Synthetic Fox", "Synthetic Rook")[index % 3],
+            opponent,
             False, "180+2", "resign", winner,
-            white_player="Visual Coach", black_player=f"Synthetic {index}",
+            white_player="Visual Coach", black_player=opponent,
             started_at=f"2026-11-{index + 1:02d}T18:30:00+00:00")
     repo.wait_for_writes()
     with repo._connection() as db:
@@ -76,7 +78,7 @@ def seed_synthetic_repository(repo, settings) -> tuple[str, str]:
             "VALUES (?,?,?,?,?,?)",
             [(account_id, str(index), f"synthetic-{index}",
               f"2026-11-{index + 1:02d}T18:30:00+00:00", "white",
-              f"Synthetic {index}") for index in range(8)])
+              opponents[index % 3]) for index in range(8)])
         db.execute("UPDATE games SET source='lichess_archive',source_game_id='synthetic-0' "
                    "WHERE game_id='0'")
         db.execute("UPDATE games SET source='lichess_archive',source_game_id='synthetic-1' "
@@ -185,6 +187,8 @@ def wait_home(window, account_id: str) -> None:
     try:
         wait_for(lambda: window._dashboard_options_loaded
                  and window.dashboard_account.currentData() == account_id
+                 and bool(window._latest_dashboard_snapshot)
+                 and not window._latest_dashboard_snapshot.get("is_preview")
                  and window._dashboard_metric_values["games"].text() == "8"
                  and len([window._home_view._recent_games_layout.itemAt(i).widget()
                           for i in range(window._home_view._recent_games_layout.count())
@@ -248,13 +252,31 @@ def wait_selected_review(page, expected_game_id: str) -> None:
         raise
 
 
+def wait_review_workspace(page, expected_game_id: str) -> None:
+    def ready() -> bool:
+        review = page.review or {}
+        game = review.get("game") or {}
+        analysis = review.get("analysis") or {}
+        return bool(
+            str(game.get("game_id")) == expected_game_id
+            and game.get("line_revision") is not None
+            and analysis.get("source") == "stockfish"
+            and page.graph.full_ply_count >= 16
+            and page.side_metrics_summary.rowCount() >= 4
+            and page.title.text())
+
+    wait_for(ready, "loaded selected game review, Stockfish data and graph")
+
+
 def navigate_to_games(window: MainWindow, selected_game_id: str) -> None:
     QTest.mouseClick(window._nav_buttons["games"], Qt.MouseButton.LeftButton)
     page = window.library_page
-    assert page.sort_description.parentWidget() is page
-    assert page.sort_description.isHidden() and not page.sort_description.isWindow(), (
-        "Sorting help must stay a tooltip, never a floating top-level window."
-    )
+    assert not page.findChildren(QWidget, "sortDescription")
+    qt_floats = [widget for widget in QApplication.topLevelWidgets()
+                 if widget is not window and widget.isVisible()]
+    assert not qt_floats, (
+        "Entering My Games must not open a sorting/help popup; visible top-level widgets: "
+        + ", ".join(f"{type(widget).__name__}:{widget.windowTitle()}" for widget in qt_floats))
     wait_for(lambda: page.games.count() >= 3 and page.selected_game() is not None,
              "library rows from the real query worker")
     item = next((page.games.item(index) for index in range(page.games.count())
@@ -267,6 +289,10 @@ def navigate_to_games(window: MainWindow, selected_game_id: str) -> None:
     QTest.mouseClick(page.games.viewport(), Qt.MouseButton.LeftButton, pos=rect.center())
     wait_selected_review(page, selected_game_id)
     assert page.detail_title.text().startswith("Победа")
+    selected = page.selected_game()
+    expected_opponent = selected.get("account_opponent") or selected.get("opponent")
+    assert expected_opponent in page.detail_players.text(), (
+        "The selected row and player score must identify the same synthetic opponent.")
     assert "88.4% · Lichess" in page.detail_metrics.text()
     assert "Stockfish · Есть данные" == page.source_badges["Stockfish"].text()
     assert "Lichess · Есть данные" == page.source_badges["Lichess"].text()
@@ -486,7 +512,47 @@ def main() -> None:
             make_pair(reference_dir, output, REFERENCE_MAP["background"], image,
                       f"background-offline-{width}x{height}")
 
-        expected_count = 3 * len(target_sizes) + len(offline_sizes)
+        # One actual native-window frame for each remaining required route.
+        # These pages share the production shell and the same synthetic SQLite.
+        width, height = target_sizes[0]
+        for route in ("play", "analysis"):
+            QTest.mouseClick(window._nav_buttons[route], Qt.MouseButton.LeftButton)
+            QTest.qWait(80)
+            assert window.screen_stack.currentWidget() is (
+                window.play_page if route == "play" else window.analysis_page)
+            image = capture(window, output, route, width, height)
+            captured[route] = image
+
+        QTest.mouseClick(window._nav_buttons["training"], Qt.MouseButton.LeftButton)
+        wait_for(lambda: window.screen_stack.currentWidget() is window._puzzle_page
+                 and not any(label.text().startswith("Читаю локальную историю")
+                             for label in window._puzzle_page.findChildren(QLabel)),
+                 "local synthetic training history page", timeout=30)
+        captured["training"] = capture(window, output, "training", width, height)
+
+        QTest.mouseClick(window._nav_buttons["progress"], Qt.MouseButton.LeftButton)
+        wait_for(lambda: window.screen_stack.currentWidget() is window._statistics_dialog
+                 and not window._statistics_dialog.summary_label.text().startswith(
+                     ("Обновляем статистику", "Загружаем статистику")),
+                 "local progress summary", timeout=60)
+        captured["progress"] = capture(window, output, "progress", width, height)
+
+        window.open_settings()
+        assert window.screen_stack.currentWidget() is window._settings_dialog
+        captured["settings"] = capture(window, output, "settings", width, height)
+
+        window.start_local_game()
+        assert window.screen_stack.currentWidget() is window.game_page
+        captured["active-game"] = capture(window, output, "active-game", width, height)
+
+        navigate_to_games(window, selected_game_id)
+        selected = window.library_page.selected_game()
+        assert selected and str(selected.get("game_id")) == selected_game_id
+        assert window._open_saved_game(dict(selected))
+        wait_review_workspace(window.review_workspace, selected_game_id)
+        captured["game-review"] = capture(window, output, "game-review", width, height)
+
+        expected_count = 3 * len(target_sizes) + len(offline_sizes) + 7
         assert len(captured) == expected_count, (
             f"Expected {expected_count} screenshot states, got {len(captured)}"
         )
@@ -500,11 +566,9 @@ def main() -> None:
         assert runtime._closed or window._shutdown_requested
 
     scale = os.environ.get("QT_SCALE_FACTOR", "1")
-    details = [f"{key}: window {window_width}x{window_height} logical; "
-               f"image {image.width()}x{image.height()} px; DPR {image.devicePixelRatio()}"
-               for key, image in captured.items()
-               for window_width, window_height in (
-                   tuple(map(int, key.rsplit('-', 1)[1].split('x'))),)]
+    details = [f"{key}: capture {image.width()}x{image.height()} px; "
+               f"DPR {image.devicePixelRatio()}"
+               for key, image in captured.items()]
     (output / "capture.txt").write_text(
         f"SHA: {os.environ.get('CC_VISUAL_SHA', 'local working tree')}\n"
         f"Platform: Windows · QT_SCALE_FACTOR={scale}\n"
@@ -519,7 +583,7 @@ def main() -> None:
         f"Logical targets: {target_sizes}\n"
         + "\n".join(details) + "\n",
         encoding="utf-8")
-    print(f"VIS4 native visual smoke: PASS ({len(captured)} strict synthetic states; "
+    print(f"VIS5 native visual smoke: PASS ({len(captured)} strict synthetic states; "
           f"logical targets {target_sizes}; actual window and pixel dimensions verified)")
 
 

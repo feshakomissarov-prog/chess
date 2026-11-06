@@ -4,7 +4,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from PySide6.QtCore import QPoint, Qt
 from PySide6.QtTest import QTest
-from PySide6.QtWidgets import QScrollArea
+from PySide6.QtWidgets import QApplication, QMainWindow, QScrollArea, QStackedWidget, QWidget
 
 from chess_coach.ui.pages import LibraryPage, PlayPage, ResultPage
 from chess_coach.ui.pages.background import BackgroundOperationsPage
@@ -99,18 +99,29 @@ def test_library_page_emits_selected_game_actions_and_pagination(qtbot):
 
 
 def test_library_sort_help_never_opens_a_floating_window_on_reentry(qtbot):
+    host = QMainWindow()
+    stack = QStackedWidget(host)
     page = LibraryPage()
-    qtbot.addWidget(page)
-    page.resize(1100, 700)
-    page.show()
+    placeholder = QWidget()
+    stack.addWidget(page)
+    stack.addWidget(placeholder)
+    host.setCentralWidget(stack)
+    qtbot.addWidget(host)
+    host.resize(1100, 700)
+    host.show()
     qtbot.wait(20)
     for width in (1100, 900, 1200, 760, 1100):
-        page.resize(width, 700)
+        host.resize(width, 700)
+        stack.setCurrentWidget(placeholder)
+        qtbot.wait(2)
+        stack.setCurrentWidget(page)
         qtbot.wait(5)
-        assert page.sort_description.parentWidget() is page
-        assert not page.sort_description.isWindow()
-        assert page.sort_description.isHidden()
-    assert "lastMoveAt" in page.search.toolTip()
+        visible_orphans = [widget for widget in QApplication.topLevelWidgets()
+                           if widget is not host and widget.isVisible()]
+        assert visible_orphans == []
+        assert not page.findChildren(QWidget, "sortDescription")
+    assert "lastMoveAt" in page.search.accessibleDescription()
+    assert page.search.toolTip() == ""
 
 
 def test_library_typing_filters_coalesce_to_one_query(qtbot):
@@ -379,14 +390,20 @@ def test_extracted_ui_components_do_not_import_the_root_window():
                        for name in imported), f"{path.name} imports the root window"
 
 
-def test_visual_background_progress_requires_a_known_total(qtbot):
+def test_background_ready_analytics_uses_truthful_counters_not_stuck_percentage(qtbot):
     page = BackgroundOperationsPage()
     qtbot.addWidget(page)
     page.show()
-    page.set_snapshot((), source_summary="", backfill_paused=False, can_check=False,
+    page.set_snapshot((), source_summary="Проверено: 3 из 100 · ожидают: 97 · повтор позже",
+                      backfill_paused=False, can_check=False,
                       can_pause=False, progress={"ready": (7, 0), "stockfish": (2, 5)})
     assert page.workflow_progress["ready"].isHidden()
     bar = page.workflow_progress["stockfish"]
     assert bar.isVisible()
     assert bar.maximum() == 5 and bar.value() == 2
+    page.set_snapshot((), source_summary="Проверено: 3 из 100 · ожидают: 97 · повтор позже",
+                      backfill_paused=False, can_check=False,
+                      can_pause=False, progress={"ready": (3, 100), "stockfish": (2, 5)})
+    assert page.workflow_progress["ready"].isHidden()
+    assert "Проверено: 3 из 100" in page.source_summary.text()
     assert "активных задач нет" in page.summary.text()

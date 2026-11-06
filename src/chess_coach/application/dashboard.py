@@ -46,7 +46,70 @@ class DashboardQueryCoordinator:
     def snapshot(self, *, account_id: str | None, clock: str,
                  query=None) -> dict:
         return (query or dashboard_snapshot)(
-            self.repository, account_id=account_id, clock=clock)
+            self.repository, account_id=account_id, clock=clock,
+            wait_for_writes=False)
+
+
+def dashboard_preview_snapshot(repository, *, account_id: str | None = None,
+                               clock: str | None = None) -> dict[str, Any]:
+    """Read the local game count and latest rows without waiting on queued writes.
+
+    This bounded preview is emitted before the more expensive source-aware
+    aggregate. SQLite readers see committed rows while the single writer keeps
+    working; pending writes must not hold the whole Home page blank.
+    """
+    join = " JOIN account_games ag ON ag.game_id=g.game_id " if account_id else ""
+    color = "ag.color" if account_id else "g.color"
+    opponent = "ag.opponent AS account_opponent" if account_id else "NULL AS account_opponent"
+    player = "ag.player_name AS account_player_name" if account_id else "NULL AS account_player_name"
+    color_value = "ag.color AS account_color" if account_id else "g.color AS account_color"
+    clauses = [f"g.status NOT IN {_COMPLETED}"]
+    params: list[object] = []
+    if account_id:
+        clauses.append("ag.account_id=?")
+        params.append(account_id)
+    if clock:
+        clauses.append("g.clock=?")
+        params.append(clock)
+    where = " AND ".join(clauses)
+    activity_epoch = ("CASE WHEN g.last_move_at>0 THEN g.last_move_at/1000.0 "
+                      "WHEN g.game_time_precision='timestamp' THEN unixepoch(g.started_at) "
+                      "WHEN g.game_time_precision='date_only' "
+                      "THEN unixepoch(substr(g.started_at,1,10)) ELSE NULL END")
+    with repository._connection() as db:
+        total = int(db.execute(f"SELECT COUNT(DISTINCT g.game_id) FROM games g{join} "
+                               f"WHERE {where}", params).fetchone()[0] or 0)
+        rows = db.execute(
+            f"SELECT g.*, {opponent}, {player}, {color_value} FROM games g{join} "
+            f"WHERE {where} ORDER BY ({activity_epoch}) IS NULL,{activity_epoch} DESC,"
+            "g.game_id DESC LIMIT 3", params).fetchall()
+    games = []
+    for row in rows:
+        game = dict(row)
+        game["review_metrics"] = {"status": "loading", "coverage": "—", "source": "—"}
+        games.append(game)
+    metrics = [
+        {"key": "games", "label": "Завершённые партии", "value": str(total),
+         "detail": "Локальные записи SQLite", "source": "games + account_games"},
+        {"key": "accuracy", "label": "Точность", "value": "—",
+         "detail": "Проверяем сохранённые источники точности…", "source": "SQLite"},
+        {"key": "analysis", "label": "Партии с анализом", "value": "—",
+         "detail": "Подготавливаем сводку охвата…", "source": "SQLite"},
+        {"key": "errors", "label": "Ошибки на 100 оценённых ходов", "value": "—",
+         "detail": "Подготавливаем статистику ходов…", "source": "SQLite"},
+    ]
+    scope = "Выбранный аккаунт" if account_id else "Все локальные партии"
+    if clock:
+        scope += f" · {clock}"
+    puzzle_rating = (repository.puzzle_player_rating(account_id)
+                     if account_id and hasattr(repository, "puzzle_player_rating") else {})
+    activity_trend = (repository.puzzle_rating_trend(account_id, limit=6)
+                      if account_id and hasattr(repository, "puzzle_rating_trend") else [])
+    return {"metrics": metrics, "recent_games": games,
+            "puzzle_player_rating": puzzle_rating, "activity_trend": activity_trend,
+            "scope": scope,
+            "filter": {"account_id": account_id, "clock": clock}, "is_preview": True}
+
 
 def dashboard_options(repository) -> dict[str, list[dict[str, str]]]:
     """Return small account/clock selectors; no game rows are loaded."""
@@ -60,13 +123,14 @@ def dashboard_options(repository) -> dict[str, list[dict[str, str]]]:
 
 
 def dashboard_snapshot(repository, *, account_id: str | None = None,
-                       clock: str | None = None) -> dict[str, Any]:
+                       clock: str | None = None, wait_for_writes: bool = True) -> dict[str, Any]:
     """Return scoped KPIs plus at most three completed games.
 
     All archive-wide counts are SQL aggregates. Only three current game lines are
     loaded for cards, and this function never parses stored PGN or starts UCI.
     """
-    repository._wait_before_read()
+    if wait_for_writes:
+        repository._wait_before_read()
     join = " JOIN account_games ag ON ag.game_id=g.game_id " if account_id else ""
     color = "ag.color" if account_id else "g.color"
     clauses = [f"g.status NOT IN {_COMPLETED}"]
@@ -156,7 +220,8 @@ def dashboard_snapshot(repository, *, account_id: str | None = None,
         "COUNT(CASE WHEN has_lichess THEN 1 END) lichess "
             "FROM game_coverage", run_params).fetchone()
 
-    summary = StatisticsService(repository).summary(account_id=account_id, clock=clock)
+    summary = StatisticsService(repository).summary(
+        account_id=account_id, clock=clock, wait_for_writes=wait_for_writes)
     activity_trend = (repository.puzzle_rating_trend(account_id, limit=6)
                       if account_id and hasattr(repository, "puzzle_rating_trend") else [])
     total = int(row["games"] or 0)
@@ -206,7 +271,8 @@ def dashboard_snapshot(repository, *, account_id: str | None = None,
     ]
     recent = repository.search_games(completed_only=True, page=0, page_size=3,
                                      account_id=account_id, clock=clock,
-                                     order_by_game_time=True)
+                                     order_by_game_time=True,
+                                     wait_for_writes=wait_for_writes)
     games = [dict(game) for game in recent["items"]]
     for game in games:
         game["review_metrics"] = game_card_metrics(repository, game)
@@ -239,6 +305,7 @@ def game_card_metrics(repository, game: dict[str, Any]) -> dict[str, Any]:
         if own_color_accuracy is not None:
             accuracy_source = "Stockfish · локально" if analysis.get("source") == "stockfish" else "Локальный расчёт"
     coverage = int(side.get("assessed") or 0)
+    classified = int(side.get("classified") or 0)
     total = int(side.get("total") or 0)
     errors = int(side.get("inaccuracy") or 0) + int(side.get("mistake") or 0) + int(side.get("blunder") or 0)
     # Current detectors do not yet implement a verified "strong move" fact.
@@ -248,10 +315,10 @@ def game_card_metrics(repository, game: dict[str, Any]) -> dict[str, Any]:
         "accuracy_source": accuracy_source,
         "assessments": list(analysis.get("assessments") or []),
         "moves": {int(move.ply): str(move.san) for move in view.get("moves") or []},
-        "errors": str(errors) if coverage else "н/д",
-        "inaccuracies": str(int(side.get("inaccuracy") or 0)) if coverage else "н/д",
-        "mistakes": str(int(side.get("mistake") or 0)) if coverage else "н/д",
-        "blunders": str(int(side.get("blunder") or 0)) if coverage else "н/д",
+        "errors": str(errors) if classified else "н/д",
+        "inaccuracies": str(int(side.get("inaccuracy") or 0)) if classified else "н/д",
+        "mistakes": str(int(side.get("mistake") or 0)) if classified else "н/д",
+        "blunders": str(int(side.get("blunder") or 0)) if classified else "н/д",
         "strong": "н/д",
         "status": str(analysis.get("status") or "без анализа"),
         "coverage": f"{coverage}/{total}",
@@ -259,14 +326,14 @@ def game_card_metrics(repository, game: dict[str, Any]) -> dict[str, Any]:
         "strong_detail": "подтверждённый классификатор отсутствует",
         "owner_accuracy": f"{float(own_color_accuracy):.1f}%" if own_color_accuracy is not None else "н/д",
         "opponent_accuracy": f"{float(opponent_accuracy):.1f}%" if opponent_accuracy is not None else "н/д",
-        "owner_inaccuracies": str(int(side.get("inaccuracy") or 0)) if coverage else "н/д",
-        "owner_mistakes": str(int(side.get("mistake") or 0)) if coverage else "н/д",
-        "owner_blunders": str(int(side.get("blunder") or 0)) if coverage else "н/д",
+        "owner_inaccuracies": str(int(side.get("inaccuracy") or 0)) if classified else "н/д",
+        "owner_mistakes": str(int(side.get("mistake") or 0)) if classified else "н/д",
+        "owner_blunders": str(int(side.get("blunder") or 0)) if classified else "н/д",
         "opponent_inaccuracies": str(int(opponent_side.get("inaccuracy") or 0))
-        if opponent_side.get("assessed") else "н/д",
+        if opponent_side.get("classified") else "н/д",
         "opponent_mistakes": str(int(opponent_side.get("mistake") or 0))
-        if opponent_side.get("assessed") else "н/д",
+        if opponent_side.get("classified") else "н/д",
         "opponent_blunders": str(int(opponent_side.get("blunder") or 0))
-        if opponent_side.get("assessed") else "н/д",
+        if opponent_side.get("classified") else "н/д",
         "opponent_coverage": f"{int(opponent_side.get('assessed') or 0)}/{int(opponent_side.get('total') or 0)}",
     }

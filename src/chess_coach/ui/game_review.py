@@ -19,8 +19,9 @@ from ..lichess.game_review import (
 )
 from ..domain.accuracy import win_percent_cp
 from .display import (
-    evaluation_label, format_clock_control, format_game_timeline, opening_tooltip, phase_label,
-    russian_opening_name, severity_label, source_short,
+    evaluation_label, format_clock_control, format_game_timeline, game_opening_name,
+    opening_tooltip, phase_label,
+    severity_label, source_short,
 )
 from .move_table import MoveTable
 from .theme import TOKENS
@@ -809,7 +810,7 @@ class GameReviewWorkspace(QWidget):
         source = analysis.get("source") or ""
         game_details = (f"{format_game_timeline(game)} · "
                         f"{format_clock_control(game.get('clock'))} · "
-                        f"{russian_opening_name(game.get('eco'), game.get('opening_name'))}")
+                        f"{game_opening_name(game)}")
         self.title.setText(f"{white} — {black} · {result} · {game_details}")
         self.title.setToolTip(f"{white} — {black} · {result}\n{game_details}")
         self.subtitle.setText(game_details)
