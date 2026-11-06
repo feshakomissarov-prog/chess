@@ -256,6 +256,7 @@ class AnalysisJobsStoreMixin:
                 SUM(accuracy_status IN ('error','rate_limited','stale_line') OR evals_status IN ('error','rate_limited','stale_line')) errors,
                 SUM(accuracy_status='queued' OR evals_status='queued' OR accuracy_status='running' OR evals_status='running') pending,
                 SUM(accuracy_checked_at IS NOT NULL OR evals_checked_at IS NOT NULL) checked,
+                MAX(MAX(COALESCE(accuracy_checked_at,''),COALESCE(evals_checked_at,''))) last_checked_at,
                 MAX(updated_at) updated_at,
                 MIN(accuracy_next_retry_at) accuracy_retry_at,
                 MIN(evals_next_retry_at) evals_retry_at
@@ -721,3 +722,12 @@ class AnalysisJobsStoreMixin:
             rows = db.execute("SELECT status,COUNT(*) AS count FROM analysis_jobs" + where +
                               " GROUP BY status", tuple(values)).fetchall()
         return {str(row["status"]): int(row["count"]) for row in rows}
+
+    def latest_analysis_job_event(self, *, account_id: str | None = None) -> dict | None:
+        scope, values = self._analysis_jobs_scope(account_id)
+        with self._connection() as db:
+            row = db.execute(
+                "SELECT status,finished_at FROM analysis_jobs "
+                "WHERE finished_at IS NOT NULL AND status IN ('complete','failed','cancelled')"
+                + scope + " ORDER BY finished_at DESC,job_id DESC LIMIT 1", values).fetchone()
+        return dict(row) if row else None

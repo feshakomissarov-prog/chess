@@ -1158,6 +1158,8 @@ class MainWindow(QMainWindow):
                 jobs = (repository.analysis_job_counts(engine_version=engine_key,
                                                       account_id=account_id)
                         if account_id or self.offline_mode else {})
+                last_job = (repository.latest_analysis_job_event(account_id=account_id)
+                            if account_id or self.offline_mode else None)
                 paused = bool(account_id and
                               repository.lichess_analysis_backfill_paused(account_id))
                 if stop_event.is_set():
@@ -1165,7 +1167,7 @@ class MainWindow(QMainWindow):
                 self.background_status_finished.emit(generation, {
                     "account_id": account_id, "username": username, "available": available,
                     "archive": archive, "puzzles": puzzles, "summary": summary,
-                    "paused": paused, "operations": operations, "jobs": jobs,
+                    "paused": paused, "operations": operations, "jobs": jobs, "last_job": last_job,
                     "metric_scope": metric_scope, "metric_status": metric_status,
                 })
             except Exception as exc:
@@ -1254,6 +1256,22 @@ class MainWindow(QMainWindow):
             if not account_id:
                 statuses.append("Архив и задачи Lichess · аккаунт не выбран; личные данные не запрашивались")
             jobs = payload.get("jobs") or {}
+            last_job = payload.get("last_job") or {}
+            job_caption = {"complete": "Stockfish · анализ завершён",
+                           "failed": "Stockfish · задание завершилось ошибкой",
+                           "cancelled": "Stockfish · задание отменено"}
+            events = [
+                (archive.get("last_success_at"), "Синхронизация партий Lichess завершена"),
+                ((payload.get("puzzles") or {}).get("last_success_at"), "История задач обновлена"),
+                (summary.get("last_checked_at"), "Готовая аналитика Lichess проверена"),
+                (last_job.get("finished_at"), job_caption.get(last_job.get("status"))),
+            ]
+            recent_events = [
+                f"{format_game_date(when, precision='timestamp')} · {caption}"
+                for when, caption in sorted(
+                    ((when, caption) for when, caption in events if when and caption),
+                    reverse=True)
+            ]
             remaining = sum(jobs.get(key, 0) for key in ("queued", "running", "paused"))
             complete, failed = jobs.get("complete", 0), jobs.get("failed", 0)
             self._background_operations_page.set_snapshot(
@@ -1273,6 +1291,7 @@ class MainWindow(QMainWindow):
                     "stockfish": (f"Осталось: {remaining} · готово: {complete} · ошибки: {failed}"
                                   if jobs else "Нет сохранённых заданий для текущего профиля."),
                 },
+                recent_events=recent_events,
                 progress={"ready": (summary.get("checked", 0), summary.get("total", 0)),
                           "stockfish": (complete, complete + remaining + failed)})
 
@@ -1956,11 +1975,11 @@ class MainWindow(QMainWindow):
         self.sidebar_toggle.clicked.connect(lambda: self._set_sidebar_collapsed(
             self.sidebar.width() > 60, explicit=True))
         layout.addWidget(self.sidebar_toggle)
-        self.sidebar_brand = QLabel("♟  Chess Coach")
-        self.sidebar_brand.setStyleSheet("font-size: 18px; font-weight: 700; padding: 4px;")
+        self.sidebar_brand = QLabel("♞  Chess Coach")
+        self.sidebar_brand.setObjectName("sidebarBrand")
         layout.addWidget(self.sidebar_brand)
         self.sidebar_profile_label = QLabel("Локальный профиль")
-        self.sidebar_profile_label.setObjectName("secondary")
+        self.sidebar_profile_label.setObjectName("sidebarProfile")
         self.sidebar_profile_label.setWordWrap(False)
         self.sidebar_profile_label.setToolTip("Текущий профиль данных")
         layout.addWidget(self.sidebar_profile_label)
@@ -2804,7 +2823,7 @@ class MainWindow(QMainWindow):
             card_layout = QVBoxLayout()
             row_layout.addLayout(card_layout, 4)
             card_layout.setSpacing(4)
-            card.setMinimumHeight(112)
+            card.setMinimumHeight(126)
             card.setMaximumHeight(145)
             heading_label = QLabel(f"♟  {heading}")
             outcome_color = (VISUAL_TOKENS.success if heading.startswith("Победа")

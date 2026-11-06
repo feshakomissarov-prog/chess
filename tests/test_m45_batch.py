@@ -808,7 +808,9 @@ def test_saved_queue_is_claimed_resumed_and_cancelled_only_for_selected_account(
         assert repository.resume_paused_analysis_jobs(**scoped) == 1
         assert repository.cancel_queued_analysis_jobs(**scoped) == 1
         assert repository.analysis_job_counts(**scoped) == {"cancelled": 1}
+        assert repository.latest_analysis_job_event(account_id="lichess:first")["status"] == "cancelled"
         assert repository.analysis_job_counts(account_id="lichess:second") == {"queued": 1}
+        assert repository.latest_analysis_job_event(account_id="lichess:second") is None
     finally:
         repository.shutdown()
 

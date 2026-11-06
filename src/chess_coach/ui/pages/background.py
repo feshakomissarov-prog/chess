@@ -63,6 +63,13 @@ class BackgroundOperationsPage(QWidget):
         root.addWidget(self.operation_list)
         self.operation_list.hide()
         self.details_toggle.toggled.connect(self.operation_list.setVisible)
+        self.recent_events_title = QLabel("Последние события")
+        self.recent_events_title.setStyleSheet("font-size: 23px; font-weight: 700;")
+        root.addWidget(self.recent_events_title)
+        self.recent_events = QListWidget()
+        self.recent_events.setAccessibleName("Последние сохранённые события")
+        self.recent_events.setMaximumHeight(135)
+        root.addWidget(self.recent_events)
         self.source_summary = QLabel("")
         self.source_summary.setWordWrap(True)
         self.source_summary.setObjectName("secondary")
@@ -95,7 +102,10 @@ class BackgroundOperationsPage(QWidget):
     def set_snapshot(self, operations, *, source_summary: str,
                      backfill_paused: bool, can_check: bool, can_pause: bool,
                      retry_status: str = "", durable_statuses=(),
-                     local_metrics_status: str | None = None, workflows=None, progress=None) -> None:
+                     local_metrics_status: str | None = None, workflows=None, progress=None,
+                     recent_events=()) -> None:
+        self.recent_events.clear()
+        self.recent_events.addItems(list(recent_events) or ["Нет сохранённых событий."])
         durable_statuses = tuple(durable_statuses)
         self.operation_list.clear()
         for operation in operations:
