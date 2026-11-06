@@ -146,6 +146,17 @@ def test_no_server_data_is_not_repolled_before_seven_day_ttl(tmp_path):
     manual = sync.refresh_ready_analytics(
         "Me", "fake", threading.Event(), limit=10, force_retry=True)
     assert manual["checked"] == 1 and len(fake.calls) == 2
+    with repository._connection() as db:
+        db.execute("UPDATE lichess_analysis_backfill SET accuracy_next_retry_at=?,"
+                   "evals_next_retry_at=? WHERE account_id=? AND game_id=?",
+                   ("2025-01-01T00:00:00+00:00", "2025-01-01T00:00:00+00:00",
+                    "lichess:me", game_id))
+    fake.responses[game_id] = _export(game_id)
+    delayed = sync.refresh_ready_analytics("Me", "fake", threading.Event(), limit=10)
+    assert delayed["checked"] == delayed["accuracy"] == delayed["evals"] == 1
+    assert repository.get_game(game_id)["lichess_accuracy_white"] == 91
+    assert len(fake.calls) == 3
+    assert sync.refresh_ready_analytics("Me", "fake", threading.Event(), limit=10)["selected"] == 0
     repository.shutdown()
 
 

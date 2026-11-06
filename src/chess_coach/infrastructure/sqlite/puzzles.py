@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from datetime import datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 import hashlib
 import uuid
 
@@ -304,3 +304,50 @@ class PuzzleActivityStoreMixin:
             db.execute("INSERT INTO puzzle_dashboard_snapshots VALUES (?,?,?,?,?)",
                        (uuid.uuid4().hex, account_id, int(days), now,
                         json.dumps(payload, sort_keys=True)))
+
+    def puzzle_player_rating_refresh_due(self, account_id: str) -> bool:
+        cutoff = (datetime.now(timezone.utc) - timedelta(days=1)).isoformat()
+        with self._connection() as db:
+            return db.execute(
+                "SELECT 1 FROM puzzle_player_rating_history WHERE account_id=? AND fetched_at>?",
+                (account_id, cutoff)).fetchone() is None
+
+    def save_puzzle_player_rating(self, account_id: str, points: list) -> None:
+        ratings = {}
+        now = datetime.now(timezone.utc)
+        for point in points:
+            if not isinstance(point, list) or len(point) != 4 or any(type(n) is not int for n in point):
+                continue
+            year, month, day, rating = point
+            try:
+                played = date(year, month + 1, day)
+            except ValueError:
+                continue
+            if 0 < rating < 10_000 and played <= now.date():
+                ratings[played.isoformat()] = rating
+        with self._connection() as db:
+            db.execute("""INSERT INTO puzzle_player_rating_history VALUES (?,?,?)
+                ON CONFLICT(account_id) DO UPDATE SET fetched_at=excluded.fetched_at,
+                points_json=CASE WHEN excluded.points_json='[]' THEN points_json
+                                 ELSE excluded.points_json END""",
+                       (account_id, now.isoformat(), json.dumps(sorted(ratings.items())[-91:])))
+
+    def puzzle_player_rating(self, account_id: str) -> dict:
+        cutoff = datetime.now(timezone.utc).date() - timedelta(days=89)
+        with self._connection() as db:
+            row = db.execute("SELECT points_json FROM puzzle_player_rating_history WHERE account_id=?",
+                             (account_id,)).fetchone()
+            if not row:
+                return {}
+            points = json.loads(row["points_json"])
+            if not points:
+                return {}
+            start_ms = int(datetime.combine(cutoff, datetime.min.time(), timezone.utc).timestamp() * 1000)
+            attempts = {item["day"]: (int(item["attempts"]), int(item["wins"]))
+                        for item in db.execute(
+                            "SELECT date(attempt_date_ms/1000,'unixepoch') day,COUNT(*) attempts,"
+                            "SUM(win) wins FROM puzzle_attempts WHERE account_id=? AND attempt_date_ms>=? "
+                            "GROUP BY day", (account_id, start_ms))}
+        return {"latest": points[-1][1], "date": points[-1][0],
+                "points": [{"day": day, "rating": rating, "attempts": attempts.get(day)}
+                           for day, rating in points if day >= cutoff.isoformat()]}

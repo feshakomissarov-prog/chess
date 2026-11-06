@@ -1125,7 +1125,7 @@ class MainWindow(QMainWindow):
 
     def _refresh_background_operations_page(self) -> None:
         page = getattr(self, "_background_operations_page", None)
-        if page is None:
+        if page is None or self._shutdown_requested:
             return
         username = str(getattr(self.lichess, "username", "") or "").strip()
         account_id = f"lichess:{username.casefold()}" if username else None
@@ -1318,7 +1318,7 @@ class MainWindow(QMainWindow):
 
     def _schedule_legacy_metrics_batch(self) -> None:
         if (self._shutdown_requested or not self._library_detail_safety_allowed()
-                or any(session.status in {"started", "playing"} and not session.is_ai_opponent
+                or any(session.status in {"started", "playing"}
                        for session in self._sessions_for_safety())):
             return
         if self._legacy_metrics_complete_revision == self.game_repository.statistics_revision:
@@ -1339,7 +1339,7 @@ class MainWindow(QMainWindow):
 
     def _start_legacy_metrics_batch(self) -> None:
         if (self._shutdown_requested or not self._library_detail_safety_allowed()
-                or any(session.status in {"started", "playing"} and not session.is_ai_opponent
+                or any(session.status in {"started", "playing"}
                        for session in self._sessions_for_safety())):
             return
         handle = self._legacy_metrics_handle
@@ -1368,8 +1368,11 @@ class MainWindow(QMainWindow):
                 else:
                     batch = repository.materialize_stale_analysis_metrics_batch(
                         limit=10, cancel_check=stop.is_set)
+                    accuracy = repository.materialize_game_accuracy_batch(
+                        limit=10, cancel_check=stop.is_set)
                     after = repository.analysis_metrics_migration_status(account_id=scope)
-                    result = {"cancelled": stop.is_set(), "batch": batch, "status": after}
+                    result = {"cancelled": stop.is_set(), "batch": batch,
+                              "accuracy": accuracy, "status": after}
             except Exception as exc:
                 result = {"error": type(exc).__name__}
             self.legacy_metrics_finished.emit(generation, {
@@ -1409,16 +1412,18 @@ class MainWindow(QMainWindow):
         else:
             self._legacy_metrics_text = self._format_legacy_metrics_status(status)
             remaining_global = int((result.get("batch") or {}).get("remaining", 0))
-            if remaining_global == 0:
+            accuracy_pending = bool((result.get("accuracy") or {}).get("has_more"))
+            if remaining_global == 0 and not accuracy_pending:
                 self._legacy_metrics_complete_revision = self.game_repository.statistics_revision
-            retry_ms = 500 if remaining_global > 0 else 0
+            retry_ms = 500 if remaining_global > 0 or accuracy_pending else 0
         statistics_page = getattr(self, "_statistics_dialog", None)
         if isinstance(statistics_page, EmbeddedStatisticsPage):
             statistics_page.set_metric_migration_status(
                 self._legacy_metrics_text, safety_allowed=True)
             if int((result.get("batch") or {}).get("processed", 0)) > 0:
                 statistics_page.refresh_data_preserving_position()
-        if ((result.get("batch") or {}).get("processed", 0) > 0
+        if (((result.get("batch") or {}).get("processed", 0) > 0
+             or (result.get("accuracy") or {}).get("processed", 0) > 0)
                 and self.screen_stack.currentWidget() is getattr(self, "home_page", None)):
             self._refresh_home_dashboard()
         page = getattr(self, "_background_operations_page", None)
@@ -2698,6 +2703,8 @@ class MainWindow(QMainWindow):
         placeholder.setWordWrap(True)
         self._recent_games_layout.addWidget(placeholder)
         self._home_view.progress_trend.setText("Загружаем историю выбранного профиля…")
+        self._home_view.puzzle_rating.setText("—")
+        self._home_view.puzzle_sparkline.set_points([])
 
     def _launch_dashboard_snapshot(self, generation: int, account_id: str | None,
                                    clock: str | None) -> None:
@@ -2754,7 +2761,16 @@ class MainWindow(QMainWindow):
     def _render_dashboard_snapshot(self, snapshot: dict) -> None:
         self._latest_dashboard_snapshot = snapshot
         trend = snapshot.get("activity_trend") or []
-        if trend:
+        puzzle_rating = snapshot.get("puzzle_player_rating") or {}
+        self._home_view.puzzle_rating.setText(str(puzzle_rating.get("latest", "—")))
+        self._home_view.puzzle_sparkline.set_points(puzzle_rating.get("points") or [])
+        if puzzle_rating:
+            self._home_view.progress_trend.setText(
+                "Последние 90 дней" if puzzle_rating.get("points") else
+                f"Последняя подтверждённая запись · {puzzle_rating['date']}")
+            self._home_view.progress_trend.setToolTip(
+                "Рейтинг игрока из истории Lichess. Даты попыток сгруппированы по UTC.")
+        elif trend:
             points = [f"{item['month']}: решено {item['wins']} из {item['attempts']}"
                       for item in trend]
             self._home_view.progress_trend.setText(
@@ -6125,6 +6141,8 @@ class MainWindow(QMainWindow):
 
     def _background_sync_finished(self, kind: str, message: str) -> None:
         if not self._shutdown_requested:
+            if kind == "задач" and self._screen_mode == "home":
+                self._refresh_home_dashboard()
             self.connection.setToolTip(f"Последнее фоновое обновление {kind}: {message}")
             if "Ошибка" in message or "не совпадают" in message:
                 self._notify_inline(f"Синхронизация {kind}: {message}")
@@ -6386,6 +6404,7 @@ class MainWindow(QMainWindow):
 
     def _pause_heavy_work_for_live_game(self) -> None:
         self._cancel_lichess_backfill_wakeup()
+        self._cancel_legacy_metrics_batch("live_game")
         self._backfill_deferred_for_live_game = True
         if self._batch_pause is not None:
             self._pause_batch_analysis()

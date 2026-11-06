@@ -6,6 +6,7 @@ import threading
 
 from typing import Any
 
+from ..domain.accuracy import FORMULA_ID
 from ..lichess.game_review import load_game_review
 from ..lichess.statistics import StatisticsService
 
@@ -85,18 +86,51 @@ def dashboard_snapshot(repository, *, account_id: str | None = None,
             "AND g.status NOT IN ('draw','stalemate','repetition','50moves','insufficientMaterial') "
             "THEN g.game_id END) AS losses,"
             "COUNT(DISTINCT CASE WHEN g.status IN ('draw','stalemate','repetition','50moves',"
-            "'insufficientMaterial') THEN g.game_id END) AS draws,"
-            f"AVG(CASE WHEN g.source IN ('lichess','lichess_archive') OR g.source_game_id IS NOT NULL THEN CASE {color} WHEN 'white' THEN g.lichess_accuracy_white "
-            "WHEN 'black' THEN g.lichess_accuracy_black END END) AS owner_accuracy,"
-            f"COUNT(DISTINCT CASE WHEN (CASE {color} WHEN 'white' THEN g.lichess_accuracy_white "
-            "WHEN 'black' THEN g.lichess_accuracy_black END) IS NOT NULL "
-            "AND (g.source IN ('lichess','lichess_archive') OR g.source_game_id IS NOT NULL) "
-            "THEN g.game_id END) AS accuracy_games "
+            "'insufficientMaterial') THEN g.game_id END) AS draws "
             f"FROM games g{join} WHERE {where}", params).fetchone()
 
         analysis_where = " AND ".join(clauses)
         run_params = list(params)
     with repository._connection() as db:
+        accuracy_stats = db.execute(f"""
+            WITH scoped AS (
+                SELECT g.game_id,g.line_revision,{color} AS player_color,
+                    CASE WHEN g.source IN ('lichess','lichess_archive') OR g.source_game_id IS NOT NULL
+                         THEN CASE {color} WHEN 'white' THEN g.lichess_accuracy_white
+                                           WHEN 'black' THEN g.lichess_accuracy_black END END official
+                FROM games g{join} WHERE {where}
+            ), candidates AS (
+                SELECT s.game_id, ar.run_id, ar.finished_at, ar.source,
+                    CASE s.player_color WHEN 'white' THEN ac.white_accuracy
+                                        WHEN 'black' THEN ac.black_accuracy END value
+                FROM scoped s JOIN analysis_runs ar ON ar.game_id=s.game_id
+                JOIN game_revisions gr ON gr.game_id=ar.game_id AND gr.is_current=1
+                    AND ar.line_revision=s.line_revision AND gr.line_revision=ar.line_revision
+                    AND gr.line_hash=ar.line_hash
+                JOIN analysis_game_accuracy ac ON ac.run_id=ar.run_id
+                    AND ac.formula_id=? AND ac.run_finished_at IS ar.finished_at
+                WHERE ar.status='complete' AND NOT EXISTS (
+                    SELECT 1 FROM analysis_jobs aj WHERE aj.result_run_id=ar.run_id
+                    AND aj.analysis_pass='review')
+            ), ranked AS (
+                SELECT *,ROW_NUMBER() OVER (PARTITION BY game_id,source='stockfish'
+                    ORDER BY CASE source WHEN 'stockfish' THEN 0 WHEN 'lichess-json' THEN 1 ELSE 2 END,
+                             finished_at DESC,run_id DESC) priority
+                FROM candidates WHERE value IS NOT NULL
+            ), scores AS (
+                SELECT s.game_id,CASE WHEN s.official BETWEEN 0 AND 100 THEN s.official END official,
+                    MAX(CASE WHEN r.source='stockfish' THEN r.value END) stockfish,
+                    MAX(CASE WHEN r.source<>'stockfish' THEN r.value END) server_local
+                FROM scoped s LEFT JOIN ranked r ON r.game_id=s.game_id AND r.priority=1
+                GROUP BY s.game_id
+            )
+            SELECT AVG(official) official_mean,COUNT(official) official_count,
+                AVG(stockfish) stockfish_mean,COUNT(stockfish) stockfish_count,
+                COUNT(CASE WHEN official IS NOT NULL AND stockfish IS NOT NULL THEN 1 END) overlap,
+                COUNT(COALESCE(official,stockfish,server_local)) combined_count,
+                AVG(COALESCE(official,stockfish,server_local)) combined_mean
+            FROM scores
+        """, (*params, FORMULA_ID)).fetchone()
         coverage = db.execute(
         "WITH scoped AS (SELECT DISTINCT g.game_id,g.line_revision FROM games g" + join +
         " WHERE " + analysis_where + "), runs AS (SELECT ar.game_id,ar.source,ar.status,"
@@ -126,8 +160,12 @@ def dashboard_snapshot(repository, *, account_id: str | None = None,
     activity_trend = (repository.puzzle_rating_trend(account_id, limit=6)
                       if account_id and hasattr(repository, "puzzle_rating_trend") else [])
     total = int(row["games"] or 0)
-    accuracy_n = int(row["accuracy_games"] or 0)
-    accuracy = row["owner_accuracy"]
+    accuracy_n = int(accuracy_stats["official_count"])
+    accuracy = accuracy_stats["combined_mean"]
+    combined_n = int(accuracy_stats["combined_count"])
+    sf_n = int(accuracy_stats["stockfish_count"])
+    official_mean = accuracy_stats["official_mean"]
+    stockfish_mean = accuracy_stats["stockfish_mean"]
     analyzed_complete = int(coverage["complete_count"] or 0)
     analyzed_partial = int(coverage["partial"] or 0)
     analyzed_games = int(coverage["analyzed"] or 0)
@@ -140,11 +178,17 @@ def dashboard_snapshot(repository, *, account_id: str | None = None,
     metrics = [
         {"key": "games", "label": "Завершённые партии", "value": str(total),
          "detail": scope, "source": "SQLite: games + account_games"},
-        {"key": "accuracy", "label": "Точность Lichess", "value":
-         f"{float(accuracy):.1f}%" if accuracy is not None and accuracy_n else "н/д",
-         "detail": f"Официальная точность: {accuracy_n}/{total} партий с данными" if total else
-         "Нет завершённых партий с официальной оценкой",
-         "source": "Lichess accuracy; локальная accuracy не рассчитывается"},
+        {"key": "accuracy", "label": "Точность", "value":
+         f"{float(accuracy):.1f}%" if accuracy is not None else "н/д",
+         "detail": (
+             f"Lichess: {f'{official_mean:.1f}%' if official_mean is not None else '—'} ({accuracy_n})\n"
+             f"Stockfish: {f'{stockfish_mean:.1f}%' if stockfish_mean is not None else '—'} ({sf_n})"
+             if total else "Нет завершённых партий"),
+         "source": (
+             f"{combined_n}/{total} партий. Один вклад за свою сторону: официальная точность "
+             "Lichess, затем локальный расчёт по полному Stockfish, затем по полным серверным оценкам. "
+             f"Обе раздельные выборки содержат {int(accuracy_stats['overlap'])} общих партий. "
+             f"Формула локального расчёта: {FORMULA_ID}.")},
         {"key": "analysis", "label": "Партии с анализом",
          "value": (f"{analyzed_games}/{total} ({100 * analyzed_games / total:.1f}%)"
                    if total else "0/0 · н/д"),
@@ -167,6 +211,7 @@ def dashboard_snapshot(repository, *, account_id: str | None = None,
     for game in games:
         game["review_metrics"] = game_card_metrics(repository, game)
     return {"metrics": metrics, "recent_games": games,
+            "puzzle_player_rating": repository.puzzle_player_rating(account_id) if account_id else {},
             "activity_trend": activity_trend,
             "activity_trend_source": "Lichess puzzle attempts saved locally" if activity_trend else None,
             "scope": scope, "filter": {"account_id": account_id, "clock": clock}}

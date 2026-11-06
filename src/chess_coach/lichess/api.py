@@ -364,6 +364,18 @@ class LichessClient:
             raise LichessError("Lichess вернул неожиданный ответ.")
         return data
 
+    def get_puzzle_rating_history(self, username: str, token: str) -> list:
+        response = self._call("GET", f"/api/user/{quote(username, safe='')}/rating-history", token)
+        payload = response.json()
+        if not isinstance(payload, list):
+            raise LichessError("Некорректный ответ Lichess об истории рейтинга.")
+        puzzles = next((entry for entry in payload
+                        if isinstance(entry, dict) and entry.get("name") == "puzzle"), None)
+        points = puzzles.get("points") if puzzles is not None else []
+        if not isinstance(points, list):
+            raise LichessError("Некорректные точки рейтинга задач Lichess.")
+        return points
+
     def get_account(self, token: str) -> dict:
         return self._json_call("GET", "/api/account", token=token)
 

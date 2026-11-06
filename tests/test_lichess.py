@@ -78,6 +78,22 @@ def response(status, data):
     return HttpResponse(status, {}, json.dumps(data).encode())
 
 
+def test_player_rating_uses_only_official_puzzle_series_and_shared_cooldown():
+    transport = FakeTransport(responses=[
+        response(200, [{"name": "blitz", "points": [[2026, 9, 1, 2500]]},
+                       {"name": "puzzle", "points": [[2026, 9, 1, 1812]]}]),
+        HttpResponse(429, {"Retry-After": "60"}, b""),
+    ])
+    client = LichessClient(transport=transport)
+    assert client.get_puzzle_rating_history("fixture", "synthetic") == [[2026, 9, 1, 1812]]
+    assert transport.calls[0][0:2] == ("GET", "https://lichess.org/api/user/fixture/rating-history")
+    with pytest.raises(RateLimitError):
+        client.get_puzzle_rating_history("fixture", "synthetic")
+    with pytest.raises(RateLimitError):
+        client.get_puzzle_rating_history("fixture", "synthetic")
+    assert len(transport.calls) == 2
+
+
 def test_pkce_request_uses_s256_and_minimal_scopes():
     auth = create_authorization_request("http://127.0.0.1:1234/oauth/callback")
     params = parse_qs(urlparse(auth.url).query)

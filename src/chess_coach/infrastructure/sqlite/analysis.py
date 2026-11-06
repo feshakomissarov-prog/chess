@@ -9,6 +9,7 @@ import sqlite3
 import uuid
 
 import chess
+from ...domain.accuracy import FORMULA_ID, calculate_saved_game_accuracy
 from ...lichess.event_detectors import (
     DETECTOR_VERSION, detect_registered_events, select_review_positions,
 )
@@ -18,6 +19,62 @@ from ...domain.analysis_scope import (analysis_run_has_position_scores,
                                       analysis_run_source_filter)
 
 class AnalysisStoreMixin:
+
+    def materialize_game_accuracy_batch(self, *, limit: int = 10,
+                                        cancel_check: Callable[[], bool] = lambda: False) -> dict:
+        """Project saved runs in bounded batches without rereading archived PGNs."""
+        eligible = """FROM analysis_runs ar JOIN game_revisions gr
+            ON gr.game_id=ar.game_id AND gr.line_revision=ar.line_revision
+            AND gr.line_hash=ar.line_hash AND gr.is_current=1
+            JOIN games g ON g.game_id=ar.game_id
+            WHERE ar.status='complete' AND ar.source IN ('stockfish','lichess-json','lichess-pgn')
+            AND g.status NOT IN ('created','started','playing','started_soon')
+            AND NOT EXISTS (SELECT 1 FROM analysis_jobs aj
+                            WHERE aj.result_run_id=ar.run_id AND aj.analysis_pass='review')
+            AND NOT EXISTS (SELECT 1 FROM analysis_game_accuracy ac
+                            WHERE ac.run_id=ar.run_id AND ac.formula_id=?
+                            AND ac.run_finished_at IS ar.finished_at)"""
+        limit = max(1, min(limit, 100))
+        with self._connection() as db:
+            runs = db.execute(
+                "SELECT ar.*,g.status game_status,gr.initial_fen,gr.moves " + eligible
+                + " ORDER BY ar.started_at DESC,ar.run_id LIMIT ?",
+                (FORMULA_ID, limit + 1)).fetchall()
+        processed = 0
+        for row in runs[:limit]:
+            if cancel_check():
+                break
+            run = dict(row)
+            with self._connection() as db:
+                run["assessments"] = [dict(score) for score in db.execute(
+                    "SELECT ply,white_cp,mate_white,depth FROM position_assessments WHERE run_id=?",
+                    (run["run_id"],))]
+            values = {}
+            try:
+                board = chess.Board() if run["initial_fen"] == "startpos" else chess.Board(run["initial_fen"])
+                positions = [board.copy(stack=False)]
+                for uci in run["moves"].split():
+                    board.push_uci(uci)
+                    positions.append(board.copy(stack=False))
+                result = calculate_saved_game_accuracy({"status": run["game_status"]}, run, run, positions)
+                values = result.values
+            except (ValueError, TypeError):
+                # Cache the absence of a trustworthy result for this immutable run.
+                pass
+            if cancel_check():
+                break
+            with self._connection() as db:
+                db.execute(
+                    """INSERT INTO analysis_game_accuracy
+                       SELECT run_id,?,?,?,finished_at,? FROM analysis_runs
+                       WHERE run_id=? AND finished_at IS ?
+                       ON CONFLICT(run_id,formula_id) DO UPDATE SET
+                         white_accuracy=excluded.white_accuracy,black_accuracy=excluded.black_accuracy,
+                         run_finished_at=excluded.run_finished_at,computed_at=excluded.computed_at""",
+                    (FORMULA_ID, values.get("white"), values.get("black"),
+                     datetime.now(timezone.utc).isoformat(), run["run_id"], run["finished_at"]))
+            processed += 1
+        return {"processed": processed, "has_more": len(runs) > processed}
 
     def save_analysis(self, game_id: str, *, line_revision: int, line_hash: str,
                       source: str, engine_name: str | None, engine_version: str | None,

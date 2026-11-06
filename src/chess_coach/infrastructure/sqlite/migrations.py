@@ -420,6 +420,20 @@ class SQLiteMigrationMixin:
                 # Rebuild it exactly when an older schema is upgraded.
                 db.execute("DROP VIEW IF EXISTS analysis_coverage")
             self._migrate_m45_schema(db)
+            db.execute("""CREATE TABLE IF NOT EXISTS analysis_game_accuracy (
+                run_id TEXT NOT NULL REFERENCES analysis_runs(run_id) ON DELETE CASCADE,
+                formula_id TEXT NOT NULL,
+                white_accuracy REAL,
+                black_accuracy REAL,
+                run_finished_at TEXT,
+                computed_at TEXT NOT NULL,
+                PRIMARY KEY(run_id, formula_id)
+            )""")
+            db.execute("""CREATE TABLE IF NOT EXISTS puzzle_player_rating_history (
+                account_id TEXT PRIMARY KEY REFERENCES accounts(account_id) ON DELETE CASCADE,
+                fetched_at TEXT NOT NULL,
+                points_json TEXT NOT NULL
+            )""")
             db.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
 
     @staticmethod

@@ -11,6 +11,21 @@ from .auth import (CLIENT_ID, OAuthCallbackServer, WindowsCredentialStore,
                    authorize_and_store, create_authorization_request)
 
 class LichessSyncMixin:
+    def _refresh_puzzle_player_rating(self, repo, username: str, token: str,
+                                      stop: threading.Event) -> None:
+        fetch = getattr(self.client, "get_puzzle_rating_history", None)
+        if not callable(fetch) or stop.is_set():
+            return
+        account_id = repo.ensure_archive_account(username)
+        if not repo.puzzle_player_rating_refresh_due(account_id):
+            return
+        try:
+            points = fetch(username, token)
+        except LichessError:
+            return  # Preserve local history. The common gate still records 429.
+        if not stop.is_set():
+            repo.save_puzzle_player_rating(account_id, points)
+
     def cancel_archive_sync(self) -> None:
         if self._archive_stop is not None:
             self._archive_stop.set()
@@ -137,6 +152,7 @@ class LichessSyncMixin:
                     return
                 count = PuzzleActivitySync(self.client, repo).run(
                     username, token, stop)
+                self._refresh_puzzle_player_rating(repo, username, token, stop)
                 if not stop.is_set():
                     self.background_sync_finished.emit(
                         "задач", f"Завершено, новых попыток: {count}")
@@ -195,6 +211,7 @@ class LichessSyncMixin:
                 count = sync.run(username, puzzle_token, stop,
                                  progress=lambda n: self.puzzles_progress.emit(n),
                                  scanned=lambda n: self.puzzles_scanned.emit(n))
+                self._refresh_puzzle_player_rating(repo, username, puzzle_token, stop)
                 status = ("Синхронизация отменена." if stop.is_set()
                           else "История задач синхронизирована.")
                 if not stop.is_set() and count > 0:

@@ -47,7 +47,56 @@ def test_dashboard_aggregates_real_sqlite_results_and_returns_only_three_recent_
         assert metrics["errors"]["value"] == "н/д"
         assert len(snapshot["recent_games"]) == 3
         assert all(row.get("game_id") for row in snapshot["recent_games"])
-        assert metrics["accuracy"]["source"].startswith("Lichess accuracy")
+        assert "0/7 партий" in metrics["accuracy"]["source"]
+    finally:
+        repo.shutdown()
+
+
+def test_accuracy_cache_backfill_uses_one_current_game_per_owner_and_keeps_sources_separate(tmp_path):
+    import sqlite3
+
+    path = tmp_path / "accuracy-v20.sqlite3"
+    repo = GameRepository(path)
+    try:
+        account = repo.ensure_archive_account("synthetic")
+        for game_id, source in (("overlap", "stockfish"), ("fallback", "lichess-json"),
+                                ("other-account", "stockfish")):
+            _save(repo, game_id)
+            line = repo.current_line(game_id)
+            repo.save_analysis(game_id, line_revision=line["line_revision"], line_hash=line["line_hash"],
+                               source=source, engine_name="Synthetic", engine_version="1", parameters={},
+                               assessments=[{"ply": ply, "white_cp": 10 * ply, "depth": 16}
+                                            for ply in range(4)], classifications=[])
+        with repo._connection() as db:
+            db.execute("UPDATE games SET source='lichess_archive',lichess_accuracy_white=80 "
+                       "WHERE game_id='overlap'")
+            for game_id in ("overlap", "fallback"):
+                db.execute("INSERT INTO account_games(account_id,game_id,remote_id,imported_at,color) "
+                           "VALUES (?,?,?,'fixture','white')", (account, game_id, game_id))
+            db.execute("DROP TABLE analysis_game_accuracy")
+            db.execute("PRAGMA user_version=20")
+    finally:
+        repo.shutdown()
+
+    repo = GameRepository(path)
+    try:
+        def accuracy():
+            return next(item for item in dashboard_snapshot(repo, account_id=account)["metrics"]
+                        if item["key"] == "accuracy")
+
+        assert accuracy()["value"] == "80.0%"
+        assert repo.materialize_game_accuracy_batch(limit=1) == {"processed": 1, "has_more": True}
+        assert repo.materialize_game_accuracy_batch(limit=10) == {"processed": 2, "has_more": False}
+        assert repo.materialize_game_accuracy_batch() == {"processed": 0, "has_more": False}
+        assert accuracy()["value"] == "90.0%"
+        assert accuracy()["detail"] == "Lichess: 80.0% (1)\nStockfish: 100.0% (1)"
+        assert "1 общих партий" in accuracy()["source"]
+        repo.save_snapshot("fallback", "startpos", "d2d4 d7d5 c2c4", "white", "Friend",
+                           False, "5+0", "resign", "white")
+        assert accuracy()["value"] == "80.0%"
+        with sqlite3.connect(str(path) + ".pre-m3-v21.bak") as backup:
+            assert backup.execute("PRAGMA user_version").fetchone()[0] == 20
+            assert backup.execute("SELECT COUNT(*) FROM analysis_runs").fetchone()[0] == 3
     finally:
         repo.shutdown()
 
@@ -171,6 +220,37 @@ def test_home_activity_trend_uses_bounded_saved_puzzle_history_or_honest_empty_s
         repo.shutdown()
 
 
+def test_dashboard_player_rating_history_does_not_use_puzzle_difficulty(tmp_path):
+    from datetime import datetime, timedelta, timezone
+
+    repo = GameRepository(tmp_path / "rating-history.sqlite3")
+    try:
+        now = datetime.now(timezone.utc)
+        day = now - timedelta(days=1)
+        account = repo.ensure_archive_account("rating-fixture")
+        other = repo.ensure_archive_account("other-fixture")
+        repo.import_puzzle_activities("rating-fixture", [
+            {"date": int(day.timestamp() * 1000), "win": False, "puzzle": {
+                "id": "difficulty-not-player-rating", "fen": "startpos", "solution": ["e2e4"],
+                "themes": [], "rating": 2499, "plays": 100}},
+        ])
+        assert dashboard_snapshot(repo, account_id=account)["puzzle_player_rating"] == {}
+        assert repo.puzzle_player_rating_refresh_due(account)
+        repo.save_puzzle_player_rating(account, [
+            [day.year, day.month - 1, day.day, 1812], [now.year, now.month - 1, now.day, 1818],
+            [now.year, 13, 1, 0],
+        ])
+        assert not repo.puzzle_player_rating_refresh_due(account)
+        rating = dashboard_snapshot(repo, account_id=account)["puzzle_player_rating"]
+        assert rating["latest"] == 1818
+        assert rating["points"][0] == {"day": day.date().isoformat(), "rating": 1812, "attempts": (1, 0)}
+        assert dashboard_snapshot(repo, account_id=other)["puzzle_player_rating"] == {}
+        repo.save_puzzle_player_rating(account, [])
+        assert repo.puzzle_player_rating(account) == rating
+    finally:
+        repo.shutdown()
+
+
 def test_dashboard_account_and_clock_filters_match_sql_scope(tmp_path):
     repo = GameRepository(tmp_path / "dashboard-filter.sqlite3")
     try:
@@ -190,7 +270,7 @@ def test_dashboard_account_and_clock_filters_match_sql_scope(tmp_path):
         metrics = {row["key"]: row for row in snapshot["metrics"]}
         assert metrics["games"]["value"] == "1"
         assert metrics["accuracy"]["value"] == "91.0%"
-        assert metrics["accuracy"]["detail"].startswith("Официальная точность: 1/1")
+        assert "Lichess: 91.0% (1)" in metrics["accuracy"]["detail"]
         assert snapshot["filter"] == {"account_id": account, "clock": "5+0"}
         assert [game["game_id"] for game in snapshot["recent_games"]] == ["fast-white"]
     finally:

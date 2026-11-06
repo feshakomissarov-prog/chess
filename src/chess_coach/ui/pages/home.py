@@ -2,11 +2,71 @@
 
 from __future__ import annotations
 
-from PySide6.QtCore import Qt
+from datetime import date
+
+from PySide6.QtCore import QPointF, Qt
+from PySide6.QtGui import QColor, QPainter, QPainterPath, QPen
 from PySide6.QtWidgets import (
     QComboBox, QFrame, QGridLayout, QHBoxLayout, QLabel, QPushButton, QScrollArea,
-    QVBoxLayout, QWidget,
+    QToolTip, QVBoxLayout, QWidget,
 )
+
+
+class PuzzleRatingSparkline(QWidget):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.points = []
+        self.setMinimumHeight(46)
+        self.setMouseTracking(True)
+        self.setAccessibleName("История рейтинга задач Lichess")
+        self.hide()
+
+    def set_points(self, points):
+        self.points = points
+        self.setVisible(bool(points))
+        self.update()
+
+    def _vertices(self):
+        if not self.points:
+            return []
+        days = [date.fromisoformat(point["day"]).toordinal() for point in self.points]
+        ratings = [point["rating"] for point in self.points]
+        low, high = min(ratings), max(ratings)
+        width, height = max(1, self.width() - 12), max(1, self.height() - 12)
+        return [QPointF(6 + width * (day - days[0]) / max(1, days[-1] - days[0]),
+                        6 + height * (1 - (rating - low + 5) / (high - low + 10)))
+                for day, rating in zip(days, ratings)]
+
+    def paintEvent(self, _event):
+        points = self._vertices()
+        if not points:
+            return
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        line = QPainterPath(points[0])
+        for point in points[1:]:
+            line.lineTo(point)
+        area = QPainterPath(line)
+        area.lineTo(points[-1].x(), self.height())
+        area.lineTo(points[0].x(), self.height())
+        area.closeSubpath()
+        painter.fillPath(area, QColor(92, 226, 130, 40))
+        painter.setPen(QPen(QColor("#79E599"), 2))
+        painter.drawPath(line)
+        painter.setBrush(QColor("#79E599"))
+        painter.drawEllipse(points[-1], 3, 3)
+
+    def mouseMoveEvent(self, event):
+        vertices = self._vertices()
+        if not vertices:
+            return
+        index = min(range(len(vertices)), key=lambda i: abs(vertices[i].x() - event.position().x()))
+        point = self.points[index]
+        activity = point.get("attempts")
+        activity_label = (f"решено {activity[1]} · не решено {activity[0] - activity[1]}"
+                          if activity else "нет сохранённых попыток за этот день")
+        QToolTip.showText(event.globalPosition().toPoint(),
+                          f"{point['day']} UTC · рейтинг Lichess {point['rating']}\n{activity_label}", self)
 
 
 class HomePage(QWidget):
@@ -48,7 +108,7 @@ class HomePage(QWidget):
         for key, label in (
                 ("games", "Завершённые партии"),
                 ("analysis", "Партии с оценками ходов"),
-                ("accuracy", "Точность Lichess"),
+                ("accuracy", "Точность"),
                 ("errors", "Ошибки на 100 оценённых ходов")):
             card = QFrame(self)
             card.setObjectName("metricCard")
@@ -86,6 +146,11 @@ class HomePage(QWidget):
         progress_title = QLabel("Рейтинг задач")
         progress_title.setStyleSheet("font-size: 17px; font-weight: 600;")
         progress_layout.addWidget(progress_title)
+        self.puzzle_rating = QLabel("—")
+        self.puzzle_rating.setStyleSheet("font-size: 32px; font-weight: 700;")
+        progress_layout.addWidget(self.puzzle_rating)
+        self.puzzle_sparkline = PuzzleRatingSparkline(self.home_progress_card)
+        progress_layout.addWidget(self.puzzle_sparkline)
         self.progress_trend = QLabel("Нет сохранённых точек тренда.")
         self.progress_trend.setObjectName("secondary")
         self.progress_trend.setWordWrap(True)
