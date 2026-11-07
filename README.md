@@ -1,10 +1,6 @@
 # Chess Coach
 
-> **05.11.2026: после source-аудита Блок I + II актуальное техническое задание — [полный ARCH-UX-01 MASTER AUDIT](docs/specs/ARCH_UX_01_FULL_SYSTEM_AUDIT_MASTER_2026_11_05.md)**: 11 CORE + 11 UI замечаний, матрица всех 24 функций, единый цикл исправлений в code draft PR #44. Ранее отдельное RF9 включено в MASTER. GitHub CI #286 750 PASS — только baseline, не владельческая приёмка. Draft PR #44/#45 не сливать, main не менять.
-
-
-> **Новые данные 05.11.2026:** кодовый draft PR #44 на SHA `881a8d8f…` прошёл [Windows CI #41945044572](https://github.com/feshakomissarov-prog/chess/actions/runs/41945044572) (687 PASS), но независимая проверка нашла недочёты auth-status Lichess, кнопки Disconnect при 429, scope Home/последних партий и потерю auto-sync. **RF5 к merge не принят; текущее корректирующее [REVIEW-FIX-06](docs/specs/ARCH_UX_01_REVIEW_FIX_06_INDEPENDENT_REVIEW.md)**, RF6-01…08. Код только в draft PR #44, docs в draft PR #45, main не менять.
-
+> **07.11.2026 · ТЕКУЩАЯ ТОЧКА ВХОДА:** [ГИД ДЛЯ НОВОГО ЧАТА / ПРИЁМКИ](docs/handoffs/NEW_CHAT_START_HERE_2026_11_07.md) · [карта действующих и исторических ТЗ](docs/specs/INDEX.md). [Кодовый draft PR #44](https://github.com/feshakomissarov-prog/chess/pull/44) HEAD `5c375b070e6644dbded5fca62d960fc09c90651e`, [Windows CI #368](https://github.com/feshakomissarov-prog/chess/actions/runs/42318755878): **837 PASS**. [Документы в draft PR #45](https://github.com/feshakomissarov-prog/chess/pull/45). Оба PR открыты, не слиты; `main` — `3e7f2cd` от 03.11.2026. **Не путать успешный synthetic Qt CI с пользовательской приёмкой или утверждённой визуальной точностью.** Открытые замечания VIS6 обсуждаются с владельцем, **новое исполняемое ТЗ Codex не опубликовано**.
 
 **Персональный шахматный тренер: от непонятной позиции — к пониманию и навыку.**
 
@@ -14,14 +10,7 @@ Chess Coach — разрабатываемое настольное прилож
 
 [**Продуктовая цель и образовательные принципы**](docs/PRODUCT_VISION.md) · [**Дорожная карта**](docs/ROADMAP.md) · [**Текущее состояние / handoff**](docs/PROJECT_STATUS.md)
 
-> **Состояние на 05.11.2026:** код ARCH-UX-01 в [draft PR #44](https://github.com/feshakomissarov-prog/chess/pull/44) прошёл предыдущий Windows CI #253 (675 PASS), **но физический Windows-пилот показал UX и Lichess-соединение не готовы к приёмке**. Новое исполняемое [**REVIEW-FIX-05**](docs/specs/ARCH_UX_01_REVIEW_FIX_05_WINDOWS_UX_LICHESS.md) — исправить корневую навигацию и лишние фильтры Главной, обрезанную шапку, корректное состояние аккаунта и безопасную проверку аналитики, 2–3 KPI/занятие/последние игры, пройти все шесть экранов в native GUI на Windows. Доработка только в draft PR #44, документы draft PR #45, **main не трогать, не merge**. Старые абзацы ниже — исторические.
-
-
-> **Последний статус 04.11.2026:** код ARCH-UX-01 реализован в [draft PR #44](https://github.com/feshakomissarov-prog/chess/pull/44), Windows CI #244 SUCCESS на SHA `2b1c724…`, но **не принят по физической Windows-проверке**. Текущая задача — [единое исправляющее ТЗ REVIEW-FIX-01 v1.2](docs/specs/ARCH_UX_01_REVIEW_FIX_01.md), RF-01…RF-15 по итогам code review и 6 скриншотов: даты, метрики и поиск по архиву, источники Lichess/Stockfish, точность, игровая доска, фон и batch UX. ТЗ хранится в [docs-only draft PR #45](https://github.com/feshakomissarov-prog/chess/pull/45); оба PR не слиты. Старые нижние сообщения о «ещё не реализованном UX» исторические.
-
-
-> **Рабочее решение 04.11.2026:** [ARCH-UX-01 — единое большое ТЗ для desktop Codex](docs/specs/ARCH_UX_01_UNIFIED_EXECUTION_SPEC.md): UX 6 разделов + адаптация уже выполненной в [draft PR #44](https://github.com/feshakomissarov-prog/chess/pull/44) архитектуры модульного монолита, с сохранением Fair Play, данных, звуков, обычных предходов и существующей аналитики. Документация готова в [draft PR #45](https://github.com/feshakomissarov-prog/chess/pull/45). PR #44 и #45 **не слиты**; runtime код этим документом не менялся. Исторические разделы README ниже не являются новыми задачами Codex.
-
+> Исторические RF1…RF9, MASTER и VIS1…VIS6 сохранены в [карте ТЗ](docs/specs/INDEX.md) и [журнале проекта](docs/PROJECT_STATUS.md); старые обозначения «текущее» в архивных документах не являются новыми командами Codex.
 
 **Утверждено 04.11.2026:** [Анализ UX-A2 (три направления, вертикальная шкала и прежний переключаемый график)](docs/ux/UX_ANALYSIS_APPROVED_V2.md) · [Игра после завершения без панели результата — UX-GAME-01](docs/ux/GAME_WORKSPACE_AND_FINISH_STATES_V1.md). [Дальняя идея: подготовка к сопернику](docs/research/OPPONENT_PREPARATION_LONG_TERM_FEATURE.md). **Это пока дизайн, не новый код.**
 
@@ -46,16 +35,17 @@ Chess Coach — разрабатываемое настольное прилож
 
 **Важное разграничение:** это *целевая функциональность*, а не список уже готовых возможностей программы. Тренер, способный надёжно объяснять всё перечисленное, ещё **не создан**. Мы начинаем с проверяемого хранилища партий, корректного шахматного анализа и понятного интерфейса.
 
-## Что работает, а что разрабатывается — 04.11.2026
+## Что работает и что проверяем — 07.11.2026
 
-| Состояние | Функциональность |
+| Где | Состояние |
 | --- | --- |
-| **В main: M0–M4.6** | Windows/Python 3.12/PySide6, Lichess/локальная игра, обычные предходы, архив и SQLite, синхронизация, Stockfish одиночный/массовый анализ, история задач и повторы, графики/статистика, тёмный shell/звуки/ярлык; M4.6 PR #41 принят |
-| **Архитектура: draft PR #44** | Модульный монолит, приложение/доменные модели, разделённая SQLite, Lichess adapters, один Stockfish manager, безопасные фоновые lanes, Fair Play; [Windows CI 604 PASS](https://github.com/feshakomissarov-prog/chess/actions/runs/41741484833) на SHA 9a59b21, PR **не слит** |
-| **Следующее задание: ARCH-UX-01 v1.1** | [Единое большое ТЗ](docs/specs/ARCH_UX_01_UNIFIED_EXECUTION_SPEC.md) в [draft PR #45](https://github.com/feshakomissarov-prog/chess/pull/45): новая навигация 6 разделов, устойчивый игровой workspace после finish, видимые игровые команды, виртуализированный архив/детали, единый Анализ, обучающие и статистические входы; **код нового UX ещё не реализован** |
-| **Позднее** | Полноценное персональное Обучение/ИИ-тренер, opening explorer, аналитика соперника и голос. Никаких фальшивых активных функций до реализации |
+| **`main`** | Фундамент M0–M4.6, утверждённая модель компетенций и ARCH-01. Последний merge PR #43 — 03.11.2026; **текущий ARCH-UX-01 не слит**. |
+| **[draft PR #44](https://github.com/feshakomissarov-prog/chess/pull/44)** | Действующая оболочка из 6 разделов, игра, архив/Review, Stockfish/Lichess, фоновые задачи, анализ и новая тёмно-фиолетовая палитра. Текущий SHA `5c375b0`, exact-head [Windows CI #368](https://github.com/feshakomissarov-prog/chess/actions/runs/42318755878): **837 PASS**, synthetic native screenshots. **Не принято окончательно по UI и физическому пилоту**. |
+| **[draft PR #45](https://github.com/feshakomissarov-prog/chess/pull/45)** | Утверждённые UX-решения, VISUAL MASTER, полный source audit, карта ТЗ и [новый handoff](docs/handoffs/NEW_CHAT_START_HERE_2026_11_07.md). **Только документы**, не код приложения. |
+| **Пока обсуждаем** | После VIS6: компактная геометрия Qt 125/150%, визуальная близость к 3 артам, точность `partial` Lichess, race быстрого Home preview, нагрузка аналитической SQLite. **Не новое Codex-ТЗ**. |
+| **Дальний продукт** | Глубокая аналитика, поиск слабых мест, соперники, обучение на своих партиях; изменение приоритетов roadmap ещё **не утверждено**. |
 
-**Реализация:** desktop Codex продолжает архитектурную ветку PR #44, получает согласованные документы из PR #45, исполняет этапы A0–A12 и проходит новое review/точный Windows CI/ручную приёмку владельца. Без самостоятельного merge. [Предстартовый аудит](docs/reviews/ARCH_UX_01_PRE_FLIGHT_AUDIT.md).
+**Проверки:** independent source review + Windows CI на точном SHA + сравнение настоящих скриншотов с утверждёнными эталонами. **Подключённый Lichess** — основной режим для владельца; offline/synthetic тесты не заменяют его физическую Windows-проверку. Никаких merge/main без разрешения владельца.
 
 ## Как устроена работа тренера
 
