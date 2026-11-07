@@ -41,9 +41,14 @@ atexit.register(close_position_engines)
 
 
 def evaluate_position(engine_path: str, board: chess.Board, stop_event: threading.Event,
-                      active_result: dict, on_update=None) -> dict:
+                      active_result: dict, on_update=None, *, engine_manager=None,
+                      safety_check=None) -> dict:
     """Evaluate one copied position; ``active_result`` lets the UI stop stale UCI work."""
-    engine = _engine_for_path(engine_path)
+    if stop_event.is_set():
+        return {"cancelled": True}
+    engine = (engine_manager.position_engine(
+        engine_path, stop_event=stop_event, safety_check=safety_check)
+        if engine_manager is not None else _engine_for_path(engine_path))
     on_update = on_update or active_result.get("on_update")
     try:
         if stop_event.is_set():
@@ -67,7 +72,9 @@ def evaluate_position(engine_path: str, board: chess.Board, stop_event: threadin
         if stop_event.is_set():
             return {"cancelled": True}
         score = info.get("score")
-        score_cp = score.pov(chess.WHITE).score(mate_score=100000) if score else None
+        # Preserve python-chess' typed mate result. A mate is not an enormous
+        # centipawn evaluation; callers display M±n from the separate field.
+        score_cp = score.pov(chess.WHITE).score(mate_score=None) if score else None
         pv = info.get("pv") or []
         return {"cancelled": False, "score_white_cp": score_cp,
                 "mate_white": score.pov(chess.WHITE).mate() if score else None,
@@ -76,3 +83,5 @@ def evaluate_position(engine_path: str, board: chess.Board, stop_event: threadin
                 "nodes": info.get("nodes")}
     finally:
         active_result.pop("analysis", None)
+        if engine_manager is not None:
+            engine.quit()

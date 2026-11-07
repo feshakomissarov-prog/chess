@@ -215,6 +215,9 @@ def test_archive_import_records_date_precision_and_unknown_date_is_not_recent(tm
                     '[Date "2026.10.01"]\n[Result "1-0"]\n\n1. e4 1-0\n')
         repo.import_archive_record("Me", {"id": "date-only", "pgn": date_pgn},
                                    checkpoint_ms=None, backfill=False)
+        repo.import_archive_record("Me", {"id": "date-only", "pgn": date_pgn,
+                                          "createdAt": 1790841600123},
+                                   checkpoint_ms=None, backfill=False)
         time_pgn = ('[Event "timestamp"]\n[White "Me"]\n[Black "Friend"]\n'
                     '[Result "1-0"]\n\n1. e4 1-0\n')
         repo.import_archive_record("Me", {"id": "timestamp", "pgn": time_pgn,
@@ -222,14 +225,39 @@ def test_archive_import_records_date_precision_and_unknown_date_is_not_recent(tm
                                    checkpoint_ms=None, backfill=False)
         repo.import_archive_record("Me", {"id": "unknown", "pgn": time_pgn},
                                    checkpoint_ms=None, backfill=False)
-        assert repo.get_game("date-only")["game_time_precision"] == "date_only"
+        upgraded = repo.get_game("date-only")
+        assert upgraded["game_time_precision"] == "timestamp"
+        assert upgraded["started_at"] == datetime.fromtimestamp(
+            1790841600123 / 1000, timezone.utc).isoformat()
         assert repo.get_game("timestamp")["game_time_precision"] == "timestamp"
         assert repo.get_game("unknown")["game_time_precision"] == "unknown"
         with repo._connection() as db:
-            assert db.execute("PRAGMA user_version").fetchone()[0] == 19
+            assert db.execute("PRAGMA user_version").fetchone()[0] == 21
             assert db.execute("PRAGMA integrity_check").fetchone()[0] == "ok"
         with pytest.raises(ValueError, match="selected account"):
             StatisticsService(repo).personal_profile(account_id=None)
+    finally:
+        repo.shutdown()
+
+
+def test_archive_reimport_never_degrades_authoritative_start_timestamp(tmp_path):
+    repo = GameRepository(tmp_path / "archive-time-monotonic.sqlite3")
+    pgn = ('[Event "synthetic"]\n[White "Me"]\n[Black "Friend"]\n'
+           '[Date "2026.10.01"]\n[Result "1-0"]\n\n1. e4 1-0\n')
+    exact_ms = 1790841600123
+    exact = datetime.fromtimestamp(exact_ms / 1000, timezone.utc).isoformat()
+    try:
+        repo.import_archive_record("Me", {"id": "time-monotonic", "pgn": pgn,
+                                          "createdAt": exact_ms},
+                                   checkpoint_ms=None, backfill=False)
+        assert repo.get_game("time-monotonic")["started_at"] == exact
+        repo.import_archive_record("Me", {"id": "time-monotonic", "pgn": pgn},
+                                   checkpoint_ms=None, backfill=False)
+        row = repo.get_game("time-monotonic")
+        assert row["started_at"] == exact
+        assert row["game_time_precision"] == "timestamp"
+        with repo._connection() as db:
+            assert db.execute("PRAGMA integrity_check").fetchone()[0] == "ok"
     finally:
         repo.shutdown()
 

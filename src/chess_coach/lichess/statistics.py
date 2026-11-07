@@ -7,6 +7,10 @@ from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from .repository import GameRepository
+from ..domain.accuracy import FORMULA_ID
+from ..domain.analysis_scope import (analysis_run_has_position_scores,
+                                     analysis_run_source_filter,
+                                     current_scored_analysis_exists)
 
 
 class StatisticsService:
@@ -88,26 +92,19 @@ class StatisticsService:
             clauses.append("g.winner IS NULL AND g.status NOT IN "
                            "('draw','stalemate','repetition','50moves','insufficientMaterial') "
                            "AND g.pgn NOT LIKE '%[Result \"1/2-1/2\"]%'")
-        analysis_exists = ("EXISTS (SELECT 1 FROM analysis_runs ar JOIN game_revisions gr "
-                           "ON gr.game_id=ar.game_id AND gr.line_revision=ar.line_revision "
-                           "WHERE ar.game_id=g.game_id AND gr.is_current=1 "
-                           "AND ar.status IN ('complete','partial') "
-                           "AND NOT EXISTS (SELECT 1 FROM analysis_jobs aj "
-                           "WHERE aj.result_run_id=ar.run_id AND aj.analysis_pass='review') "
-                           + ("AND ar.source=? " if analysis_source else "") + ")")
+        analysis_exists, analysis_source_params = current_scored_analysis_exists(
+            source=analysis_source)
         if analyzed == "yes":
             clauses.append(analysis_exists)
-            if analysis_source:
-                params.append(analysis_source)
+            params.extend(analysis_source_params)
         elif analyzed == "no":
             clauses.append(f"NOT {analysis_exists}")
-            if analysis_source:
-                params.append(analysis_source)
+            params.extend(analysis_source_params)
         elif analysis_source:
             # A chosen source always constrains the game set, even when the GUI's
             # analyzed selector is set to its default "any" value.
             clauses.append(analysis_exists)
-            params.append(analysis_source)
+            params.extend(analysis_source_params)
         return join, " AND ".join(clauses), params
 
     @staticmethod
@@ -115,7 +112,7 @@ class StatisticsService:
         color = "ag.color" if account_id else "g.color"
         rating = "ag.player_rating" if account_id else (
             "CASE g.color WHEN 'white' THEN g.white_rating ELSE g.black_rating END")
-        return ("WITH filtered_games AS (SELECT DISTINCT g.game_id,g.status,g.winner,g.pgn,"
+        return ("WITH filtered_games AS (SELECT DISTINCT g.game_id,g.line_revision,g.status,g.winner,g.pgn,"
                 "g.started_at,g.game_time_precision,g.white_rating,g.black_rating,"
                 "g.lichess_accuracy_white,g.lichess_accuracy_black,g.source,g.clock,"
                 f"{color} AS my_color,{rating} AS my_rating FROM games g{join} WHERE {where})")
@@ -126,9 +123,11 @@ class StatisticsService:
                 analysis_source: str | None = None, side: str | None = None,
                 rating_min: int | None = None, rating_max: int | None = None,
                 opening: str | None = None, result: str | None = None,
-                analyzed: str | None = None) -> dict[str, Any]:
+                analyzed: str | None = None,
+                wait_for_writes: bool = True) -> dict[str, Any]:
         cache_key = ("summary", account_id, since, until, opponent, clock, game_source,
-                     analysis_source, side, rating_min, rating_max, opening, result, analyzed)
+                     analysis_source, side, rating_min, rating_max, opening, result,
+                     analyzed, wait_for_writes)
         cached = self._get_cached(cache_key)
         if cached is not None:
             return cached
@@ -138,9 +137,13 @@ class StatisticsService:
             rating_min=rating_min, rating_max=rating_max, opening=opening,
             result=result, analyzed=analyzed)
         filtered = self._filtered_cte(join, where, account_id)
+        run_source_filter, source_params = analysis_run_source_filter("ar", analysis_source)
+        source_clause = f" AND ({run_source_filter})" if run_source_filter else ""
+        scored_run = analysis_run_has_position_scores("ar")
         latest = (", latest AS (SELECT ar.game_id,ar.line_revision,ar.run_id,"
                   "ROW_NUMBER() OVER (PARTITION BY ar.game_id,ar.line_revision "
-                  "ORDER BY CASE WHEN ar.status='complete' THEN 0 ELSE 1 END,"
+                  f"ORDER BY CASE WHEN {scored_run} THEN 0 ELSE 1 END,"
+                  "CASE WHEN ar.status='complete' THEN 0 ELSE 1 END,"
                   "ar.finished_at DESC,ar.run_id DESC) AS rank "
                   "FROM analysis_runs ar JOIN game_revisions gr "
                   "ON gr.game_id=ar.game_id AND gr.line_revision=ar.line_revision "
@@ -148,10 +151,10 @@ class StatisticsService:
                   "WHERE gr.is_current=1 AND ar.status IN ('complete','partial') "
                   "AND NOT EXISTS (SELECT 1 FROM analysis_jobs aj "
                   "WHERE aj.result_run_id=ar.run_id AND aj.analysis_pass='review') "
-                  + ("AND ar.source=? " if analysis_source else "") + ")")
-        source_params = [analysis_source] if analysis_source else []
+                  + source_clause + ")")
         selected = filtered + latest + ", chosen AS (SELECT * FROM latest WHERE rank=1)"
-        self.repository._wait_before_read()
+        if wait_for_writes:
+            self.repository._wait_before_read()
         with self.repository._connection() as db:
             # Keep all aggregate reads on one SQLite snapshot while a background writer
             # may be importing more games.
@@ -171,7 +174,12 @@ class StatisticsService:
             move_count = db.execute(filtered + " SELECT COUNT(*) FROM game_moves gm "
                 "JOIN game_revisions gr ON gr.game_id=gm.game_id AND gr.line_revision=gm.line_revision "
                 "JOIN filtered_games fg ON fg.game_id=gm.game_id WHERE gr.is_current=1", params).fetchone()[0]
-            analysis_count = db.execute(selected + " SELECT COUNT(*) FROM chosen", [*params, *source_params]).fetchone()[0]
+            scored_game_exists, scored_game_source_params = current_scored_analysis_exists(
+                "fg", analysis_source)
+            analysis_count = db.execute(
+                filtered + " SELECT COUNT(DISTINCT fg.game_id) FROM filtered_games fg "
+                "WHERE " + scored_game_exists,
+                [*params, *scored_game_source_params]).fetchone()[0]
             scored_position_count = db.execute(selected + " SELECT COUNT(*) FROM chosen c "
                 "JOIN position_assessments pa ON pa.run_id=c.run_id "
                 "WHERE pa.white_cp IS NOT NULL OR pa.mate_white IS NOT NULL",
@@ -181,7 +189,7 @@ class StatisticsService:
                 "JOIN filtered_games fg ON fg.game_id=gm.game_id "
                 "WHERE gr.is_current=1 AND gm.mover=fg.my_color", params).fetchone()[0]
             classification_sql = (selected + ", class_rows AS (SELECT mm.*,gm.mover,fg.my_color FROM chosen c "
-                "JOIN move_metrics mm ON mm.run_id=c.run_id AND mm.metric_version='cc-move-metrics-v2' "
+                "JOIN move_metrics mm ON mm.run_id=c.run_id AND mm.metric_version='cc-move-metrics-v3' "
                 "JOIN game_moves gm ON gm.game_id=mm.game_id AND gm.line_revision=mm.line_revision AND gm.ply=mm.ply "
                 "JOIN filtered_games fg ON fg.game_id=mm.game_id WHERE mm.ply>0) "
                 "SELECT COUNT(CASE WHEN mover=my_color AND cp_loss IS NOT NULL THEN 1 END) AS own_count,"
@@ -190,9 +198,12 @@ class StatisticsService:
                 "COUNT(CASE WHEN mover=my_color AND severity='mistake' THEN 1 END) AS own_mistakes,"
                 "COUNT(CASE WHEN mover=my_color AND severity='blunder' THEN 1 END) AS own_blunders,"
                 "AVG(CASE WHEN mover=my_color AND cp_loss IS NOT NULL THEN cp_loss END) AS avg_cpl,"
+                "AVG(CASE WHEN mover=my_color AND accuracy_formula_id=? THEN accuracy END) AS local_accuracy,"
+                "COUNT(CASE WHEN mover=my_color AND accuracy_formula_id=? AND accuracy IS NOT NULL THEN 1 END) AS local_accuracy_n,"
                 "COUNT(CASE WHEN mover=my_color AND cp_loss>=200 THEN 1 END) AS swings "
                 "FROM class_rows")
-            own = db.execute(classification_sql, [*params, *source_params]).fetchone()
+            own = db.execute(classification_sql,
+                             [*params, *source_params, FORMULA_ID, FORMULA_ID]).fetchone()
             per_game = db.execute(selected + ", own_per_game AS (SELECT mm.game_id,"
                 "COUNT(CASE WHEN gm.mover=fg.my_color AND mm.cp_loss IS NOT NULL "
                 "THEN 1 END) AS assessed,"
@@ -200,7 +211,7 @@ class StatisticsService:
                 "SUM(CASE WHEN gm.mover=fg.my_color AND mm.severity='mistake' THEN 1 ELSE 0 END) AS mistakes,"
                 "SUM(CASE WHEN gm.mover=fg.my_color AND mm.severity='blunder' THEN 1 ELSE 0 END) AS blunders "
                 "FROM chosen c JOIN filtered_games fg ON fg.game_id=c.game_id "
-                "LEFT JOIN move_metrics mm ON mm.run_id=c.run_id AND mm.metric_version='cc-move-metrics-v2' AND mm.ply>0 "
+                "LEFT JOIN move_metrics mm ON mm.run_id=c.run_id AND mm.metric_version='cc-move-metrics-v3' AND mm.ply>0 "
                 "LEFT JOIN game_moves gm ON gm.game_id=mm.game_id AND gm.line_revision=mm.line_revision AND gm.ply=mm.ply "
                 "GROUP BY fg.game_id) SELECT COUNT(CASE WHEN assessed>0 THEN 1 END) AS analyzed_games,"
                 "AVG(CASE WHEN assessed>0 THEN inaccuracies END) AS avg_inaccuracies,"
@@ -215,7 +226,7 @@ class StatisticsService:
                 "AND mm.ply>=pb.middle_start_ply THEN 'middlegame' ELSE 'unknown' END AS phase,"
                 "CASE WHEN gm.mover=fg.my_color THEN 'mine' ELSE 'opponent' END AS perspective,"
                 "mm.severity AS label,COUNT(*) AS count FROM chosen c "
-                "JOIN move_metrics mm ON mm.run_id=c.run_id AND mm.metric_version='cc-move-metrics-v2' "
+                "JOIN move_metrics mm ON mm.run_id=c.run_id AND mm.metric_version='cc-move-metrics-v3' "
                 "JOIN game_moves gm ON gm.game_id=mm.game_id AND gm.line_revision=mm.line_revision AND gm.ply=mm.ply "
                 "JOIN filtered_games fg ON fg.game_id=mm.game_id "
                 "LEFT JOIN game_phase_boundaries pb ON pb.game_id=mm.game_id AND pb.line_revision=mm.line_revision "
@@ -256,11 +267,15 @@ class StatisticsService:
                  "share_games_with_blunder_percent": round(100 * float(per_game['share_games_with_blunder']), 1) if per_game['share_games_with_blunder'] is not None else None,
                  "own_error_rate_per_100": round(100 * int(own['own_errors'] or 0) / own_count, 1) if own_count else None,
                  "avg_cpl_cp": round(float(own['avg_cpl']), 1) if own['avg_cpl'] is not None else None,
+                 "local_move_accuracy": round(float(own['local_accuracy']), 1)
+                     if own['local_accuracy'] is not None else None,
+                 "local_move_accuracy_n": int(own['local_accuracy_n'] or 0),
+                 "local_move_accuracy_formula_id": FORMULA_ID,
                  "swings_200cp": int(own['swings'] or 0),
                  "lichess_accuracy": {
                      "white": round(float(base['accuracy_white']), 1) if base['accuracy_white'] is not None else None,
                      "black": round(float(base['accuracy_black']), 1) if base['accuracy_black'] is not None else None},
-                 "analysis_coverage": round(100 * analysis_count / games_count, 1) if games_count else 0.0,
+                 "analysis_coverage": round(100 * analysis_count / games_count, 1) if games_count else None,
                  "classifications_by_phase": phases, "rating_trend": rating_trend}
         return self._store_cached(cache_key, stats)
 
@@ -296,22 +311,32 @@ class StatisticsService:
         if until:
             clauses.append("g.started_at<?")
             params.append(until)
-        if analysis_source:
-            clauses.append("ar.source=?")
-            params.append(analysis_source)
+        outer_source_filter, outer_source_params = analysis_run_source_filter("ar", analysis_source)
+        if outer_source_filter:
+            clauses.append(f"({outer_source_filter})")
+            params.extend(outer_source_params)
+            source_scored_exists, source_scored_params = current_scored_analysis_exists(
+                "g", analysis_source)
+            clauses.append(source_scored_exists)
+            params.extend(source_scored_params)
+        ranked_source_filter, ranked_source_params = analysis_run_source_filter("ar", analysis_source)
+        ranked_source_clause = (f"AND ({ranked_source_filter}) "
+                                if ranked_source_filter else "")
+        ranked_score = analysis_run_has_position_scores("ar")
         # Local games have no account_games row; use their stored perspective. Account
         # aggregates use the account-specific color, avoiding mixed-account attribution.
         self.repository._wait_before_read()
         with self.repository._connection() as db:
             rows = db.execute(
                 "WITH ranked AS (SELECT ar.*,ROW_NUMBER() OVER(PARTITION BY ar.game_id,"
-                "ar.line_revision ORDER BY CASE WHEN ar.status='complete' THEN 0 ELSE 1 END,"
+                "ar.line_revision ORDER BY " + f"CASE WHEN {ranked_score} THEN 0 ELSE 1 END," +
+                "CASE WHEN ar.status='complete' THEN 0 ELSE 1 END,"
                 "ar.finished_at DESC,ar.run_id DESC) AS rank FROM analysis_runs ar "
                 "JOIN game_revisions rr ON rr.game_id=ar.game_id AND rr.line_revision=ar.line_revision "
                  "WHERE rr.is_current=1 AND ar.status IN ('complete','partial') "
                  "AND NOT EXISTS (SELECT 1 FROM analysis_jobs aj WHERE aj.result_run_id=ar.run_id "
                  "AND aj.analysis_pass='review') "
-                + ("AND ar.source=? " if analysis_source else "") + "), chosen AS ("
+                 + ranked_source_clause + "), chosen AS ("
                 "SELECT * FROM ranked WHERE rank=1) "
                 "SELECT COALESCE(om.eco,g.opening_eco,'unknown') AS eco,"
                 "COALESCE(om.name,g.opening_name,'unknown') AS opening,"
@@ -336,7 +361,7 @@ class StatisticsService:
                 "LEFT JOIN opening_matches om ON om.game_id=g.game_id AND om.line_revision=g.line_revision "
                 "LEFT JOIN account_games ag ON ag.game_id=g.game_id "
                 "LEFT JOIN chosen ar ON ar.game_id=g.game_id AND ar.line_revision=g.line_revision "
-                "LEFT JOIN move_metrics mm ON mm.run_id=ar.run_id AND mm.metric_version='cc-move-metrics-v2' "
+                "LEFT JOIN move_metrics mm ON mm.run_id=ar.run_id AND mm.metric_version='cc-move-metrics-v3' "
                 "LEFT JOIN game_moves gm ON gm.game_id=mm.game_id AND gm.line_revision=mm.line_revision AND gm.ply=mm.ply "
                 "LEFT JOIN game_phase_boundaries pb ON pb.game_id=mm.game_id AND pb.line_revision=mm.line_revision "
                 "WHERE " + " AND ".join(clauses) +
@@ -347,7 +372,7 @@ class StatisticsService:
                 "WHEN g.opening_eco IS NOT NULL THEN 'lichess' ELSE 'unknown' END,"
                 "COALESCE(ag.color,g.color),g.source,COALESCE(ag.account_id,'local') "
                 "ORDER BY games DESC,eco,opening,my_color,account_scope "
-                , [*([analysis_source] if analysis_source else []), *params]).fetchall()
+                , [*ranked_source_params, *params]).fetchall()
         output = []
         for row in rows:
             item = dict(row)
@@ -479,16 +504,20 @@ class StatisticsService:
         params: list[object] = [account_id, side, since, until]
         if clock:
             clauses.append("g.clock=?"); params.append(clock)
+        source_filter, source_params = analysis_run_source_filter("ar", analysis_source)
+        source_clause = f"AND ({source_filter}) " if source_filter else ""
+        scored_run = analysis_run_has_position_scores("ar")
         with self.repository._connection() as db:
             row = db.execute(
                 "WITH ranked AS (SELECT ar.game_id,ar.line_revision,ar.run_id,"
                 "ROW_NUMBER() OVER(PARTITION BY ar.game_id,ar.line_revision ORDER BY "
+                f"CASE WHEN {scored_run} THEN 0 ELSE 1 END,"
                 "CASE WHEN ar.status='complete' THEN 0 ELSE 1 END,ar.finished_at DESC,ar.run_id DESC) rn "
                 "FROM analysis_runs ar JOIN game_revisions rr ON rr.game_id=ar.game_id "
                 "AND rr.line_revision=ar.line_revision WHERE rr.is_current=1 "
                 "AND ar.status IN ('complete','partial') AND NOT EXISTS (SELECT 1 FROM analysis_jobs aj "
                 "WHERE aj.result_run_id=ar.run_id AND aj.analysis_pass='review') " +
-                ("AND ar.source=? " if analysis_source else "") + "), chosen AS (SELECT * FROM ranked WHERE rn=1) "
+                source_clause + "), chosen AS (SELECT * FROM ranked WHERE rn=1) "
                 "SELECT COUNT(*) FROM games g JOIN account_games ag ON ag.game_id=g.game_id "
                 "JOIN game_revisions gr ON gr.game_id=g.game_id AND gr.line_revision=g.line_revision "
                 "JOIN chosen c ON c.game_id=g.game_id AND c.line_revision=g.line_revision "
@@ -498,10 +527,10 @@ class StatisticsService:
                 "AND gm.line_revision=g.line_revision AND gm.mover=ag.color)>0 "
                 "AND (SELECT COUNT(*) FROM move_metrics mm JOIN game_moves gm ON gm.game_id=mm.game_id "
                 "AND gm.line_revision=mm.line_revision AND gm.ply=mm.ply WHERE mm.run_id=ar.run_id "
-                "AND mm.metric_version='cc-move-metrics-v2' AND gm.mover=ag.color "
+                "AND mm.metric_version='cc-move-metrics-v3' AND gm.mover=ag.color "
                 "AND mm.cp_loss IS NOT NULL)=(SELECT COUNT(*) FROM game_moves gm WHERE gm.game_id=g.game_id "
                 "AND gm.line_revision=g.line_revision AND gm.mover=ag.color)",
-                ([analysis_source] if analysis_source else []) + params).fetchone()
+                [*source_params, *params]).fetchone()
         return int(row[0] or 0)
 
     def _personal_diagnostics(self, *, account_id: str, since: str, until: str,
@@ -515,10 +544,12 @@ class StatisticsService:
         if clock:
             clauses.append("g.clock=?")
             params.append(clock)
-        source_clause = "AND ar.source=? " if analysis_source else ""
-        source_params: list[object] = [analysis_source] if analysis_source else []
+        source_filter, source_params = analysis_run_source_filter("ar", analysis_source)
+        source_clause = f"AND ({source_filter}) " if source_filter else ""
+        scored_run = analysis_run_has_position_scores("ar")
         cte = ("WITH ranked AS (SELECT ar.*,ROW_NUMBER() OVER(PARTITION BY ar.game_id,ar.line_revision "
-                "ORDER BY CASE WHEN ar.status='complete' THEN 0 ELSE 1 END,ar.finished_at DESC,ar.run_id DESC) rn "
+                f"ORDER BY CASE WHEN {scored_run} THEN 0 ELSE 1 END,"
+                "CASE WHEN ar.status='complete' THEN 0 ELSE 1 END,ar.finished_at DESC,ar.run_id DESC) rn "
                 "FROM analysis_runs ar JOIN game_revisions rr ON rr.game_id=ar.game_id "
                 "AND rr.line_revision=ar.line_revision WHERE rr.is_current=1 AND ar.status IN ('complete','partial') "
                 "AND NOT EXISTS (SELECT 1 FROM analysis_jobs aj WHERE aj.result_run_id=ar.run_id "
@@ -539,7 +570,7 @@ class StatisticsService:
                 "COUNT(CASE WHEN gm.mover=my_color AND mm.severity IN ('mistake','blunder') "
                 "AND pb.middle_start_ply IS NOT NULL AND mm.ply<pb.middle_start_ply THEN 1 END) errors "
                 "FROM scope LEFT JOIN move_metrics mm ON mm.run_id=scope.run_id "
-                "AND mm.metric_version='cc-move-metrics-v2' AND mm.ply>0 "
+                "AND mm.metric_version='cc-move-metrics-v3' AND mm.ply>0 "
                 "LEFT JOIN game_moves gm ON gm.game_id=mm.game_id AND gm.line_revision=mm.line_revision AND gm.ply=mm.ply "
                 "LEFT JOIN game_phase_boundaries pb ON pb.game_id=mm.game_id AND pb.line_revision=mm.line_revision "
                 "GROUP BY eco,opening ORDER BY errors DESC,games DESC,eco LIMIT 20",
@@ -552,7 +583,7 @@ class StatisticsService:
                 "COUNT(CASE WHEN gm.mover=my_color AND mm.severity IN ('mistake','blunder') THEN 1 END) errors,"
                 "AVG(CASE WHEN gm.mover=my_color AND mm.cp_loss IS NOT NULL THEN mm.cp_loss END) mean_loss_cp "
                 "FROM scope LEFT JOIN move_metrics mm ON mm.run_id=scope.run_id "
-                "AND mm.metric_version='cc-move-metrics-v2' AND mm.ply>0 "
+                "AND mm.metric_version='cc-move-metrics-v3' AND mm.ply>0 "
                 "LEFT JOIN game_moves gm ON gm.game_id=mm.game_id AND gm.line_revision=mm.line_revision AND gm.ply=mm.ply "
                 "LEFT JOIN game_phase_boundaries pb ON pb.game_id=mm.game_id AND pb.line_revision=mm.line_revision "
                 "GROUP BY phase ORDER BY errors DESC,phase",
@@ -568,7 +599,7 @@ class StatisticsService:
                 "scope.eco,scope.opening,"
                 "(SELECT ar.source FROM analysis_runs ar WHERE ar.run_id=scope.run_id) analysis_source "
                 "FROM scope JOIN move_metrics mm ON mm.run_id=scope.run_id "
-                "AND mm.metric_version='cc-move-metrics-v2' "
+                "AND mm.metric_version='cc-move-metrics-v3' "
                 "JOIN game_moves gm ON gm.game_id=mm.game_id AND gm.line_revision=mm.line_revision AND gm.ply=mm.ply "
                 "LEFT JOIN game_phase_boundaries pb ON pb.game_id=mm.game_id AND pb.line_revision=mm.line_revision "
                 "WHERE gm.mover=scope.my_color AND mm.ply>0 AND mm.cp_loss IS NOT NULL "
@@ -601,8 +632,15 @@ class StatisticsService:
             clauses.append("g.clock=?"); params.append(clock)
         if side in {"white", "black"}:
             clauses.append("ag.color=?"); params.append(side)
-        analysis_clause = "AND ar.source=? " if analysis_source else ""
-        cte_params: list[object] = [analysis_source] if analysis_source else []
+        source_filter, cte_params = analysis_run_source_filter("ar", analysis_source)
+        analysis_clause = f"AND ({source_filter}) " if source_filter else ""
+        source_scored_exists = ""
+        source_scored_params: list[object] = []
+        if analysis_source:
+            source_scored_exists, source_scored_params = current_scored_analysis_exists(
+                "g", analysis_source)
+            source_scored_exists = " AND " + source_scored_exists
+        scored_run = analysis_run_has_position_scores("ar")
         from .event_detectors import DETECTOR_VERSION
         active_detector = DETECTOR_VERSION + ":%"
         where = " AND ".join(clauses)
@@ -610,7 +648,8 @@ class StatisticsService:
         with self.repository._connection() as db:
             rows = db.execute(
                 "WITH ranked AS (SELECT ar.*,ROW_NUMBER() OVER(PARTITION BY ar.game_id,ar.line_revision "
-                "ORDER BY CASE WHEN ar.status='complete' THEN 0 ELSE 1 END,ar.finished_at DESC,ar.run_id DESC) rank "
+                f"ORDER BY CASE WHEN {scored_run} THEN 0 ELSE 1 END,"
+                "CASE WHEN ar.status='complete' THEN 0 ELSE 1 END,ar.finished_at DESC,ar.run_id DESC) rank "
                 "FROM analysis_runs ar JOIN game_revisions rr ON rr.game_id=ar.game_id "
                 "AND rr.line_revision=ar.line_revision WHERE rr.is_current=1 "
                 "AND ar.status IN ('complete','partial') AND NOT EXISTS (SELECT 1 FROM analysis_jobs aj "
@@ -618,27 +657,28 @@ class StatisticsService:
                 "(SELECT * FROM ranked WHERE rank=1), "
                 "game_rows AS (SELECT g.*,ag.color my_color,ar.run_id,ar.status analysis_status,"
                 "CASE WHEN g.started_at IS NULL THEN 'unknown' ELSE substr(g.started_at,1,7) END period,"
+                f"CASE WHEN ar.run_id IS NOT NULL AND {scored_run} THEN 1 ELSE 0 END has_scored_analysis,"
                 "CASE ag.color WHEN 'white' THEN g.lichess_accuracy_white "
                 "WHEN 'black' THEN g.lichess_accuracy_black END official_accuracy,"
                 "(SELECT COUNT(*) FROM move_metrics mm JOIN game_moves gm ON gm.game_id=mm.game_id "
                 "AND gm.line_revision=mm.line_revision AND gm.ply=mm.ply WHERE mm.run_id=ar.run_id "
-                "AND mm.metric_version='cc-move-metrics-v2' AND mm.ply>0 AND gm.mover=ag.color "
+                "AND mm.metric_version='cc-move-metrics-v3' AND mm.ply>0 AND gm.mover=ag.color "
                 "AND mm.cp_loss IS NOT NULL) assessed_own_moves,"
                 "(SELECT COUNT(*) FROM move_metrics mm JOIN game_moves gm ON gm.game_id=mm.game_id "
                 "AND gm.line_revision=mm.line_revision AND gm.ply=mm.ply WHERE mm.run_id=ar.run_id "
-                "AND mm.metric_version='cc-move-metrics-v2' AND gm.mover=ag.color "
+                "AND mm.metric_version='cc-move-metrics-v3' AND gm.mover=ag.color "
                 "AND mm.severity IN ('mistake','blunder')) own_errors,"
                 "(SELECT COUNT(*) FROM move_metrics mm JOIN game_moves gm ON gm.game_id=mm.game_id "
                 "AND gm.line_revision=mm.line_revision AND gm.ply=mm.ply WHERE mm.run_id=ar.run_id "
-                "AND mm.metric_version='cc-move-metrics-v2' AND gm.mover=ag.color "
+                "AND mm.metric_version='cc-move-metrics-v3' AND gm.mover=ag.color "
                 "AND mm.severity='inaccuracy') own_inaccuracies,"
                 "(SELECT COUNT(*) FROM move_metrics mm JOIN game_moves gm ON gm.game_id=mm.game_id "
                 "AND gm.line_revision=mm.line_revision AND gm.ply=mm.ply WHERE mm.run_id=ar.run_id "
-                "AND mm.metric_version='cc-move-metrics-v2' AND gm.mover=ag.color "
+                "AND mm.metric_version='cc-move-metrics-v3' AND gm.mover=ag.color "
                 "AND mm.severity='mistake') own_mistakes,"
                 "(SELECT COUNT(*) FROM move_metrics mm JOIN game_moves gm ON gm.game_id=mm.game_id "
                 "AND gm.line_revision=mm.line_revision AND gm.ply=mm.ply WHERE mm.run_id=ar.run_id "
-                "AND mm.metric_version='cc-move-metrics-v2' AND gm.mover=ag.color "
+                "AND mm.metric_version='cc-move-metrics-v3' AND gm.mover=ag.color "
                 "AND mm.severity='blunder') own_blunders,"
                 "(SELECT COUNT(*) FROM analysis_events ae WHERE ae.run_id=ar.run_id "
                 "AND ae.event_type='missed_opportunity' AND ae.confidence_state='candidate' "
@@ -654,7 +694,7 @@ class StatisticsService:
                 "verified_opportunities_used "
                 "FROM games g JOIN account_games ag ON ag.game_id=g.game_id "
                 "LEFT JOIN chosen ar ON ar.game_id=g.game_id AND ar.line_revision=g.line_revision WHERE "
-                + where + ") "
+                + where + source_scored_exists + ") "
                 "SELECT period,my_color,COUNT(*) games,"
                 "SUM(CASE WHEN winner=my_color THEN 1 ELSE 0 END) wins,"
                 "SUM(CASE WHEN winner IS NOT NULL AND winner<>my_color "
@@ -663,7 +703,8 @@ class StatisticsService:
                 "SUM(CASE WHEN status IN ('draw','stalemate','repetition','50moves','insufficientMaterial') "
                 "OR pgn LIKE '%[Result \"1/2-1/2\"]%' THEN 1 ELSE 0 END) draws,"
                 "AVG(official_accuracy) official_accuracy,COUNT(official_accuracy) accuracy_n,"
-                "COUNT(analysis_status) analyzed_games,SUM(assessed_own_moves) assessed_own_moves,"
+                "COUNT(DISTINCT CASE WHEN has_scored_analysis=1 THEN game_id END) analyzed_games,"
+                "SUM(assessed_own_moves) assessed_own_moves,"
                 "SUM(own_errors) own_errors,SUM(opportunity_candidates) opportunity_candidates,"
                 "SUM(own_inaccuracies) own_inaccuracies,SUM(own_mistakes) own_mistakes,"
                 "SUM(own_blunders) own_blunders,"
@@ -672,7 +713,8 @@ class StatisticsService:
                 "SUM(CASE WHEN started_at IS NULL THEN 1 ELSE 0 END) unknown_date_games "
                 "FROM game_rows GROUP BY period,my_color "
                 "ORDER BY CASE WHEN period='unknown' THEN 1 ELSE 0 END,period,my_color",
-                [*cte_params, active_detector, active_detector, *params]).fetchall()
+                [*cte_params, active_detector, active_detector, *params,
+                 *source_scored_params]).fetchall()
         output = []
         for row in rows:
             item = dict(row)
@@ -748,14 +790,18 @@ class StatisticsService:
         if account_id:
             selected += ",ag.account_id AS account_id,ag.opponent AS account_opponent,ag.player_name AS account_player_name,ag.color AS account_color"
         owner_color = "ag.color" if account_id else "g.color"
+        page_source_filter, page_source_params = analysis_run_source_filter("ar", analysis_source)
+        page_source_clause = f"AND ({page_source_filter}) " if page_source_filter else ""
+        scored_run = analysis_run_has_position_scores("ar")
         latest_run = ("SELECT ar.run_id FROM analysis_runs ar JOIN game_revisions rr "
                       "ON rr.game_id=ar.game_id AND rr.line_revision=ar.line_revision "
                       "WHERE ar.game_id=g.game_id AND ar.line_revision=g.line_revision "
                       "AND rr.is_current=1 AND ar.status IN ('complete','partial') "
                  "AND NOT EXISTS (SELECT 1 FROM analysis_jobs aj WHERE aj.result_run_id=ar.run_id "
                  "AND aj.analysis_pass='review') "
-                      + ("AND ar.source=? " if analysis_source else "") +
-                      "ORDER BY CASE WHEN ar.status='complete' THEN 0 ELSE 1 END,"
+                      + page_source_clause +
+                      f"ORDER BY CASE WHEN {scored_run} THEN 0 ELSE 1 END,"
+                      "CASE WHEN ar.status='complete' THEN 0 ELSE 1 END,"
                       "ar.finished_at DESC,ar.run_id DESC LIMIT 1")
         selected += f", ({latest_run}) AS latest_run_id, " \
                     f"(SELECT ar.status FROM analysis_runs ar WHERE ar.run_id=({latest_run})) AS analysis_status, " \
@@ -764,27 +810,39 @@ class StatisticsService:
                     f"AND gp.line_revision=g.line_revision) AS total_positions, " \
                     f"(SELECT COUNT(*) FROM position_assessments pa WHERE pa.run_id=({latest_run}) " \
                     f"AND (pa.white_cp IS NOT NULL OR pa.mate_white IS NOT NULL)) AS scored_positions, " \
+                    f"(SELECT COUNT(*) FROM move_classifications mc JOIN game_moves gm " \
+                    f"ON gm.game_id=mc.game_id AND gm.line_revision=mc.line_revision AND gm.ply=mc.ply " \
+                    f"WHERE mc.run_id=({latest_run}) AND gm.mover={owner_color} " \
+                    f"AND mc.label='inaccuracy') AS own_classified_inaccuracies, " \
+                    f"(SELECT COUNT(*) FROM move_classifications mc JOIN game_moves gm " \
+                    f"ON gm.game_id=mc.game_id AND gm.line_revision=mc.line_revision AND gm.ply=mc.ply " \
+                    f"WHERE mc.run_id=({latest_run}) AND gm.mover={owner_color} " \
+                    f"AND mc.label='mistake') AS own_classified_mistakes, " \
+                    f"(SELECT COUNT(*) FROM move_classifications mc JOIN game_moves gm " \
+                    f"ON gm.game_id=mc.game_id AND gm.line_revision=mc.line_revision AND gm.ply=mc.ply " \
+                    f"WHERE mc.run_id=({latest_run}) AND gm.mover={owner_color} " \
+                    f"AND mc.label='blunder') AS own_classified_blunders, " \
                     f"(SELECT COUNT(*) FROM game_moves gm WHERE gm.game_id=g.game_id " \
                     f"AND gm.line_revision=g.line_revision AND gm.mover={owner_color}) AS total_own_moves, " \
                     f"(SELECT COUNT(*) FROM move_metrics mm JOIN game_moves gm ON gm.game_id=mm.game_id " \
                     f"AND gm.line_revision=mm.line_revision AND gm.ply=mm.ply WHERE mm.run_id=({latest_run}) " \
-                    f"AND mm.metric_version='cc-move-metrics-v2' AND gm.mover={owner_color} " \
+                    f"AND mm.metric_version='cc-move-metrics-v3' AND gm.mover={owner_color} " \
                     f"AND mm.cp_loss IS NOT NULL) AS own_assessed_moves, " \
                     f"(SELECT COUNT(*) FROM move_metrics mm JOIN game_moves gm ON gm.game_id=mm.game_id " \
                     f"AND gm.line_revision=mm.line_revision AND gm.ply=mm.ply WHERE mm.run_id=({latest_run}) " \
-                    f"AND mm.metric_version='cc-move-metrics-v2' AND gm.mover={owner_color} " \
+                    f"AND mm.metric_version='cc-move-metrics-v3' AND gm.mover={owner_color} " \
                     f"AND mm.severity='inaccuracy') AS own_inaccuracies, " \
                     f"(SELECT COUNT(*) FROM move_metrics mm JOIN game_moves gm ON gm.game_id=mm.game_id " \
                     f"AND gm.line_revision=mm.line_revision AND gm.ply=mm.ply WHERE mm.run_id=({latest_run}) " \
-                    f"AND mm.metric_version='cc-move-metrics-v2' AND gm.mover={owner_color} " \
+                    f"AND mm.metric_version='cc-move-metrics-v3' AND gm.mover={owner_color} " \
                     f"AND mm.severity='mistake') AS own_mistakes, " \
                     f"(SELECT COUNT(*) FROM move_metrics mm JOIN game_moves gm ON gm.game_id=mm.game_id " \
                     f"AND gm.line_revision=mm.line_revision AND gm.ply=mm.ply WHERE mm.run_id=({latest_run}) " \
-                    f"AND mm.metric_version='cc-move-metrics-v2' AND gm.mover={owner_color} " \
+                    f"AND mm.metric_version='cc-move-metrics-v3' AND gm.mover={owner_color} " \
                     f"AND mm.severity='blunder') AS own_blunders, " \
                     f"CASE {owner_color} WHEN 'white' THEN g.lichess_accuracy_white " \
                     f"WHEN 'black' THEN g.lichess_accuracy_black END AS owner_lichess_accuracy"
-        page_params = ([analysis_source] * 8 if analysis_source else []) + [*params]
+        page_params = page_source_params * 11 + params
         self.repository._wait_before_read()
         with self.repository._connection() as db:
             total = db.execute(f"SELECT COUNT(DISTINCT g.game_id) FROM games g{join} WHERE {where}",
@@ -794,6 +852,17 @@ class StatisticsService:
                 "ORDER BY CASE WHEN g.started_at IS NULL THEN 1 ELSE 0 END,"
                 "g.started_at DESC,g.game_id LIMIT ? OFFSET ?",
                 [*page_params, page_size, page * page_size]).fetchall()
-        return self._store_cached(cache_key, {"items": [dict(row) for row in rows], "total": total,
+        items = [dict(row) for row in rows]
+        for item in items:
+            scored_positions = int(item.get("scored_positions") or 0)
+            item["has_position_scores"] = scored_positions > 0
+            item["technical_analysis_status"] = item.get("analysis_status")
+            item["technical_analysis_source"] = item.get("selected_analysis_source")
+            if not scored_positions:
+                # Keep the recorded job state available for diagnostics, but do
+                # not expose an empty completed run as an evaluation result.
+                item["analysis_status"] = None
+                item["selected_analysis_source"] = None
+        return self._store_cached(cache_key, {"items": items, "total": total,
                 "page": page, "page_size": page_size,
                 "pages": (total + page_size - 1) // page_size})

@@ -51,6 +51,35 @@ def test_diagnostics_use_rotating_bounded_files(tmp_path, monkeypatch):
     diagnostics._HANDLER = None
 
 
+def test_diagnostics_attach_only_valid_operation_ids_and_redact_exception_text(
+        tmp_path, monkeypatch):
+    monkeypatch.setattr(diagnostics, "_HANDLER", None)
+    diagnostics._LOGGER.handlers.clear()
+    assert diagnostics.configure_logging(tmp_path)
+    context = diagnostics.set_context(operation_id="a" * 32, run_id="token=invalid-secret")
+    try:
+        diagnostics.log_event(
+            "request_failed", "fake_transport", reason_code="rate_limited",
+            error=RuntimeError(
+                "Bearer fake-token token=another-secret owner@example.test "
+                "C:\\Users\\Owner\\private\\game.pgn"))
+    finally:
+        diagnostics.reset_context(context)
+    for handler in diagnostics._LOGGER.handlers:
+        handler.flush()
+    content = (tmp_path / "chess-coach.log").read_text(encoding="utf-8")
+    event = json.loads(content)
+    assert event["operation_id"] == "a" * 32
+    assert event["reason_code"] == "rate_limited"
+    assert "another-secret" not in content
+    assert "fake-token" not in content
+    assert "owner@example.test" not in content
+    assert "private\\game.pgn" not in content
+    assert "invalid-secret" not in content
+    diagnostics._LOGGER.handlers.clear()
+    diagnostics._HANDLER = None
+
+
 def test_anonymized_report_has_versions_and_no_account_data():
     report = diagnostics.anonymized_report(
         schema_version=9, engine_verified=True, last_error_code="RateLimitError",
@@ -105,5 +134,5 @@ def test_settings_diagnostic_report_requires_explicit_opt_in(qtbot, tmp_path):
     dialog.share_report.setChecked(True)
     dialog._copy_diagnostic_report()
     report = json.loads(clipboard.text())
-    assert report["schema_version"] == 19
+    assert report["schema_version"] == 21
     assert "recent_batch_counts" in report

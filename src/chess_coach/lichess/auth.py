@@ -39,11 +39,16 @@ class WindowsCredentialStore:
     SERVICE = "ChessCoach.Lichess"
     USER = "oauth-access-token"
     PERSONAL_TOKEN_USER = "personal-access-token"
+    _locks_guard = threading.Lock()
+    _slot_locks: dict[tuple[str, str], threading.RLock] = {}
 
     def __init__(self, keyring_module=None, *, service: str | None = None,
                  user: str | None = None) -> None:
         self._service = service or self.SERVICE
         self._user = user or self.USER
+        slot = (self._service, self._user)
+        with self._locks_guard:
+            self._slot_lock = self._slot_locks.setdefault(slot, threading.RLock())
         if keyring_module is None:
             try:
                 import keyring as keyring_module
@@ -55,7 +60,8 @@ class WindowsCredentialStore:
 
     def get(self) -> str | None:
         try:
-            return self._keyring.get_password(self._service, self._user)
+            with self._slot_lock:
+                return self._keyring.get_password(self._service, self._user)
         except Exception as exc:
             raise CredentialStorageError(
                 "Не удалось прочитать токен из Windows Credential Manager."
@@ -63,7 +69,8 @@ class WindowsCredentialStore:
 
     def set(self, token: str) -> None:
         try:
-            self._keyring.set_password(self._service, self._user, token)
+            with self._slot_lock:
+                self._keyring.set_password(self._service, self._user, token)
         except Exception as exc:
             raise CredentialStorageError(
                 "Не удалось сохранить токен в Windows Credential Manager."
@@ -71,13 +78,29 @@ class WindowsCredentialStore:
 
     def delete(self) -> None:
         try:
-            self._keyring.delete_password(self._service, self._user)
+            with self._slot_lock:
+                self._keyring.delete_password(self._service, self._user)
         except self._keyring.errors.PasswordDeleteError:
             return
         except Exception as exc:
             raise CredentialStorageError(
                 "Не удалось удалить токен из Windows Credential Manager."
             ) from exc
+
+    def delete_if_value(self, expected: str) -> bool:
+        """Atomically compare and delete this process' credential slot."""
+        with self._slot_lock:
+            if self._keyring.get_password(self._service, self._user) != expected:
+                return False
+            try:
+                self._keyring.delete_password(self._service, self._user)
+            except self._keyring.errors.PasswordDeleteError:
+                return False
+            except Exception as exc:
+                raise CredentialStorageError(
+                    "Не удалось удалить OAuth-токен из Windows Credential Manager."
+                ) from exc
+            return True
 
 
 @dataclass(frozen=True)

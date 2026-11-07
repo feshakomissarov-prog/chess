@@ -250,8 +250,9 @@ class BoardView(BoardWidget):
                 painter,
                 self._queued_premove.from_square,
                 self._queued_premove.to_square,
-                QColor(80, 110, 190, 185),
+                QColor("#F5B948"),
                 0.82,
+                head_scale=1.65,
             )
         if self._premove_selected is not None:
             self._renderer.highlight_square(
@@ -488,7 +489,8 @@ class BoardView(BoardWidget):
         return QPointF(rect.x() + (col + 0.5) * side, rect.y() + (row + 0.5) * side)
 
     def _draw_arrow(
-        self, painter: QPainter, start: int, end: int, color: QColor, thickness: float
+        self, painter: QPainter, start: int, end: int, color: QColor, thickness: float,
+        *, head_scale: float = 1.0,
     ) -> None:
         if start == end:
             return
@@ -505,7 +507,7 @@ class BoardView(BoardWidget):
         width = self._arrow_width(side, thickness)
         painter.setPen(QPen(color, width, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
         painter.drawLine(a, base)
-        wing = side * (0.34 if manual else 0.24)
+        wing = side * (0.34 if manual else 0.24) * head_scale
         left = QPointF(tip.x() - cos(angle - 0.55) * wing, tip.y() - sin(angle - 0.55) * wing)
         right = QPointF(tip.x() - cos(angle + 0.55) * wing, tip.y() - sin(angle + 0.55) * wing)
         painter.setPen(Qt.PenStyle.NoPen)

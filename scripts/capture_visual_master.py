@@ -1,0 +1,765 @@
+"""Capture truthful native-Windows screenshots from isolated synthetic SQLite data.
+
+The production MainWindow, dashboard workers, library query/detail workers and
+background status reader are used unchanged. No Lichess transport, credential
+store, user settings, user database or real engine is opened.
+"""
+
+from __future__ import annotations
+
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+import os
+import sys
+import threading
+import time
+from hashlib import sha256
+from types import SimpleNamespace
+
+import chess
+from PySide6.QtCore import QPoint, QRect, QSize, Qt
+from PySide6.QtGui import QColor, QCursor, QImage, QPainter
+from PySide6.QtTest import QTest
+from PySide6.QtWidgets import QApplication, QLabel, QListWidgetItem, QToolTip, QWidget
+
+from chess_coach.bootstrap import create_runtime
+from chess_coach.application.dashboard import dashboard_snapshot
+from chess_coach.application.background_work import OperationLane
+from chess_coach.lichess.batch_analysis import BatchAnalysisRunner, FastPassOptions
+from chess_coach.ui.game_review import ReviewGraph
+from chess_coach.ui.pages.background import BackgroundOperationsPage
+from chess_coach.ui.pages.puzzles import PuzzleHistoryPage
+from chess_coach.window import MainWindow
+
+
+REFERENCE_HASHES = {
+    "01_HOME_APPROVED.png": "45066d18a5ba324dff62a2001059cfe0131c293d9cb46eeb07b3f19e38885c52",
+    "02_MY_GAMES_APPROVED.png": "42df53480ffea4dd720638b753c7f7ca798af3f2bf4efabb907be19671ef5cbe",
+    "03_BACKGROUND_APPROVED.png": "87e37894fb09832cdfaa0190b6816cae8679098194459d9780f1d17c7b7ab67a",
+}
+REFERENCE_MAP = {
+    "home": "01_HOME_APPROVED.png",
+    "games": "02_MY_GAMES_APPROVED.png",
+    "background": "03_BACKGROUND_APPROVED.png",
+}
+TARGET_SIZES = ((1672, 941), (1360, 860), (1280, 720))
+MOVE_TEXT = (
+    "e2e4 e7e5 g1f3 b8c6 f1b5 a7a6 b5a4 g8f6 "
+    "e1g1 f8e7 f1e1 b7b5 a4b3 d7d6 c2c3 e8g8"
+)
+SCORES = (0, 18, -7, 34, 9, 42, 20, 61, 40, 78, 55, 91, 72, 113, 89, 127, 146)
+
+
+def wait_for(condition, description: str, *, timeout: float = 20.0) -> None:
+    deadline = time.monotonic() + timeout
+    while not condition():
+        if time.monotonic() >= deadline:
+            raise AssertionError(f"Timed out waiting for {description}")
+        QTest.qWait(25)
+
+
+def seed_synthetic_repository(repo, settings) -> tuple[str, str]:
+    account_id = repo.ensure_archive_account("visual-synthetic")
+    settings.setValue("workspace/selected_account", account_id)
+    settings.setValue("workspace/sidebar_explicit", False)
+    settings.setValue("workspace/sidebar_collapsed", False)
+    opponents = ("Synthetic Owl", "Synthetic Fox", "Synthetic Rook")
+    for index in range(8):
+        days_ago = max(0, 7 - index)
+        # Keep every fixture timestamp in the past even when the wall clock is
+        # before 18:30 UTC. Replacing the time-of-day on today's date used to
+        # put the newest synthetic game in the future and exclude it from the
+        # Progress dialog's inclusive-until-now filter.
+        fixture_time = datetime.now(timezone.utc) - timedelta(days=days_ago + 1, hours=1)
+        game_id = str(index)
+        winner = "white" if index % 3 else "black"
+        opponent = opponents[index % 3]
+        repo.save_snapshot(
+            game_id, "startpos", MOVE_TEXT, "white",
+            opponent,
+            False, "180+2", "resign", winner,
+            white_player="Visual Coach", black_player=opponent,
+            started_at=fixture_time.isoformat())
+    repo.wait_for_writes()
+    with repo._connection() as db:
+        db.executemany(
+            "INSERT INTO account_games(account_id,game_id,remote_id,imported_at,color,opponent,"
+            "player_rating,opponent_rating) VALUES (?,?,?,?,?,?,?,?)",
+            [(account_id, str(index), f"synthetic-{index}",
+              (datetime.now(timezone.utc)
+               - timedelta(days=max(0, 7 - index) + 1, hours=1)).isoformat(), "white",
+              opponents[index % 3], 1680 + index * 7, 1660 + index * 5)
+             for index in range(8)])
+        db.execute("UPDATE games SET source='lichess_archive',source_game_id='synthetic-0' "
+                   "WHERE game_id='0'")
+        db.execute("UPDATE games SET source='lichess_archive',source_game_id='synthetic-1' "
+                   "WHERE game_id='1'")
+        db.execute("UPDATE games SET source='lichess_archive',source_game_id='synthetic-6' "
+                   "WHERE game_id='6'")
+        db.execute("UPDATE games SET source='lichess_archive',source_game_id='synthetic-7',"
+                   "lichess_accuracy_white=88.4,lichess_accuracy_black=84.7 WHERE game_id='7'")
+        db.execute("UPDATE games SET opening_eco='C60',opening_name='Испанская партия' "
+                   "WHERE game_id IN ('5','6','7')")
+    repo.wait_for_writes()
+
+    for game_id, sign in (("5", 1), ("6", 1), ("7", -1)):
+        line = repo.current_line(game_id)
+        repo.save_analysis(
+            game_id, line_revision=line["line_revision"], line_hash=line["line_hash"],
+            source="stockfish", engine_name="Synthetic Fixture", engine_version="fixture-v1",
+            parameters={"nodes": 100},
+            assessments=[{"ply": ply, "white_cp": sign * value, "depth": 16,
+                          "played_uci": "e2e4" if ply == 1 else None}
+                         for ply, value in enumerate(SCORES)],
+            classifications=[])
+    repo.wait_for_writes()
+    assert repo.materialize_game_accuracy_batch()["processed"] >= 2
+    today = datetime.now(timezone.utc)
+    repo.save_puzzle_player_rating(account_id, [
+        [day.year, day.month - 1, day.day, 1640 + n * 9 + (n % 4) * 13]
+        for n, day in enumerate(today - timedelta(days=57 - 3 * n)
+                                 for n in range(20))])
+    puzzle_fen = "r1bqkbnr/pppp1ppp/2n5/4p3/4P3/5N2/PPPP1PPP/RNBQKB1R w KQkq - 2 3"
+    repo.import_puzzle_activities("visual-synthetic", [
+        {"date": int((today - timedelta(days=index)).timestamp() * 1000),
+         "win": bool(index % 3),
+         "puzzle": {"id": f"visual-puzzle-{index:02}", "fen": puzzle_fen,
+                    "solution": ["f1c4", "g8f6"], "themes": ["opening", "developing"],
+                    "rating": 1320 + index * 17, "plays": 90 + index * 11}}
+        for index in range(18)])
+
+    # Seed durable but synthetic background states through their public stores.
+    repo.finish_archive_incremental(account_id, 1_799_000_000_000, last_sync_new_count=8)
+    repo.record_puzzle_error(account_id, "synthetic fixture state")
+    repo.finish_puzzle_incremental(account_id, 1_799_000_000_000, last_sync_new_count=12)
+    repo.finish_puzzle_backfill(account_id)
+    repo.enqueue_lichess_analysis_backfill(account_id)
+    for game_id, accuracy, evals in (
+            ("0", "queued", "queued"),
+            ("1", "has_data", "partial"),
+            ("6", "no_server_data", "no_server_data"),
+            ("7", "has_data", "has_data")):
+        line = repo.current_line(game_id)
+        repo.record_lichess_analysis_backfill(
+            account_id, game_id, accuracy_status=accuracy, evals_status=evals,
+            line_revision=line["line_revision"], line_hash=line["line_hash"])
+    with repo._connection() as db:
+        db.execute("UPDATE archive_sync_state SET backfill_complete=0,imported_count=8 "
+                   "WHERE account_id=?", (account_id,))
+        db.execute("UPDATE puzzle_sync_state SET imported_count=12 WHERE account_id=?",
+                   (account_id,))
+
+    return account_id, "7"
+
+
+def seed_stockfish_job(repo, account_id: str, root: Path) -> tuple[BatchAnalysisRunner, dict, dict]:
+    binary = root / "synthetic-stockfish.exe"
+    binary.write_bytes(b"synthetic screenshot fixture; never executed")
+    runner = BatchAnalysisRunner(repo, binary, options=FastPassOptions(nodes=20_000, hash_mb=64))
+    line = repo.current_line("6")
+    repo.enqueue_analysis_jobs(
+        [{"game_id": "6", "line_revision": line["line_revision"],
+          "line_hash": line["line_hash"]}], analysis_pass="fast",
+        engine_version=runner.engine_key, parameters=runner.parameters, retry_failed=False)
+    complete = repo.claim_next_analysis_job(
+        "visual-complete", engine_version=runner.engine_key, analysis_pass="fast",
+        parameters=runner.parameters, account_id=account_id)
+    assert complete is not None
+    completed_run = repo.list_analyses("6")[0]
+    repo.finish_analysis_job(complete["job_id"], "visual-complete", status="complete",
+                             result_run_id=completed_run["run_id"])
+    missing = next(game for game in repo.list_games_needing_fast_analysis(
+        account_id=account_id, limit=10, engine_version=runner.engine_key,
+        parameters=runner.parameters) if game["game_id"] == "0")
+    repo.enqueue_analysis_jobs([missing], analysis_pass="fast", engine_version=runner.engine_key,
+                               parameters=runner.parameters)
+    active = repo.claim_next_analysis_job(
+        "visual-active", engine_version=runner.engine_key, analysis_pass="fast",
+        parameters=runner.parameters, account_id=account_id)
+    assert active is not None
+    return runner, active, complete
+
+
+def make_window(app: QApplication):
+    runtime = create_runtime(offline_mode=True)
+    account_id, selected_game_id = seed_synthetic_repository(runtime.repository, runtime.settings)
+    # Catch schema/fixture errors before the asynchronous UI worker obscures them.
+    snapshot = dashboard_snapshot(runtime.repository, account_id=account_id)
+    assert len(snapshot.get("recent_games") or []) == 3
+    runner, active_job, complete_job = seed_stockfish_job(
+        runtime.repository, account_id, runtime.data_root)
+    runtime.settings.setValue(
+        f"batch/plan/{account_id}",
+        {"engine": runner.engine_key, "nodes": runner.options.nodes,
+         "hash": runner.options.hash_mb, "review": False})
+    window = MainWindow(runtime=runtime)
+    # This inert identity supplies only an account scope to the read-only
+    # background view. Offline mode still disables every transport/API path.
+    window.lichess = SimpleNamespace(username="visual-synthetic", auth_generation=1)
+    window._lichess_connected = False
+    window.show()
+    assert QTest.qWaitForWindowExposed(window, 5000), "Native MainWindow did not become exposed"
+    return window, runtime, account_id, selected_game_id, runner, active_job, complete_job
+
+
+def wait_home(window, account_id: str) -> None:
+    try:
+        wait_for(lambda: window._dashboard_options_loaded
+                 and window.dashboard_account.currentData() == account_id
+                 and bool(window._latest_dashboard_snapshot)
+                 and not window._latest_dashboard_snapshot.get("is_preview")
+                 and window._dashboard_metric_values["games"].text() == "8"
+                 and len([window._home_view._recent_games_layout.itemAt(i).widget()
+                          for i in range(window._home_view._recent_games_layout.count())
+                          if window._home_view._recent_games_layout.itemAt(i).widget()
+                          and window._home_view._recent_games_layout.itemAt(i).widget().objectName() == "metricCard"]) == 3,
+                 "Home dashboard account data, accuracy and all three recent-game cards",
+                 timeout=90)
+    except AssertionError:
+        print("Dashboard diagnostics:", {
+            "options_loaded": window._dashboard_options_loaded,
+            "account_data": window.dashboard_account.currentData(),
+            "account_items": [(window.dashboard_account.itemText(i), window.dashboard_account.itemData(i))
+                               for i in range(window.dashboard_account.count())],
+            "metric_values": {key: value.text() for key, value in window._dashboard_metric_values.items()},
+            "metric_details": {key: value.text() for key, value in window._dashboard_metric_details.items()},
+            "recent_layout_count": window._home_view._recent_games_layout.count(),
+        })
+        raise
+    assert window._dashboard_metric_values["accuracy"].text().endswith("%")
+    assert "Lichess" in window._dashboard_metric_details["accuracy"].text()
+    recent_cards = [window._home_view._recent_games_layout.itemAt(i).widget()
+                    for i in range(window._home_view._recent_games_layout.count())
+                    if window._home_view._recent_games_layout.itemAt(i).widget()
+                    and window._home_view._recent_games_layout.itemAt(i).widget().objectName() == "metricCard"]
+    assert all(card.findChild(ReviewGraph) is not None for card in recent_cards), (
+        "All three synthetic Home games require a real rendered evaluation graph."
+    )
+
+
+def wait_selected_review(page, expected_game_id: str) -> None:
+    def ready() -> bool:
+        selected = page.selected_game()
+        return bool(
+            selected and str(selected.get("game_id")) == expected_game_id
+            and selected.get("line_revision") is not None
+            and page._detail_game is not None
+            and page._detail_game.get("line_revision") == selected.get("line_revision")
+            and page.detail_open.isEnabled()
+            and page.detail_status.text().startswith("Stockfish")
+            and page.detail_graph.isVisible()
+            and page.detail_graph.full_ply_count >= 16
+            and all(badge.isVisible() for badge in page.source_badges.values())
+            and all(caption.isVisible() and value.text()
+                    for caption, value in page.metric_rows.values()))
+
+    try:
+        wait_for(ready, "selected evaluated game, both sources, complete metrics and nonempty graph")
+    except AssertionError:
+        print("Library diagnostics:", {
+            "selected": page.selected_game(),
+            "detail_title": page.detail_title.text(),
+            "detail_status": page.detail_status.text(),
+            "detail_metrics": page.detail_metrics.text(),
+            "graph_visible": page.detail_graph.isVisible(),
+            "graph_positions": page.detail_graph.full_ply_count,
+            "badges": {key: (value.text(), value.isVisible())
+                       for key, value in page.source_badges.items()},
+            "metric_rows": {key: (caption.isVisible(), value.text())
+                            for key, (caption, value) in page.metric_rows.items()},
+        }, flush=True)
+        raise
+
+
+def wait_review_workspace(page, expected_game_id: str) -> None:
+    def ready() -> bool:
+        review = page.review or {}
+        game = review.get("game") or {}
+        analysis = review.get("analysis") or {}
+        return bool(
+            str(game.get("game_id")) == expected_game_id
+            and game.get("line_revision") is not None
+            and analysis.get("source") == "stockfish"
+            and page.graph.full_ply_count >= 16
+            and page.side_metrics_summary.rowCount() >= 4
+            and page.title.text())
+
+    wait_for(ready, "loaded selected game review, Stockfish data and graph")
+
+
+def navigate_to_games(window: MainWindow, selected_game_id: str) -> None:
+    QTest.mouseClick(window._nav_buttons["games"], Qt.MouseButton.LeftButton)
+    page = window.library_page
+    assert not page.findChildren(QWidget, "sortDescription")
+    qt_floats = [widget for widget in QApplication.topLevelWidgets()
+                 if widget is not window and widget.isVisible()]
+    assert not qt_floats, (
+        "Entering My Games must not open a sorting/help popup; visible top-level widgets: "
+        + ", ".join(f"{type(widget).__name__}:{widget.windowTitle()}" for widget in qt_floats))
+    wait_for(lambda: page.games.count() >= 3 and page.selected_game() is not None,
+             "library rows from the real query worker")
+    item = next((page.games.item(index) for index in range(page.games.count())
+                 if isinstance(page.games.item(index), QListWidgetItem)
+                 and str((page.games.item(index).data(Qt.ItemDataRole.UserRole) or {}).get("game_id"))
+                 == selected_game_id), None)
+    assert item is not None, f"selected synthetic record {selected_game_id!r} was not loaded"
+    rect = page.games.visualItemRect(item)
+    assert rect.isValid() and rect.width() > 0, "selected row is outside the loaded page"
+    QTest.mouseClick(page.games.viewport(), Qt.MouseButton.LeftButton, pos=rect.center())
+    wait_selected_review(page, selected_game_id)
+    assert page.detail_title.text().startswith("Победа")
+    selected = page.selected_game()
+    expected_opponent = selected.get("account_opponent") or selected.get("opponent")
+    assert expected_opponent in page.detail_players.text(), (
+        "The selected row and player score must identify the same synthetic opponent.")
+    assert "88.4% · Lichess" in page.detail_metrics.text()
+    assert "Stockfish · Оценки ходов" == page.source_badges["Stockfish"].text()
+    assert "Lichess · Официальная точность" == page.source_badges["Lichess"].text()
+
+
+def create_fake_active_operations(window, account_id: str):
+    release_events = []
+    handles = []
+    for kind, lane, progress in (
+            ("lichess_archive_sync", OperationLane.NETWORK_BACKGROUND, (42, 100)),
+            ("stockfish_batch_analysis", OperationLane.ENGINE, (9, 16))):
+        release = threading.Event()
+        release_events.append(release)
+        handle = window.runtime.work_coordinator.start(
+            lambda event=release: event.wait(), kind=kind, lane=lane,
+            account_id=account_id, auth_generation=0, stop_event=release,
+            thread_name=f"visual-{kind}")
+        handles.append(handle)
+        wait_for(lambda item=handle: item.snapshot.status.value == "running",
+                 f"synthetic operation {kind} to enter running state")
+        handle.update_progress(*progress)
+    return release_events, handles
+
+
+def wait_background(window, *, active: bool) -> None:
+    page = window._background_operations_page
+    if active:
+        wait_for(lambda: page.summary.text().startswith("Сейчас:")
+                 and page.workflow_badges["archive"].text() == "Идёт"
+                 and page.workflow_badges["stockfish"].text() == "Идёт"
+                 and page.workflow_badges["puzzles"].text() == "Готово"
+                 and page.workflow_badges["ready"].text() == "Ожидает"
+                 and page.recent_events.count() >= 3,
+                 "active archive/Stockfish with waiting ready-analysis, completed puzzles and events")
+    else:
+        try:
+            wait_for(lambda: page.summary.text() == "Сейчас активных задач нет"
+                 and not any(operation.status.value in {"queued", "running"}
+                             and getattr(operation.context, "kind", "")
+                             != "background_status_read"
+                             for operation in window.runtime.work_coordinator.snapshots()),
+                     "honest offline state with no active background operations")
+        except AssertionError:
+            print("Background diagnostics:", {
+                "summary": page.summary.text(),
+                "operations": [(item.context.kind, item.status.value)
+                               for item in window.runtime.work_coordinator.snapshots()],
+                "badges": {key: value.text() for key, value in page.workflow_badges.items()},
+                "statuses": {key: value.text() for key, value in page.workflow_status.items()},
+            }, flush=True)
+            raise
+
+
+def capture(window: MainWindow, output: Path, name: str, width: int, height: int) -> QImage:
+    if window.isMaximized() or window.isFullScreen():
+        window.showNormal()
+    window.resize(width, height)
+    QTest.qWait(30)
+    current = window.screen_stack.currentWidget()
+    if isinstance(current, BackgroundOperationsPage):
+        cards = [item[0] for item in current._workflow_cards]
+        assert all(left.geometry().bottom() < right.geometry().top()
+                   for left, right in zip(cards, cards[1:])), (
+            f"background workflow cards overlap at {width}x{height}: "
+            f"{[card.geometry().getRect() for card in cards]}"
+        )
+        assert cards[-1].geometry().bottom() < current.recent_events_title.geometry().top(), (
+            f"background cards overlap the recent events heading at {width}x{height}"
+        )
+        assert not current.recent_events.geometry().intersects(current.close_button.geometry()), (
+            f"background events overlap the back button at {width}x{height}"
+        )
+        for key, label in current.workflow_status.items():
+            required = (label.heightForWidth(label.width()) if label.hasHeightForWidth()
+                        else label.sizeHint().height())
+            assert required <= label.height(), (
+                f"background {key} status text is clipped at {width}x{height}: "
+                f"required={required}, actual={label.height()}"
+            )
+        print(f"background geometry: {width}x{height}, no overlaps; status labels fit")
+    if current is window.home_page:
+        expected_account = window.dashboard_account.currentData()
+        if expected_account:
+            wait_home(window, str(expected_account))
+        if width >= 1500 and height >= 900:
+            recent = window._home_view.recent_scroll
+            card_heights = [window._recent_games_layout.itemAt(i).widget().height()
+                            for i in range(window._recent_games_layout.count())
+                            if window._recent_games_layout.itemAt(i).widget() is not None]
+            print(
+                f"home layout: window={window.size().width()}x{window.size().height()}, "
+                f"page={window.home_page.height()}, recent={recent.height()}px, "
+                f"content={recent.widget().height()}px, "
+                f"scroll_max={recent.verticalScrollBar().maximum()}, "
+                f"cards={card_heights}")
+            assert window._home_view.recent_scroll.verticalScrollBar().maximum() == 0, (
+                "The approved wide Home reference requires all three recent cards visible "
+                "without an internal scroll bar."
+            )
+    elif current is window.library_page:
+        game = window.library_page._detail_game or {}
+        wait_selected_review(window.library_page, str(game.get("game_id") or ""))
+        if height <= 700:
+            page = window.library_page
+            row_rect = page.page_actions_row.geometry()
+            stack_rect = window.screen_stack.rect()
+            row_in_stack = QRect(
+                page.page_actions_row.parentWidget().mapTo(window.screen_stack,
+                                                           row_rect.topLeft()),
+                row_rect.size())
+            buttons = (page.previous, page.following, page.sync_button,
+                       page.background_button, page.settings_button)
+            print("compact library geometry:", {
+                "page": page.geometry().getRect(), "stack": stack_rect.getRect(),
+                "row": row_rect.getRect(), "row_stack": row_in_stack.getRect(),
+                "buttons": [(button.text(), button.geometry().getRect(),
+                             button.mapTo(window.screen_stack, button.rect().bottomRight()).y())
+                            for button in buttons],
+            }, flush=True)
+            assert row_rect.isValid() and stack_rect.contains(row_in_stack), (
+                "Compact library must keep its pagination/action row inside the visible screen stack."
+            )
+            assert all(button.isVisible()
+                       and stack_rect.contains(button.mapTo(window.screen_stack,
+                                                           button.rect().bottomRight()))
+                       for button in buttons), (
+                "Compact library pagination and primary actions must remain visible."
+            )
+    elif current is window._background_operations_page:
+        active = any(
+            operation.status.value == "running"
+            and getattr(operation.context, "kind", "") in {
+                "lichess_archive_sync", "stockfish_batch_analysis"}
+            for operation in window.runtime.work_coordinator.snapshots())
+        wait_background(window, active=active)
+        page = window._background_operations_page
+        assert page.recent_events.count() >= 3
+        if width >= 1500 and height >= 900:
+            print(
+                f"background layout: window={window.size().width()}x{window.size().height()}, "
+                f"page={page.height()}px, events={page.recent_events.height()}px, "
+                f"viewport={page.recent_events.viewport().height()}px, "
+                f"scroll_max={page.recent_events.verticalScrollBar().maximum()}, "
+                f"rows={page.recent_events.count()}, "
+                f"row_heights={[page.recent_events.sizeHintForRow(i) for i in range(page.recent_events.count())]}, "
+                f"row_rects={[page.recent_events.visualItemRect(page.recent_events.item(i)).getRect() for i in range(page.recent_events.count())]}, "
+                f"cards={[card.height() for card, _icon, _title in page._workflow_cards]}")
+            row_rects = [page.recent_events.visualItemRect(page.recent_events.item(i))
+                         for i in range(page.recent_events.count())]
+            viewport = page.recent_events.viewport().rect()
+            assert all(rect.isValid() and viewport.contains(rect) for rect in row_rects), (
+                "Every synthetic recent event row must be fully visible in the wide reference."
+            )
+            assert page.recent_events.verticalScrollBar().value() == 0
+        print(
+            f"background {width}x{height}: page={page.height()}px, "
+            f"events={page.recent_events.count()} rows/{page.recent_events.height()}px, "
+            f"cards={[card.height() for card, _icon, _title in page._workflow_cards]}")
+    assert window.size() == QSize(width, height), (
+        f"Requested {width}x{height}, actual Qt window is {window.width()}x{window.height()}, "
+        f"minimum={window.minimumWidth()}x{window.minimumHeight()}, "
+        f"maximized={window.isMaximized()}, page={type(window.screen_stack.currentWidget()).__name__}"
+    )
+    assert window.isVisible(), "capture target is not visible"
+    # Click-driven route navigation can leave the pointer on a control and
+    # produce a floating tooltip in the screenshot. Clear it and move the
+    # pointer outside the target window before taking the actual frame.
+    QToolTip.hideText()
+    QCursor.setPos(window.mapToGlobal(QPoint(width + 20, height + 20)))
+    QTest.qWait(80)
+    QToolTip.hideText()
+    QApplication.processEvents()
+    image = window.grab().toImage()
+    assert not image.isNull()
+    dpr = float(image.devicePixelRatio())
+    expected_pixels = QSize(round(width * dpr), round(height * dpr))
+    assert image.size() == expected_pixels, (
+        f"Logical window {width}x{height} at DPR {dpr} should capture as "
+        f"{expected_pixels.width()}x{expected_pixels.height()}, got "
+        f"{image.width()}x{image.height()}"
+    )
+    filename = f"{width}x{height}-{name}.png"
+    assert image.save(str(output / filename))
+    print(f"{filename}: window {window.width()}x{window.height()} logical px, "
+          f"capture {image.width()}x{image.height()} px, DPR {image.devicePixelRatio()}")
+    return image
+
+
+def make_pair(reference_dir: Path, output: Path, reference_file: str,
+              actual: QImage, label: str) -> None:
+    path = reference_dir / reference_file
+    expected = REFERENCE_HASHES[reference_file]
+    assert sha256(path.read_bytes()).hexdigest() == expected, f"approved reference changed: {path.name}"
+    art = QImage(str(path))
+    assert not art.isNull()
+    art = art.scaled(actual.size(), Qt.AspectRatioMode.IgnoreAspectRatio,
+                     Qt.TransformationMode.SmoothTransformation)
+    canvas = QImage(actual.width() * 2 + 16, actual.height(), QImage.Format.Format_RGB32)
+    canvas.fill(QColor("#43465a"))
+    painter = QPainter(canvas)
+    painter.drawImage(0, 0, art)
+    painter.drawImage(actual.width() + 16, 0, actual)
+    painter.end()
+    assert canvas.save(str(output / f"pair-{label}.png"))
+
+
+def main() -> None:
+    # Hosted Windows may use cp1252 for redirected stdout/stderr even though
+    # screenshot labels and test output contain Russian UI text.
+    for stream in (sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if reconfigure is not None:
+            reconfigure(encoding="utf-8", errors="backslashreplace")
+    output = Path(os.environ.get("CC_VISUAL_OUTPUT", "visual-evidence")).resolve()
+    output.mkdir(parents=True, exist_ok=True)
+    # Keep diagnostics generated by this one-shot offline capture away from the
+    # owner's normal Chess Coach logs. The real profile/database/credential
+    # store are never consulted by this synthetic capture.
+    isolated_local_app_data = Path(os.environ.get(
+        "CC_VISUAL_LOCALAPPDATA", str(output / "isolated-localappdata"))).resolve()
+    isolated_local_app_data.mkdir(parents=True, exist_ok=True)
+    os.environ["LOCALAPPDATA"] = str(isolated_local_app_data)
+    app = QApplication([])
+    assert app.platformName() == "windows", f"Expected native Windows Qt, got {app.platformName()}"
+    configured_sizes = os.environ.get("CC_VISUAL_TARGET_SIZES", "").strip()
+    target_sizes = TARGET_SIZES
+    if configured_sizes:
+        parsed = []
+        for value in configured_sizes.split(","):
+            width_text, separator, height_text = value.strip().lower().partition("x")
+            assert separator and width_text.isdigit() and height_text.isdigit(), (
+                f"Invalid CC_VISUAL_TARGET_SIZES entry: {value!r}"
+            )
+            parsed.append((int(width_text), int(height_text)))
+        assert parsed, "CC_VISUAL_TARGET_SIZES cannot be empty"
+        target_sizes = tuple(parsed)
+    reference_dir = Path(__file__).resolve().parent.parent / "tests" / "visual" / "reference"
+    for filename, digest in REFERENCE_HASHES.items():
+        assert sha256((reference_dir / filename).read_bytes()).hexdigest() == digest
+
+    (window, runtime, account_id, selected_game_id, _runner, active_job,
+     _complete_job) = make_window(app)
+    release_events = []
+    operation_handles = []
+    captured: dict[str, QImage] = {}
+    geometry: list[str] = []
+    try:
+        # Production Home worker owns its query. No snapshot is passed directly
+        # to the renderer and no production method is overridden.
+        wait_home(window, account_id)
+        for width, height in target_sizes:
+            QTest.mouseClick(window._nav_buttons["home"], Qt.MouseButton.LeftButton)
+            wait_home(window, account_id)
+            window._set_sidebar_collapsed(False)
+            image = capture(window, output, "home", width, height)
+            captured[f"home-{width}x{height}"] = image
+            make_pair(reference_dir, output, REFERENCE_MAP["home"], image, f"home-{width}x{height}")
+
+            navigate_to_games(window, selected_game_id)
+            image = capture(window, output, "games", width, height)
+            captured[f"games-{width}x{height}"] = image
+            make_pair(reference_dir, output, REFERENCE_MAP["games"], image, f"games-{width}x{height}")
+
+        # Active visual state is a local fake operation registry over synthetic
+        # durable SQLite state. It never starts a Lichess request or UCI process.
+        release_events, operation_handles = create_fake_active_operations(window, account_id)
+        window.show_background_analytics()
+        wait_background(window, active=True)
+        window._show_batch_live_progress(account_id, window._analysis_session_generation, 9, 16)
+        for width, height in target_sizes:
+            image = capture(window, output, "background-active", width, height)
+            captured[f"background-active-{width}x{height}"] = image
+            make_pair(reference_dir, output, REFERENCE_MAP["background"], image,
+                      f"background-active-{width}x{height}")
+
+        for release in release_events:
+            release.set()
+        for handle in operation_handles:
+            handle.join(2.0)
+        runtime.repository.finish_analysis_job(active_job["job_id"], "visual-active", status="paused")
+        window._show_batch_live_progress(account_id, window._analysis_session_generation, 0, 0)
+        window._refresh_background_operations_page()
+        QTest.qWait(120)
+        wait_background(window, active=False)
+        offline_sizes = tuple(dict.fromkeys((target_sizes[0], target_sizes[-1])))
+        for width, height in offline_sizes:
+            image = capture(window, output, "background-offline", width, height)
+            captured[f"background-offline-{width}x{height}"] = image
+            make_pair(reference_dir, output, REFERENCE_MAP["background"], image,
+                      f"background-offline-{width}x{height}")
+
+        # One actual native-window frame for each remaining required route.
+        # These pages share the production shell and the same synthetic SQLite.
+        width, height = target_sizes[0]
+        for route in ("play", "analysis"):
+            QTest.mouseClick(window._nav_buttons[route], Qt.MouseButton.LeftButton)
+            QTest.qWait(80)
+            assert window.screen_stack.currentWidget() is (
+                window.play_page if route == "play" else window.analysis_page)
+            if route == "analysis":
+                window.analysis_page.external_text.setPlainText(
+                    '[Event "Synthetic visual review"]\n[White "Visual Coach"]\n'
+                    '[Black "Synthetic Opponent"]\n[Result "*"]\n\n'
+                    "1. e4 e5 2. Nf3 Nc6 3. Bb5 a6 *")
+                window.analysis_page.set_external_status(
+                    "Синтетическая PGN для проверки формы; архив и сеть не изменяются.")
+            image = capture(window, output, route, width, height)
+            captured[route] = image
+            if route == "play":
+                board = chess.Board()
+                board.push_uci("e2e4")
+                window._play_mode_page.mode_selector.setCurrentIndex(
+                    window._play_mode_page.mode_selector.findData("active"))
+                window._play_mode_page.set_active_games([{
+                    "gameId": "synthetic-active-ai", "source": "ai",
+                    "opponent": {"id": None, "ai": 3}, "color": "black",
+                    "speed": "correspondence", "daysPerTurn": 3,
+                    "fen": board.fen(), "isMyTurn": True,
+                }], status="Синтетическая подтверждённая партия · без сети")
+                window._play_mode_page.active_games.setCurrentRow(0)
+                assert window._play_mode_page.active_preview_board._board.fen() == board.fen()
+                captured["play-active-games"] = capture(
+                    window, output, "play-active-games", width, height)
+
+        QTest.mouseClick(window._nav_buttons["training"], Qt.MouseButton.LeftButton)
+        wait_for(lambda: window._puzzle_page is not None
+                 and window.screen_stack.currentWidget() is window._puzzle_page
+                 and window._puzzle_page.findChild(PuzzleHistoryPage) is not None,
+                 "local training history page creation", timeout=30)
+        training = window._puzzle_page.findChild(PuzzleHistoryPage)
+        wait_for(lambda: training is not None and training.history.count() > 0
+                 and not training.summary.text().startswith(
+                     ("Загружаем", "Читаю")),
+                 "populated local synthetic training history", timeout=30)
+        training.history.setCurrentRow(0)
+        wait_for(lambda: training.solution.text().startswith("Задача "),
+                 "selected synthetic exercise and board position")
+        captured["training"] = capture(window, output, "training", width, height)
+
+        QTest.mouseClick(window._nav_buttons["progress"], Qt.MouseButton.LeftButton)
+        wait_for(lambda: window.screen_stack.currentWidget() is window._statistics_dialog
+                 and not window._statistics_dialog.summary_label.text().startswith(
+                     ("Обновляем статистику", "Загружаем статистику")),
+                 "local progress summary", timeout=60)
+        progress = window._statistics_dialog
+        wait_for(lambda: progress.account.findData(account_id) >= 0,
+                 "synthetic account in progress filters", timeout=30)
+        progress.account.setCurrentIndex(progress.account.findData(account_id))
+        try:
+            wait_for(lambda: progress._rows
+                     and f"Аккаунт: {progress.account.currentText()}" in progress.mixed_warning.text()
+                     and progress.summary_label.text().startswith("Партии: 8 ·"),
+                "account-scoped progress statistics", timeout=60)
+        except AssertionError:
+            print("Progress diagnostics:", {
+                "account": (progress.account.currentText(), progress.account.currentData(),
+                            [(progress.account.itemText(i), progress.account.itemData(i))
+                             for i in range(progress.account.count())]),
+                "summary": progress.summary_label.text(),
+                "scope": progress.mixed_warning.text(),
+                "rows": len(progress._rows),
+                "games_widget": progress.games.count(),
+                "query_alive": bool(progress._query_thread and progress._query_thread.is_alive()),
+                "pending_refresh": progress._pending_refresh,
+            }, flush=True)
+            raise
+        wait_for(lambda: bool(progress.trend.points),
+                 "synthetic account rating trend in Progress overview", timeout=20)
+        progress.tabs.setCurrentIndex(0)
+        captured["progress-overview"] = capture(
+            window, output, "progress-overview", width, height)
+        progress.tabs.setCurrentIndex(1)
+        wait_for(lambda: progress.games.count() > 0 or progress.games_empty.isVisible(),
+                 "account-scoped progress game table")
+        captured["progress-games"] = capture(window, output, "progress-games", width, height)
+        progress.tabs.setCurrentIndex(2)
+        QTest.mouseClick(progress.opening_refresh_button, Qt.MouseButton.LeftButton)
+        wait_for(lambda: progress.opening_table.count() > 0
+                 or "нет данных" in progress.opening_summary.text().casefold()
+                 or "ошиб" in progress.opening_summary.text().casefold(),
+                 "account-scoped local opening/phase analysis", timeout=60)
+        captured["progress-openings"] = capture(
+            window, output, "progress-openings", width, height)
+        progress.tabs.setCurrentIndex(3)
+        QTest.qWait(100)
+        captured["progress-critical"] = capture(
+            window, output, "progress-critical", width, height)
+
+        window.open_settings()
+        assert window.screen_stack.currentWidget() is window._settings_dialog
+        tabs = window._settings_dialog.settings_tabs
+        for tab_index in range(tabs.count()):
+            tabs.setCurrentIndex(tab_index)
+            QTest.qWait(80)
+            tab_name = "-".join(tabs.tabText(tab_index).casefold().replace("/", " ").split())
+            captured[f"settings-{tab_index}"] = capture(
+                window, output, f"settings-{tab_name}", width, height)
+
+        window.start_local_game()
+        assert window.screen_stack.currentWidget() is window.game_page
+        for uci in ("e2e4", "e7e5", "g1f3", "b8c6"):
+            window.on_move_intent(chess.Move.from_uci(uci))
+        assert window.controller.ply == 4
+        captured["active-game"] = capture(window, output, "active-game", width, height)
+
+        navigate_to_games(window, selected_game_id)
+        selected = window.library_page.selected_game()
+        assert selected and str(selected.get("game_id")) == selected_game_id
+        assert window._open_saved_game(dict(selected))
+        wait_review_workspace(window.review_workspace, selected_game_id)
+        captured["game-review"] = capture(window, output, "game-review", width, height)
+
+        # Settings are captured once per tab at the largest target size.
+        expected_count = (3 * len(target_sizes) + len(offline_sizes) + 10
+                          + tabs.count())
+        assert len(captured) == expected_count, (
+            f"Expected {expected_count} screenshot states, got {len(captured)}"
+        )
+    finally:
+        for release in release_events:
+            release.set()
+        # Remove inert fake identity before normal offline shutdown.
+        window.lichess = None
+        window.close()
+        app.processEvents()
+        assert runtime._closed or window._shutdown_requested
+
+    scale = os.environ.get("QT_SCALE_FACTOR", "1")
+    details = [f"{key}: capture {image.width()}x{image.height()} px; "
+               f"DPR {image.devicePixelRatio()}"
+               for key, image in captured.items()]
+    (output / "capture.txt").write_text(
+        f"SHA: {os.environ.get('CC_VISUAL_SHA', 'local working tree')}\n"
+        f"Platform: Windows · QT_SCALE_FACTOR={scale}\n"
+        "Fixture: isolated temporary SQLite, fake account identity, fake operation registry.\n"
+        "Network/API calls: none. Credential store: none. Real Stockfish: none.\n"
+        "Library condition: selected game 7, current line revision, Stockfish + Lichess metadata, "
+        "17 ply evaluations, official accuracy and a populated graph.\n"
+        "Background active: synthetic archive + Stockfish running; ready-analysis waiting; "
+        "puzzle sync complete; three-or-more durable event rows.\n"
+        "Background offline: no active operation registry entries; queued/paused durable work remains visible.\n"
+        "Window QSize was asserted equal to each logical target; QImage pixel size was asserted as logical size × DPR.\n"
+        f"Logical targets: {target_sizes}\n"
+        + "\n".join(details) + "\n",
+        encoding="utf-8")
+    print(f"VIS6 native visual smoke: PASS ({len(captured)} strict synthetic states; "
+          f"logical targets {target_sizes}; actual window and pixel dimensions verified)")
+
+
+if __name__ == "__main__":
+    main()

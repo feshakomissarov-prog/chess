@@ -286,14 +286,14 @@ def test_schema_v5_migrates_account_identity_and_keeps_backup_and_existing_rows(
     assert repo.get_game("old-game")["moves"] == "e2e4"
     assert repo.current_line("old-game")["moves"] == "e2e4"
     with repo._connection() as migrated:
-        assert migrated.execute("PRAGMA user_version").fetchone()[0] == 19
+        assert migrated.execute("PRAGMA user_version").fetchone()[0] == 21
         identity = migrated.execute("SELECT opponent,player_name FROM account_games "
                                     "WHERE account_id=?", (account,)).fetchone()
         assert tuple(identity) == ("Bob", "Alice")
         state = migrated.execute("SELECT backfill_started_at FROM archive_sync_state "
                                  "WHERE account_id=?", (account,)).fetchone()
         assert state[0] == 50
-    backup = sqlite3.connect(str(path) + ".pre-m3-v19.bak")
+    backup = sqlite3.connect(str(path) + ".pre-m3-v21.bak")
     try:
         assert backup.execute("PRAGMA integrity_check").fetchone()[0] == "ok"
         assert backup.execute("PRAGMA user_version").fetchone()[0] == 5
@@ -364,8 +364,8 @@ def test_puzzle_activity_2501_file_sqlite_attempts_resume_without_loss(tmp_path)
             self.page_calls = 0
             self.cancel_second_page = True
 
-        def stream_puzzle_activity(self, _token, stop_event, *, since=None, before=None, max_items=1000):
-            if max_items == 1000:
+        def stream_puzzle_activity(self, _token, stop_event, *, since=None, before=None, max_items=250):
+            if max_items == 250:
                 self.page_calls += 1
                 if self.cancel_second_page and self.page_calls == 2:
                     stop_event.set()
@@ -380,25 +380,25 @@ def test_puzzle_activity_2501_file_sqlite_attempts_resume_without_loss(tmp_path)
     client = Client()
     stop = threading.Event()
     repo = GameRepository(path)
-    assert PuzzleActivitySync(client, repo).run("Alice", "fake", stop, page_size=1000) == 1000
+    assert PuzzleActivitySync(client, repo).run("Alice", "fake", stop, page_size=1000) == 250
     account = repo.ensure_archive_account("Alice")
     state = repo.puzzle_sync_state(account)
     assert state["backfill_complete"] == 0
     assert state["last_error"]
     with repo._connection() as db:
         assert db.execute("SELECT COUNT(*) FROM puzzle_attempts WHERE account_id=?",
-                          (account,)).fetchone()[0] == 1000
+                          (account,)).fetchone()[0] == 250
     repo.shutdown()
 
     repo = GameRepository(path)
     client.page_calls = 0
     client.cancel_second_page = False
     imported = PuzzleActivitySync(client, repo).run("Alice", "fake", threading.Event(), page_size=1000)
-    assert imported == 1501
+    assert imported == 2251
     account = repo.ensure_archive_account("Alice")
     state = repo.puzzle_sync_state(account)
     assert state["backfill_complete"] == 1
-    assert state["last_sync_new_count"] == 1501
+    assert state["last_sync_new_count"] == 2251
     assert state["last_success_at"]
     with repo._connection() as db:
         assert db.execute("SELECT COUNT(*) FROM puzzle_attempts WHERE account_id=?",

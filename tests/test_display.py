@@ -2,7 +2,8 @@ import csv
 from pathlib import Path
 
 from chess_coach.ui.display import (
-    evaluation_label, format_clock_control, format_game_date, format_remaining_clock,
+    evaluation_label, format_clock_control, format_game_activity_time, format_game_date,
+    format_game_timeline, format_remaining_clock,
     russian_opening_name,
     source_short,
 )
@@ -10,11 +11,29 @@ from chess_coach.ui.display import (
 
 def test_local_timestamp_date_precision_and_invalid_date_are_honest():
     assert format_game_date("2026-11-02") == "02.11.2026"
-    assert format_game_date("2026-11-02T12:05:39.123Z").startswith("02.11.2026 · ")
-    assert "+00:00" not in format_game_date("2026-11-02T12:05:39Z")
+    assert format_game_date("2026-11-02T12:05:39.123Z").startswith("Время неизвестно")
+    assert format_game_date("2026-11-02T12:05:39Z", precision="timestamp").startswith("02.11.2026 · ")
+    assert "+00:00" not in format_game_date("2026-11-02T12:05:39Z", precision="timestamp")
     assert format_game_date("2026-11-02T12:05:39Z", precision="date_only") == "02.11.2026"
-    assert format_game_date("invalid") == "Дата неизвестна"
+    assert format_game_date("2026-08-04T00:00:00+00:00", precision="date_only") == "04.08.2026"
+    assert format_game_date("invalid") == "Время неизвестно"
     assert format_game_date(20261102) == "02.11.2026"
+
+
+def test_game_activity_labels_use_last_move_and_never_invent_unknown_start_time():
+    completed = {"status": "mate", "last_move_at": 1793779200000,
+                 "started_at": "2026-11-03T08:00:00Z", "game_time_precision": "timestamp"}
+    assert format_game_activity_time(completed).startswith("Завершена: 04.11.2026")
+    assert format_game_timeline(completed).startswith("Завершена: 04.11.2026")
+    assert "Начата: 03.11.2026" in format_game_timeline(completed)
+    date_only = {"status": "mate", "started_at": "2026-11-03",
+                 "game_time_precision": "date_only", "updated_at": "2026-11-04T03:00:00Z"}
+    assert format_game_activity_time(date_only) == "Дата начала: 03.11.2026"
+    unknown = {"status": "mate", "started_at": None,
+               "game_time_precision": "unknown", "updated_at": "2026-11-04T03:00:00Z"}
+    assert format_game_activity_time(unknown) == "Дата начала неизвестна"
+    unknown["last_move_at"] = 10 ** 1000
+    assert format_game_activity_time(unknown) == "Дата начала неизвестна"
 
 
 def test_clock_labels_preserve_units_for_base_and_increment():
@@ -31,6 +50,8 @@ def test_remaining_clock_formatting_ticks_only_active_snapshot_and_marks_low_tim
     assert format_remaining_clock(29_000) == ("00:29", True)
     assert format_remaining_clock(9_900, active=True, elapsed_ms=100) == ("0:09.8", True)
     assert format_remaining_clock(3_661_000) == ("1:01:01", False)
+    assert format_remaining_clock(24 * 60 * 60 * 1000 + 3_661_000) == (
+        "1д 01:01:01", False)
     assert format_remaining_clock(90_000, elapsed_ms=9_000, active=True, syncing=True) == (
         "—:— · синхронизация", False)
 
@@ -60,6 +81,8 @@ def test_opening_families_translate_deterministically_and_keep_eco():
 def test_source_badges_have_accessible_explanations():
     assert source_short("stockfish")[0] == "S"
     assert "Lichess" in source_short("lichess")[1]
+    assert source_short("lichess-json")[0] == "L"
+    assert source_short("lichess-pgn")[0] == "L"
     assert source_short(None) == ("—", "Оценка отсутствует")
 
 

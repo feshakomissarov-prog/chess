@@ -2,6 +2,8 @@ import pytest
 from pathlib import Path
 import subprocess
 import ctypes
+from PySide6.QtCore import QStandardPaths, QTimer
+from PySide6.QtWidgets import QApplication
 
 from chess_coach import __main__ as launcher
 from scripts.create_app_icon import make_icon
@@ -32,13 +34,17 @@ def test_offline_cli_passes_isolation_mode_to_window(monkeypatch):
 
     monkeypatch.setattr(launcher, "QApplication", FakeApplication)
     monkeypatch.setattr(launcher, "MainWindow", FakeWindow)
+    runtime = object()
+    monkeypatch.setattr(launcher, "create_runtime",
+                        lambda **kwargs: (calls.update(runtime_args=kwargs), runtime)[1])
 
     assert launcher.main(["--offline"]) == 0
-    assert calls["window_kwargs"] == {
+    assert calls["runtime_args"] == {
         "asynchronous_storage": True,
         "offline_mode": True,
         "manual_connect_mode": False,
     }
+    assert calls["window_kwargs"] == {"runtime": runtime}
     assert calls["shown"] is True
 
 
@@ -63,13 +69,17 @@ def test_manual_connect_cli_passes_non_isolated_mode_to_window(monkeypatch):
 
     monkeypatch.setattr(launcher, "QApplication", FakeApplication)
     monkeypatch.setattr(launcher, "MainWindow", FakeWindow)
+    runtime = object()
+    monkeypatch.setattr(launcher, "create_runtime",
+                        lambda **kwargs: (calls.update(runtime_args=kwargs), runtime)[1])
 
     assert launcher.main(["--manual-connect"]) == 0
-    assert calls["window_kwargs"] == {
+    assert calls["runtime_args"] == {
         "asynchronous_storage": True,
         "offline_mode": False,
         "manual_connect_mode": True,
     }
+    assert calls["window_kwargs"] == {"runtime": runtime}
     assert calls["shown"] is True
     assert "activation_callback" in calls
 
@@ -94,12 +104,16 @@ def test_ordinary_cli_launch_uses_auto_restore_mode(monkeypatch):
     monkeypatch.setattr(launcher, "QApplication", FakeApplication)
     monkeypatch.setattr(launcher, "MainWindow", FakeWindow)
     monkeypatch.setattr(launcher, "acquire_single_instance", lambda _path: FakeGuard())
+    runtime = object()
+    monkeypatch.setattr(launcher, "create_runtime",
+                        lambda **kwargs: (calls.update(runtime_args=kwargs), runtime)[1])
     assert launcher.main([]) == 0
-    assert calls["kwargs"] == {
+    assert calls["runtime_args"] == {
         "asynchronous_storage": True,
         "offline_mode": False,
         "manual_connect_mode": False,
     }
+    assert calls["kwargs"] == {"runtime": runtime}
     assert calls["shown"]
 
 
@@ -107,6 +121,116 @@ def test_offline_and_manual_connect_cli_modes_are_mutually_exclusive(monkeypatch
     monkeypatch.setattr(launcher, "QApplication", lambda _argv: pytest.fail("app must not start"))
     with pytest.raises(SystemExit):
         launcher.main(["--offline", "--manual-connect"])
+
+
+@pytest.mark.parametrize(("arguments", "expected_mode"), [
+    (["--offline"], "offline"),
+    (["--manual-connect"], "manual"),
+])
+def test_cli_modes_reach_real_window_and_apply_runtime_ui_without_credentials_or_network(
+        qapp, tmp_path, monkeypatch, arguments, expected_mode):
+    """Exercise CLI -> real runtime -> real MainWindow, including the first visible frame."""
+    from chess_coach import window as window_module
+    from chess_coach.lichess import api as api_module
+    from chess_coach.lichess import auth as auth_module
+
+    app = QApplication.instance()
+    visible_state = {}
+    window_ref = {}
+
+    class TrackingWindow(window_module.MainWindow):
+        def __init__(self, **kwargs):
+            super().__init__(**kwargs)
+            window_ref["window"] = self
+
+    class UnexpectedCredentialAccess:
+        def __init__(self, *args, **kwargs):
+            pytest.fail("Credential Manager must not be accessed before explicit intent")
+
+        def get(self):
+            pytest.fail("Credential Manager read must not happen in these CLI modes")
+
+    class UnexpectedNetwork:
+        def request(self, *args, **kwargs):
+            pytest.fail("CLI mode initialization must not make HTTP requests")
+
+        def stream(self, *args, **kwargs):
+            pytest.fail("CLI mode initialization must not open HTTP streams")
+
+    class FakeGuard:
+        def set_activation_callback(self, callback):
+            self.callback = callback
+
+        def close(self):
+            pass
+
+    class ExistingApplicationRunner:
+        """Run one event-processing turn without terminating pytest's shared QApplication."""
+        def __init__(self, _argv): pass
+        def __getattr__(self, name): return getattr(app, name)
+        def exec(self):
+            app.processEvents()
+            return 0
+
+    monkeypatch.setattr(launcher, "QApplication", ExistingApplicationRunner)
+    monkeypatch.setattr(launcher, "MainWindow", TrackingWindow)
+    monkeypatch.setattr(launcher, "acquire_single_instance", lambda _path: FakeGuard())
+    monkeypatch.setattr(QStandardPaths, "writableLocation",
+                        lambda _location: str(tmp_path / "profile"))
+    monkeypatch.setattr(auth_module, "WindowsCredentialStore", UnexpectedCredentialAccess)
+    monkeypatch.setattr(api_module, "UrlLibTransport", UnexpectedNetwork)
+
+    def inspect_visible_window():
+        window = window_ref["window"]
+        visible_state.update(
+            visible=window.isVisible(),
+            connection=window.connection.text(),
+            connect_text=window.connect_button.text(),
+            connect_accessible_name=window.connect_button.accessibleName(),
+            connect_tooltip=window.connect_button.toolTip(),
+            sidebar_collapsed=window.sidebar.width() <= 60,
+            connect_enabled=window.connect_button.isEnabled(),
+            lichess_service=window.lichess,
+            friend_visible=window.friend_link_button.isVisible(),
+            friend_enabled=window.friend_link_button.isEnabled(),
+            ai_visible=window.ai_button.isVisible(),
+            ai_enabled=window.ai_button.isEnabled(),
+            runtime_data_root=window.runtime.data_root,
+            runtime_isolated=window.offline_mode,
+            runtime_manual=window.manual_connect_mode,
+        )
+
+    QTimer.singleShot(0, inspect_visible_window)
+    assert launcher.main(arguments) == 0
+    window = window_ref["window"]
+    assert visible_state["visible"]
+    assert visible_state["lichess_service"] is None
+    assert not visible_state["friend_enabled"]
+    assert not visible_state["ai_enabled"]
+    if expected_mode == "offline":
+        assert visible_state["runtime_isolated"]
+        assert not visible_state["runtime_manual"]
+        assert visible_state["connection"] == "Офлайн"
+        assert not visible_state["connect_enabled"]
+        assert not visible_state["friend_visible"]
+        assert not visible_state["ai_visible"]
+        offline_root = Path(visible_state["runtime_data_root"])
+        assert offline_root.name.startswith("chess-coach-offline-")
+        assert offline_root != tmp_path / "profile"
+    else:
+        assert not visible_state["runtime_isolated"]
+        assert visible_state["runtime_manual"]
+        assert visible_state["connection"] == "Ручной"
+        assert visible_state["connect_accessible_name"] == "Подключиться вручную"
+        if visible_state["sidebar_collapsed"]:
+            assert visible_state["connect_text"] == "↗"
+            assert visible_state["connect_tooltip"] == "Подключиться вручную"
+        else:
+            assert visible_state["connect_text"] == "Подключиться вручную"
+        assert visible_state["connect_enabled"]
+        assert visible_state["runtime_data_root"] == tmp_path / "profile"
+    window.close()
+    app.processEvents()
 
 
 def test_second_process_returns_without_creating_a_second_window(monkeypatch):
