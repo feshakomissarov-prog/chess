@@ -239,6 +239,6 @@ Windows, обычный Qt backend `windows`, 1360×860, временная SQLi
 |---|---|---|
 | VIS6-05 synthetic Progress capture | Исправлено время последней синтетической партии: оно гарантированно раньше now; проверены 8 партий и выбранный аккаунт | PASS: ранее missing row был ошибкой fixture, SQL-выборка работала корректно |
 | Native Windows evidence | Повторный production MainWindow capture, строгие проверки данных/размеров и пары с PNG для Home, Library, Background | PASS: 25/25 состояний; локальные пары доступны в `visual-evidence/vis6-final/` |
-| GitHub artifact | Первый run `42315427643`: test job PASS, visual job FAIL из-за fixture timestamp; artifact не загрузился | FAIL честно зафиксирован; требуется новый exact-head CI после commit |
+| GitHub artifact | Runs `42315427643` and `42317068946`: first visual job exposed future fixture timestamp; second reached Progress but hit hosted Windows cp1252 while printing Russian tab names | Both overall FAIL, no artifact; fixture time and UTF-8 console handling corrected, third exact-head CI required |
 
 Обновлённые benchmarks: Home preview на временной synthetic SQLite — 100 партий **5.66 ms median**, 3500 партий **26.77 ms median** (5 выборок; EXPLAIN использует индексы). Реальные пользовательские данные и Lichess не использовались.

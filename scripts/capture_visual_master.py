@@ -10,6 +10,7 @@ from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 import os
+import sys
 import threading
 import time
 from hashlib import sha256
@@ -460,6 +461,12 @@ def make_pair(reference_dir: Path, output: Path, reference_file: str,
 
 
 def main() -> None:
+    # Hosted Windows may use cp1252 for redirected stdout/stderr even though
+    # screenshot labels and test output contain Russian UI text.
+    for stream in (sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if reconfigure is not None:
+            reconfigure(encoding="utf-8", errors="backslashreplace")
     app = QApplication([])
     assert app.platformName() == "windows", f"Expected native Windows Qt, got {app.platformName()}"
     output = Path(os.environ.get("CC_VISUAL_OUTPUT", "visual-evidence")).resolve()
