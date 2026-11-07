@@ -1,5 +1,8 @@
 # ARCH-UX-01 · MASTER REVIEW — единое комплексное ревью приложения и исправления одним циклом
 
+> **07.11.2026 · НЕ ЧИТАЙ СТАРЫЕ «CURRENT» В ЭТОМ ДЛИННОМ ДОКУМЕНТЕ КАК ТЕКУЩЕЕ ТЗ.** [АКТУАЛЬНЫЙ HANDOFF](../handoffs/NEW_CHAT_START_HERE_2026_11_07.md) · [КАРТА ТЗ](INDEX.md). Code draft PR #44 SHA `5c375b0` прошёл [Windows CI #368 / 837 PASS](https://github.com/feshakomissarov-prog/chess/actions/runs/42318755878). **VIS6-01…05 исполнены по отчёту и source-ревью частично подтверждены; после VIS6 выявлены отдельные нерешённые проблемы.** Новое сводное исправляющее ТЗ **пока только обсуждается с владельцем**, не выдавать Codex автоматически. Старые разделы §1–17 — важный аудиторский след, не свежая команда на весь прежний RF. Оба PR draft, main не трогать.
+
+
 > **АКТУАЛЬНЫЙ GATE 05.11.2026 ПОСЛЕ РЕАЛИЗАЦИИ:** независимое ревью SHA `10b3ffae` — **НЕ ОК, ещё НЕ передавать на ручной пилот**. Результат и **ЕДИНОЕ** дополнение с MA-01…MA-09: [§9](#9-независимое-повторное-ревью-реализации-master--sha-10b3ffae--05112026). Hosted CI #305 774 PASS подтверждён, но source-блокеры остаются. Этот пункт новее старого handoff «ТЗ готово к передаче» ниже.
 
 > **СТАТУС: ЕДИНОЕ ТЗ ГОТОВО К ПЕРЕДАЧЕ CODEX ПОСЛЕ ДВУХ БЛОКОВ SOURCE-АУДИТА.** Редактируется/сохраняется в GitHub после каждого значимого шага. Последний подтверждённый code draft [PR #44](https://github.com/feshakomissarov-prog/chess/pull/44), HEAD `7a3a6775a0a27e60c0bea7cfbcd4f28d734e939b`, base `main`, draft/unmerged. Docs draft [PR #45](https://github.com/feshakomissarov-prog/chess/pull/45) — единственное место редактирования ТЗ. [Windows CI #286](https://github.com/feshakomissarov-prog/chess/actions/runs/42005438175) **SUCCESS, 750 PASS** на baseline SHA, но это не сертификат полноты GUI/сети.
