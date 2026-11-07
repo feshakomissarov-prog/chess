@@ -496,3 +496,31 @@ def test_background_ready_analytics_uses_truthful_counters_not_stuck_percentage(
     assert page.workflow_progress["ready"].isHidden()
     assert "Проверено: 3 из 100" in page.source_summary.text()
     assert "активных задач нет" in page.summary.text()
+
+
+def test_background_ready_status_fits_720p_and_keeps_full_schedule_accessible(qtbot):
+    page = BackgroundOperationsPage()
+    qtbot.addWidget(page)
+    page.resize(1280, 720)
+    page.show()
+    # In the real stacked window the page gets the window's 720px viewport;
+    # a standalone page has a taller sizeHint because its other rows are visible.
+    page._compact_status = True
+    detail = (
+        "Проверено 3500/3500 · точность 873 · оценки 1564\n"
+        "Без анализа 1040 · ошибки 3 · повторы 80\n"
+        "Следующая проверка не ранее 07.11.2026 18:30 (ожидается срок повтора отдельных партий)"
+    )
+    page.set_snapshot(
+        (), source_summary="Источник: JSON export", backfill_paused=False,
+        can_check=True, can_pause=True, workflows={"ready": detail},
+        workflow_tooltips={"ready": detail + "\nПолная причина и расписание"},
+    )
+    label = page.workflow_status["ready"]
+    qtbot.wait(10)
+    assert label.text().count("\n") == 1
+    assert "3500/3500" in label.text()
+    assert "07.11 18:30" in label.text()
+    assert "Полная причина и расписание" in label.toolTip()
+    required = label.heightForWidth(label.width()) if label.hasHeightForWidth() else label.sizeHint().height()
+    assert required <= label.height()

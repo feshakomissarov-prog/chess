@@ -38,6 +38,8 @@ class BackgroundOperationsPage(QWidget):
         controls.addWidget(self.refresh_button)
         root.addWidget(banner)
         self.workflow_status = {}
+        self._workflow_status_source = {}
+        self._compact_status = False
         self.workflow_badges = {}
         self.workflow_progress = {}
         self._workflow_rows = {}
@@ -150,6 +152,7 @@ class BackgroundOperationsPage(QWidget):
     def resizeEvent(self, event) -> None:
         super().resizeEvent(event)
         compact = self.height() < 740
+        self._compact_status = compact
         self._root_layout.setSpacing(6 if compact else 8)
         self._banner.setMinimumHeight(58 if compact else 76)
         self.summary.setStyleSheet(
@@ -172,6 +175,52 @@ class BackgroundOperationsPage(QWidget):
         self.recent_events_title.setStyleSheet(
             f"font-size: {19 if compact else 23}px; font-weight: 700;")
         self.details_toggle.setMaximumHeight(25 if compact else 30)
+        self._render_workflow_statuses()
+
+    @staticmethod
+    def _compact_ready_status(text: str) -> str:
+        """Keep the important queue counts and next check visible in short cards.
+
+        The full schedule/retry explanation remains available in the tooltip. A
+        three-line server status otherwise clips on 720p Windows at 125% scale.
+        """
+        lines = [line.strip() for line in str(text).splitlines() if line.strip()]
+        if len(lines) < 3:
+            return str(text)
+        counts = lines[0].replace("точность", "точн.").replace("оценки", "оценок")
+        detail = (lines[1].replace("Без анализа", "Без данных")
+                  .replace("без анализа", "без данных")
+                  .replace("повторы", "повтор"))
+        schedule = lines[2]
+        import re
+        match = re.search(r"(\d{2})\.(\d{2})\.(\d{4})\s+(\d{2}:\d{2})", schedule)
+        if match:
+            date = f"{match.group(1)}.{match.group(2)}"
+            schedule = f"Далее: {date} {match.group(4)}"
+        else:
+            replacements = (
+                ("Следующая проверка:", "Далее:"),
+                ("после восстановления игрового потока Lichess", "после связи"),
+                ("после завершения активной партии", "после партии"),
+                ("автоматическая проверка выключена", "авто-проверка выключена"),
+                ("очередь пуста или серверных данных больше не ожидается", "очередь пуста"),
+                ("готова к запуску", "готова"),
+            )
+            for old, new in replacements:
+                schedule = schedule.replace(old, new)
+        # Shorten count labels while retaining every count; full text is in tooltip.
+        detail = detail.replace("ошибки", "ошибок")
+        return f"{counts}\n{detail} · {schedule}"
+
+    def _render_workflow_statuses(self) -> None:
+        for key, label in self.workflow_status.items():
+            source = self._workflow_status_source.get(key, label.text())
+            shown = self._compact_ready_status(source) if (
+                self._compact_status and key == "ready") else source
+            label.setText(shown)
+            label.setWordWrap(True)
+            label.setStyleSheet(
+                "font-size: 15px;" if self._compact_status else "")
 
     def set_snapshot(self, operations, *, source_summary: str,
                      backfill_paused: bool, can_check: bool, can_pause: bool,
@@ -215,8 +264,10 @@ class BackgroundOperationsPage(QWidget):
             else f"Сейчас выполняется задач: {len(active)}" if active
             else "Сейчас активных задач нет")
         for key, label in self.workflow_status.items():
-            label.setText((workflows or {}).get(key) or "Состояние не подтверждено.")
-            label.setToolTip((workflow_tooltips or {}).get(key, ""))
+            source = (workflows or {}).get(key) or "Состояние не подтверждено."
+            self._workflow_status_source[key] = source
+            label.setText(source)
+            label.setToolTip((workflow_tooltips or {}).get(key, source))
             state = (states or {}).get(key, "Ожидает")
             self.set_workflow_state(key, state)
             bar = self.workflow_progress[key]
@@ -240,6 +291,7 @@ class BackgroundOperationsPage(QWidget):
                                   else "Приостановить Lichess")
         self.pause_button.setEnabled(bool(can_pause))
         self.manual_check_button.setEnabled(bool(can_check and not self._paused))
+        self._render_workflow_statuses()
 
     def set_workflow_state(self, key: str, state: str) -> None:
         colors = {"Идёт": ("#234B38", "#79E599"), "Готово": ("#234B38", "#79E599"),
