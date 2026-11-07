@@ -239,6 +239,6 @@ Windows, обычный Qt backend `windows`, 1360×860, временная SQLi
 |---|---|---|
 | VIS6-05 synthetic Progress capture | Исправлено время последней синтетической партии: оно гарантированно раньше now; проверены 8 партий и выбранный аккаунт | PASS: ранее missing row был ошибкой fixture, SQL-выборка работала корректно |
 | Native Windows evidence | Повторный production MainWindow capture, строгие проверки данных/размеров и пары с PNG для Home, Library, Background | PASS: 25/25 состояний; локальные пары доступны в `visual-evidence/vis6-final/` |
-| GitHub artifact | Runs `42315427643` and `42317068946`: first visual job exposed future fixture timestamp; second reached Progress but hit hosted Windows cp1252 while printing Russian tab names | Both overall FAIL, no artifact; fixture time and UTF-8 console handling corrected, third exact-head CI required |
+| GitHub artifact | Runs `42315427643` and `42317068946` exposed fixture timestamp and cp1252 output; fixes are in `f1fdc28427bec04b47b51d549cfdacf677b49ff0` | Windows run #367 / `42317639521` SUCCESS; 837 PASS, visual scales 1/1.25/1.5 PASS; [screenshots artifact](https://github.com/feshakomissarov-prog/chess/actions/runs/42317639521#artifacts) |
 
 Обновлённые benchmarks: Home preview на временной synthetic SQLite — 100 партий **5.66 ms median**, 3500 партий **26.77 ms median** (5 выборок; EXPLAIN использует индексы). Реальные пользовательские данные и Lichess не использовались.
