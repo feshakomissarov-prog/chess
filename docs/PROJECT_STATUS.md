@@ -491,3 +491,7 @@ Exact-head Windows CI #396 подтвердил дополнительный м�
 CI #397 после первого исправления прошёл Home и список партий на масштабе 125%, но воспроизвёл дублирующий запуск detail worker при первоначальном выборе ряда. Причина устранена в `LibraryPage.set_results()`; добавлен тест, фиксирующий ровно один запрос. Целевые Qt-регрессии при 125% — 3 PASS. Полный набор и новый Windows visual-evidence job ожидают следующего exact-head commit.
 
 После исправления полный локальный pytest на Python 3.12.10: **863 PASS** с `PytestUnhandledThreadExceptionWarning` как ошибкой; compileall, diff-check и сбор тестов (863) PASS. Масштабированный native Windows CI должен подтвердить capture на точном следующем SHA; CI #397 остаётся неуспешным на предшествующем коду состоянии.
+
+CI #398: test job SUCCESS на SHA `79005c04b6f4d23058b25a133d2c9e407cc49111`, но native visual job обнаружил пересечение карточек Background в узком 150% режиме 1120×640. Добавлен отдельный tight-layout breakpoint при высоте страницы <540px и интеграционная Qt-регрессия. После этого изменения запланированы полный 864-test suite и новый exact-head Windows run; CI #398 целиком остаётся FAIL и не считается приёмкой.
+
+После tight-layout изменения полный локальный набор: **864 PASS** на Python 3.12.10; worker-thread exceptions — errors; compileall, `git diff --check`, collect count 864 и три целевые Qt-регрессии (125% статус, 150% геометрия, одиночная загрузка выбранной партии) PASS. Новый Windows CI на точном финальном SHA ожидает публикации.

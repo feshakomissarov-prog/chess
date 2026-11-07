@@ -5,7 +5,7 @@ from types import SimpleNamespace
 from PySide6.QtCore import QPoint, Qt
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import (QApplication, QMainWindow, QPushButton, QScrollArea,
-                               QStackedWidget, QWidget)
+                               QStackedWidget, QVBoxLayout, QWidget)
 
 from chess_coach.ui.pages import LibraryPage, PlayPage, ResultPage
 from chess_coach.ui.pages.background import BackgroundOperationsPage
@@ -376,6 +376,45 @@ def test_background_page_compact_layout_has_no_overlapping_cards_or_events(qtbot
     assert cards[-1].geometry().bottom() <= page.recent_events_title.geometry().top()
     assert not page.recent_events.geometry().intersects(page.close_button.geometry())
     assert all(card.height() >= 70 for card in cards)
+
+
+def test_background_tight_150_percent_viewport_keeps_cards_separated(qtbot):
+    host = QWidget()
+    host.setFixedSize(1028, 662)
+    layout = QVBoxLayout(host)
+    layout.setContentsMargins(8, 8, 8, 8)
+    toolbar = QWidget()
+    toolbar.setFixedHeight(140)
+    stack = QStackedWidget()
+    page = BackgroundOperationsPage()
+    stack.addWidget(page)
+    layout.addWidget(toolbar)
+    layout.addWidget(stack)
+    qtbot.addWidget(host)
+    page.set_snapshot(
+        (), source_summary="Источник: Lichess", backfill_paused=False,
+        can_check=True, can_pause=True,
+        workflows={
+            "archive": "Сохранено партий: 3 500 · первичная загрузка не завершена\nОбновлено: 07.11.2026",
+            "ready": "Проверено 3/8 · точность 1 · оценки 0\n"
+                     "Без анализа 1 · ошибки 0 · повторы 0\n"
+                     "Следующая проверка не ранее 07.11.2026 18:30 (Retry-After)",
+            "puzzles": "Попыток: 12 · история полностью загружена\nОбновлено: 07.11.2026",
+            "stockfish": "В очереди 54 · готово 128 · ошибок 0 · не поставлено 6",
+        }, recent_events=[f"Синтетическое событие {index}" for index in range(4)],
+    )
+    host.show()
+    qtbot.wait(30)
+    assert page.height() < 540
+    assert page._tight_status
+    cards = [item[0] for item in page._workflow_cards]
+    assert all(left.geometry().bottom() < right.geometry().top()
+               for left, right in zip(cards, cards[1:]))
+    assert cards[-1].geometry().bottom() < page.recent_events_title.geometry().top()
+    assert not page.recent_events.geometry().intersects(page.close_button.geometry())
+    label = page.workflow_status["ready"]
+    required = label.heightForWidth(label.width()) if label.hasHeightForWidth() else label.sizeHint().height()
+    assert required <= label.height()
 
 
 def test_position_setup_uses_shared_board_and_emits_ephemeral_fen(qtbot):

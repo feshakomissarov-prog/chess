@@ -40,6 +40,7 @@ class BackgroundOperationsPage(QWidget):
         self.workflow_status = {}
         self._workflow_status_source = {}
         self._compact_status = False
+        self._tight_status = False
         self.workflow_badges = {}
         self.workflow_progress = {}
         self._workflow_rows = {}
@@ -152,29 +153,32 @@ class BackgroundOperationsPage(QWidget):
     def resizeEvent(self, event) -> None:
         super().resizeEvent(event)
         compact = self.height() < 740
+        tight = self.height() < 540
         self._compact_status = compact
-        self._root_layout.setSpacing(6 if compact else 8)
-        self._banner.setMinimumHeight(58 if compact else 76)
+        self._tight_status = tight
+        self._root_layout.setSpacing(2 if tight else 6 if compact else 8)
+        self._banner.setMinimumHeight(52 if tight else 58 if compact else 76)
         self.summary.setStyleSheet(
-            f"font-size: {16 if compact else 19}px; font-weight: 700;")
+            f"font-size: {14 if tight else 16 if compact else 19}px; font-weight: 700;")
         for card, icon, title in self._workflow_cards:
-            card.setMinimumHeight(70 if compact else 100)
-            card.layout().setContentsMargins(10 if compact else 14,
-                                             4 if compact else 6,
-                                             10 if compact else 14,
-                                             4 if compact else 6)
-            icon.setFixedSize(32 if compact else 43, 32 if compact else 43)
+            card.setMinimumHeight(60 if tight else 70 if compact else 100)
+            card.layout().setContentsMargins(8 if tight else 10 if compact else 14,
+                                             2 if tight else 4 if compact else 6,
+                                             8 if tight else 10 if compact else 14,
+                                             2 if tight else 4 if compact else 6)
+            icon.setFixedSize(28 if tight else 32 if compact else 43,
+                              28 if tight else 32 if compact else 43)
             icon.setStyleSheet(
                 "background: #39365E; color: #C8BBFF; border-radius: 10px; "
-                f"font-size: {20 if compact else 26}px;")
+                f"font-size: {18 if tight else 20 if compact else 26}px;")
             title.setStyleSheet(
-                f"font-size: {16 if compact else 18}px; font-weight: 700;")
+                f"font-size: {14 if tight else 16 if compact else 18}px; font-weight: 700;")
         # Keep all four approved desktop event rows inside the list viewport.
-        self.recent_events.setMinimumHeight(84 if compact else 162)
-        self.recent_events.setMaximumHeight(104 if compact else 170)
+        self.recent_events.setMinimumHeight(64 if tight else 84 if compact else 162)
+        self.recent_events.setMaximumHeight(76 if tight else 104 if compact else 170)
         self.recent_events_title.setStyleSheet(
-            f"font-size: {19 if compact else 23}px; font-weight: 700;")
-        self.details_toggle.setMaximumHeight(25 if compact else 30)
+            f"font-size: {17 if tight else 19 if compact else 23}px; font-weight: 700;")
+        self.details_toggle.setMaximumHeight(22 if tight else 25 if compact else 30)
         self._render_workflow_statuses()
 
     @staticmethod
@@ -220,7 +224,8 @@ class BackgroundOperationsPage(QWidget):
             label.setText(shown)
             label.setWordWrap(True)
             label.setStyleSheet(
-                "font-size: 15px;" if self._compact_status else "")
+                ("font-size: 14px;" if self._tight_status else "font-size: 15px;")
+                if self._compact_status else "")
 
     def set_snapshot(self, operations, *, source_summary: str,
                      backfill_paused: bool, can_check: bool, can_pause: bool,
