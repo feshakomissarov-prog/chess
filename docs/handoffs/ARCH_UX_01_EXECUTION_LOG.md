@@ -483,6 +483,10 @@ Synthetic preview benchmark (5 измерений, включая первое):
 
 ### VIS6 final local verification — 07.11.2026
 
-После последней правки графика полный offscreen pytest повторён: **837 passed in 262.13s**, Qt unhandled worker warnings — errors. compileall -q src scripts tests и git diff --check — PASS. Последний benchmark: 100 — median **5.59 ms** (32.18, 5.98, 5.40, 5.48, 5.59); 3500 — **26.60 ms** (46.77, 24.90, 25.49, 26.60, 26.71). EXPLAIN повторно показывает covering indexes account_games(account_id), games(game_id) и temporary B-tree для COUNT DISTINCT.
+После последней правки графика полный offscreen pytest повторён: **837 passed in 262.13s**, Qt unhandled worker warnings — errors. compileall -q src scripts tests и git diff --check — PASS. Последний benchmark: 100 — median **5.66 ms** (28.90, 5.66, 5.35, 5.51, 5.98); 3500 — **26.77 ms** (49.65, 27.54, 26.28, 26.49, 26.77). EXPLAIN повторно показывает covering indexes account_games(account_id), games(game_id) и temporary B-tree для COUNT DISTINCT.
 
 После последней правки снова выполнен обычный visible Windows Qt capture: **25 strict states PASS**, реальные размеры окна/image проверены при scale 100%. Targeted стилизация/прогресс-график прошли 2 PASS отдельно; прежний focused VIS6 набор — 7 PASS. Личные данные, сеть, OAuth, real Lichess/Stockfish, физический DPI не запускались. Hosted CI — pending exact final SHA.
+
+### Проверка после независимого ревью VIS6
+
+На новом визуальном прогоне обнаружена ошибка тестовой фикстуры: дата одной партии выставлялась на 18:30 UTC и могла оказаться в будущем, поэтому правильная SQL-выборка исключала её. Исправлено формирование всех восьми времён как `now - (days_ago + 1 day + 1 hour)`; реальная выборка «Прогресса» теперь содержит 8/8. Нативный Windows capture повторён полностью: **25/25 заполненных состояний PASS**, включая четыре вкладки Прогресса. Пары «арт / результат» заново сохранены в `visual-evidence/vis6-final/`. Полный pytest после исправления — **837 PASS / 263.68 s**; compileall и diff check PASS. Первичный hosted run `42315427643` имел PASS тестов/компиляции/offline startup, но visual job завершился FAIL из-за этой фикстуры и не опубликовал artifact; это не трактуется как успешный CI. Запускается новый exact-head Windows CI с artifact upload.

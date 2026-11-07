@@ -64,6 +64,11 @@ def seed_synthetic_repository(repo, settings) -> tuple[str, str]:
     opponents = ("Synthetic Owl", "Synthetic Fox", "Synthetic Rook")
     for index in range(8):
         days_ago = max(0, 7 - index)
+        # Keep every fixture timestamp in the past even when the wall clock is
+        # before 18:30 UTC. Replacing the time-of-day on today's date used to
+        # put the newest synthetic game in the future and exclude it from the
+        # Progress dialog's inclusive-until-now filter.
+        fixture_time = datetime.now(timezone.utc) - timedelta(days=days_ago + 1, hours=1)
         game_id = str(index)
         winner = "white" if index % 3 else "black"
         opponent = opponents[index % 3]
@@ -72,16 +77,15 @@ def seed_synthetic_repository(repo, settings) -> tuple[str, str]:
             opponent,
             False, "180+2", "resign", winner,
             white_player="Visual Coach", black_player=opponent,
-            started_at=(datetime.now(timezone.utc) - timedelta(days=days_ago)).replace(
-                hour=18, minute=30, second=0, microsecond=0).isoformat())
+            started_at=fixture_time.isoformat())
     repo.wait_for_writes()
     with repo._connection() as db:
         db.executemany(
             "INSERT INTO account_games(account_id,game_id,remote_id,imported_at,color,opponent,"
             "player_rating,opponent_rating) VALUES (?,?,?,?,?,?,?,?)",
             [(account_id, str(index), f"synthetic-{index}",
-              (datetime.now(timezone.utc) - timedelta(days=max(0, 7 - index))).replace(
-                  hour=18, minute=30, second=0, microsecond=0).isoformat(), "white",
+              (datetime.now(timezone.utc)
+               - timedelta(days=max(0, 7 - index) + 1, hours=1)).isoformat(), "white",
               opponents[index % 3], 1680 + index * 7, 1660 + index * 5)
              for index in range(8)])
         db.execute("UPDATE games SET source='lichess_archive',source_game_id='synthetic-0' "
@@ -569,10 +573,24 @@ def main() -> None:
         wait_for(lambda: progress.account.findData(account_id) >= 0,
                  "synthetic account in progress filters", timeout=30)
         progress.account.setCurrentIndex(progress.account.findData(account_id))
-        wait_for(lambda: progress._rows
-                 and f"Аккаунт: {progress.account.currentText()}" in progress.mixed_warning.text()
-                 and progress.summary_label.text().startswith("Партии: 8 ·"),
-            "account-scoped progress statistics", timeout=60)
+        try:
+            wait_for(lambda: progress._rows
+                     and f"Аккаунт: {progress.account.currentText()}" in progress.mixed_warning.text()
+                     and progress.summary_label.text().startswith("Партии: 8 ·"),
+                "account-scoped progress statistics", timeout=60)
+        except AssertionError:
+            print("Progress diagnostics:", {
+                "account": (progress.account.currentText(), progress.account.currentData(),
+                            [(progress.account.itemText(i), progress.account.itemData(i))
+                             for i in range(progress.account.count())]),
+                "summary": progress.summary_label.text(),
+                "scope": progress.mixed_warning.text(),
+                "rows": len(progress._rows),
+                "games_widget": progress.games.count(),
+                "query_alive": bool(progress._query_thread and progress._query_thread.is_alive()),
+                "pending_refresh": progress._pending_refresh,
+            }, flush=True)
+            raise
         wait_for(lambda: bool(progress.trend.points),
                  "synthetic account rating trend in Progress overview", timeout=20)
         progress.tabs.setCurrentIndex(0)
