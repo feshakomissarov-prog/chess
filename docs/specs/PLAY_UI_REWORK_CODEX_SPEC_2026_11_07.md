@@ -20,6 +20,10 @@
 - src/chess_coach/lichess/service_games.py — create_ai_game, open_friend_game, challenge_username, fetch_active_games, cancel_pending_friend_challenge, cancel_open_invitation; здесь уже есть tracking request/generation и защита от повторов.
 - src/chess_coach/ui/dialogs.py::OnlineGameDialog и старые Home shortcuts — альтернативный путь создания AI/друга/вызова с дополнительными диалогами. Пройти все call sites: новая PlayPage не должна создавать ещё один способ отправки POST или ломать существующие Home shortcuts.
 
+**ВАЖНО — несоответствие скриншота и source:** на предоставленных владельцем актуальных Windows-снимках видны сразу пять карточек режимов **и** выпадающий selector. Но в проверенном SHA PR #44 файле play.py все карточки в конце __init__ скрываются через setVisible(False). Значит, скриншоты и выбранный source SHA **не доказаны как одна и та же сборка**. До кодовых правок Codex обязан записать точную версию установленного EXE/commit, сравнить актуальный source и наблюдаемые сценарии, затем устранить только реально существующий дубль. Не считать любой скрин исходной версии доказательством того, что source именно такой.
+
+**Связанный риск live→local:** если уже идёт Lichess human match, переключение карточки не закрывает session и не разрешает Stockfish. Явное открытие свободной доски должно чётко объяснить переход в локальную workspace при сохранении серверной live-сессии и возможности возврата; если unsaved local line будет потеряна — запросить подтверждение. Не заменять «активная онлайн-игра» состоянием «свободная доска» в Lichess account guards.
+
 **Инварианты:** текущая партия не сбрасывается выбором режима; никаких сетевых POST без явной CTA; server-authoritative success/cancel; auth-generation guard A/B; без выдуманного времени, результата, приглашения; никакого engine hint во время live human play. Никаких новых SQLite-миграций, Lichess credentials, отдельных приложений.
 
 ## 1. Задача и путь пользователя
