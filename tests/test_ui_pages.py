@@ -128,7 +128,7 @@ def test_library_sort_help_never_opens_a_floating_window_on_reentry(qtbot):
         assert visible_orphans == []
         assert not page.findChildren(QWidget, "sortDescription")
     assert "lastMoveAt" in page.search.accessibleDescription()
-    assert page.search.toolTip() == ""
+    assert page.search.toolTip()
 
 
 def test_library_typing_filters_coalesce_to_one_query(qtbot):

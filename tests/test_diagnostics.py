@@ -134,5 +134,6 @@ def test_settings_diagnostic_report_requires_explicit_opt_in(qtbot, tmp_path):
     dialog.share_report.setChecked(True)
     dialog._copy_diagnostic_report()
     report = json.loads(clipboard.text())
-    assert report["schema_version"] == 21
+    from chess_coach.infrastructure.sqlite.constants import SCHEMA_VERSION
+    assert report["schema_version"] == SCHEMA_VERSION
     assert "recent_batch_counts" in report

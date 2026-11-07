@@ -1,3 +1,11 @@
+## 08.11.2026 — CORR-01…16 corrective gate (локальная приёмка)
+
+Продолжается существующий draft PR #44 на `codex/arch-01-modular-refactor`, от SHA `afb2cc63958da048fcc6683555f909942e94400d`. Исправления опубликованы после локальных проверок: 894 pytest PASS на Python 3.12.10 (worker-thread warnings-as-errors), compileall и diff-check PASS; native synthetic Windows capture — 76/76 состояний при Qt 100/125/150%. Exact-head CI и screenshot artifact ожидаются после push. Рабочая копия содержит пользовательские `.venv312/`, `visual-evidence/` и `vlc-help.txt`; их не изменять и не добавлять.
+
+Проведён native Windows Qt smoke на изолированной синтетической SQLite: 76 populated states на 1672×941/1360×860/1280×720 @100%, 1280×720 @125%, 1120×640 @150%; actual window and image dimensions, клики карточек режимов, загрузка игры/метрик/графика и геометрия страниц проверяются assert-ами. Полный pytest до последних трёх компактных UI правок дал 893 PASS; финальный полный прогон ещё обязателен. Offline GUI/native — не physical owner DPI и не live Lichess.
+
+Краткая CORR трассировка и доказательства — в [execution log](handoffs/ARCH_UX_01_EXECUTION_LOG.md) и [acceptance matrix](handoffs/ARCH_UX_01_MASTER_ACCEPTANCE_MATRIX.md). Владелец должен получить exact-head Windows CI и доступные screenshot artifacts перед повторным независимым ревью. PR остаётся draft; main не меняется и merge не выполняется.
+
 ## 06.11.2026 — VIS5 / загрузка Home, единый dark UI и popup сортировки (продолжение)
 
 Рабочее дерево продолжается в draft PR #44, ветка `codex/arch-01-modular-refactor`; `main` не менялся, merge не выполнялся. Исправлена ранняя загрузка Home из committed SQLite, убран глобальный writer-queue wait для фоновой dashboard-сводки, локальный puzzle rating появляется уже в preview. Аналитика Lichess не показывает застывший процент. Открытие дебюта унифицировано; неизвестная классификация не маскируется нулями. Общая тёмная тема покрывает остальные shell-страницы. Устранено плавающее окно «Сортировка: последняя дата хода…», добавлены Qt/native проверки.

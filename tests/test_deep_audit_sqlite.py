@@ -11,7 +11,7 @@ import pytest
 
 from chess_coach.lichess.archive import ArchiveSync
 from chess_coach.lichess.puzzles import PuzzleActivitySync
-from chess_coach.lichess.repository import GameRepository
+from chess_coach.lichess.repository import GameRepository, SCHEMA_VERSION
 from chess_coach.lichess.statistics import StatisticsService
 
 
@@ -286,14 +286,14 @@ def test_schema_v5_migrates_account_identity_and_keeps_backup_and_existing_rows(
     assert repo.get_game("old-game")["moves"] == "e2e4"
     assert repo.current_line("old-game")["moves"] == "e2e4"
     with repo._connection() as migrated:
-        assert migrated.execute("PRAGMA user_version").fetchone()[0] == 21
+        assert migrated.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION
         identity = migrated.execute("SELECT opponent,player_name FROM account_games "
                                     "WHERE account_id=?", (account,)).fetchone()
         assert tuple(identity) == ("Bob", "Alice")
         state = migrated.execute("SELECT backfill_started_at FROM archive_sync_state "
                                  "WHERE account_id=?", (account,)).fetchone()
         assert state[0] == 50
-    backup = sqlite3.connect(str(path) + ".pre-m3-v21.bak")
+    backup = sqlite3.connect(str(path) + f".pre-m3-v{SCHEMA_VERSION}.bak")
     try:
         assert backup.execute("PRAGMA integrity_check").fetchone()[0] == "ok"
         assert backup.execute("PRAGMA user_version").fetchone()[0] == 5

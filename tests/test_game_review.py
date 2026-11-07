@@ -232,7 +232,7 @@ def test_move_table_groups_white_and_black_in_fullmove_rows_and_keeps_ply(qtbot)
     assert table.table.item(0, 2).text() == "e5 +0.1"
     assert table.table.item(0, 2).toolTip().startswith("Не оценено")
     assert table.table.item(0, 1).foreground().color().name() == "#58a978"
-    assert table.table.item(1, 1).text().startswith("?? ")
+    assert table.table.item(1, 1).text().startswith("‼ ")
     selected = []
     table.ply_selected.connect(selected.append)
     table._cell_clicked(0, 2)
@@ -415,7 +415,8 @@ def test_phase_summary_shows_both_sides_coverage_and_never_fabricates_accuracy(q
         workspace.load_game(game)
         assert workspace.side_metrics_summary.rowCount() == 7
         assert [workspace.side_metrics_summary.horizontalHeaderItem(i).text()
-                for i in range(3)] == ["Показатель", "Я", "Соперник"]
+                for i in range(3)] == ["Показатель", "Я", "Сопер."]
+        assert workspace.side_metrics_summary.horizontalHeaderItem(2).toolTip() == "Соперник"
         assert "Зевки" in _metrics_text(workspace.side_metrics_summary)
         assert "н/д" in _metrics_text(workspace.side_metrics_summary)
         assert "S · 4/4" in workspace.phase_summary.text()
@@ -584,6 +585,36 @@ def test_review_layout_has_no_outer_scroll_and_renders_at_desktop_sizes(qtbot, t
                         assert workspace.moves_list.table.fontMetrics().horizontalAdvance(
                             item.text()) <= workspace.moves_list.table.columnWidth(column)
         assert workspace.workspace_splitter.orientation().name == "Horizontal"
+    finally:
+        repo.shutdown()
+
+
+def test_compact_review_keeps_selected_move_clickable_at_640px_window_height(qtbot, tmp_path):
+    from PySide6.QtCore import Qt
+    from PySide6.QtTest import QTest
+
+    repo, game = _review_repo(tmp_path / "review-compact-640.sqlite3")
+    try:
+        workspace = GameReviewWorkspace(repo, training_allowed=True)
+        qtbot.addWidget(workspace)
+        workspace.load_game(game)
+        workspace.resize(996, 550)  # MainWindow content area of a 1120x640 window.
+        workspace.show()
+        qtbot.wait(30)
+
+        assert workspace.graph.height() <= 74
+        assert workspace.graph.compact
+        assert workspace.graph.plot_rect().height() >= 40
+        assert workspace.moves_list.table.viewport().height() >= 29
+        workspace.select_ply(3)
+        item = workspace.moves_list.item_by_ply(3)
+        assert item is not None
+        rect = workspace.moves_list.table.visualItemRect(item)
+        assert rect.isValid()
+        assert workspace.moves_list.table.viewport().rect().contains(rect)
+        QTest.mouseClick(workspace.moves_list.table.viewport(), Qt.MouseButton.LeftButton,
+                         pos=rect.center())
+        assert workspace.selected_ply == 3
     finally:
         repo.shutdown()
 

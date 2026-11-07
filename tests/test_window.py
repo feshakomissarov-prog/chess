@@ -531,7 +531,7 @@ def test_board_fit_uses_available_window_area_and_focus_hides_inspector(
     window.close()
 
 
-@pytest.mark.parametrize(("width", "height"), [(1280, 720), (1366, 768), (1920, 1080)])
+@pytest.mark.parametrize(("width", "height"), [(1120, 640), (1280, 720), (1366, 768), (1920, 1080)])
 def test_game_workspace_has_no_page_wide_scroll_and_keeps_live_controls_visible(
         qtbot, tmp_path, width, height):
     from PySide6.QtCore import QPoint
@@ -1500,17 +1500,26 @@ def test_batch_queue_and_remote_active_games_stay_inside_workspace(
     monkeypatch.setattr(window, "_online_actions_allowed", lambda: True)
     monkeypatch.setattr(window, "open_active_game", opened.append)
 
+    games = [{
+        "gameId": "remote-game", "color": "white", "speed": "blitz",
+        "isMyTurn": True, "opponent": {"username": "Synthetic"},
+        "fen": "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1",
+    }]
+
     class FakeService:
+        username = "SyntheticAccount"
+        auth_generation = 4
+
         def fetch_active_games(self):
-            window._active_games_received([{
-                "gameId": "remote-game", "color": "white", "speed": "blitz",
-                "isMyTurn": True, "opponent": {"username": "Synthetic"},
-            }])
+            return "fake-active-games-request"
 
     window.lichess = FakeService()
     window.show_active_games()
     page = window._play_mode_page
     assert window.screen_stack.currentWidget() is page
+    assert page.active_games.count() == 0  # pending until the fake server responds
+    window._active_games_received(games, generation=4,
+                                  request_id="fake-active-games-request")
     assert page.active_games.count() == 1
     assert "Synthetic" in page.active_games.item(0).text()
     page.active_games.setCurrentRow(0)
@@ -1518,6 +1527,7 @@ def test_batch_queue_and_remote_active_games_stay_inside_workspace(
     assert opened == [{
         "gameId": "remote-game", "color": "white", "speed": "blitz",
         "isMyTurn": True, "opponent": {"username": "Synthetic"},
+        "fen": "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1",
     }]
     assert getattr(window, "_active_games_dialog", None) is None
     window.close()
@@ -1935,7 +1945,7 @@ def test_explicit_offline_window_never_constructs_or_uses_lichess_credentials(qt
     assert window.connection.text() == "Офлайн"
     assert not window.connect_button.isEnabled()
     assert window.home_ai_button.isHidden()
-    assert not window.play_ai_button.isEnabled()
+    assert window.play_ai_button.isEnabled()
     assert "Подключите Lichess" in window.play_ai_button.toolTip()
     offline_dir = Path(window.game_repository.path).parent
     assert offline_dir.name.startswith("chess-coach-offline-")
@@ -2528,8 +2538,8 @@ def test_puzzle_replay_is_local_legal_and_does_not_change_history_or_send_reques
                       if button.text() == "Решить повторно")
         reveal = next(button for button in dialog.findChildren(QPushButton)
                       if button.text() == "Показать решение…")
-        reset = next(button for button in dialog.findChildren(QPushButton)
-                     if button.text() == "Сбросить упражнение")
+        reset = dialog.findChild(QPushButton, "resetPuzzleReplay")
+        assert reset is not None
         board = dialog.findChild(BoardView)
         labels = [label.text() for label in dialog.findChildren(QLabel)]
         assert not any("e5" in label or "e7e5" in label or "Решение:" in label
@@ -3614,7 +3624,7 @@ def test_sidebar_play_opens_mode_picker_without_resetting_local_game(qtbot, tmp_
     assert sum(widget.objectName() == "metricCard"
                for widget in window.play_page.findChildren(QFrame)) == 6
     assert window.play_local_button.text() == "Свободная доска"
-    assert not window.play_ai_button.isEnabled()
+    assert window.play_ai_button.isEnabled()
     assert window.play_active_button.toolTip()
     window.setFixedSize(1000, 720)
     window._layout_play_mode_cards()
@@ -4952,7 +4962,7 @@ def test_correspondence_and_finished_games_do_not_wait_forever_for_clocks(qtbot,
 
     session.status = "mate"
     window._update_clock()
-    assert window.you_clock_label.text() == "Завершена · без часов"
+    assert window.you_clock_label.text() == "Завершена · без обычных часов"
     assert window.clock_label.text() == "Партия завершена · часы остановлены"
     window.close()
 
@@ -5081,7 +5091,7 @@ def test_ready_event_stream_automatically_starts_bounded_old_game_analytics(qtbo
     window._start_connected_account_background_work(7, "Me")
     qtbot.waitUntil(lambda: bool(service.calls), timeout=2500)
     assert service.calls == [{"generation": 7, "limit": 10, "daily_limit": 25,
-                              "force_retry": False}]
+                              "force_retry": False, "preferred_game_id": None}]
     assert "проверяем до 10" in window.lichess_analysis_status.text()
 
 

@@ -1,4 +1,4 @@
-from chess_coach.lichess.repository import GameRepository
+from chess_coach.lichess.repository import GameRepository, SCHEMA_VERSION
 from chess_coach.ui.dashboard import game_card_text
 from chess_coach.application.dashboard import dashboard_preview_snapshot, dashboard_snapshot
 from chess_coach.ui.display import game_opening_name
@@ -96,7 +96,7 @@ def test_accuracy_cache_backfill_uses_one_current_game_per_owner_and_keeps_sourc
         repo.save_snapshot("fallback", "startpos", "d2d4 d7d5 c2c4", "white", "Friend",
                            False, "5+0", "resign", "white")
         assert accuracy()["value"] == "80.0%"
-        with sqlite3.connect(str(path) + ".pre-m3-v21.bak") as backup:
+        with sqlite3.connect(str(path) + f".pre-m3-v{SCHEMA_VERSION}.bak") as backup:
             assert backup.execute("PRAGMA user_version").fetchone()[0] == 20
             assert backup.execute("SELECT COUNT(*) FROM analysis_runs").fetchone()[0] == 3
     finally:

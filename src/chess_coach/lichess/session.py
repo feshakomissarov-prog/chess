@@ -397,6 +397,15 @@ class LichessGameSession:
     def _apply_game_full_metadata(self, event: dict, incoming_fen: str) -> None:
         self.initial_fen = incoming_fen
         self.rated = bool(event.get("rated", False))
+        # A reconnect may start with gameFull and never repeat gameStart. Preserve
+        # the server's time-control classification from either authoritative event.
+        speed = event.get("speed")
+        if isinstance(speed, str) and speed in {
+                "bullet", "blitz", "rapid", "classical", "correspondence", "unlimited"}:
+            self.speed = speed
+        days = event.get("daysPerTurn")
+        if type(days) is int and 1 <= days <= 14:
+            self.days_per_turn = days
         created_at = event.get("createdAt") or event.get("created_at")
         if created_at and not self.started_at:
             try:

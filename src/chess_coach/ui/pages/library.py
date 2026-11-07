@@ -79,6 +79,7 @@ class LibraryPage(QWidget):
     note_requested = Signal(dict, str)
     analyze_requested = Signal(dict)
     refresh_requested = Signal(dict)
+    retry_analysis_requested = Signal(dict)
     active_requested = Signal(object)
     detail_requested = Signal(dict)
     detail_position_requested = Signal(dict, int)
@@ -124,7 +125,7 @@ class LibraryPage(QWidget):
         self.search.setPlaceholderText("Поиск по сопернику, дебюту или дате")
         self.search.setAccessibleName("Поиск по партиям")
         self.search.setAccessibleDescription(sort_help)
-        self.search.setToolTip("")
+        self.search.setToolTip("Поиск по сопернику, дебюту или дате")
         self.filters_toggle = QPushButton("Фильтры")
         self.filters_toggle.setCheckable(True)
         search_widget = QWidget(self)
@@ -219,6 +220,7 @@ class LibraryPage(QWidget):
         """)
         left_panel = QWidget()
         self.left_panel = left_panel
+        left_panel.setMinimumWidth(420)
         left_layout = QVBoxLayout(left_panel)
         left_layout.setContentsMargins(0, 0, 0, 0)
         left_layout.setSpacing(18)
@@ -303,8 +305,10 @@ class LibraryPage(QWidget):
         detail_layout.addWidget(self.detail_graph)
         self.detail_open = QPushButton("Открыть разбор")
         self.detail_open.clicked.connect(lambda: self._emit_for_detail(self.open_requested))
-        detail_actions = QHBoxLayout()
-        detail_actions.addWidget(self.detail_open)
+        detail_actions = QGridLayout()
+        detail_actions.setHorizontalSpacing(8)
+        detail_actions.setVerticalSpacing(6)
+        detail_actions.addWidget(self.detail_open, 0, 0)
         self.detail_open.setObjectName("primaryAction")
         aside_layout.addWidget(self.detail_panel, 1)
         self.aside_scroll = QScrollArea()
@@ -314,6 +318,7 @@ class LibraryPage(QWidget):
         self.aside_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self.aside_scroll.setWidget(aside)
         inspector = QWidget()
+        inspector.setMinimumWidth(320)
         inspector_layout = QVBoxLayout(inspector)
         inspector_layout.setContentsMargins(0, 0, 0, 0)
         inspector_layout.setSpacing(6)
@@ -326,20 +331,21 @@ class LibraryPage(QWidget):
         body.setStretchFactor(1, 1)
         body.setSizes([650, 650])
         layout.addWidget(body, 1)
-        page_row = QHBoxLayout()
+        page_actions_widget = QWidget(self)
+        page_actions_grid = QGridLayout(page_actions_widget)
+        page_actions_grid.setContentsMargins(0, 0, 0, 0)
+        page_actions_grid.setHorizontalSpacing(5)
+        page_actions_grid.setVerticalSpacing(4)
+        self.page_actions_grid = page_actions_grid
         self.previous = QPushButton("← Назад")
         self.page_label = QLabel()
         self.following = QPushButton("Вперёд →")
-        page_row.addWidget(self.previous)
-        page_row.addWidget(self.page_label, 1)
-        page_row.addWidget(self.following)
         note_toggle = QPushButton("Заметка")
+        self.note_toggle = note_toggle
         note_toggle.setCheckable(True)
-        page_row.addWidget(note_toggle)
-        for button in (self.sync_button, self.background_button, self.settings_button):
-            page_row.addWidget(button)
-        layout.addLayout(page_row)
-        self.page_actions_row = page_row
+        self.page_actions_widget = page_actions_widget
+        self.page_actions_row = page_actions_grid
+        layout.addWidget(page_actions_widget)
         note_row = QHBoxLayout()
         self.note = QLineEdit()
         self.note.setPlaceholderText("Заметка к начальной позиции выбранной партии")
@@ -365,11 +371,17 @@ class LibraryPage(QWidget):
         # Per-game refresh is a recovery action, not a normal catalog command.
         # It is revealed only by an explicit diagnosed-recovery presentation.
         self.refresh_game.setVisible(False)
+        self.retry_analysis_button = QPushButton("Повторить проверку аналитики Lichess")
+        self.retry_analysis_button.setToolTip(
+            "Ставит на повтор только выбранную завершённую партию. Суточный лимит и Retry-After сохраняются.")
+        self.retry_analysis_button.clicked.connect(lambda _checked=False: self._emit_for_detail(
+            self.retry_analysis_requested))
+        self.retry_analysis_button.setEnabled(False)
         self.close_button = QPushButton("Закрыть")
         self.open_game.hide()
-        for button in (self.export_game, self.analyze_game):
-            detail_actions.addWidget(button)
-        page_row.addWidget(self.refresh_game)
+        detail_actions.addWidget(self.export_game, 0, 1)
+        detail_actions.addWidget(self.analyze_game, 1, 0)
+        detail_actions.addWidget(self.retry_analysis_button, 1, 1)
         self.close_button.hide()  # Global Back and Home already remain available.
         self._typing_filter_timer = QTimer(self)
         self._typing_filter_timer.setSingleShot(True)
@@ -393,9 +405,27 @@ class LibraryPage(QWidget):
         self.note.textChanged.connect(self._note_draft_changed)
         self.detail_graph.selected_ply.connect(self._detail_graph_selected)
         self._detail_game: dict | None = None
+        self._layout_page_actions()
 
     def resizeEvent(self, event) -> None:
         super().resizeEvent(event)
+        self._layout_page_actions()
+
+    def _layout_page_actions(self) -> None:
+        grid = getattr(self, "page_actions_grid", None)
+        if grid is None or not hasattr(self, "refresh_game"):
+            return
+        while grid.count():
+            grid.takeAt(0)
+        grid.addWidget(self.previous, 0, 0)
+        grid.addWidget(self.page_label, 0, 1)
+        grid.addWidget(self.following, 0, 2)
+        buttons = [self.note_toggle, self.sync_button, self.background_button,
+                   self.settings_button, self.refresh_game]
+        columns = 3 if self.width() < 900 else len(buttons)
+        for index, button in enumerate(buttons):
+            button.setMinimumHeight(34)
+            grid.addWidget(button, 1 + index // columns, index % columns)
 
     def show_game_detail(self, game: dict | None, review: dict | None = None, *,
                          safety_allowed: bool = False) -> None:
@@ -424,7 +454,8 @@ class LibraryPage(QWidget):
             self.detail_metrics.clear()
             self.detail_graph.setVisible(False)
             self.detail_graph.set_safety_gate(False, "Выберите партию")
-            for button in (self.detail_open, self.export_game, self.analyze_game):
+            for button in (self.detail_open, self.export_game, self.analyze_game,
+                           self.retry_analysis_button):
                 button.setEnabled(False)
             return
         title = str(game.get("account_opponent") or game.get("opponent") or "Соперник")
@@ -448,6 +479,9 @@ class LibraryPage(QWidget):
         # lookup to finish, so an empty/loading pane cannot claim success.
         self.export_game.setEnabled(True)
         self.analyze_game.setEnabled(True)
+        self.retry_analysis_button.setEnabled(bool(
+            game.get("source_game_id") and
+            game.get("source") in {"lichess", "lichess_archive", "lichess-json"}))
         self.detail_open.setEnabled(review is not None)
         if not safety_allowed:
             self.detail_status.setText("Оценки и график скрыты до подтверждения безопасности Lichess.")
@@ -604,7 +638,7 @@ class LibraryPage(QWidget):
                 item.setForeground(QColor("#79E599"))
             elif row_text.startswith("Поражение"):
                 item.setForeground(QColor("#FF737C"))
-            item.setToolTip(f"Источник: {source_label}")
+            item.setToolTip(f"{row_text}\nИсточник: {source_label}")
             item.setData(Qt.ItemDataRole.UserRole, game)
             item.setData(Qt.ItemDataRole.AccessibleDescriptionRole,
                          row_text.replace("\n", ". "))

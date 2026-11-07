@@ -43,6 +43,7 @@ from PySide6.QtWidgets import (
     QPushButton,
     QProgressDialog,
     QRadioButton,
+    QScrollArea,
     QTabWidget,
     QSpinBox,
     QSlider,
@@ -374,6 +375,7 @@ class MainWindow(QMainWindow):
     legacy_metrics_finished = Signal(int, object)
     puzzle_history_finished = Signal(str, object, object)
     statistics_filter_options_finished = Signal(int, object, object)
+    home_game_read_finished = Signal(int, str, object, object, object, object)
 
     @property
     def _selected_live_game_id(self) -> str | None:
@@ -446,6 +448,9 @@ class MainWindow(QMainWindow):
         self._home_detail_game_id: str | None = None
         self._home_detail_payload: dict | None = None
         self._home_detail_lookup_pending = False
+        self._home_game_read_generation = 0
+        self._home_game_read_handle = None
+        self._home_game_read_context: tuple[str, str | None, int | None] | None = None
         self._library_detail_target_id: str | None = None
         self._ready_analytics_failure_status = ""
         self._library_filter_options_loaded = False
@@ -597,6 +602,7 @@ class MainWindow(QMainWindow):
         self.library_query_finished.connect(self._library_query_result_ready)
         self.library_target_finished.connect(self._library_target_result_ready)
         self.library_detail_finished.connect(self._library_detail_result_ready)
+        self.home_game_read_finished.connect(self._home_game_read_result_ready)
         self.note_save_finished.connect(self._note_save_result_ready)
         self.saved_game_analysis_read_finished.connect(
             self._saved_game_analysis_read_ready)
@@ -1067,7 +1073,8 @@ class MainWindow(QMainWindow):
             debounce_if_due=False)
 
     def _start_lichess_analysis_backfill(self, generation: int, *, manual: bool = False,
-                                         force_retry: bool = False) -> None:
+                                         force_retry: bool = False,
+                                         preferred_game_id: str | None = None) -> None:
         self._cancel_lichess_backfill_wakeup()
         if (self._shutdown_requested or self.offline_mode
                 or not self._current_lichess_generation(generation)
@@ -1082,7 +1089,7 @@ class MainWindow(QMainWindow):
         self.lichess.refresh_lichess_analysis_background(
             generation=generation, limit=10,
             daily_limit=self.settings.value("lichess/ready_analytics_daily_limit", 25, type=int),
-            force_retry=force_retry)
+            force_retry=force_retry, preferred_game_id=preferred_game_id)
         self.lichess_analysis_status.setText("Lichess · проверяем до 10 завершённых партий…")
 
     def _lichess_analysis_backfill_progress(self, generation: int, username: str,
@@ -1719,7 +1726,7 @@ class MainWindow(QMainWindow):
                 "Проверка аналитики приостановлена в настройках фоновых операций.")
             return
         self._start_lichess_analysis_backfill(
-            self.lichess.auth_generation, manual=True, force_retry=True)
+            self.lichess.auth_generation, manual=True, force_retry=False)
         self._refresh_background_operations_page()
 
     def _open_lichess_game_page(self, game_id: str) -> None:
@@ -1897,7 +1904,7 @@ class MainWindow(QMainWindow):
         splitter.addWidget(board_column)
 
         side = QWidget()
-        side.setMinimumWidth(340)
+        side.setMinimumWidth(0)
         side_layout = QVBoxLayout(side)
         side_layout.setContentsMargins(8, 0, 0, 0)
         side_layout.setSpacing(10)
@@ -2076,14 +2083,22 @@ class MainWindow(QMainWindow):
         actions.addWidget(self.flip_button)
         side_layout.addLayout(actions)
         side_layout.addWidget(self.clear_marks_button)
-        splitter.addWidget(side)
+        side_scroll = QScrollArea()
+        side_scroll.setObjectName("gameControlsScroll")
+        side_scroll.setWidgetResizable(True)
+        side_scroll.setFrameShape(QFrame.Shape.NoFrame)
+        side_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        side_scroll.setWidget(side)
+        self.game_controls_scroll = side_scroll
+        splitter.addWidget(side_scroll)
         splitter.setStretchFactor(0, 13)
         splitter.setStretchFactor(1, 7)
         splitter.setSizes([850, 450])
         self.game_splitter = splitter
         splitter.splitterMoved.connect(lambda *_: QTimer.singleShot(0, self._apply_board_size))
         splitter.setOrientation(
-            Qt.Orientation.Vertical if self.width() < 1120 else Qt.Orientation.Horizontal)
+            Qt.Orientation.Vertical if self._game_layout_should_stack()
+            else Qt.Orientation.Horizontal)
         # The board workspace itself must not become a page-wide scroll area:
         # the move table owns its own scrolling and the side controls stay in view.
         game_page = QWidget()
@@ -2158,6 +2173,19 @@ class MainWindow(QMainWindow):
             review_size = max(320, min(requested, review_width, review_height))
             self.review_workspace.review_board.setFixedSize(review_size, review_size)
 
+    def _game_layout_should_stack(self) -> bool:
+        """Stack game board and controls when either dimension is compact.
+
+        At 1280×720 the nominal width is enough for two columns, but the short
+        height (especially at 125%/150% UI scaling) leaves the move controls
+        and action labels clipped. A vertical splitter gives the board and
+        independently scrollable control pane their own visible regions.
+        """
+        # At laptop widths a horizontal split gives the action pane the full
+        # workspace height. Stacking it below the board hides time-sensitive
+        # online controls behind a second scroll viewport.
+        return self.width() < 900
+
     def _set_focus_mode(self, enabled: bool) -> None:
         self._board_focus_mode = bool(enabled)
         if hasattr(self, "game_splitter"):
@@ -2189,7 +2217,8 @@ class MainWindow(QMainWindow):
         self._apply_board_size()
         if hasattr(self, "game_splitter"):
             self.game_splitter.setOrientation(
-                Qt.Orientation.Vertical if self.width() < 1120 else Qt.Orientation.Horizontal)
+                Qt.Orientation.Vertical if self._game_layout_should_stack()
+                else Qt.Orientation.Horizontal)
             QTimer.singleShot(0, self._apply_board_size)
         self._apply_header_responsive()
         self._layout_dashboard_metrics()
@@ -2958,7 +2987,11 @@ class MainWindow(QMainWindow):
         online = self._online_actions_allowed()
         for button in (self.play_ai_button, self.play_friend_button,
                        self.play_challenge_button, self.play_active_button):
-            button.setEnabled(online)
+            # Mode cards are navigation, not request controls. Keep them
+            # selectable offline so the owner can inspect/configure a mode;
+            # _create_play_request remains the single strict network gate and
+            # never sends a POST until the connection is ready.
+            button.setEnabled(True)
             button.setToolTip("Подключите Lichess; запросы остаются отключены до готовности соединения."
                               if not online else "Доступно при активном соединении Lichess.")
         if self._pending_play_request_mode:
@@ -3356,20 +3389,81 @@ class MainWindow(QMainWindow):
         game_id = str(game.get("game_id") or "")
         if not game_id:
             return
-        record = dict(game)
-        # Recent-game rows come from the account-scoped Home query; verify the
-        # durable line still exists before opening a read-only review session.
-        current = self.game_repository.get_game(game_id)
-        if not current:
-            self.home_status.setText("Эта партия больше недоступна в локальной базе.")
-            return
-        if (record.get("line_revision") is not None
-                and current.get("line_revision") != record.get("line_revision")):
-            self.home_status.setText("Линия партии обновилась; главную страницу обновляю перед разбором.")
+        snapshot = self._latest_dashboard_snapshot or {}
+        expected_account = (snapshot.get("filter") or {}).get("account_id")
+        if hasattr(self, "dashboard_account") and self.dashboard_account.currentData() != expected_account:
             self._refresh_home_dashboard()
             return
-        current.update({key: value for key, value in record.items()
-                        if value is not None and key not in {"moves", "initial_fen", "line_revision"}})
+        expected_revision = (int(game["line_revision"])
+                             if game.get("line_revision") is not None else None)
+        self._home_game_read_generation += 1
+        generation = self._home_game_read_generation
+        previous = self._home_game_read_handle
+        if previous is not None and previous.is_alive():
+            previous.cancel("home_game_selection_changed")
+        stop_event = threading.Event()
+        self._home_game_read_context = (game_id, expected_account, expected_revision)
+        self.home_status.setText("Открываю выбранную партию…")
+
+        def worker() -> None:
+            try:
+                record = self.game_repository.get_game(game_id)
+                if stop_event.is_set():
+                    return
+                if record is not None and expected_account is not None:
+                    with self.game_repository._connection() as db:
+                        linked = db.execute(
+                            "SELECT 1 FROM account_games WHERE account_id=? AND game_id=?",
+                            (expected_account, game_id)).fetchone()
+                    if not linked:
+                        record = None
+                error = None
+            except Exception as exc:
+                record = None
+                error = f"Не удалось загрузить партию ({type(exc).__name__})."
+            if not stop_event.is_set():
+                self.home_game_read_finished.emit(
+                    generation, game_id, expected_account, expected_revision,
+                    (dict(game), record), error)
+
+        self._home_game_read_handle = self._start_registered_work(
+            worker, kind="home_game_detail_read", lane=OperationLane.INTERACTIVE,
+            thread_name="cc-home-game-read", stop_event=stop_event)
+
+    def _home_game_read_result_ready(self, generation: int, game_id: str,
+                                     account_id: object, line_revision: object,
+                                     payload: object, error: object) -> None:
+        if (generation != self._home_game_read_generation
+                or self._home_game_read_context != (str(game_id), account_id, line_revision)
+                or self.screen_stack.currentWidget() is not self.home_page):
+            return
+        selected_account = (self.dashboard_account.currentData()
+                            if hasattr(self, "dashboard_account") else account_id)
+        latest_account = ((self._latest_dashboard_snapshot or {}).get("filter") or {}).get(
+            "account_id")
+        if selected_account != account_id or latest_account != account_id:
+            self.home_status.setText("Аккаунт главной изменился; повторите выбор партии.")
+            return
+        if error:
+            self.home_status.setText(str(error))
+            return
+        if not isinstance(payload, tuple) or len(payload) != 2:
+            self.home_status.setText("Данные выбранной партии недоступны.")
+            return
+        card, record = payload
+        if not isinstance(record, dict):
+            self.home_status.setText("Эта партия больше не принадлежит выбранному аккаунту.")
+            return
+        if (line_revision is not None
+                and record.get("line_revision") != line_revision):
+            self.home_status.setText(
+                "Линия партии обновилась; главную страницу обновляю перед разбором.")
+            self._refresh_home_dashboard()
+            return
+        current = dict(record)
+        current.update({key: value for key, value in card.items()
+                        if value is not None and key not in {
+                            "moves", "initial_fen", "line_revision", "account_id"}})
         if not self._open_saved_game(current):
             self.home_status.setText(self._raw_only_game_message(current))
 
@@ -4681,6 +4775,10 @@ class MainWindow(QMainWindow):
                     item = QListWidgetItem(
                         f"{date} · {outcome_label} · {attempt['puzzle_rating'] or 'без рейтинга'} · {themes}")
                     item.setData(Qt.ItemDataRole.UserRole, attempt)
+                    item.setToolTip(
+                        f"{date}\n{outcome_label} · рейтинг задачи: "
+                        f"{attempt['puzzle_rating'] or 'нет данных'}\nТемы: {themes}\n"
+                        "Попытка хранится локально; ответ не отправляется на Lichess.")
                     history.addItem(item)
                 page_count = max(1, result["pages"])
                 state["page"] = min(state["page"], page_count - 1)
@@ -6260,6 +6358,7 @@ class MainWindow(QMainWindow):
 
     def show_active_games(self) -> None:
         self.show_play()
+        self._play_mode_page.select_mode("active")
         if not self._online_actions_allowed():
             cooldown = self._lichess_rate_limit_remaining()
             self._play_mode_page.set_active_games(status=(f"Ограничение Lichess · повтор через {cooldown} с."
@@ -7442,8 +7541,8 @@ class MainWindow(QMainWindow):
                              "noStart", "variantEnd", "finished", "aborted"}
         finished = session.status in terminal_statuses
         no_regular_clock = session.speed in {"correspondence", "unlimited"}
-        if session.clock_state_valid is False and (no_regular_clock or finished):
-            text = "Завершена · без часов" if finished else "Без обычных часов"
+        if session.clock_state_valid is False and no_regular_clock:
+            text = "Завершена · без обычных часов" if finished else "Без обычных часов"
             self.opponent_clock_label.setText(text)
             self.you_clock_label.setText(text)
             self.clock_label.setText(
@@ -7459,10 +7558,16 @@ class MainWindow(QMainWindow):
                 f"font-size: 22px; font-weight: 700; padding: 2px 8px; color: {TOKENS.secondary};")
             return
         if session.clock_state_valid is False:
-            message = "—:— · часы синхронизируются"
+            known_control = str(session.clock_control or "-")
+            message = ("Часы недоступны" if finished else "—:— · часы синхронизируются")
             self.opponent_clock_label.setText(message)
             self.you_clock_label.setText(message)
-            self.clock_label.setText("Ожидаем корректные часы сервера")
+            self.clock_label.setText(
+                (f"Контроль {known_control} · партия завершена, часы остановлены"
+                 if finished and known_control != "-" else
+                 "Партия завершена · контроль времени не подтверждён" if finished else
+                 f"Контроль {known_control} · ожидаем корректные часы сервера"
+                 if known_control != "-" else "Ожидаем корректные часы сервера"))
             self.opponent_clock_detail.clear()
             self.you_clock_detail.clear()
             self.opponent_clock_label.setStyleSheet(
@@ -7717,12 +7822,42 @@ class MainWindow(QMainWindow):
                 return
             self.archive_sync.refresh_game(self.lichess, game["game_id"])
 
+        def retry_selected_analysis(game=None):
+            game = game or selected_game()
+            if not isinstance(game, dict) or not game.get("source_game_id"):
+                return
+            if not self.lichess or not self._online_actions_allowed():
+                self._notify_inline("Подключите Lichess для повторной проверки выбранной партии.")
+                return
+            if any(session.status in {"started", "playing"}
+                   for session in self._sessions_for_safety()):
+                self._notify_inline("Проверка готовых оценок отложена до завершения активной партии.")
+                return
+            username = str(getattr(self.lichess, "username", "") or "").strip()
+            account_id = str(game.get("account_id") or "")
+            if not account_id.startswith("lichess:"):
+                if not username:
+                    self._notify_inline("Не удалось определить аккаунт для выбранной партии.")
+                    return
+                account_id = self.game_repository.ensure_archive_account(username)
+            self.game_repository.enqueue_lichess_analysis_backfill(account_id)
+            line_revision = game.get("line_revision")
+            if line_revision is None or not self.game_repository.retry_lichess_analysis_game(
+                    account_id, str(game["game_id"]), line_revision=int(line_revision)):
+                self._notify_inline("Выбранная партия изменилась или не принадлежит этому аккаунту.")
+                return
+            generation = self.lichess.auth_generation
+            self._start_lichess_analysis_backfill(
+                generation, manual=True, preferred_game_id=str(game["game_id"]))
+            self._notify_inline("Повторно проверяется только выбранная партия; лимиты Lichess сохранены.")
+
         page.query_requested.connect(load_page)
         page.open_requested.connect(open_selected)
         page.export_requested.connect(export_selected)
         page.note_requested.connect(save_selected_note)
         page.analyze_requested.connect(analyze_selected)
         page.refresh_requested.connect(refresh_selected)
+        page.retry_analysis_requested.connect(retry_selected_analysis)
         load_page(page.current_filters(), int(self.settings.value(
             "workspace/library_page", 0, type=int)))
         page.close_button.setText("Главная")
@@ -8498,7 +8633,10 @@ class MainWindow(QMainWindow):
             return False
         self.screen_stack.setCurrentWidget(self.review_workspace)
         self.game_status.setText("Сохранённая завершённая партия · только чтение")
-        self._active_route = "games"
+        # _shell_screen_changed already records the route transition and keeps
+        # the actual origin (Home or Library) on WorkspaceNavigator's back stack.
+        # Overwriting only the persistence field here used to restore the wrong
+        # route after opening a card directly from Home.
         self._schedule_workspace_save()
         if not self.offline_mode and self._lichess_connected:
             self._request_review_training_safety(str(game["game_id"]))
@@ -8529,6 +8667,7 @@ class MainWindow(QMainWindow):
         self._cancel_legacy_metrics_batch("shutdown")
         self._cancel_lichess_backfill_wakeup()
         for handle_name in ("_library_query_handle", "_library_detail_handle",
+                            "_home_game_read_handle",
                             "_external_study_handle"):
             handle = getattr(self, handle_name, None)
             if handle is not None and handle.is_alive():

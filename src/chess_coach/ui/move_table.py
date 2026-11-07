@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import chess
 from decimal import Decimal, ROUND_HALF_UP
-from PySide6.QtCore import Qt, Signal
+from PySide6.QtCore import QTimer, Qt, Signal
 from PySide6.QtGui import QColor
 from PySide6.QtWidgets import (
     QAbstractItemView, QHeaderView, QTableWidget, QTableWidgetItem, QWidget, QVBoxLayout,
@@ -13,9 +13,11 @@ from PySide6.QtWidgets import (
 
 _SEVERITY = {
     "good": ("✓", "Хороший ход"),
-    "inaccuracy": ("!", "Неточность"),
-    "mistake": ("?!", "Ошибка"),
-    "blunder": ("??", "Зевок"),
+    # Avoid chess NAG punctuation whose conventional meanings differ from
+    # the product's classifier labels (! is a good move; ?! is dubious).
+    "inaccuracy": ("△", "Неточность"),
+    "mistake": ("✕", "Ошибка"),
+    "blunder": ("‼", "Зевок"),
     "strong": ("★", "Подтверждённый сильный ход"),
 }
 _SEVERITY_COLORS = {
@@ -68,6 +70,7 @@ class MoveTable(QWidget):
         self.table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectItems)
         self.table.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
         self.table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        self.table.setVerticalScrollMode(QAbstractItemView.ScrollMode.ScrollPerPixel)
         self.table.verticalHeader().setVisible(False)
         self.table.setWordWrap(False)
         self.table.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
@@ -272,9 +275,22 @@ class MoveTable(QWidget):
                 item = self.table.item(row, column)
                 if item is not None and item.data(Qt.ItemDataRole.UserRole) == ply:
                     self.table.setCurrentItem(item)
-                    self.table.scrollToItem(item, QAbstractItemView.ScrollHint.EnsureVisible)
+                    self.table.scrollToItem(item, QAbstractItemView.ScrollHint.PositionAtBottom)
+                    # Showing an asynchronously loaded review can trigger a
+                    # splitter resize after selection. Repeat the scroll once
+                    # the queued layout pass has settled, fenced by ply so an
+                    # older callback cannot move a newer selection.
+                    QTimer.singleShot(0, lambda selected=ply: self._scroll_selected_ply(selected))
                     return
         self.table.clearSelection()
+
+    def _scroll_selected_ply(self, ply: int):
+        current = self.table.currentItem()
+        if current is None or current.data(Qt.ItemDataRole.UserRole) != int(ply):
+            return
+        item = self.item_by_ply(ply)
+        if item is not None:
+            self.table.scrollToItem(item, QAbstractItemView.ScrollHint.PositionAtBottom)
 
     def setCurrentRow(self, ply: int):
         """Compatibility helper for callers that used the former one-ply list."""

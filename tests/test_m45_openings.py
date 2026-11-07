@@ -205,13 +205,13 @@ def test_schema_v16_upgrade_preserves_existing_facts_and_backup(tmp_path):
         db.execute("PRAGMA user_version=15")
     upgraded = GameRepository(path)
     try:
-        assert SCHEMA_VERSION == 21
+        assert SCHEMA_VERSION == 22
         assert upgraded.get_game("keep")["moves"] == "e2e4 e7e5"
         with upgraded._connection() as db:
-            assert db.execute("PRAGMA user_version").fetchone()[0] == 21
+            assert db.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION
             assert db.execute("SELECT COUNT(*) FROM opening_matches").fetchone()[0] == 0
             assert db.execute("PRAGMA integrity_check").fetchone()[0] == "ok"
-        with sqlite3.connect(str(path) + ".pre-m3-v21.bak") as backup:
+        with sqlite3.connect(str(path) + f".pre-m3-v{SCHEMA_VERSION}.bak") as backup:
             assert backup.execute("PRAGMA user_version").fetchone()[0] == 15
             assert backup.execute("SELECT COUNT(*) FROM games").fetchone()[0] == 1
     finally:

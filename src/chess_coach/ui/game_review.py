@@ -175,6 +175,8 @@ class ReviewGraph(QWidget):
                     int(math.ceil(target / 1_000_000) * 1_000_000))
 
     def plot_rect(self):
+        if self.compact:
+            return self.rect().adjusted(42, 6, -12, -20)
         return self.rect().adjusted(54, 18, -14, -31)
 
     @staticmethod
@@ -551,7 +553,8 @@ class GameReviewWorkspace(QWidget):
         metrics_column.addWidget(self.phase_selector)
         self.side_metrics_summary = QTableWidget(0, 3)
         self.side_metrics_summary.setObjectName("reviewSideMetrics")
-        self.side_metrics_summary.setHorizontalHeaderLabels(("Показатель", "Я", "Соперник"))
+        self.side_metrics_summary.setHorizontalHeaderLabels(("Показатель", "Я", "Сопер."))
+        self.side_metrics_summary.horizontalHeaderItem(2).setToolTip("Соперник")
         self.side_metrics_summary.setAccessibleName("Сравнительная статистика партии")
         self.side_metrics_summary.setSelectionMode(QAbstractItemView.SelectionMode.NoSelection)
         self.side_metrics_summary.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
@@ -571,8 +574,9 @@ class GameReviewWorkspace(QWidget):
         self.left_metrics_label.setVisible(False)
         self.phase_summary = QLabel("Фазы: н/д")
         self.phase_summary.setWordWrap(True)
-        self.phase_summary.setMaximumHeight(22)
-        self.phase_summary.setWordWrap(False)
+        self.phase_summary.setMinimumHeight(0)
+        self.phase_summary.setSizePolicy(QSizePolicy.Policy.Preferred,
+                                         QSizePolicy.Policy.Minimum)
         self.phase_summary.setToolTip(
             "Официальная Lichess accuracy доступна только для партии целиком. "
             "Фазовая точность не выводится без отдельной доказанной метрики.")
@@ -582,7 +586,7 @@ class GameReviewWorkspace(QWidget):
 
         inspector = QWidget()
         self.review_inspector = inspector
-        inspector.setMinimumWidth(340)
+        inspector.setMinimumWidth(0)
         inspector_layout = QVBoxLayout(inspector)
         self.advantage_bar = AdvantageBar()
         inspector_layout.addWidget(self.advantage_bar, 0, Qt.AlignmentFlag.AlignLeft)
@@ -732,20 +736,36 @@ class GameReviewWorkspace(QWidget):
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
+        compact_review = self.height() < 620
+        # In the desktop shell the review page has less vertical space than
+        # its own widget height because the app header/navigation are outside
+        # this page. Preserve a usable move viewport at compact 640px windows
+        # by yielding chart height before compressing the move table to zero.
+        graph = getattr(self, "graph", None)
+        if graph is not None:
+            graph.setMinimumHeight(68 if compact_review else 170)
+            graph.setMaximumHeight(74 if compact_review else 220)
+            graph.compact = compact_review
+            graph.update()
         splitter = getattr(self, "workspace_splitter", None)
         if splitter is not None:
-            compact = self.width() < 980
-            splitter.setOrientation(Qt.Orientation.Vertical if compact else Qt.Orientation.Horizontal)
-            if not compact and not self._review_splitter_user_sized:
+            stack_only = self.width() < 700
+            splitter.setOrientation(Qt.Orientation.Vertical if stack_only else Qt.Orientation.Horizontal)
+            if not stack_only and not self._review_splitter_user_sized:
                 available = max(1, splitter.width() - 8)
-                left_width = min(370, max(360, round(available * .30)))
-                board_side = max(180, min(splitter.height() - 8,
-                                          available - left_width - 340 - 8))
+                compact = self.width() < 980
+                left_width = (max(190, round(available * .30)) if compact else
+                              min(410, max(385, round(available * .38))))
+                inspector_width = (max(220, round(available * .34)) if compact else
+                                   max(300, round(available * .31)))
+                board_side = max(170, min(splitter.height() - 8,
+                                          available - left_width - inspector_width - 8))
                 board_width = board_side + 8
                 splitter.setSizes([left_width, board_width,
-                                   max(340, available - left_width - board_width)])
-            self.left_metrics.setMinimumWidth(0 if compact else 360)
-            self.left_metrics.setMaximumWidth(16777215 if compact else 370)
+                                   max(220 if compact else 300,
+                                       available - left_width - board_width)])
+            self.left_metrics.setMinimumWidth(0)
+            self.left_metrics.setMaximumWidth(16777215)
             self._fit_review_board()
 
     def showEvent(self, event):
@@ -1060,6 +1080,7 @@ class GameReviewWorkspace(QWidget):
         for row_index, values in enumerate(rows):
             for col_index, value in enumerate(values):
                 item = QTableWidgetItem(str(value))
+                item.setToolTip(str(value))
                 if row_index == 0 and scope != "all":
                     item.setToolTip("Локальная точность по сохранённым оценкам выбранной фазы.")
                 table.setItem(row_index, col_index, item)

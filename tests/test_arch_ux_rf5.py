@@ -92,7 +92,7 @@ def test_home_geometry_has_only_approved_visible_controls_at_common_sizes(qtbot,
     window.close()
 
 
-def test_library_inspector_scrolls_instead_of_clipping_filters_on_compact_window(
+def test_library_filters_stay_inside_left_zone_on_compact_window(
         qtbot, tmp_path):
     window = _offline_window(qtbot, tmp_path, "library-compact")
     window.resize(1280, 720)
@@ -104,10 +104,11 @@ def test_library_inspector_scrolls_instead_of_clipping_filters_on_compact_window
     assert page.filter_panel.isHidden()
     page.filters_toggle.click()
     qtbot.waitUntil(page.filter_panel.isVisible)
-    viewport = page.aside_scroll.viewport()
-    bottom = page.filter_panel.mapTo(viewport, page.filter_panel.rect().bottomLeft()).y()
-    scroll = page.aside_scroll.verticalScrollBar()
-    assert bottom - (scroll.maximum() - scroll.value()) < viewport.height()
+    filter_rect = page.filter_panel.geometry()
+    left_rect = page.left_panel.rect()
+    assert left_rect.contains(filter_rect), (filter_rect.getRect(), left_rect.getRect())
+    assert page.games.isVisibleTo(page)
+    assert page.games.height() > 0
     assert page.search.height() >= 28
     assert page.account_filter.height() >= 28
     assert page.detail_open.height() > 0
@@ -244,6 +245,8 @@ def test_home_recent_game_click_opens_exact_saved_review(qtbot, tmp_path):
     window._render_dashboard_snapshot({"metrics": [], "recent_games": [game]})
     card = window._recent_games_layout.itemAt(0).widget()
     card.activated.emit()
+    qtbot.waitUntil(lambda: window.screen_stack.currentWidget() is window.review_workspace,
+                    timeout=2500)
     assert window.screen_stack.currentWidget() is window.review_workspace
     assert window.review_workspace.review["game"]["game_id"] == "synthetic-home-route"
     assert window._screen_mode == "review"

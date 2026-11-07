@@ -352,7 +352,8 @@ class LichessSyncMixin:
     def refresh_lichess_analysis_background(self, *, generation: int,
                                             limit: int = 10,
                                             daily_limit: int = 25,
-                                            force_retry: bool = False) -> None:
+                                            force_retry: bool = False,
+                                            preferred_game_id: str | None = None) -> None:
         """Resume one small, authenticated JSON backfill batch on the current account."""
         if (self.repository is None or not self.username or self._closing
                 or not self.is_auth_generation_current(generation)):
@@ -411,6 +412,7 @@ class LichessSyncMixin:
                     username, token, stop, limit=max(1, min(10, int(limit))),
                     daily_limit=max(1, min(100, int(daily_limit))),
                     force_retry=force_retry,
+                    preferred_game_id=preferred_game_id,
                     generation_is_current=lambda: (
                         self.is_operation_context_current(context) and not self._closing),
                     progress=lambda done, total, game: self.lichess_analysis_backfill_progress.emit(

@@ -319,12 +319,26 @@ class SQLiteMigrationMixin:
                     accuracy_checked_at TEXT, evals_checked_at TEXT,
                     accuracy_next_retry_at TEXT, evals_next_retry_at TEXT,
                     attempts INTEGER NOT NULL DEFAULT 0, last_error TEXT, updated_at TEXT NOT NULL,
+                    lease_owner TEXT, lease_heartbeat_at TEXT,
                     PRIMARY KEY(account_id,game_id))""")
-                db.execute("INSERT INTO lichess_analysis_backfill SELECT * FROM lichess_analysis_backfill_v18")
+                db.execute("INSERT INTO lichess_analysis_backfill("
+                           "account_id,game_id,line_revision,line_hash,accuracy_status,evals_status,"
+                           "accuracy_checked_at,evals_checked_at,accuracy_next_retry_at,"
+                           "evals_next_retry_at,attempts,last_error,updated_at) "
+                           "SELECT account_id,game_id,line_revision,line_hash,accuracy_status,"
+                           "evals_status,accuracy_checked_at,evals_checked_at,"
+                           "accuracy_next_retry_at,evals_next_retry_at,attempts,last_error,updated_at "
+                           "FROM lichess_analysis_backfill_v18")
                 db.execute("DROP TABLE lichess_analysis_backfill_v18")
                 db.execute("CREATE INDEX idx_lichess_analysis_backfill_due ON "
                            "lichess_analysis_backfill(account_id,accuracy_next_retry_at,"
                            "evals_next_retry_at,updated_at)")
+            backfill_columns = {row[1] for row in
+                                db.execute("PRAGMA table_info(lichess_analysis_backfill)")}
+            for name, definition in (("lease_owner", "TEXT"),
+                                     ("lease_heartbeat_at", "TEXT")):
+                if name not in backfill_columns:
+                    db.execute(f"ALTER TABLE lichess_analysis_backfill ADD COLUMN {name} {definition}")
             budget_columns = {row[1] for row in db.execute(
                 "PRAGMA table_info(lichess_analysis_backfill_budget)")}
             if "retry_after_at" not in budget_columns:

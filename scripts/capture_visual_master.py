@@ -19,8 +19,8 @@ from types import SimpleNamespace
 import chess
 from PySide6.QtCore import QPoint, QRect, QSize, Qt
 from PySide6.QtGui import QColor, QCursor, QImage, QPainter
-from PySide6.QtTest import QTest
-from PySide6.QtWidgets import QApplication, QLabel, QListWidgetItem, QToolTip, QWidget
+from PySide6.QtTest import QSignalSpy, QTest
+from PySide6.QtWidgets import QApplication, QLabel, QListWidgetItem, QScrollArea, QToolTip, QWidget
 
 from chess_coach.bootstrap import create_runtime
 from chess_coach.application.dashboard import dashboard_snapshot
@@ -56,6 +56,77 @@ def wait_for(condition, description: str, *, timeout: float = 20.0) -> None:
         if time.monotonic() >= deadline:
             raise AssertionError(f"Timed out waiting for {description}")
         QTest.qWait(25)
+
+
+def assert_action_target(window: QWidget, widget: QWidget, description: str) -> None:
+    """Check a real visible click target, not only a container's dimensions."""
+    assert widget.isVisibleTo(window), f"{description} is hidden"
+    rect = QRect(widget.mapTo(window, QPoint(0, 0)), widget.size())
+    assert rect.width() >= 24 and rect.height() >= 24, (
+        f"{description} has a truncated click target {rect.getRect()}"
+    )
+    assert window.rect().contains(rect), (
+        f"{description} extends outside the actual window: {rect.getRect()}"
+    )
+    if hasattr(widget, "accessibleName"):
+        assert widget.accessibleName() or getattr(widget, "text", lambda: "")(), (
+            f"{description} lacks an accessible label"
+        )
+
+
+def assert_no_widget_overlap(first: QWidget, second: QWidget, description: str) -> None:
+    assert first.isVisible() and second.isVisible(), f"{description}: a required widget is hidden"
+    first_rect = QRect(first.mapToGlobal(QPoint(0, 0)), first.size())
+    second_rect = QRect(second.mapToGlobal(QPoint(0, 0)), second.size())
+    assert not first_rect.intersects(second_rect), (
+        f"{description}: {first_rect.getRect()} overlaps {second_rect.getRect()}"
+    )
+
+
+def assert_label_fits(label: QLabel, description: str) -> None:
+    assert label.isVisible(), f"{description} is hidden"
+    if label.hasHeightForWidth():
+        required = label.heightForWidth(max(1, label.width()))
+        assert required <= label.height(), (
+            f"{description} is vertically clipped: required={required}, actual={label.height()}"
+        )
+    elif not label.wordWrap():
+        required = label.fontMetrics().horizontalAdvance(label.text())
+        assert required <= label.width(), (
+            f"{description} is horizontally clipped: required={required}, actual={label.width()}, "
+            f"text={label.text()!r}"
+        )
+
+
+def assert_scroll_action(scroll: QScrollArea, widget: QWidget, description: str) -> None:
+    scroll.ensureWidgetVisible(widget)
+    QApplication.processEvents()
+    assert widget.isVisible(), f"{description} is hidden"
+    bounds = QRect(widget.mapTo(scroll.viewport(), QPoint(0, 0)), widget.size())
+    assert scroll.viewport().rect().contains(bounds), (
+        f"{description} cannot be fully reached in its local scroll area: {bounds.getRect()}"
+    )
+    assert bounds.width() >= 24 and bounds.height() >= 24, (
+        f"{description} has a truncated click target: {bounds.getRect()}"
+    )
+
+
+def assert_native_tooltip_bounds(window: QWidget, widget: QWidget, description: str) -> None:
+    tooltip = widget.toolTip().strip()
+    assert tooltip, f"{description} must have a full explanatory tooltip"
+    anchor = widget.mapToGlobal(widget.rect().center())
+    QToolTip.showText(anchor, tooltip, widget)
+    QTest.qWait(120)
+    popup = QApplication.activePopupWidget()
+    if popup is not None and popup.isVisible():
+        screen = window.screen()
+        assert screen is not None
+        popup_global = QRect(popup.mapToGlobal(QPoint(0, 0)), popup.size())
+        assert screen.availableGeometry().contains(popup_global), (
+            f"{description} tooltip extends beyond the usable display: "
+            f"{popup_global.getRect()} vs {screen.availableGeometry().getRect()}"
+        )
+    QToolTip.hideText()
 
 
 def seed_synthetic_repository(repo, settings) -> tuple[str, str]:
@@ -365,12 +436,144 @@ def wait_background(window, *, active: bool) -> None:
             raise
 
 
+def exercise_play_mode_targets(window: MainWindow) -> None:
+    page = window._play_mode_page
+    create_spy = QSignalSpy(page.create_requested)
+    for mode in ("local", "ai", "friend", "challenge", "active"):
+        button = page.buttons[mode]
+        assert_scroll_action(page.content_scroll, button, f"Play mode {mode}")
+        assert_action_target(window, button, f"Play mode {mode}")
+        assert button.accessibleName() or button.text(), f"Mode {mode} needs an accessible label"
+        # Native Qt's synthesized click follows the real screen pointer at high
+        # DPI; position it explicitly so this verifies an actual click target.
+        QCursor.setPos(button.mapToGlobal(button.rect().center()))
+        QTest.mouseClick(button, Qt.MouseButton.LeftButton)
+        QTest.qWait(10)
+        assert page.mode_selector.currentData() == mode, (
+            f"Clicking {mode} must select that mode exactly once."
+        )
+        assert all(not card.isHidden() for card in page.cards), (
+            "Every game mode must remain reachable while Active is selected."
+        )
+        assert page.active_panel.isVisible() == (mode == "active"), (
+            "Active-games content must only show in the Active mode."
+        )
+        assert create_spy.count() == 0, "Selecting a mode must not submit a game/challenge POST."
+        if mode == "active":
+            page.active_games.clearSelection()
+            page._clear_active_preview("Синтетическая позиция не загружена.")
+            assert page.active_preview_board.isHidden()
+            assert not page.active_open.isEnabled()
+    page.select_mode("local")
+    page.content_scroll.verticalScrollBar().setValue(0)
+
+
 def capture(window: MainWindow, output: Path, name: str, width: int, height: int) -> QImage:
     if window.isMaximized() or window.isFullScreen():
         window.showNormal()
     window.resize(width, height)
     QTest.qWait(30)
     current = window.screen_stack.currentWidget()
+    if current is window.play_page:
+        page = window._play_mode_page
+        assert page.form_rows["Режим"].isHidden(), (
+            "Mode cards are the primary navigation; a duplicate visible combo wastes compact space."
+        )
+        mode = str(page.mode_selector.currentData())
+        assert all(not card.isHidden() for card in page.cards), (
+            "Every game mode must remain reachable while Active is selected."
+        )
+        assert page.active_panel.isVisible() == (mode == "active"), (
+            "Active-games content must only show in the Active mode."
+        )
+        assert_scroll_action(page.content_scroll, page.buttons[mode], f"Play mode {mode}")
+        assert_action_target(window, page.buttons[mode], f"Play mode {mode}")
+        page.content_scroll.verticalScrollBar().setValue(0)
+        QTest.qWait(20)
+    if current is window.game_page:
+        assert window.game_status.isVisible()
+        assert_label_fits(window.game_status, "Game status")
+        assert window.moves.isVisible() and window.moves.table.rowCount() > 0
+        assert window.game_splitter.orientation() == (
+            Qt.Orientation.Vertical if window._game_layout_should_stack()
+            else Qt.Orientation.Horizontal)
+        assert_no_widget_overlap(window.board, window.game_status, "Game board and status")
+        assert_no_widget_overlap(window.board, window.moves, "Game board and move history")
+        assert_scroll_action(window.game_controls_scroll, window.clear_marks_button,
+                             "Clear board annotations")
+        assert_action_target(window, window.clear_marks_button, "Clear board annotations")
+        window.game_controls_scroll.verticalScrollBar().setValue(0)
+        QTest.qWait(20)
+    training_page = (current if isinstance(current, PuzzleHistoryPage)
+                     else current.findChild(PuzzleHistoryPage))
+    if training_page is not None:
+        assert training_page.history.count() > 0
+        assert training_page.board.isVisible()
+        assert_no_widget_overlap(training_page.board, training_page.solution,
+                                 "Puzzle board and solution text")
+        for button, name_ in ((training_page.replay, "Repeat puzzle"),
+                              (training_page.reveal, "Reveal solution"),
+                              (training_page.reset_replay, "Reset puzzle"),
+                              (training_page.close_button, "Close puzzle history")):
+            assert_action_target(window, button, name_)
+        assert_label_fits(training_page.solution, "Puzzle solution/explanation")
+        assert training_page.history.horizontalScrollBar().maximum() == 0, (
+            "Puzzle history must elide long rows instead of adding horizontal scrolling."
+        )
+        for index in range(training_page.history.count()):
+            item = training_page.history.item(index)
+            assert item.toolTip(), "Elided puzzle history rows must preserve full details on hover."
+    if current is window.review_workspace:
+        page = current
+        assert page.review and page.moves_list.table.rowCount() > 0
+        assert page.side_metrics_summary.rowCount() >= 4
+        assert page.graph.full_ply_count >= 16
+        assert_no_widget_overlap(page.review_board, page.side_metrics_summary,
+                                 "Review board and comparison table")
+        assert_label_fits(page.phase_summary, "Review phase summary")
+        assert_action_target(window, page.export_button, "Export PGN")
+        assert_action_target(window, page.training_button, "Review mistakes")
+        last_ply = len(page.review.get("moves") or {})
+        # Select the last move through the production review API so its table
+        # row is scrolled into view before verifying the real clickable target.
+        page.select_ply(last_ply)
+        QTest.qWait(50)  # allow the native splitter/table geometry pass to settle
+        QApplication.processEvents()
+        row = page.moves_list.item_by_ply(last_ply)
+        assert row is not None and row.text().strip(), "Selected-line move row must be populated."
+        bounds = page.moves_list.table.visualItemRect(row)
+        if not (bounds.isValid() and page.moves_list.table.viewport().rect().contains(bounds)):
+            print("review move target geometry:", {
+                "last_ply": last_ply, "selected_ply": page.selected_ply,
+                "rows": page.moves_list.table.rowCount(),
+                "row_index": page.moves_list.table.row(row) if row else None,
+                "item_ply": row.data(Qt.ItemDataRole.UserRole) if row else None,
+                "bounds": bounds.getRect(), "viewport": page.moves_list.table.viewport().rect().getRect(),
+                "table": page.moves_list.table.geometry().getRect(),
+                "visible": page.moves_list.table.isVisible(),
+                "scroll": page.moves_list.table.verticalScrollBar().value(),
+                "scroll_max": page.moves_list.table.verticalScrollBar().maximum(),
+                "page": page.geometry().getRect(),
+                "split": page.workspace_splitter.geometry().getRect(),
+                "board_column": page.board_column.geometry().getRect(),
+                "inspector": page.review_inspector.geometry().getRect(),
+                "review_layout": [page.layout().itemAt(i).geometry().getRect()
+                                  for i in range(page.layout().count())],
+                "inspector_layout": [page.review_inspector.layout().itemAt(i).geometry().getRect()
+                                     for i in range(page.review_inspector.layout().count())],
+            })
+        assert bounds.isValid() and page.moves_list.table.viewport().rect().contains(bounds), (
+            "The selected move must be visible and clickable in the review table."
+        )
+        QTest.mouseClick(page.moves_list.table.viewport(), Qt.MouseButton.LeftButton,
+                         pos=bounds.center())
+        assert page.selected_ply == last_ply
+        page.select_ply(0)
+    if current is window.home_page:
+        for route, button in window._nav_buttons.items():
+            if route in {"home", "games", "play", "analysis", "training", "progress"}:
+                assert button.isVisible() and button.isEnabled()
+                assert_action_target(window, button, f"Navigation {route}")
     if isinstance(current, BackgroundOperationsPage):
         cards = [item[0] for item in current._workflow_cards]
         assert all(left.geometry().bottom() < right.geometry().top()
@@ -414,8 +617,25 @@ def capture(window: MainWindow, output: Path, name: str, width: int, height: int
     elif current is window.library_page:
         game = window.library_page._detail_game or {}
         wait_selected_review(window.library_page, str(game.get("game_id") or ""))
+        page = window.library_page
+        page_actions = (page.previous, page.following, page.sync_button,
+                        page.background_button, page.settings_button,
+                        page.detail_open, page.export_game, page.analyze_game,
+                        page.retry_analysis_button)
+        for button in page_actions:
+            if button.isVisible() and button.isEnabled():
+                assert_action_target(window, button, button.accessibleName() or button.text())
+        assert page.search.toolTip() == "Поиск по сопернику, дебюту или дате"
+        assert_native_tooltip_bounds(window, page.search, "Library search")
+        selected = page.selected_game()
+        selected_item = page.games.currentItem()
+        assert selected and selected_item and selected_item.toolTip(), (
+            "The selected library row must preserve full text/source in its tooltip."
+        )
+        assert_label_fits(page.detail_title, "Library selected-game title")
+        if page.detail_players.isVisible():
+            assert_label_fits(page.detail_players, "Library selected players/score")
         if height <= 700:
-            page = window.library_page
             row_rect = page.page_actions_row.geometry()
             stack_rect = window.screen_stack.rect()
             row_in_stack = QRect(
@@ -618,9 +838,19 @@ def main() -> None:
                     "1. e4 e5 2. Nf3 Nc6 3. Bb5 a6 *")
                 window.analysis_page.set_external_status(
                     "Синтетическая PGN для проверки формы; архив и сеть не изменяются.")
+            if route == "play":
+                exercise_play_mode_targets(window)
             image = capture(window, output, route, width, height)
             captured[route] = image
             if route == "play":
+                for mode in ("ai", "friend", "challenge", "active"):
+                    button = window._play_mode_page.buttons[mode]
+                    QCursor.setPos(button.mapToGlobal(button.rect().center()))
+                    QTest.mouseClick(button, Qt.MouseButton.LeftButton)
+                    assert window._play_mode_page.mode_selector.currentData() == mode
+                    image = capture(window, output, f"play-mode-{mode}", width, height)
+                    captured[f"play-mode-{mode}"] = image
+                window._play_mode_page.select_mode("local")
                 board = chess.Board()
                 board.push_uci("e2e4")
                 window._play_mode_page.mode_selector.setCurrentIndex(
@@ -725,7 +955,7 @@ def main() -> None:
         captured["game-review"] = capture(window, output, "game-review", width, height)
 
         # Settings are captured once per tab at the largest target size.
-        expected_count = (3 * len(target_sizes) + len(offline_sizes) + 10
+        expected_count = (3 * len(target_sizes) + len(offline_sizes) + 14
                           + tabs.count())
         assert len(captured) == expected_count, (
             f"Expected {expected_count} screenshot states, got {len(captured)}"

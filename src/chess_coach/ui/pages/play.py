@@ -7,7 +7,8 @@ from collections.abc import Callable
 import chess
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (QCheckBox, QComboBox, QApplication, QFrame, QGridLayout, QHBoxLayout,
-                               QLabel, QLineEdit, QListWidget, QListWidgetItem, QPushButton, QSpinBox, QVBoxLayout, QWidget)
+                               QLabel, QLineEdit, QListWidget, QListWidgetItem, QPushButton, QScrollArea,
+                               QSpinBox, QVBoxLayout, QWidget)
 from ...board_view import BoardView
 
 
@@ -29,13 +30,25 @@ class PlayPage(QWidget):
 
     def __init__(self, actions: dict[str, Callable], parent=None) -> None:
         super().__init__(parent)
-        layout = QVBoxLayout(self)
+        root_layout = QVBoxLayout(self)
         title = QLabel("Выберите режим игры")
         title.setObjectName("pageTitle")
-        layout.addWidget(title)
+        root_layout.addWidget(title)
         note = QLabel("Выберите локальную доску или сетевую партию. Текущая партия не сбрасывается.")
         note.setObjectName("secondary")
-        layout.addWidget(note)
+        note.setWordWrap(True)
+        root_layout.addWidget(note)
+        self.content_scroll = QScrollArea(self)
+        self.content_scroll.setObjectName("playContentScroll")
+        self.content_scroll.setWidgetResizable(True)
+        self.content_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.content_scroll.setFrameShape(QFrame.Shape.NoFrame)
+        self.content = QWidget()
+        layout = QVBoxLayout(self.content)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(8)
+        self.content_scroll.setWidget(self.content)
+        root_layout.addWidget(self.content_scroll, 1)
         self.mode_selector = QComboBox()
         for label, value in (("Свободная доска", "local"),
                              ("Lichess AI", "ai"), ("Друг по ссылке", "friend"),
@@ -99,6 +112,12 @@ class PlayPage(QWidget):
             row_widget.setLayout(row)
             self.form_rows[label] = row_widget
             form_layout.addWidget(row_widget)
+        # The five mode cards are the primary mode navigation. Keeping a second
+        # visible mode combo here duplicated the same choice and pushed the
+        # actual controls below the fold on compact/high-DPI windows. Retain the
+        # combo as the keyboard/accessibility-backed selection model, but expose
+        # mode selection through the cards and keep the form for mode options.
+        self.form_rows["Режим"].hide()
         form_layout.addWidget(self.custom_clock_row)
         form_layout.addWidget(self.rated)
         form_layout.addWidget(self.form_status)
@@ -146,6 +165,7 @@ class PlayPage(QWidget):
         self.active_preview_board.set_annotations_enabled(False)
         self.active_preview_board.set_premove_allowed(False)
         self.active_preview_board.set_show_legal_moves(False)
+        self.active_preview_board.hide()
         preview_column.addWidget(self.active_preview_status)
         preview_column.addWidget(self.active_preview_board, 0, Qt.AlignmentFlag.AlignHCenter)
         preview_row.addLayout(preview_column)
@@ -153,7 +173,7 @@ class PlayPage(QWidget):
         self.active_open.setEnabled(False)
         self.active_open.clicked.connect(self._open_selected_active_game)
         self.active_games.currentItemChanged.connect(
-            lambda item, _old: self.active_open.setEnabled(item is not None))
+            lambda item, _old: self._set_active_open_enabled(item))
         active_layout.addWidget(self.active_status)
         active_layout.addWidget(preview)
         active_layout.addWidget(self.active_open)
@@ -212,11 +232,7 @@ class PlayPage(QWidget):
             button.setChecked(key == mode)
         self.active_panel.setVisible(mode == "active")
         for card in getattr(self, "cards", ()):
-            # The active-games panel already contains the list, selected
-            # confirmed board and Continue action. Hiding redundant mode cards
-            # in that state keeps those actions on-screen at compact heights;
-            # the mode selector remains available to switch elsewhere.
-            card.setVisible(mode != "active")
+            card.setVisible(True)
         online = mode in {"ai", "friend", "challenge"}
         self.color.setVisible(online)
         self.clock.setVisible(online)
@@ -290,16 +306,16 @@ class PlayPage(QWidget):
         elif self.active_games.count():
             self.active_games.setCurrentRow(0)
         else:
-            self.active_preview_status.setText("Нет подтверждённой позиции активной партии.")
-            self.active_preview_board.set_position(chess.Board())
+            self._clear_active_preview("Нет подтверждённой позиции активной партии.")
         self.active_status.setText(status or (
             "Выберите партию для продолжения." if self.active_games.count()
             else "Активных партий нет."))
-        self.active_panel.show()
+        self._update_form()
 
     def _show_active_preview(self, item, _previous=None) -> None:
         game = item.data(Qt.ItemDataRole.UserRole) if item is not None else None
         if not isinstance(game, dict):
+            self._clear_active_preview("Выберите партию, чтобы увидеть подтверждённую позицию.")
             return
         fen = game.get("fen")
         try:
@@ -309,20 +325,43 @@ class PlayPage(QWidget):
         except (TypeError, ValueError):
             board = None
         if board is None:
-            self.active_preview_status.setText("Позиция ещё не подтверждена сервером.")
+            self._clear_active_preview("Позиция ещё не подтверждена сервером.")
             return
         color = game.get("color")
         self.active_preview_board.set_position(board)
         self.active_preview_board.set_flipped(color == "black")
+        self.active_preview_board.show()
+        self.active_open.setEnabled(True)
         self.active_preview_status.setText(
             "Подтверждённая позиция · " + {"white": "вы играете белыми",
                                             "black": "вы играете чёрными"}.get(
                                                 color, "цвет неизвестен"))
 
+    def _clear_active_preview(self, message: str) -> None:
+        self.active_preview_board.hide()
+        self.active_preview_status.setText(str(message))
+        self.active_open.setEnabled(False)
+
+    def _set_active_open_enabled(self, item) -> None:
+        if item is None:
+            self.active_open.setEnabled(False)
+            return
+        game = item.data(Qt.ItemDataRole.UserRole)
+        self.active_open.setEnabled(bool(isinstance(game, dict) and self._valid_fen(game.get("fen"))))
+
+    @staticmethod
+    def _valid_fen(fen) -> bool:
+        try:
+            board = chess.Board(str(fen)) if fen else None
+            return bool(board is not None and board.is_valid())
+        except (TypeError, ValueError):
+            return False
+
     def _open_selected_active_game(self) -> None:
         item = self.active_games.currentItem()
-        if item is not None:
-            self.active_game_requested.emit(item.data(Qt.ItemDataRole.UserRole))
+        game = item.data(Qt.ItemDataRole.UserRole) if item is not None else None
+        if isinstance(game, dict) and self._valid_fen(game.get("fen")):
+            self.active_game_requested.emit(game)
 
     def set_status(self, text: str) -> None:
         self.form_status.setText(str(text))

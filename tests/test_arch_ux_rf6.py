@@ -278,6 +278,8 @@ def test_home_game_card_opens_exact_saved_review_directly(qtbot, tmp_path):
                               "source": "нет данных"}
     window._render_dashboard_snapshot({"metrics": [], "recent_games": [game]})
     window._open_home_game_details(game)
+    qtbot.waitUntil(lambda: window.screen_stack.currentWidget() is window.review_workspace,
+                    timeout=2500)
     assert window.screen_stack.currentWidget() is window.review_workspace
     assert window._review_session is not None
     assert window._review_session.game_id == target

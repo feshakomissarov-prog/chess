@@ -4,7 +4,7 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 
-from chess_coach.lichess.repository import GameRepository
+from chess_coach.lichess.repository import GameRepository, SCHEMA_VERSION
 from chess_coach.lichess.statistics import StatisticsService
 
 
@@ -232,7 +232,7 @@ def test_archive_import_records_date_precision_and_unknown_date_is_not_recent(tm
         assert repo.get_game("timestamp")["game_time_precision"] == "timestamp"
         assert repo.get_game("unknown")["game_time_precision"] == "unknown"
         with repo._connection() as db:
-            assert db.execute("PRAGMA user_version").fetchone()[0] == 21
+            assert db.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION
             assert db.execute("PRAGMA integrity_check").fetchone()[0] == "ok"
         with pytest.raises(ValueError, match="selected account"):
             StatisticsService(repo).personal_profile(account_id=None)

@@ -75,6 +75,7 @@ class GameRepository(
                                      move_annotations: list[dict], validation_issues: list[str],
                                      opening: dict | None = None,
                                      division: dict | None = None,
+                                     lease_owner: str | None = None,
                                      generation_is_current: Callable[[], bool] | None = None) -> int:
         """CAS-merge server analytics without replacing PGN or the current line.
 
@@ -91,6 +92,16 @@ class GameRepository(
                 db.execute("BEGIN IMMEDIATE")
                 if not current():
                     raise StaleGameLineError("stale_session: аккаунт уже сменился")
+                if lease_owner is not None:
+                    lease = db.execute(
+                        "SELECT 1 FROM lichess_analysis_backfill WHERE account_id=? AND game_id=? "
+                        "AND line_revision=? AND lease_owner=? "
+                        "AND (accuracy_status='running' OR evals_status='running')",
+                        (account_id, game_id, int(expected_line_revision),
+                         str(lease_owner))).fetchone()
+                    if not lease:
+                        raise StaleGameLineError(
+                            "stale_lease: фоновая проверка больше не владеет записью очереди")
                 linked = db.execute("""
                     SELECT g.line_revision,g.source_game_id,g.moves,gr.line_hash,
                            gr.is_current,a.username

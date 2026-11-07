@@ -275,3 +275,27 @@ Windows, обычный Qt backend `windows`, 1360×860, временная SQLi
 | PARKED | Полный граф путей приложения | Explicitly excluded by owner | НЕ ВЫПОЛНЯЛОСЬ |
 
 **Ручная приёмка:** подтвердить физическую читаемость при DPI 100/125/150%, звуковую задержку на устройстве, live Lichess reconnect/official JSON and actual Stockfish lifecycle; проверить три доступных screenshot pairs. Автоматический и native capture не выдаются за ручной приём владельца.
+
+
+## CORR-01…16 — independent corrective gate (08.11.2026)
+
+| ID | Defect/evidence | Fix and regression evidence | Result / remaining limit |
+|---|---|---|---|
+| CORR-01 | Compact play-card CTA clipping | Responsive card scroll; selection-only clicks; QTest covers all five modes and no POST | PASS synthetic native, 1120×640 @150% |
+| CORR-02 | Active panel leaking into other modes | Visibility follows selected mode; late data cannot show panel | PASS Qt mode-switch regressions |
+| CORR-03 | Previous game's preview retained on invalid FEN | Neutral hidden preview; continue disabled; account/game identity checked | PASS synthetic valid→invalid→empty |
+| CORR-04 | Game UI overlaps at compact sizes | Horizontal split retained until narrow width; viewport/action geometry checks at 1120/1280 | PASS native synthetic; physical owner DPI not run |
+| CORR-05 | Training text/board/actions overlap | Separate board/solution/action layout; compact reset caption with full tooltip; no horizontal scroll | PASS native synthetic 1120 @150% |
+| CORR-06 | Review coverage and rows overlap/empty capture | Separate metrics/coverage, selected 17-ply review table and actual graph | PASS native synthetic; owner aesthetics remain |
+| CORR-07 | Library footer/actions clipped | Two-row inspector actions, minimum widths, full row details in tooltip/accessibility | PASS native synthetic; click-through automated |
+| CORR-08 | Reference fidelity | New populated native pairs compared with three immutable arts at 1672×941; compact screenshots included | Evidence captured; exact aesthetic match and owner acceptance remain NOT ACCEPTED |
+| CORR-09 | Correspondence completion priority uses start date | Completion/last move timestamp, source-aware fallback, reserved backlog slice | PASS SQLite 3,510-game synthetic |
+| CORR-10 | Global retry clears all TTLs | Global check obeys per-item due time; selected retry revision-scoped; never clears 429 | PASS temporary SQLite/fake service |
+| CORR-11 | Move sound waits HTTP ACK | Pending status is immediate; confirmed sound/state remains ACK-gated, preventing false confirmation | Safety behavior PASS; perceptual/audio-device latency remains NOT PROVEN |
+| CORR-12 | Invalid finished clock mislabeled untimed | Preserve known time control; distinguish invalid terminal snapshot from untimed/correspondence | PASS fake session/Qt |
+| CORR-13 | Home→Review synchronous SQLite/context loss | Worker-based account/revision-fenced read; delayed read does not block Qt; home Back preserved | PASS temporary SQLite barrier test |
+| CORR-14 | Lease and manual/batch priority concurrency | Two-worker CAS, live heartbeat, stale-owner recovery and fake-engine batch/manual handoff | PASS deterministic fake concurrency |
+| CORR-15 | Ambiguous NAG-like severity glyphs | △/✕/‼/✓ and neutral unknown; tooltip/accessibility text | PASS move-table regressions |
+| CORR-16 | Visual harness false PASS | Strict dimension/DPR, populated selection, click targets, text-fit and overlap assertions; negative fixture | PASS native capture 30+23+23; screen-reader/physical DPI not tested |
+
+**Native run paths:** `%TEMP%\chess-corr-gate-native-100`, `%TEMP%\chess-corr-gate-native-125`, `%TEMP%\chess-corr-gate-native-final`. Hosted Windows CI artifact URL is added after exact final SHA run. Synthetic automation is not physical owner acceptance; no real credentials, user database, API or Stockfish used. Final local full suite on Python 3.12.10: 894 PASS / 261.82 s, worker-thread warnings-as-errors; compileall and diff-check PASS. Native visible synthetic capture: 76/76 strict states at Qt scales 1/1.25/1.5.
