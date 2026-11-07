@@ -1,6 +1,6 @@
 # Chess Coach — карта ТЗ и статусов (07.11.2026)
 
-> **НЕ начинай с древнего \`REVIEW-FIX-01\` и не читай \`main\` как текущую реализацию!** Сначала [документ передачи контекста следующему чату](../handoffs/NEW_CHAT_START_HERE_2026_11_07.md). Все указания ниже — **документы** в docs-only draft [PR #45](https://github.com/feshakomissarov-prog/chess/pull/45); код — в [draft PR #44](https://github.com/feshakomissarov-prog/chess/pull/44). Указанный статус верен на 07.11.2026, после новых коммитов нужно повторное ревью. **Правило одного консолидированного ТЗ**, а не цепочки маленьких RF.
+> **НЕ начинай с древнего `REVIEW-FIX-01` и не читай `main` как текущую реализацию!** Сначала [документ передачи контекста следующему чату](../handoffs/NEW_CHAT_START_HERE_2026_11_07.md). Все указания ниже — **документы** в docs-only draft [PR #45](https://github.com/feshakomissarov-prog/chess/pull/45); код — в [draft PR #44](https://github.com/feshakomissarov-prog/chess/pull/44). Указанный статус верен на 07.11.2026, после новых коммитов нужно повторное ревью. **Правило одного консолидированного ТЗ**, а не цепочки маленьких RF.
 
 ## Где лежит что
 
@@ -16,11 +16,11 @@
 
 ## Что УТВЕРЖДЕНО владельцем, а что ЕЩЁ НЕТ
 
-**Утверждено:** оболочка шести рабочих разделов и Settings; [UX-B1](../ux/UX_APPROVED_BASELINE_V1.md); [UX-A2](../ux/UX_ANALYSIS_APPROVED_V2.md); [UX-GAME-01](../ux/GAME_WORKSPACE_AND_FINISH_STATES_V1.md); **три конкретных эталонных изображения** Home, My Games, Background — на кодовой ветке в \`tests/visual/reference/{01_HOME_APPROVED,02_MY_GAMES_APPROVED,03_BACKGROUND_APPROVED}.png\`. Утверждён **визуальный результат**, не цифры synthetic-датасета. Реализацию сравнивать с артом, а не с другим screenshot.
+**Утверждено:** оболочка шести рабочих разделов и Settings; [UX-B1](../ux/UX_APPROVED_BASELINE_V1.md); [UX-A2](../ux/UX_ANALYSIS_APPROVED_V2.md); [UX-GAME-01](../ux/GAME_WORKSPACE_AND_FINISH_STATES_V1.md); **три конкретных эталонных изображения** Home, My Games, Background — на кодовой ветке в `tests/visual/reference/{01_HOME_APPROVED,02_MY_GAMES_APPROVED,03_BACKGROUND_APPROVED}.png`. Утверждён **визуальный результат**, не цифры synthetic-датасета. Реализацию сравнивать с артом, а не с другим screenshot.
 
-**Исполнено Codex по отчёту, но НЕ принято окончательно владельцем:** VIS6-01…05 на кодовом SHA \`5c375b070e6644dbded5fca62d960fc09c90651e\`; [CI #368](https://github.com/feshakomissarov-prog/chess/actions/runs/42318755878) 837 PASS, native Windows screenshot artifact. Независимое техническое/визуальное ревью выявило новые проблемы. Не объявлять close/merge.
+**Исполнено Codex по отчёту, но НЕ принято окончательно владельцем:** VIS6-01…05 на кодовом SHA `5c375b070e6644dbded5fca62d960fc09c90651e`; [CI #368](https://github.com/feshakomissarov-prog/chess/actions/runs/42318755878) 837 PASS, native Windows screenshot artifact. Независимое техническое/визуальное ревью выявило новые проблемы. Не объявлять close/merge.
 
-**В стадии обсуждения, НЕ кодовое ТЗ:** проблемы компактного Qt 125/150% (обрезание и наложения), fidelity трёх эталонов, \`partial\` в Lichess counters, race \`handle_ref[0]\` в preview, длительность на реальной SQLite со множеством анализов; подробности в [handoff §4](../handoffs/NEW_CHAT_START_HERE_2026_11_07.md). **Не создавать исполняемый VIS7/новый RF без согласования с владельцем**, не публиковать отдельный MD-файл исправлений раньше обсуждения.
+**В стадии обсуждения, НЕ кодовое ТЗ:** проблемы компактного Qt 125/150% (обрезание и наложения), fidelity трёх эталонов, `partial` в Lichess counters, race `handle_ref[0]` в preview, длительность на реальной SQLite со множеством анализов; подробности в [handoff §4](../handoffs/NEW_CHAT_START_HERE_2026_11_07.md). **Не создавать исполняемый VIS7/новый RF без согласования с владельцем**, не публиковать отдельный MD-файл исправлений раньше обсуждения.
 
 **Будущий продуктовый roadmap:** обсуждён новый порядок (единый UI → глубокая аналитика → подготовка к сопернику → обучение на собственных партиях → адаптивный тренер), **пока не утверждён как изменение ROADMAP**. Не путать с ближайшим кодовым scope.
 
