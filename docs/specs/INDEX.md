@@ -1,3 +1,5 @@
+> **07.11.2026 · ЕДИНОЕ ТЕКУЩЕЕ СВОДНОЕ ТЗ (ЕЩЁ НЕ УТВЕРЖДЕНО ДЛЯ CODEX): [ARCH_UX_01_VISUAL_MASTER_EXECUTION_2026_11_06.md §15](ARCH_UX_01_VISUAL_MASTER_EXECUTION_2026_11_06.md).** Оно содержит **ВМЕСТЕ** все оставшиеся замечания по дизайну и технический системный аудит на SHA `5c375b07`: 3 визуальные группы V-01…03; 6 source-confirmed T-01…06; 5 рисков/недостатков тестового evidence R-01…05; единая матрица red→green, Fair Play/SQLite/credentials/Qt/CI/native visual acceptance. **Не создавать второе ТЗ `TECH`, не запускать RF/новый Codex цикл до решения владельца.**
+
 # Chess Coach — карта ТЗ и статусов (07.11.2026)
 
 > **НЕ начинай с древнего `REVIEW-FIX-01` и не читай `main` как текущую реализацию!** Сначала [документ передачи контекста следующему чату](../handoffs/NEW_CHAT_START_HERE_2026_11_07.md). Все указания ниже — **документы** в docs-only draft [PR #45](https://github.com/feshakomissarov-prog/chess/pull/45); код — в [draft PR #44](https://github.com/feshakomissarov-prog/chess/pull/44). Указанный статус верен на 07.11.2026, после новых коммитов нужно повторное ревью. **Правило одного консолидированного ТЗ**, а не цепочки маленьких RF.
