@@ -65,7 +65,7 @@ def stylesheet(t: Theme = TOKENS) -> str:
         background: {t.surface}; border: 1px solid {t.border}; border-radius: {radius}px;
     }}
     QLabel#secondary, QLabel#muted, QLabel#connectionStatus {{ color: {t.secondary}; }}
-    QLabel#pageTitle {{ font-size: 22px; font-weight: 700; }}
+    QLabel#pageTitle {{ font-size: {30 if t is VISUAL_TOKENS else 22}px; font-weight: 700; }}
     QPushButton, QToolButton {{
         background: {t.raised}; color: {t.text}; border: 1px solid {t.border};
         border-radius: 8px; padding: 9px 14px; min-height: 22px;

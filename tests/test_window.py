@@ -610,7 +610,7 @@ def test_background_inspector_reads_archive_and_puzzle_checkpoints_off_ui(
     assert any("Задачи Lichess · сохранено 0 попыток" in row for row in rows)
     assert all("synthetic-secret-error" not in row for row in rows)
     assert "Сохранено партий: " in page.workflow_status["archive"].text()
-    assert "Сохранено попыток: " in page.workflow_status["puzzles"].text()
+    assert "Попыток: 0" in page.workflow_status["puzzles"].text()
     assert read_threads and read_threads[0] != gui_thread
     window.close()
 
@@ -3717,6 +3717,7 @@ def test_home_dashboard_masks_cached_analysis_when_safety_is_pending_or_human_ga
     card = window._recent_games_layout.itemAt(0).widget()
     assert card.findChild(QLabel, "dashboardAnalysisMetrics") is None
     assert "Оценки скрыты" in card.findChild(QLabel, "dashboardAnalysisCoverage").text()
+    assert card.findChild(QLabel, "dashboardAnalysisCoverage").isHidden()
     assert not window.recent_safety_notice.isHidden()
 
     window._dashboard_analysis_safety_allowed = True
@@ -4932,6 +4933,112 @@ def test_malformed_server_clock_is_not_rendered_as_plausible_time(qtbot, tmp_pat
     window.close()
 
 
+def test_correspondence_and_finished_games_do_not_wait_forever_for_clocks(qtbot, tmp_path):
+    window = MainWindow(QSettings(str(tmp_path / "clock-correspondence.ini"),
+                                  QSettings.Format.IniFormat), offline_mode=True)
+    qtbot.addWidget(window)
+    session = LichessGameSession("correspondence-clock", window.game_repository)
+    session.status = "playing"
+    session.speed = "correspondence"
+    session.days_per_turn = 3
+    session.clock_state_valid = False
+    session.clock_metadata_invalid = True
+    window.online_session = session
+    window._screen_mode = "online"
+
+    window._update_clock()
+    assert window.you_clock_label.text() == "Без обычных часов"
+    assert window.clock_label.text() == "Переписка · срок хода 3 дн."
+
+    session.status = "mate"
+    window._update_clock()
+    assert window.you_clock_label.text() == "Завершена · без часов"
+    assert window.clock_label.text() == "Партия завершена · часы остановлены"
+    window.close()
+
+
+def test_online_move_sound_waits_for_successful_post_and_is_once(qtbot, tmp_path, monkeypatch):
+    window = MainWindow(QSettings(str(tmp_path / "move-sound-ack.ini"),
+                                  QSettings.Format.IniFormat), offline_mode=True)
+    qtbot.addWidget(window)
+    session = LichessGameSession("sound-ack", window.game_repository)
+    session.bind_owner("synthetic", 7)
+    session.status = "playing"
+    session.awaiting_authoritative_snapshot = False
+    sent = []
+
+    class _Service:
+        auth_generation = 7
+
+        def is_auth_generation_current(self, generation):
+            return generation == self.auth_generation
+
+        def send_move(self, game_id, uci, request_id):
+            sent.append((game_id, uci, request_id))
+
+    class _Sound:
+        calls = []
+
+        def play_move(self, *args, **kwargs):
+            self.calls.append((args, kwargs))
+            return True
+
+    sound = _Sound()
+    window.lichess = _Service()
+    window.sound_player = sound
+    window.online_session = session
+    window._screen_mode = "online"
+    monkeypatch.setattr(window, "refresh", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(window, "_lichess_move_failed", lambda *_args: None)
+
+    window.on_move_intent(chess.Move.from_uci("e2e4"))
+    assert len(sent) == 1 and sound.calls == []
+    request_id = sent[0][2]
+    window._lichess_session_move_accepted(7, "sound-ack", "e2e4", request_id)
+    window._lichess_session_move_accepted(7, "sound-ack", "e2e4", request_id)
+    assert len(sound.calls) == 1
+    assert sound.calls[0][0][0:2] == ("sound-ack", 1)
+    assert sound.calls[0][1]["source"] == "confirmed"
+
+    session.fail_submission(request_id, definitive=True)
+    window.on_move_intent(chess.Move.from_uci("d2d4"))
+    rejected_request = sent[-1][2]
+    window._lichess_session_move_failed(7, "sound-ack", "d2d4", rejected_request, 400)
+    assert len(sound.calls) == 1
+    window.close()
+
+
+def test_entering_play_refreshes_active_games_once_per_ttl(qtbot, tmp_path, monkeypatch):
+    from types import SimpleNamespace
+    window = MainWindow(QSettings(str(tmp_path / "play-active-refresh.ini"),
+                                  QSettings.Format.IniFormat), offline_mode=True)
+    qtbot.addWidget(window)
+    calls = []
+
+    class _Service:
+        username = "synthetic"
+        auth_generation = 9
+        client = SimpleNamespace(rate_limit_remaining=0)
+
+        def fetch_active_games(self):
+            calls.append("fetch")
+            return f"req-{len(calls)}"
+
+    window.lichess = _Service()
+    window.offline_mode = False
+    window._lichess_connected = True
+    window._lichess_stream_ready_generation = 9
+    monkeypatch.setattr("chess_coach.window.time.monotonic", lambda: 100.0)
+
+    window.show_play()
+    window.show_play()
+    assert calls == ["fetch"]
+    window._refresh_active_games_for_play(force=True)
+    assert calls == ["fetch", "fetch"]
+    window.lichess = None
+    window.close()
+
+
 def test_queued_backfill_status_from_previous_account_is_ignored(qtbot, tmp_path):
     window = MainWindow(QSettings(str(tmp_path / "backfill-account-status.ini"),
                                   QSettings.Format.IniFormat), offline_mode=True)
@@ -5318,7 +5425,12 @@ def test_connected_analysis_allows_only_official_lichess_ai_and_blocks_bot_accou
     window._lichess_account_authenticated = True
     window._lichess_stream_ready_generation = 7
     launches = []
-    monkeypatch.setattr(window, "_launch_game_analysis", lambda *args, **kwargs: launches.append((args, kwargs)))
+    priority_events = []
+    monkeypatch.setattr(window, "_launch_game_analysis",
+                        lambda *args, **kwargs: (priority_events.append("launch"),
+                                                 launches.append((args, kwargs))))
+    monkeypatch.setattr(window, "_pause_batch_analysis",
+                        lambda *, manual=True: priority_events.append(("pause", manual)))
     monkeypatch.setattr(QMessageBox, "warning", lambda *_args: QMessageBox.StandardButton.Ok)
 
     window._start_game_analysis("finished-game", "fake-stockfish")
@@ -5327,13 +5439,17 @@ def test_connected_analysis_allows_only_official_lichess_ai_and_blocks_bot_accou
         {"gameId": "unopened-human-game", "source": "friend",
          "opponent": {"id": "friend", "username": "Friend"}}])
     assert not launches
+    assert not priority_events
     assert window._analysis_stop is None
 
+    window._batch_thread = type("ActiveBatch", (), {"is_alive": lambda _self: True})()
     window._start_game_analysis("finished-game", "fake-stockfish")
     window._analysis_safety_games_received(requests[-1], [
         {"gameId": "ai-game", "source": "ai", "opponent": {
             "id": None, "username": "Stockfish level 1", "ai": 1}}])
     assert len(launches) == 1
+    assert priority_events == [("pause", False), "launch"]
+    assert "освобождаем Stockfish" in window._analysis_dialog.labelText()
     assert not window._active_game_blocks_engine({"source": "ai", "opponent": {
         "id": None, "username": "Stockfish level 1", "ai": 1}})
     window._analysis_finished("finished-game", {"error": "fixture complete"})

@@ -229,9 +229,9 @@ def test_move_table_groups_white_and_black_in_fullmove_rows_and_keeps_ply(qtbot)
     table.set_rows(moves, scores={1: {"white_cp": 25}, 2: {"white_cp": 10}})
     assert table.table.rowCount() == 2
     assert table.table.item(0, 1).text().endswith("+0.3")
-    assert table.table.item(0, 2).text().startswith("? e5 +0.1")
+    assert table.table.item(0, 2).text() == "e5 +0.1"
+    assert table.table.item(0, 2).toolTip().startswith("Не оценено")
     assert table.table.item(0, 1).foreground().color().name() == "#58a978"
-    assert table.table.item(0, 2).foreground().color().name() == "#858b93"
     assert table.table.item(1, 1).text().startswith("?? ")
     selected = []
     table.ply_selected.connect(selected.append)
@@ -258,7 +258,8 @@ def test_move_table_black_to_move_fen_uses_fullmove_number_and_handles_empty_sid
     assert table.table.rowCount() == 1
     assert table.table.item(0, 0).text() == "25"
     assert table.table.item(0, 1).text() == ""
-    assert table.table.item(0, 2).text() == "? Kd7"
+    assert table.table.item(0, 2).text() == "Kd7"
+    assert table.table.item(0, 2).toolTip() == "Не оценено"
 
 
 def test_move_table_keeps_both_san_columns_visible_without_horizontal_scroll(qtbot):
@@ -286,12 +287,13 @@ def test_move_table_keeps_both_san_columns_visible_without_horizontal_scroll(qtb
     assert table.table.horizontalScrollBar().maximum() == 0
     assert table.table.horizontalHeader().sectionResizeMode(1) == QHeaderView.ResizeMode.Stretch
     assert table.table.horizontalHeader().sectionResizeMode(2) == QHeaderView.ResizeMode.Stretch
-    assert table.item_by_ply(1).text() == "? e4 +0.3"
-    assert table.item_by_ply(2).text() == "? e5 -0.2"
-    assert table.item_by_ply(3).text() == "? Nf3 +15.0"
+    assert table.item_by_ply(1).text() == "e4 +0.3"
+    assert table.item_by_ply(2).text() == "e5 -0.2"
+    assert table.item_by_ply(3).text() == "Nf3 +15.0"
     for ply in (1, 2, 3):
         item = table.item_by_ply(ply)
         assert item is not None and item.text()
+        assert item.toolTip().startswith("Не оценено")
         column = 1 if ply in (1, 3) else 2
         assert table.table.columnWidth(column) > 80
         assert table.table.fontMetrics().horizontalAdvance(item.text()) <= table.table.columnWidth(column)

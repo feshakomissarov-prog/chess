@@ -50,12 +50,17 @@ class AnalysisJobsStoreMixin:
     def enqueue_lichess_analysis_backfill(self, account_id: str, *, limit: int = 10_000) -> int:
         """Durably queue all saved, finished games for one account without touching lines."""
         now = datetime.now(timezone.utc).isoformat()
+        # A running row belongs to an in-flight request. Ordinary status reads
+        # and queue refreshes must not steal it; recover only leases that could
+        # have been orphaned by a process exit before this request began.
+        stale_running_before = (datetime.now(timezone.utc) - timedelta(minutes=10)).isoformat()
         limit = max(1, min(50_000, int(limit)))
         with self._connection() as db:
             db.execute("UPDATE lichess_analysis_backfill SET accuracy_status='queued',"
                        "evals_status='queued',updated_at=? WHERE account_id=? "
-                       "AND (accuracy_status='running' OR evals_status='running')",
-                       (now, account_id))
+                       "AND (accuracy_status='running' OR evals_status='running') "
+                       "AND updated_at<?",
+                       (now, account_id, stale_running_before))
             db.execute("""
                 INSERT INTO lichess_analysis_backfill(
                   account_id,game_id,line_revision,line_hash,accuracy_status,evals_status,updated_at)
@@ -116,7 +121,7 @@ class AnalysisJobsStoreMixin:
                            "evals_next_retry_at=CASE WHEN evals_status IN "
                            "('no_server_data','partial','error') THEN NULL ELSE evals_next_retry_at END "
                            "WHERE account_id=?", (account_id,))
-            rows = db.execute(f"""
+            select_sql = f"""
                 SELECT q.account_id,q.game_id,q.line_revision,q.line_hash,
                        q.accuracy_status,q.evals_status,q.attempts,q.last_error,
                        (q.accuracy_status IN {due} AND
@@ -135,11 +140,46 @@ class AnalysisJobsStoreMixin:
                    (q.accuracy_next_retry_at IS NULL OR q.accuracy_next_retry_at<=?)) OR
                   (q.evals_status IN {due} AND
                    (q.evals_next_retry_at IS NULL OR q.evals_next_retry_at<=?)))
-                ORDER BY CASE WHEN q.accuracy_status='queued' OR q.evals_status='queued'
-                              THEN 0 ELSE 1 END,
-                         g.started_at DESC,q.game_id LIMIT ?
-            """, (now, now, account_id, now, now, limit)).fetchall()
-        return [dict(row) for row in rows]
+            """
+
+            def select_page(condition: str, condition_values: tuple, order: str,
+                            count: int):
+                return db.execute(
+                    select_sql + condition + " ORDER BY " + order + " LIMIT ?",
+                    (now, now, account_id, now, now, *condition_values, count)).fetchall()
+
+            # Freshly completed games should receive prompt coverage, while a
+            # reserved slice keeps a large influx from starving older backlog.
+            recent_cutoff = (datetime.now(timezone.utc) - timedelta(days=14)).isoformat()
+            backlog_slots = max(1, limit // 5) if limit >= 5 else 0
+            fresh_slots = limit - backlog_slots
+            queued_first = "CASE WHEN q.accuracy_status='queued' OR q.evals_status='queued' " \
+                           "THEN 0 ELSE 1 END,"
+            recent_rows = select_page(
+                " AND g.started_at>=?", (recent_cutoff,),
+                queued_first + " g.started_at DESC,q.game_id", fresh_slots)
+            chosen = list(recent_rows)
+            chosen_ids = {row["game_id"] for row in chosen}
+            if backlog_slots:
+                older_rows = select_page(
+                    " AND (g.started_at IS NULL OR g.started_at<?)", (recent_cutoff,),
+                    queued_first + " CASE WHEN g.started_at IS NULL THEN 0 ELSE 1 END,"
+                    " g.started_at ASC,q.game_id", backlog_slots)
+                for row in older_rows:
+                    if row["game_id"] not in chosen_ids:
+                        chosen.append(row)
+                        chosen_ids.add(row["game_id"])
+
+            if len(chosen) < limit:
+                fallback = select_page(
+                    "", (), queued_first + " g.started_at DESC,q.game_id", limit * 2)
+                for row in fallback:
+                    if row["game_id"] not in chosen_ids:
+                        chosen.append(row)
+                        chosen_ids.add(row["game_id"])
+                        if len(chosen) >= limit:
+                            break
+        return [dict(row) for row in chosen[:limit]]
 
     def lichess_analysis_backfill_has_due_work(self, account_id: str, *,
                                                 daily_limit: int = 25,
@@ -289,16 +329,44 @@ class AnalysisJobsStoreMixin:
         with self._connection() as db:
             row = db.execute("""
               SELECT COUNT(*) total,
-                SUM(accuracy_status IN ('has_data','partial')) accuracy,
-                SUM(evals_status IN ('has_data','partial')) evals,
+                SUM(accuracy_status IN ('has_data','partial') AND EXISTS (
+                    SELECT 1 FROM games g JOIN account_games ag ON ag.game_id=g.game_id
+                    WHERE g.game_id=lichess_analysis_backfill.game_id
+                      AND ag.account_id=lichess_analysis_backfill.account_id
+                      AND ((ag.color='white' AND g.lichess_accuracy_white BETWEEN 0 AND 100)
+                        OR (ag.color='black' AND g.lichess_accuracy_black BETWEEN 0 AND 100)))) accuracy,
+                SUM(evals_status IN ('has_data','partial') AND EXISTS (
+                    SELECT 1 FROM analysis_runs ar JOIN position_assessments pa
+                      ON pa.run_id=ar.run_id JOIN game_revisions gr
+                      ON gr.game_id=ar.game_id AND gr.line_revision=ar.line_revision
+                         AND gr.is_current=1 AND gr.line_hash=ar.line_hash
+                    WHERE ar.game_id=lichess_analysis_backfill.game_id
+                      AND ar.line_revision=lichess_analysis_backfill.line_revision
+                      AND ar.source IN ('lichess-pgn','lichess-json')
+                      AND ar.status IN ('complete','partial')
+                      AND (pa.white_cp IS NOT NULL OR pa.mate_white IS NOT NULL))) evals,
                 SUM(accuracy_status='no_server_data' AND evals_status='no_server_data') no_data,
                 SUM(accuracy_status IN ('error','rate_limited','stale_line') OR evals_status IN ('error','rate_limited','stale_line')) errors,
                 SUM(accuracy_status='queued' OR evals_status='queued' OR accuracy_status='running' OR evals_status='running') pending,
                 SUM(accuracy_checked_at IS NOT NULL OR evals_checked_at IS NOT NULL) checked,
                 MAX(MAX(COALESCE(accuracy_checked_at,''),COALESCE(evals_checked_at,''))) last_checked_at,
-                MAX(MAX(CASE WHEN accuracy_status IN ('has_data','partial','no_server_data')
+                MAX(MAX(CASE WHEN accuracy_status IN ('has_data','partial') AND EXISTS (
+                               SELECT 1 FROM games g JOIN account_games ag ON ag.game_id=g.game_id
+                               WHERE g.game_id=lichess_analysis_backfill.game_id
+                                 AND ag.account_id=lichess_analysis_backfill.account_id
+                                 AND ((ag.color='white' AND g.lichess_accuracy_white BETWEEN 0 AND 100)
+                                   OR (ag.color='black' AND g.lichess_accuracy_black BETWEEN 0 AND 100)))
                              THEN COALESCE(accuracy_checked_at,'') ELSE '' END,
-                        CASE WHEN evals_status IN ('has_data','partial','no_server_data')
+                        CASE WHEN evals_status IN ('has_data','partial') AND EXISTS (
+                               SELECT 1 FROM analysis_runs ar JOIN position_assessments pa
+                                 ON pa.run_id=ar.run_id JOIN game_revisions gr
+                                 ON gr.game_id=ar.game_id AND gr.line_revision=ar.line_revision
+                                    AND gr.is_current=1 AND gr.line_hash=ar.line_hash
+                               WHERE ar.game_id=lichess_analysis_backfill.game_id
+                                 AND ar.line_revision=lichess_analysis_backfill.line_revision
+                                 AND ar.source IN ('lichess-pgn','lichess-json')
+                                 AND ar.status IN ('complete','partial')
+                                 AND (pa.white_cp IS NOT NULL OR pa.mate_white IS NOT NULL))
                              THEN COALESCE(evals_checked_at,'') ELSE '' END)) last_success_at,
                 MAX(CASE WHEN attempts>0 THEN updated_at ELSE '' END) last_attempt_at,
                 MAX(updated_at) updated_at,
@@ -318,6 +386,8 @@ class AnalysisJobsStoreMixin:
             "last_checked_at": None, "last_success_at": None, "last_attempt_at": None,
             "updated_at": None,
             "accuracy_retry_at": None, "evals_retry_at": None, "retry_waiting": 0}
+        if not summary.get("last_success_at"):
+            summary["last_success_at"] = None
         retry_values = [str(summary[key]) for key in ("accuracy_retry_at", "evals_retry_at")
                         if summary.get(key)]
         account_retry = self.lichess_analysis_retry_after(account_id)

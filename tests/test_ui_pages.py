@@ -4,7 +4,8 @@ from pathlib import Path
 from types import SimpleNamespace
 from PySide6.QtCore import QPoint, Qt
 from PySide6.QtTest import QTest
-from PySide6.QtWidgets import QApplication, QMainWindow, QScrollArea, QStackedWidget, QWidget
+from PySide6.QtWidgets import (QApplication, QMainWindow, QPushButton, QScrollArea,
+                               QStackedWidget, QWidget)
 
 from chess_coach.ui.pages import LibraryPage, PlayPage, ResultPage
 from chess_coach.ui.pages.background import BackgroundOperationsPage
@@ -13,7 +14,7 @@ from chess_coach.ui.dialogs import SettingsDialog
 from PySide6.QtCore import QSettings
 
 
-def test_play_page_keeps_each_action_connected_and_reflows_cards(qtbot):
+def test_play_page_mode_cards_only_select_and_explicit_button_starts(qtbot):
     calls = []
     actions = {key: (lambda key=key: calls.append(key))
                for key in ("local", "ai", "friend", "challenge", "active")}
@@ -21,8 +22,14 @@ def test_play_page_keeps_each_action_connected_and_reflows_cards(qtbot):
     qtbot.addWidget(page)
 
     page.buttons["ai"].click()
+    assert calls == []
+    assert page.mode_selector.currentData() == "ai"
+    assert not page.level.isHidden()
+    assert all(not card.isHidden() for card in page.cards)
     page.buttons["local"].click()
-    assert calls == ["ai", "local"]
+    assert calls == []
+    assert page.mode_selector.currentData() == "local"
+    assert not page.level.isVisible()
     page.layout_modes(900)
     assert page._columns == 1
     assert page.grid.getItemPosition(0) == (0, 0, 1, 1)
@@ -192,6 +199,34 @@ def test_play_page_exposes_cancel_only_for_cancellable_pending_challenge(qtbot):
     assert not page.cancel_pending_button.isVisible()
 
 
+def test_active_game_list_shows_only_server_confirmed_preview_and_preserves_selection(qtbot):
+    page = PlayPage({key: (lambda: None)
+                     for key in ("local", "ai", "friend", "challenge", "active")})
+    qtbot.addWidget(page)
+    page.mode_selector.setCurrentIndex(page.mode_selector.findData("active"))
+    start = chess.Board()
+    start.push_uci("e2e4")
+    games = [
+        {"gameId": "g1", "source": "ai", "opponent": {"ai": 4},
+         "color": "black", "speed": "correspondence", "fen": start.fen()},
+        {"gameId": "g2", "opponent": {"username": "Synthetic Opponent"},
+         "color": "white", "speed": "blitz"},
+    ]
+
+    page.set_active_games(games)
+    page.active_games.setCurrentRow(0)
+    assert "Lichess AI · уровень 4" in page.active_games.currentItem().text()
+    assert "чёрные" in page.active_games.currentItem().text()
+    assert page.active_preview_board._board.fen() == start.fen()
+    assert page.active_preview_board._flipped
+    assert "Подтверждённая позиция" in page.active_preview_status.text()
+
+    page.active_games.setCurrentRow(1)
+    page.set_active_games(list(reversed(games)), status="Обновлено")
+    assert page.active_games.currentItem().data(Qt.ItemDataRole.UserRole)["gameId"] == "g2"
+    assert "Позиция ещё не подтверждена" in page.active_preview_status.text()
+
+
 def test_library_uses_bounded_three_zone_layout_at_laptop_size(qtbot):
     page = LibraryPage()
     qtbot.addWidget(page)
@@ -288,6 +323,48 @@ def test_background_operations_page_renders_shared_registry_and_pause_state(qtbo
     assert page.recent_events.minimumHeight() >= 84
 
 
+def test_background_diagnostics_toggle_does_not_overlap_recent_events(qtbot):
+    page = BackgroundOperationsPage()
+    qtbot.addWidget(page)
+    page.resize(1672, 941)
+    page.show()
+    qtbot.wait(50)
+    toggle = page.findChild(QPushButton, "backgroundDiagnosticsToggle")
+    assert toggle is page.details_toggle
+    assert not toggle.geometry().intersects(page.recent_events.geometry())
+    assert abs(toggle.geometry().center().y() - page.recent_events_title.geometry().center().y()) < 30
+    toggle.click()
+    assert page.operation_list.isVisible()
+    toggle.click()
+    assert not page.operation_list.isVisible()
+
+
+def test_background_page_compact_layout_has_no_overlapping_cards_or_events(qtbot):
+    page = BackgroundOperationsPage()
+    qtbot.addWidget(page)
+    page.resize(1028, 580)
+    page.set_snapshot((), source_summary="synthetic",
+                      backfill_paused=False, can_check=True, can_pause=True,
+                      workflows={
+                          "archive": "Сохранено партий: 3 500 · первичная загрузка/продолжение не завершены\n"
+                                    "Последнее успешное обновление: 07.11.2026 19:06",
+                          "ready": "Проверено 3/8 · точность 1 · оценки 0\n"
+                                   "Без анализа 1 · ошибки 0 · повторы 0\n"
+                                   "Далее: после восстановления игрового потока Lichess",
+                          "puzzles": "Сохранено попыток: 12 · история полностью загружена\n"
+                                     "Последнее успешное обновление: 07.11.2026 19:06",
+                          "stockfish": "В очереди: 54 · готово: 128 · ошибки: 0\nЕщё не поставлено: 6",
+                      }, recent_events=[f"Синтетическое событие {i}" for i in range(4)])
+    page.show()
+    qtbot.wait(80)
+    cards = [item[0] for item in page._workflow_cards]
+    assert all(left.geometry().bottom() <= right.geometry().top()
+               for left, right in zip(cards, cards[1:]))
+    assert cards[-1].geometry().bottom() <= page.recent_events_title.geometry().top()
+    assert not page.recent_events.geometry().intersects(page.close_button.geometry())
+    assert all(card.height() >= 70 for card in cards)
+
+
 def test_position_setup_uses_shared_board_and_emits_ephemeral_fen(qtbot):
     page = PositionSetupWidget()
     qtbot.addWidget(page)
@@ -370,6 +447,8 @@ def test_library_detail_reuses_review_graph_and_masks_until_safety_gate(qtbot):
     assert page.detail_graph._values() == [(0, 10, None), (1, -25, None)]
     assert page.detail_graph.full_ply_count == 1
     assert "95.0% · Lichess / 90.0% · Lichess" in page.detail_metrics.text()
+    assert page.source_badges["Lichess"].text() == "Lichess · Официальная точность"
+    assert page.source_badges["Stockfish"].text() == "Stockfish · Нет данных"
     positions = []
     page.detail_position_requested.connect(lambda selected, ply: positions.append((selected, ply)))
     page.detail_graph.selected_ply.emit(1)

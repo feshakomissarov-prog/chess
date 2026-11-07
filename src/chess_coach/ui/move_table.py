@@ -12,7 +12,6 @@ from PySide6.QtWidgets import (
 
 
 _SEVERITY = {
-    "unknown": ("?", "Ход не классифицирован"),
     "good": ("✓", "Хороший ход"),
     "inaccuracy": ("!", "Неточность"),
     "mistake": ("?!", "Ошибка"),
@@ -21,7 +20,7 @@ _SEVERITY = {
 }
 _SEVERITY_COLORS = {
     "good": "#58a978", "inaccuracy": "#d1a638", "mistake": "#dd7a36",
-    "blunder": "#d95050", "strong": "#4aa6d8", "unknown": "#858b93",
+    "blunder": "#d95050", "strong": "#4aa6d8",
 }
 
 
@@ -142,7 +141,11 @@ class MoveTable(QWidget):
             else:
                 item = QTableWidgetItem(label)
                 base_label = san
-                if severity:
+                if severity == "unknown":
+                    item.setToolTip("Не оценено")
+                    item.setData(Qt.ItemDataRole.AccessibleDescriptionRole,
+                                 f"Не оценено: {san}")
+                elif severity:
                     item.setToolTip(f"Класс хода: {severity}")
                     item.setData(Qt.ItemDataRole.AccessibleDescriptionRole,
                                  f"Класс хода не распознан: {san}")
@@ -200,7 +203,11 @@ class MoveTable(QWidget):
         else:
             item = QTableWidgetItem(label)
             base_label = san
-            if severity:
+            if severity == "unknown":
+                item.setToolTip("Не оценено")
+                item.setData(Qt.ItemDataRole.AccessibleDescriptionRole,
+                             f"Не оценено: {san}")
+            elif severity:
                 item.setToolTip(f"Класс хода: {severity}")
         item.setData(Qt.ItemDataRole.UserRole, ply)
         item.setData(Qt.ItemDataRole.UserRole + 1, base_label)

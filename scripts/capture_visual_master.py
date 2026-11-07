@@ -17,16 +17,17 @@ from hashlib import sha256
 from types import SimpleNamespace
 
 import chess
-from PySide6.QtCore import QSize, Qt
-from PySide6.QtGui import QColor, QImage, QPainter
+from PySide6.QtCore import QPoint, QRect, QSize, Qt
+from PySide6.QtGui import QColor, QCursor, QImage, QPainter
 from PySide6.QtTest import QTest
-from PySide6.QtWidgets import QApplication, QLabel, QListWidgetItem, QWidget
+from PySide6.QtWidgets import QApplication, QLabel, QListWidgetItem, QToolTip, QWidget
 
 from chess_coach.bootstrap import create_runtime
 from chess_coach.application.dashboard import dashboard_snapshot
 from chess_coach.application.background_work import OperationLane
 from chess_coach.lichess.batch_analysis import BatchAnalysisRunner, FastPassOptions
 from chess_coach.ui.game_review import ReviewGraph
+from chess_coach.ui.pages.background import BackgroundOperationsPage
 from chess_coach.ui.pages.puzzles import PuzzleHistoryPage
 from chess_coach.window import MainWindow
 
@@ -312,8 +313,8 @@ def navigate_to_games(window: MainWindow, selected_game_id: str) -> None:
     assert expected_opponent in page.detail_players.text(), (
         "The selected row and player score must identify the same synthetic opponent.")
     assert "88.4% · Lichess" in page.detail_metrics.text()
-    assert "Stockfish · Есть данные" == page.source_badges["Stockfish"].text()
-    assert "Lichess · Есть данные" == page.source_badges["Lichess"].text()
+    assert "Stockfish · Оценки ходов" == page.source_badges["Stockfish"].text()
+    assert "Lichess · Официальная точность" == page.source_badges["Lichess"].text()
 
 
 def create_fake_active_operations(window, account_id: str):
@@ -370,6 +371,27 @@ def capture(window: MainWindow, output: Path, name: str, width: int, height: int
     window.resize(width, height)
     QTest.qWait(30)
     current = window.screen_stack.currentWidget()
+    if isinstance(current, BackgroundOperationsPage):
+        cards = [item[0] for item in current._workflow_cards]
+        assert all(left.geometry().bottom() < right.geometry().top()
+                   for left, right in zip(cards, cards[1:])), (
+            f"background workflow cards overlap at {width}x{height}: "
+            f"{[card.geometry().getRect() for card in cards]}"
+        )
+        assert cards[-1].geometry().bottom() < current.recent_events_title.geometry().top(), (
+            f"background cards overlap the recent events heading at {width}x{height}"
+        )
+        assert not current.recent_events.geometry().intersects(current.close_button.geometry()), (
+            f"background events overlap the back button at {width}x{height}"
+        )
+        for key, label in current.workflow_status.items():
+            required = (label.heightForWidth(label.width()) if label.hasHeightForWidth()
+                        else label.sizeHint().height())
+            assert required <= label.height(), (
+                f"background {key} status text is clipped at {width}x{height}: "
+                f"required={required}, actual={label.height()}"
+            )
+        print(f"background geometry: {width}x{height}, no overlaps; status labels fit")
     if current is window.home_page:
         expected_account = window.dashboard_account.currentData()
         if expected_account:
@@ -392,6 +414,32 @@ def capture(window: MainWindow, output: Path, name: str, width: int, height: int
     elif current is window.library_page:
         game = window.library_page._detail_game or {}
         wait_selected_review(window.library_page, str(game.get("game_id") or ""))
+        if height <= 700:
+            page = window.library_page
+            row_rect = page.page_actions_row.geometry()
+            stack_rect = window.screen_stack.rect()
+            row_in_stack = QRect(
+                page.page_actions_row.parentWidget().mapTo(window.screen_stack,
+                                                           row_rect.topLeft()),
+                row_rect.size())
+            buttons = (page.previous, page.following, page.sync_button,
+                       page.background_button, page.settings_button)
+            print("compact library geometry:", {
+                "page": page.geometry().getRect(), "stack": stack_rect.getRect(),
+                "row": row_rect.getRect(), "row_stack": row_in_stack.getRect(),
+                "buttons": [(button.text(), button.geometry().getRect(),
+                             button.mapTo(window.screen_stack, button.rect().bottomRight()).y())
+                            for button in buttons],
+            }, flush=True)
+            assert row_rect.isValid() and stack_rect.contains(row_in_stack), (
+                "Compact library must keep its pagination/action row inside the visible screen stack."
+            )
+            assert all(button.isVisible()
+                       and stack_rect.contains(button.mapTo(window.screen_stack,
+                                                           button.rect().bottomRight()))
+                       for button in buttons), (
+                "Compact library pagination and primary actions must remain visible."
+            )
     elif current is window._background_operations_page:
         active = any(
             operation.status.value == "running"
@@ -423,9 +471,19 @@ def capture(window: MainWindow, output: Path, name: str, width: int, height: int
             f"events={page.recent_events.count()} rows/{page.recent_events.height()}px, "
             f"cards={[card.height() for card, _icon, _title in page._workflow_cards]}")
     assert window.size() == QSize(width, height), (
-        f"Requested {width}x{height}, actual Qt window is {window.width()}x{window.height()}"
+        f"Requested {width}x{height}, actual Qt window is {window.width()}x{window.height()}, "
+        f"minimum={window.minimumWidth()}x{window.minimumHeight()}, "
+        f"maximized={window.isMaximized()}, page={type(window.screen_stack.currentWidget()).__name__}"
     )
     assert window.isVisible(), "capture target is not visible"
+    # Click-driven route navigation can leave the pointer on a control and
+    # produce a floating tooltip in the screenshot. Clear it and move the
+    # pointer outside the target window before taking the actual frame.
+    QToolTip.hideText()
+    QCursor.setPos(window.mapToGlobal(QPoint(width + 20, height + 20)))
+    QTest.qWait(80)
+    QToolTip.hideText()
+    QApplication.processEvents()
     image = window.grab().toImage()
     assert not image.isNull()
     dpr = float(image.devicePixelRatio())
@@ -467,10 +525,17 @@ def main() -> None:
         reconfigure = getattr(stream, "reconfigure", None)
         if reconfigure is not None:
             reconfigure(encoding="utf-8", errors="backslashreplace")
-    app = QApplication([])
-    assert app.platformName() == "windows", f"Expected native Windows Qt, got {app.platformName()}"
     output = Path(os.environ.get("CC_VISUAL_OUTPUT", "visual-evidence")).resolve()
     output.mkdir(parents=True, exist_ok=True)
+    # Keep diagnostics generated by this one-shot offline capture away from the
+    # owner's normal Chess Coach logs. The real profile/database/credential
+    # store are never consulted by this synthetic capture.
+    isolated_local_app_data = Path(os.environ.get(
+        "CC_VISUAL_LOCALAPPDATA", str(output / "isolated-localappdata"))).resolve()
+    isolated_local_app_data.mkdir(parents=True, exist_ok=True)
+    os.environ["LOCALAPPDATA"] = str(isolated_local_app_data)
+    app = QApplication([])
+    assert app.platformName() == "windows", f"Expected native Windows Qt, got {app.platformName()}"
     configured_sizes = os.environ.get("CC_VISUAL_TARGET_SIZES", "").strip()
     target_sizes = TARGET_SIZES
     if configured_sizes:
@@ -555,6 +620,21 @@ def main() -> None:
                     "Синтетическая PGN для проверки формы; архив и сеть не изменяются.")
             image = capture(window, output, route, width, height)
             captured[route] = image
+            if route == "play":
+                board = chess.Board()
+                board.push_uci("e2e4")
+                window._play_mode_page.mode_selector.setCurrentIndex(
+                    window._play_mode_page.mode_selector.findData("active"))
+                window._play_mode_page.set_active_games([{
+                    "gameId": "synthetic-active-ai", "source": "ai",
+                    "opponent": {"id": None, "ai": 3}, "color": "black",
+                    "speed": "correspondence", "daysPerTurn": 3,
+                    "fen": board.fen(), "isMyTurn": True,
+                }], status="Синтетическая подтверждённая партия · без сети")
+                window._play_mode_page.active_games.setCurrentRow(0)
+                assert window._play_mode_page.active_preview_board._board.fen() == board.fen()
+                captured["play-active-games"] = capture(
+                    window, output, "play-active-games", width, height)
 
         QTest.mouseClick(window._nav_buttons["training"], Qt.MouseButton.LeftButton)
         wait_for(lambda: window._puzzle_page is not None
@@ -645,7 +725,7 @@ def main() -> None:
         captured["game-review"] = capture(window, output, "game-review", width, height)
 
         # Settings are captured once per tab at the largest target size.
-        expected_count = (3 * len(target_sizes) + len(offline_sizes) + 9
+        expected_count = (3 * len(target_sizes) + len(offline_sizes) + 10
                           + tabs.count())
         assert len(captured) == expected_count, (
             f"Expected {expected_count} screenshot states, got {len(captured)}"

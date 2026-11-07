@@ -150,7 +150,7 @@ def test_dashboard_preview_returns_committed_local_rows_without_waiting_for_queu
         repo.shutdown()
 
 
-def test_dashboard_preview_uses_current_official_then_local_accuracy_without_loading_all_games(
+def test_dashboard_preview_defers_account_wide_accuracy_to_full_snapshot(
         tmp_path):
     repo = GameRepository(tmp_path / "dashboard-preview-accuracy.sqlite3")
     try:
@@ -169,9 +169,11 @@ def test_dashboard_preview_uses_current_official_then_local_accuracy_without_loa
         full = dashboard_snapshot(repo, account_id=account_id, wait_for_writes=False)
         preview_accuracy = next(row for row in preview["metrics"] if row["key"] == "accuracy")
         full_accuracy = next(row for row in full["metrics"] if row["key"] == "accuracy")
-        assert preview_accuracy["value"] == full_accuracy["value"]
-        assert preview_accuracy["detail"].replace(" · ", "\n") == full_accuracy["detail"]
-        assert preview_accuracy["value"] != "—"
+        # The first, bounded Home preview must not execute the archive-wide
+        # accuracy CTE; the follow-up full snapshot supplies authoritative KPIs.
+        assert preview_accuracy["value"] == "—"
+        assert "Подготавливаем" in preview_accuracy["detail"]
+        assert full_accuracy["value"] != "—"
         assert all(game["review_metrics"]["status"] == "loading"
                    for game in preview["recent_games"])
     finally:

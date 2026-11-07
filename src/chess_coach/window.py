@@ -359,7 +359,7 @@ class MainWindow(QMainWindow):
     position_eval_finished = Signal(int, object, object)
     position_eval_update = Signal(int, object)
     dashboard_finished = Signal(int, object, object, object)
-    dashboard_preview_ready = Signal(int, object, object, object)
+    dashboard_preview_ready = Signal(int, object, object, str)
     library_query_finished = Signal(int, object, object)
     library_target_finished = Signal(int, str, object, object)
     library_detail_finished = Signal(int, str, object, object)
@@ -481,9 +481,11 @@ class MainWindow(QMainWindow):
         self._lichess_stream_ready_generation: int | None = None
         self._active_games_request_id: str | None = None
         self._active_games_request_generation: int | None = None
+        self._active_games_last_request_at = 0.0
         self._open_challenge_id: str | None = None
         self._open_challenge_generation: int | None = None
         self._pending_game_actions: set[tuple[str, str]] = set()
+        self._pending_move_sound_intents: dict[str, tuple[int, str, int, chess.Board, chess.Move]] = {}
         self._pending_play_request_id: str | None = None
         self._pending_play_game_id: str | None = None
         self._pending_play_request_generation: int | None = None
@@ -517,6 +519,7 @@ class MainWindow(QMainWindow):
         self._dashboard_full_rendered_generation: int | None = None
         self._dashboard_preview_thread: OperationHandle | None = None
         self._dashboard_preview_stop: threading.Event | None = None
+        self._dashboard_preview_operation_id: str | None = None
         self._dashboard_preview_pending: tuple[int, str | None, str | None] | None = None
         self._position_eval_generation = 0
         self._position_eval_thread: threading.Thread | None = None
@@ -536,6 +539,7 @@ class MainWindow(QMainWindow):
         self._analysis_safety_context: tuple | None = None
         self._analysis_safety_phase: str | None = None
         self._analysis_worker_context: tuple | None = None
+        self._analysis_user_cancelled_request_id: str | None = None
         self._review_safety_request_id: str | None = None
         self._review_safety_context: tuple | None = None
         self._analysis_session_generation = 0
@@ -678,6 +682,8 @@ class MainWindow(QMainWindow):
             service.session_move_failed.connect(self._lichess_session_move_failed)
         else:
             service.move_failed.connect(self._lichess_move_failed)
+        if hasattr(service, "session_move_accepted"):
+            service.session_move_accepted.connect(self._lichess_session_move_accepted)
         if hasattr(service, "session_takeback_action_completed"):
             service.session_takeback_action_completed.connect(
                 self._lichess_session_takeback_completed)
@@ -713,22 +719,49 @@ class MainWindow(QMainWindow):
             service.session_operation_failed.connect(self._lichess_session_operation_failed)
         service.analysis_safety_games_received.connect(self._analysis_safety_games_received)
         service.analysis_safety_error.connect(self._analysis_safety_error)
-        service.archive_progress.connect(self._archive_progress)
-        service.archive_finished.connect(self._archive_finished)
-        service.archive_pilot_progress.connect(self._archive_pilot_progress)
-        service.archive_pilot_finished.connect(self._archive_pilot_finished)
-        service.archive_game_refresh_finished.connect(self._archive_game_refresh_finished)
-        service.puzzles_progress.connect(self._puzzles_progress)
-        service.puzzles_scanned.connect(self._puzzles_scanned)
-        service.puzzles_started.connect(self._puzzles_started)
-        service.background_sync_finished.connect(self._background_sync_finished)
+        if hasattr(service, "session_sync_event"):
+            service.session_sync_event.connect(self._lichess_session_sync_event)
+        else:
+            service.archive_progress.connect(self._archive_progress)
+            service.archive_finished.connect(self._archive_finished)
+            service.archive_pilot_progress.connect(self._archive_pilot_progress)
+            service.archive_pilot_finished.connect(self._archive_pilot_finished)
+            service.archive_game_refresh_finished.connect(self._archive_game_refresh_finished)
+            service.puzzles_progress.connect(self._puzzles_progress)
+            service.puzzles_scanned.connect(self._puzzles_scanned)
+            service.puzzles_started.connect(self._puzzles_started)
+            service.background_sync_finished.connect(self._background_sync_finished)
+            service.puzzles_finished.connect(self._puzzles_finished)
+            service.puzzle_pilot_progress.connect(self._puzzle_pilot_progress)
+            service.puzzle_pilot_finished.connect(self._puzzle_pilot_finished)
         service.lichess_analysis_backfill_finished.connect(
             self._lichess_analysis_backfill_finished)
         service.lichess_analysis_backfill_progress.connect(
             self._lichess_analysis_backfill_progress)
-        service.puzzles_finished.connect(self._puzzles_finished)
-        service.puzzle_pilot_progress.connect(self._puzzle_pilot_progress)
-        service.puzzle_pilot_finished.connect(self._puzzle_pilot_finished)
+
+    def _lichess_session_sync_event(self, generation: int, _request_id: str,
+                                    event: str, payload: object) -> None:
+        if not self._current_lichess_generation(generation):
+            return
+        handler_name = {
+            "archive_progress": "_archive_progress",
+            "archive_finished": "_archive_finished",
+            "archive_pilot_progress": "_archive_pilot_progress",
+            "archive_pilot_finished": "_archive_pilot_finished",
+            "archive_game_refresh_finished": "_archive_game_refresh_finished",
+            "archive_eval_refresh_progress": "_archive_eval_refresh_progress",
+            "archive_eval_refresh_finished": "_archive_eval_refresh_finished",
+            "puzzles_progress": "_puzzles_progress",
+            "puzzles_scanned": "_puzzles_scanned",
+            "puzzles_started": "_puzzles_started",
+            "puzzles_finished": "_puzzles_finished",
+            "background_sync_finished": "_background_sync_finished",
+            "puzzle_pilot_progress": "_puzzle_pilot_progress",
+            "puzzle_pilot_finished": "_puzzle_pilot_finished",
+        }.get(str(event))
+        handler = getattr(self, handler_name, None) if handler_name else None
+        if callable(handler) and isinstance(payload, (tuple, list)):
+            handler(*payload)
 
     def _current_lichess_generation(self, generation: int) -> bool:
         return bool(self.lichess and self.lichess.is_auth_generation_current(generation))
@@ -778,8 +811,20 @@ class MainWindow(QMainWindow):
 
     def _lichess_session_move_failed(self, generation: int, game_id: str, uci: str,
                                      request_id: str, status: int) -> None:
+        self._pending_move_sound_intents.pop(str(request_id), None)
         if self._current_lichess_generation(generation):
             self._lichess_move_failed(game_id, uci, request_id, status)
+
+    def _lichess_session_move_accepted(self, generation: int, game_id: str,
+                                       uci: str, request_id: str) -> None:
+        intent = self._pending_move_sound_intents.pop(str(request_id), None)
+        if not self._current_lichess_generation(generation) or intent is None:
+            return
+        intent_generation, intent_game, ply, before, move = intent
+        if (intent_generation != generation or intent_game != str(game_id)
+                or move.uci() != str(uci)):
+            return
+        self.sound_player.play_move(str(game_id), ply, before, move, source="confirmed")
 
     def _lichess_session_takeback_completed(self, generation: int, game_id: str,
                                             request_id: str, status: int) -> None:
@@ -1363,28 +1408,28 @@ class MainWindow(QMainWindow):
             last_success = format_game_date(summary.get("last_success_at"), precision="timestamp")
             ready_counts = (
                 f"Проверено {summary.get('checked', 0)}/{summary.get('total', 0)} · "
-                f"точность {summary.get('accuracy', 0)} · с оценками {summary.get('evals', 0)} · "
-                f"нет анализа {summary.get('no_data', 0)} · ошибки {summary.get('errors', 0)} · "
-                f"повтор {summary.get('retry_waiting', 0)}")
+                f"точность {summary.get('accuracy', 0)} · оценки {summary.get('evals', 0)}")
+            ready_counts_detail = (
+                f"Без анализа {summary.get('no_data', 0)} · ошибки {summary.get('errors', 0)} · "
+                f"повторы {summary.get('retry_waiting', 0)}")
+            next_check_compact = next_check.replace("Следующая проверка", "Далее")
             ready_detail = (
-                f"{ready_counts}\n{next_check}\n"
-                f"Попытка: {last_attempt} · данные получены: {last_success} · "
-                f"запросы сегодня: {summary.get('requests_today', 0)}/"
-                f"{payload.get('daily_limit', 25)} · до 10 партий за запуск")
+                f"{ready_counts}\n{ready_counts_detail}\n{next_check_compact}")
             ready_tooltip = (
-                f"{ready_counts}\nПоследняя попытка: {last_attempt}\n"
+                f"{ready_counts} · {ready_counts_detail}\nПоследняя попытка: {last_attempt}\n"
                 f"Последние данные получены: {last_success}\n{next_check}\n"
                 f"Запросов сегодня: {summary.get('requests_today', 0)}/"
                 f"{payload.get('daily_limit', 25)}. Источник: документированный JSON export Lichess. "
                 "Локальный Stockfish хранится отдельно; создание серверного анализа не запрашивается.")
 
             def state(kind: str, *, error=False, complete=False, paused=False) -> str:
-                if active_game:
-                    return "Пауза из-за игры"
-                if paused:
-                    return "Пауза"
                 if kind in active_operations:
                     return "Идёт"
+                if active_game and kind in {
+                        "lichess_analysis_backfill", "stockfish_batch_analysis"}:
+                    return "Отложено до конца игры"
+                if paused:
+                    return "Пауза"
                 if error:
                     return "Ошибка"
                 return "Готово" if complete else "Ожидает"
@@ -1397,20 +1442,33 @@ class MainWindow(QMainWindow):
                 durable_statuses=statuses, local_metrics_status=metric_text,
                 workflows={
                     "archive": (f"Сохранено партий: {archive.get('imported_count', 0)} · {archive_phase}\n"
-                                f"Последнее успешное обновление: {archive_last}{archive_problem}"
+                                f"Обновлено: {archive_last}{archive_problem}"
                                 if account_id else "Аккаунт Lichess не выбран."),
                     "ready": ready_detail if account_id else source_summary,
-                    "puzzles": (f"Сохранено попыток: {puzzles.get('imported_count', 0)} · {puzzle_phase}\n"
-                                 f"Последнее успешное обновление: {puzzle_last}{puzzle_problem}"
+                    "puzzles": (f"Попыток: {puzzles.get('imported_count', 0)} · "
+                                 f"{'история загружена' if puzzles.get('backfill_complete') else 'загрузка не завершена'}\n"
+                                 f"Обновлено: {puzzle_last}{puzzle_problem}"
                                  if account_id else "Аккаунт Lichess не выбран."),
-                    "stockfish": (f"В очереди: {remaining} · готово: {complete} · ошибки: {failed}"
-                                  + (f"\nЕщё не поставлено: {payload['unqueued']}"
+                    "stockfish": (f"В очереди {remaining} · готово {complete} · ошибок {failed}"
+                                  + (f" · не поставлено {payload['unqueued']}"
                                      if payload.get("unqueued") is not None else "")
                                   if jobs or payload.get("unqueued") is not None
                                   else "Нет сохранённых заданий для текущего профиля."),
                 },
                 recent_events=recent_events,
-                workflow_tooltips={"ready": ready_tooltip},
+                workflow_tooltips={
+                    "ready": ready_tooltip,
+                    "archive": (f"Сохранено партий: {archive.get('imported_count', 0)} · {archive_phase}\n"
+                                f"Последнее успешное обновление: {archive_last}{archive_problem}"
+                                if account_id else "Аккаунт Lichess не выбран."),
+                    "puzzles": (f"Сохранено попыток: {puzzles.get('imported_count', 0)} · "
+                                f"{puzzle_phase}\nПоследнее успешное обновление: "
+                                f"{puzzle_last}{puzzle_problem}"
+                                if account_id else "Аккаунт Lichess не выбран."),
+                    "stockfish": (f"В очереди: {remaining} · готово: {complete} · ошибки: {failed}\n"
+                                  + (f"Ещё не поставлено: {payload['unqueued']}"
+                                     if payload.get("unqueued") is not None else "")),
+                },
                 states={
                     "archive": state("lichess_archive_sync", error=bool(archive.get("last_error")),
                                      complete=bool(archive.get("backfill_complete"))),
@@ -1636,8 +1694,29 @@ class MainWindow(QMainWindow):
         self._refresh_background_operations_page()
 
     def _manual_lichess_analytics_check(self) -> None:
-        if (not self.lichess or self.offline_mode or not self._lichess_connected
-                or self._lichess_stream_ready_generation != self.lichess.auth_generation):
+        if not self.lichess or self.offline_mode:
+            self.lichess_analysis_status.setText(
+                "Проверка аналитики недоступна: сначала подключите Lichess.")
+            return
+        if not self._lichess_connected:
+            self.lichess_analysis_status.setText(
+                "Проверка аналитики ожидает подключения Lichess.")
+            return
+        if self._lichess_stream_ready_generation != self.lichess.auth_generation:
+            self.lichess_analysis_status.setText(
+                "Проверка аналитики ожидает готовности игрового потока Lichess.")
+            return
+        if any(session.status in {"started", "playing"}
+               for session in self._sessions_for_safety()):
+            # Do not send archive/API requests during a live human game. Make
+            # the reason visible instead of silently swallowing the button.
+            self.lichess_analysis_status.setText(
+                "Проверка готовых оценок отложена до завершения активной партии.")
+            self._refresh_background_operations_page()
+            return
+        if self.settings.value("lichess/ready_analytics_paused", False, type=bool):
+            self.lichess_analysis_status.setText(
+                "Проверка аналитики приостановлена в настройках фоновых операций.")
             return
         self._start_lichess_analysis_backfill(
             self.lichess.auth_generation, manual=True, force_retry=True)
@@ -2595,6 +2674,23 @@ class MainWindow(QMainWindow):
         self.screen_title.setText("Играть")
         self.screen_stack.setCurrentWidget(self.play_page)
         self._update_play_mode_availability()
+        self._refresh_active_games_for_play()
+
+    def _refresh_active_games_for_play(self, *, force: bool = False) -> None:
+        """Refresh active games on entry with a small TTL to avoid API polling."""
+        service = self.lichess
+        fetch_active_games = getattr(service, "fetch_active_games", None)
+        if not self._online_actions_allowed() or not callable(fetch_active_games):
+            return
+        generation = getattr(service, "auth_generation", None)
+        now = time.monotonic()
+        if (not force and generation == self._active_games_request_generation
+                and now - self._active_games_last_request_at < 15):
+            return
+        self._play_mode_page.set_active_games(status="Обновляю список активных партий Lichess…")
+        self._active_games_request_generation = generation
+        self._active_games_last_request_at = now
+        self._active_games_request_id = fetch_active_games()
 
     def _create_play_request(self, options: dict) -> None:
         """Execute the embedded Play form through the existing Lichess façade."""
@@ -2918,7 +3014,8 @@ class MainWindow(QMainWindow):
         stop_event = threading.Event()
         self._dashboard_preview_stop = stop_event
 
-        handle_ref: list[object] = []
+        operation_id = uuid.uuid4().hex
+        self._dashboard_preview_operation_id = operation_id
 
         def work():
             preview: dict = {"_preview_cancelled": True}
@@ -2934,13 +3031,16 @@ class MainWindow(QMainWindow):
             if stop_event.is_set():
                 preview = {"_preview_cancelled": True}
             self.dashboard_preview_ready.emit(
-                generation, preview, threading.current_thread(), handle_ref[0])
+                generation, preview, threading.current_thread(), operation_id)
 
         handle = self._start_registered_work(
             work, kind="dashboard_preview_read", lane=OperationLane.INTERACTIVE,
             thread_name="chess-coach-dashboard-preview")
-        handle_ref.append(handle)
-        self._dashboard_preview_thread = handle
+        # A zero-duration worker may emit before start() returns. The request
+        # identity is installed before start; only retain the returned handle
+        # if that operation still owns the slot.
+        if self._dashboard_preview_operation_id == operation_id:
+            self._dashboard_preview_thread = handle
 
     def _clear_dashboard_scope(self, message: str) -> None:
         """Immediately remove previous-account dashboard values during a switch."""
@@ -2979,17 +3079,22 @@ class MainWindow(QMainWindow):
         self._dashboard_thread = thread
 
     def _dashboard_preview_result_ready(self, generation: int, snapshot: object,
-                                        thread: object, handle: object) -> None:
+                                        thread: object, operation_id: str) -> None:
         """Render the bounded committed local rows while aggregate work continues."""
+        if operation_id != self._dashboard_preview_operation_id:
+            return
+        if isinstance(thread, threading.Thread):
+            if thread is threading.current_thread():
+                thread = None
         if isinstance(thread, threading.Thread):
             thread.join(timeout=0.05)
             if thread.is_alive():
                 QTimer.singleShot(10, lambda: self._dashboard_preview_result_ready(
-                    generation, snapshot, thread, handle))
+                    generation, snapshot, thread, operation_id))
                 return
-        if self._dashboard_preview_thread is handle:
-            self._dashboard_preview_thread = None
-            self._dashboard_preview_stop = None
+        self._dashboard_preview_thread = None
+        self._dashboard_preview_stop = None
+        self._dashboard_preview_operation_id = None
         if (self._shutdown_requested or not self.dashboard_queries.is_current(generation)
                 or not isinstance(snapshot, dict)):
             self._launch_pending_dashboard_preview()
@@ -3119,14 +3224,22 @@ class MainWindow(QMainWindow):
                     detail_text = f"С оценками: {analyzed if analyzed is not None else '—'}\n{parts[2]} · {parts[3]}"
             self._dashboard_metric_details[metric["key"]].setText(
                 "Проверка безопасности Lichess не подтверждена." if masked else detail_text)
-            safe_description = ("Аналитика скрыта до свежего разрешения Fair Play."
-                                if masked else
-                                f"{metric['detail']}\nИсточник: {metric['source']}"
-                                if metric["key"] == "analysis" else str(metric["source"]))
-            self._dashboard_metric_values[metric["key"]].setToolTip(safe_description)
-            self._dashboard_metric_details[metric["key"]].setToolTip(safe_description)
-            self._dashboard_metric_values[metric["key"]].setAccessibleDescription(safe_description)
-            self._dashboard_metric_details[metric["key"]].setAccessibleDescription(safe_description)
+            source_description = ("Аналитика скрыта до свежего разрешения Fair Play."
+                                  if masked else
+                                  f"{metric['detail']}\nИсточник: {metric['source']}"
+                                  if metric["key"] == "analysis" else str(metric["source"]))
+            if not masked and metric["key"] == "accuracy":
+                # Keep the hover hint concise; retain full provenance/formula for
+                # assistive technology without displaying a screen-sized tooltip.
+                tooltip = ("Средняя точность по партиям с достоверными данными.\n"
+                           "Официальные оценки Lichess и расчёты Stockfish показаны отдельно.\n"
+                           "Охват источников может различаться.")
+            else:
+                tooltip = source_description
+            self._dashboard_metric_values[metric["key"]].setToolTip(tooltip)
+            self._dashboard_metric_details[metric["key"]].setToolTip(tooltip)
+            self._dashboard_metric_values[metric["key"]].setAccessibleDescription(source_description)
+            self._dashboard_metric_details[metric["key"]].setAccessibleDescription(source_description)
         while self._recent_games_layout.count():
             item = self._recent_games_layout.takeAt(0)
             widget = item.widget()
@@ -3180,6 +3293,7 @@ class MainWindow(QMainWindow):
                              f"Оценённые ходы: {metrics.get('coverage', '—')}")
             coverage = QLabel(coverage_text if analysis_allowed else "Оценки скрыты до проверки безопасности")
             coverage.setObjectName("dashboardAnalysisCoverage")
+            coverage.setParent(card)
             coverage.setWordWrap(False)
             if analysis_allowed:
                 coverage.setToolTip(
@@ -3190,7 +3304,11 @@ class MainWindow(QMainWindow):
                 coverage.setToolTip(
                     "Источник, оценки и охват скрыты до свежего подтверждения Fair Play.")
             coverage.setAccessibleDescription(coverage.toolTip())
-            card_layout.addWidget(coverage)
+            # Keep precise provenance accessible without spending one of the
+            # three visual rows on implementation detail. The approved Home
+            # card prioritizes opponent/date, opening/accuracy, and the
+            # side-by-side move table; hover and screen readers retain scope.
+            coverage.hide()
             if analysis_allowed:
                 accuracy = metrics.get("accuracy")
                 accuracy_group = QVBoxLayout()
@@ -3207,12 +3325,17 @@ class MainWindow(QMainWindow):
                 accuracy_label.setWordWrap(True)
                 accuracy_group.addWidget(accuracy_label)
                 row_layout.addLayout(accuracy_group, 2)
-                rows = ["Я / соперник"]
+                rows = ["                   Я   Соперник"]
                 for title, key in (("Неточности", "inaccuracies"), ("Ошибки", "mistakes"),
                                    ("Зевки", "blunders")):
-                    rows.append(f"{title}: {metrics.get('owner_' + key, '—')} / "
-                                f"{metrics.get('opponent_' + key, '—')}")
+                    own = metrics.get("owner_" + key, "—")
+                    other = metrics.get("opponent_" + key, "—")
+                    rows.append(f"{title}:  {own}  /  {other}")
                 statistics = QLabel("\n".join(rows))
+                statistics.setStyleSheet("font-size: 15px; line-height: 1.15;")
+                statistics.setAccessibleDescription(
+                    "Показатели ходов отдельно для владельца и соперника. "
+                    + coverage.toolTip())
                 row_layout.addWidget(statistics, 2)
                 if metrics.get("assessments"):
                     graph = ReviewGraph(metrics["assessments"], [])
@@ -3229,14 +3352,26 @@ class MainWindow(QMainWindow):
         self._recent_games_layout.addStretch()
 
     def _open_home_game_details(self, game: dict) -> None:
-        """Open the selected record in Library's details pane, not Review."""
+        """Open this exact saved Home card directly in Review."""
         game_id = str(game.get("game_id") or "")
         if not game_id:
             return
-        self._home_detail_game_id = game_id
-        self._home_detail_payload = dict(game)
-        self._home_detail_lookup_pending = False
-        self.show_saved_games()
+        record = dict(game)
+        # Recent-game rows come from the account-scoped Home query; verify the
+        # durable line still exists before opening a read-only review session.
+        current = self.game_repository.get_game(game_id)
+        if not current:
+            self.home_status.setText("Эта партия больше недоступна в локальной базе.")
+            return
+        if (record.get("line_revision") is not None
+                and current.get("line_revision") != record.get("line_revision")):
+            self.home_status.setText("Линия партии обновилась; главную страницу обновляю перед разбором.")
+            self._refresh_home_dashboard()
+            return
+        current.update({key: value for key, value in record.items()
+                        if value is not None and key not in {"moves", "initial_fen", "line_revision"}})
+        if not self._open_saved_game(current):
+            self.home_status.setText(self._raw_only_game_message(current))
 
     def _refresh_dashboard_analysis_visibility(self) -> None:
         safety_allowed = self._library_detail_safety_allowed()
@@ -5225,7 +5360,14 @@ class MainWindow(QMainWindow):
             if self.online_view_ply is not None or not session.begin_submission(move):
                 self.refresh("Ход недоступен: проверьте актуальную позицию.")
                 return
-            self.lichess.send_move(session.game_id, move.uci(), session.pending_request_id)
+            request_id = str(session.pending_request_id)
+            before = session.board.copy(stack=True)
+            generation = int(getattr(self.lichess, "auth_generation",
+                                     session.auth_generation or 0))
+            self._pending_move_sound_intents[request_id] = (
+                generation, session.game_id,
+                len(session.moves.split()) + 1, before, move)
+            self.lichess.send_move(session.game_id, move.uci(), request_id)
             self.refresh(f"Отправляем ход {move.uci()}; ожидаем подтверждения Lichess.")
             return
         before_board = self.controller.board.copy(stack=True)
@@ -6118,15 +6260,12 @@ class MainWindow(QMainWindow):
 
     def show_active_games(self) -> None:
         self.show_play()
-        page = self._play_mode_page
         if not self._online_actions_allowed():
             cooldown = self._lichess_rate_limit_remaining()
-            page.set_active_games(status=(f"Ограничение Lichess · повтор через {cooldown} с."
-                                          if cooldown else "Соединение Lichess пока недоступно."))
+            self._play_mode_page.set_active_games(status=(f"Ограничение Lichess · повтор через {cooldown} с."
+                                                          if cooldown else "Соединение Lichess пока недоступно."))
             return
-        page.set_active_games(status="Обновляю список активных партий Lichess…")
-        self._active_games_request_generation = getattr(self.lichess, "auth_generation", None)
-        self._active_games_request_id = self.lichess.fetch_active_games()
+        self._refresh_active_games_for_play()
 
     def _request_active_games(self) -> None:
         dialog = getattr(self, "_active_games_dialog", None)
@@ -6143,6 +6282,7 @@ class MainWindow(QMainWindow):
                 or generation != self._active_games_request_generation
                 or request_id != self._active_games_request_id)):
             return
+        self._active_games_last_request_at = time.monotonic()
         dialog = getattr(self, "_active_games_dialog", None)
         if dialog and dialog.isVisible():
             dialog.set_games(games)
@@ -6169,6 +6309,7 @@ class MainWindow(QMainWindow):
         self._update_library_active_games()
 
     def _active_games_error(self, message: str) -> None:
+        self._active_games_last_request_at = 0.0
         if not self._play_mode_page.active_panel.isHidden():
             self._play_mode_page.set_active_games(status=message)
         dialog = getattr(self, "_active_games_dialog", None)
@@ -6883,6 +7024,8 @@ class MainWindow(QMainWindow):
                                               and previous is None)):
                 self._show_created_online_game(session)
             self._update_library_active_games()
+            if self.screen_stack.currentWidget() is self.play_page:
+                self._refresh_active_games_for_play(force=True)
         elif kind == "gameFinish":
             game_id = event.get("game", {}).get("gameId")
             if game_id in self.online_sessions:
@@ -6904,6 +7047,8 @@ class MainWindow(QMainWindow):
                     self.lichess.mark_game_finished(game_id)
                     self.lichess.start_game(game_id)
                 self._update_library_active_games()
+                if self.screen_stack.currentWidget() is self.play_page:
+                    self._refresh_active_games_for_play(force=True)
                 if was_active and game_id == self._selected_live_game_id:
                     self.sound_player.play_game_end(game_id, len(session.board.move_stack))
                 self._refresh_batch_readiness()
@@ -7141,7 +7286,8 @@ class MainWindow(QMainWindow):
         self.board.set_premove(session.premove, session.color)
         self.opponent_label.setText(f"Соперник  ·  {session.opponent}")
         self.you_label.setText("Вы  ·  " + ("белыми" if session.color == chess.WHITE else "чёрными"))
-        turn = ("Синхронизация позиции…" if session.awaiting_authoritative_snapshot
+        turn = ("Партия завершена" if finished_view else
+                "Синхронизация позиции…" if session.awaiting_authoritative_snapshot
                 else "Ваш ход" if session.is_my_turn else "Ход соперника")
         self.turn_label.setText(turn + (" · история" if not live else ""))
         if finished_view:
@@ -7291,6 +7437,27 @@ class MainWindow(QMainWindow):
             self.opponent_clock_label.setStyleSheet("font-size: 28px; font-weight: 700; padding: 2px 8px;")
             self.you_clock_label.setStyleSheet("font-size: 28px; font-weight: 700; padding: 2px 8px;")
             return
+        terminal_statuses = {"mate", "resign", "draw", "stalemate", "repetition", "50moves",
+                             "insufficientMaterial", "timeout", "outoftime", "cheat",
+                             "noStart", "variantEnd", "finished", "aborted"}
+        finished = session.status in terminal_statuses
+        no_regular_clock = session.speed in {"correspondence", "unlimited"}
+        if session.clock_state_valid is False and (no_regular_clock or finished):
+            text = "Завершена · без часов" if finished else "Без обычных часов"
+            self.opponent_clock_label.setText(text)
+            self.you_clock_label.setText(text)
+            self.clock_label.setText(
+                "Партия завершена · часы остановлены" if finished else
+                (f"Переписка · срок хода {session.days_per_turn} дн."
+                 if session.speed == "correspondence" and session.days_per_turn
+                 else "Партия без обычных часов"))
+            self.opponent_clock_detail.clear()
+            self.you_clock_detail.clear()
+            self.opponent_clock_label.setStyleSheet(
+                f"font-size: 22px; font-weight: 700; padding: 2px 8px; color: {TOKENS.secondary};")
+            self.you_clock_label.setStyleSheet(
+                f"font-size: 22px; font-weight: 700; padding: 2px 8px; color: {TOKENS.secondary};")
+            return
         if session.clock_state_valid is False:
             message = "—:— · часы синхронизируются"
             self.opponent_clock_label.setText(message)
@@ -7304,7 +7471,8 @@ class MainWindow(QMainWindow):
                 f"font-size: 28px; font-weight: 600; padding: 2px 8px; color: {TOKENS.secondary};")
             return
         if session.white_ms is None or session.black_ms is None:
-            waiting = self._screen_mode == "online" and session.clock_control != "-"
+            waiting = (self._screen_mode == "online" and session.clock_control != "-"
+                       and not no_regular_clock and not finished)
             fallback = "—:— · ожидаем часы Lichess" if waiting else "Без часов"
             self.opponent_clock_label.setText(fallback)
             self.you_clock_label.setText(fallback)
@@ -7315,16 +7483,18 @@ class MainWindow(QMainWindow):
                 _clock_increment_label(opponent_increment))
             self.you_clock_detail.setText(
                 _clock_increment_label(owner_increment))
-            self.clock_label.setText(session.clock_control if waiting else "Без часов")
+            self.clock_label.setText(
+                session.clock_control if waiting else
+                ("Партия завершена · без часов" if finished else
+                 f"Переписка · срок хода {session.days_per_turn} дн."
+                 if session.speed == "correspondence" and session.days_per_turn else
+                 "Партия без обычных часов" if no_regular_clock else "Без часов"))
             self.opponent_clock_label.setStyleSheet(
                 f"font-size: 28px; font-weight: 600; padding: 2px 8px; color: {TOKENS.secondary};")
             self.you_clock_label.setStyleSheet(
                 f"font-size: 28px; font-weight: 600; padding: 2px 8px; color: {TOKENS.secondary};")
             return
         history_view = self._screen_mode != "online" or self.online_view_ply is not None
-        terminal_statuses = {"mate", "resign", "draw", "stalemate", "repetition", "50moves",
-                             "insufficientMaterial", "timeout", "outoftime", "cheat",
-                             "noStart", "variantEnd", "finished", "aborted"}
         status_unknown = session.status not in {"started", "playing", *terminal_statuses}
         paused = bool(session.awaiting_authoritative_snapshot or history_view
                       or session.status not in {"started", "playing"})
@@ -7364,7 +7534,9 @@ class MainWindow(QMainWindow):
             f"font-size: 28px; font-weight: 800; padding: 2px 8px; color: #F3C969;" if opponent_warning else
             f"font-size: 28px; font-weight: 800; padding: 2px 8px; color: #FFFFFF;" if opponent_active else
             f"font-size: 28px; font-weight: 600; padding: 2px 8px; color: {TOKENS.secondary};")
-        self.clock_label.setText(f"Контроль {format_clock_control(session.clock_control)} · часы Lichess")
+        self.clock_label.setText(
+            f"Контроль {format_clock_control(session.clock_control)} · "
+            + ("партия завершена" if finished else "часы Lichess"))
 
     def resign_online(self) -> None:
         session = self.online_session
@@ -7972,6 +8144,7 @@ class MainWindow(QMainWindow):
                 self._analysis_dialog = None
             return
         if self._analysis_safety_phase == "running" and self._analysis_dialog is not None:
+            self._analysis_user_cancelled_request_id = request_id
             self._analysis_dialog.setLabelText("Останавливаем анализ…")
             button = self._analysis_dialog.findChild(QPushButton)
             if button is not None:
@@ -8041,9 +8214,20 @@ class MainWindow(QMainWindow):
         self._schedule_legacy_metrics_batch()
         self._refresh_dashboard_analysis_visibility()
         _request, game_id, engine_path, options, _generation, _account_id, _service = context
+        batch_thread = getattr(self, "_batch_thread", None)
+        batch_waiting = bool(batch_thread is not None and batch_thread.is_alive())
+        if batch_waiting:
+            # The explicit, post-Fair-Play analysis of a finished game has
+            # priority over archive work. The batch runner owns a stop-at-
+            # position pause event and releases its Stockfish lease before the
+            # interactive worker can acquire the shared engine manager.
+            if self._analysis_dialog is not None:
+                self._analysis_dialog.setLabelText(
+                    "Проверка пройдена. Приостанавливаем фоновый анализ и освобождаем Stockfish…")
+            self._pause_batch_analysis(manual=False)
+        elif self._analysis_dialog is not None:
+            self._analysis_dialog.setLabelText("Проверка пройдена. Запускаем Stockfish…")
         self._analysis_safety_phase = "running"
-        if self._analysis_dialog is not None:
-            self._analysis_dialog.setLabelText("Анализ партии Stockfish…")
         self._launch_game_analysis(game_id, engine_path, options,
                                    stop=stop, dialog=self._analysis_dialog,
                                    request_id=request_id)
@@ -8216,7 +8400,21 @@ class MainWindow(QMainWindow):
         if stale_or_cancelled:
             self.home_status.setText("Анализ остановлен: требуется новая проверка Fair Play.")
             self._notify_inline("Анализ остановлен: изменилось состояние безопасности Lichess.")
+            # A user cancellation is not a safety revocation. Resume an opted-in
+            # background plan only if the exact preflight session is still current;
+            # `_resume_opted_in_batch` performs its own eligibility checks before
+            # it can restart any durable work.
+            user_cancelled_current_session = bool(
+                context and self._analysis_user_cancelled_request_id == context[0]
+                and context[2] == self._analysis_session_generation
+                and not context[4]
+                and context[3] is self.lichess
+                and self._online_actions_allowed())
+            self._analysis_user_cancelled_request_id = None
+            if user_cancelled_current_session and self._batch_resume_timer is not None:
+                self._batch_resume_timer.start(500)
             return
+        self._analysis_user_cancelled_request_id = None
         if isinstance(result, dict) and result.get("error"):
             self._notify_inline(f"Stockfish: {result['error']}")
         else:
@@ -8232,6 +8430,11 @@ class MainWindow(QMainWindow):
                     self._notify_inline(f"Анализ сохранён: оценено {count} позиций.")
             else:
                 self._notify_inline("Stockfish не сохранил оценки для этой партии.")
+        # `_resume_opted_in_batch` re-checks the account-scoped explicit opt-in,
+        # Fair Play, live games and any rate limit before restarting durable work.
+        # It is safe to schedule after success, cancellation, or an analyzer error.
+        if self._batch_resume_timer is not None:
+            self._batch_resume_timer.start(500)
 
     def _open_analysis_position(self, game_id: str, ply: int, *,
                                 analysis_source: str | None = None) -> bool:

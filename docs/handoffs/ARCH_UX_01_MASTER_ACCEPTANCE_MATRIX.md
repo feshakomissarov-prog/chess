@@ -242,3 +242,36 @@ Windows, обычный Qt backend `windows`, 1360×860, временная SQLi
 | GitHub artifact | Runs `42315427643` and `42317068946` exposed fixture timestamp and cp1252 output; fixes are in `f1fdc28427bec04b47b51d549cfdacf677b49ff0` | Windows run #367 / `42317639521` SUCCESS; 837 PASS, visual scales 1/1.25/1.5 PASS; [screenshots artifact](https://github.com/feshakomissarov-prog/chess/actions/runs/42317639521#artifacts) |
 
 Обновлённые benchmarks: Home preview на временной synthetic SQLite — 100 партий **5.66 ms median**, 3500 партий **26.77 ms median** (5 выборок; EXPLAIN использует индексы). Реальные пользовательские данные и Lichess не использовались.
+
+## VISUAL MASTER §15 — сводная трассировка требований
+
+| ID / группа | Ожидаемое действие / состояние | Проверка | Итог |
+|---|---|---|---|
+| V-01 | Адаптивная компоновка без обрезки и наложений, реальные logical/pixel размеры | `scripts/capture_visual_master.py`; capture проверяет QRect карточек Background, event heading/list, Back button и height-for-width статусов; `test_background_page_compact_layout_has_no_overlapping_cards_or_events` | PASS для Qt capture (1672×941, 1360×860, 1280×720); physical Windows DPI 125/150% — BLOCKED |
+| V-02 | Три утверждённых арта сопоставлены с загруженными Home/Library/Background | пары `pair-home-*`, `pair-games-*`, `pair-background-active-*` в visual-evidence и Actions artifact | Скриншоты получены; высокая визуальная сходимость — НЕ ПРИНЯТА, ждёт независимой/владельческой оценки |
+| V-03 | Общая тема и доступные действия всех наполненных разделов | 25 synthetic view states, существующая UX-COV матрица и 70-control smoke | Авто-покрытие PASS; ручное прохождение каждой кнопки — BLOCKED |
+| T-01 | OAuth revoke не удаляет заменённый credential | barrier regression conditional delete | PASS |
+| T-02 | Поздние операции не меняют аккаунт после reconnect/switch | account/generation Qt and fake-service regressions | PASS |
+| T-03 | Partial/invalid payload не засчитывается как готовые данные | official JSON/schema and malformed/partial fixtures | PASS; real endpoint — BLOCKED |
+| T-04 | Быстрый Home worker не зависит от handle до старта | синхронный fast-worker regression | PASS |
+| T-05 | close останавливает backfill | service-close stop-event regression | PASS |
+| T-06 | «Проверено», «данные получены», no-data и retry имеют точный смысл | SQLite summary and ready-analytics UI tests | PASS на synthetic DB |
+| R-01 | Home preview не ждёт тяжёлый агрегат | 3500-game temporary SQLite benchmark + delayed aggregate Qt test | PASS; медиана 26.77 ms за пять прошлых проб |
+| R-02 | Lease не дублирует live работу, orphan queue восстанавливается | live lease and stale lease SQLite regression; свежий приоритет + резерв старому backlog | PASS |
+| R-03 | Параллельные чтения/записи сохраняют целостность | existing transaction/concurrency suite на временной SQLite | PASS по автотестам; аварийный тест пользовательской БД — BLOCKED |
+| R-04 | Lichess rate limits и Retry-After соблюдаются | fake HTTP 429/Retry-After, account-switch fences | PASS; реальный API не вызывался |
+| R-05 | Fair Play fail-closed; движок не обходит активную человеческую игру | fake safety/preflight and game lifecycle Qt tests | PASS на fake data; реальные аккаунты/Stockfish — BLOCKED |
+| VID-01…09 | Все девять наблюдений видеоревью учтены как кодовые/визуальные проверки без потери данных | Windows captures по состояниям Home, Library, Background, Play, review, clocks, settings; см. VID-01…09 test map предыдущей таблицы | Частично PASS; физическое воспроизведение видео/звук и manual interaction — BLOCKED |
+| VOICE-01…02 | Home quick preview, ясные заголовки и подсказки | Home snapshot/UI tests and screenshots | PASS автоматизировано; визуальная приемка открыта |
+| VOICE-03 | Короткая tooltip точности без потери provenance | `test_home_accuracy_tooltip_is_compact_but_accessible_description_keeps_provenance` | PASS |
+| VOICE-04 | Карточки 5 режимов и условные настройки | `test_ui_pages.py` Play mode tests; capture `play` states | PASS автоматизировано; физический click-through — BLOCKED |
+| VOICE-05 | Active games обновляются с безопасной TTL и показывают authoritative mini-board | fake active list/game event and stale account tests; capture `active-games` | PASS fake-only; live stream — BLOCKED |
+| VOICE-06 | Ходовой звук не дублируется и ждёт успешного ACK | `test_online_move_sound_waits_for_authoritative_ack_and_deduplicates_replays`; settings/audio UI capture | PASS по логике; задержка реального устройства вывода — BLOCKED |
+| VOICE-07 | Ручной Stockfish-analysis приоритетен, batch безопасно возобновляется | fair-play Qt cancellation/priority/resume tests | PASS fake engine; настоящий Stockfish не запускался |
+| VOICE-08 | Чёткая причина фоновой паузы, manual-check не выглядит inert | `test_live_game_defers_only_fairness_sensitive_background_workflows`; handler asserts zero requests during live game | PASS fake-only |
+| VIS-15 narrow layout | Карточки Background, кнопка диагностики и события не перекрывают друг друга; длинная карточка готовой аналитики не обрезана | `test_background_diagnostics_toggle_does_not_overlap_recent_events`, `test_background_page_compact_layout_has_no_overlapping_cards_or_events`; visible synthetic capture strict geometry | PASS: 26 состояний capture; все 3 окна |
+| VOICE-09 | Свежая игра получает приоритет, старый backlog не голодает; выбранная партия может получить due retry | `test_ready_analytics_queue_prioritizes_recent_games_without_starving_old_backlog`; scoped retry tests | PASS fake JSON/temp SQLite; настоящая публикация JSON на Lichess — BLOCKED |
+| VOICE-10 | Home recent card открывает именно выбранную игру в Review | Home selected game/revision tests and capture | PASS; live account Fair Play remains enforced |
+| PARKED | Полный граф путей приложения | Explicitly excluded by owner | НЕ ВЫПОЛНЯЛОСЬ |
+
+**Ручная приёмка:** подтвердить физическую читаемость при DPI 100/125/150%, звуковую задержку на устройстве, live Lichess reconnect/official JSON and actual Stockfish lifecycle; проверить три доступных screenshot pairs. Автоматический и native capture не выдаются за ручной приём владельца.

@@ -89,8 +89,6 @@ def dashboard_preview_snapshot(repository, *, account_id: str | None = None,
             f"SELECT g.*, {opponent}, {player}, {color_value} FROM games g{join} "
             f"WHERE {where} ORDER BY ({activity_epoch}) IS NULL,{activity_epoch} DESC,"
             "g.game_id DESC LIMIT 3", params).fetchall()
-        accuracy_stats = _dashboard_accuracy_stats(db, join=join, color=color,
-                                                   where=where, params=params)
         db.set_progress_handler(None, 0)
     if stop_event is not None and stop_event.is_set():
         raise RuntimeError("dashboard preview superseded")
@@ -99,16 +97,6 @@ def dashboard_preview_snapshot(repository, *, account_id: str | None = None,
         game = dict(row)
         game["review_metrics"] = {"status": "loading", "coverage": "—", "source": "—"}
         games.append(game)
-    official_mean = accuracy_stats["official_mean"]
-    stockfish_mean = accuracy_stats["stockfish_mean"]
-    accuracy = accuracy_stats["combined_mean"]
-    combined_n = int(accuracy_stats["combined_count"] or 0)
-    source_detail = (
-        f"Lichess: {f'{official_mean:.1f}%' if official_mean is not None else '—'} "
-        f"({int(accuracy_stats['official_count'] or 0)}) · "
-        f"Stockfish: {f'{stockfish_mean:.1f}%' if stockfish_mean is not None else '—'} "
-        f"({int(accuracy_stats['stockfish_count'] or 0)})"
-    )
     scope = "Выбранный аккаунт" if account_id else "Все локальные партии"
     if clock:
         scope += f" · {clock}"
@@ -116,10 +104,8 @@ def dashboard_preview_snapshot(repository, *, account_id: str | None = None,
         {"key": "games", "label": "Завершённые партии", "value": str(total),
          "detail": "Локальные записи SQLite", "source": "games + account_games"},
         {"key": "accuracy", "label": "Точность",
-         "value": f"{float(accuracy):.1f}%" if accuracy is not None else "—",
-         "detail": source_detail if combined_n else "Нет локально рассчитанной точности",
-         "source": (f"{combined_n} партий · официальный Lichess с приоритетом над локальным "
-                    "расчётом; выборки источников могут пересекаться")},
+         "value": "—", "detail": "Подготавливаем сводку точности…",
+         "source": "SQLite; появится после фоновой полной сводки"},
         {"key": "analysis", "label": "Партии с анализом", "value": "—",
          "detail": "Подготавливаем сводку охвата…", "source": "SQLite"},
         {"key": "errors", "label": "Ошибки на 100 оценённых ходов", "value": "—",

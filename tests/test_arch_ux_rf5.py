@@ -228,8 +228,12 @@ def test_dashboard_safety_denies_local_human_and_late_account_reply(qtbot, tmp_p
     window.close()
 
 
-def test_home_recent_game_click_routes_to_library_details_without_opening_review(qtbot, tmp_path):
+def test_home_recent_game_click_opens_exact_saved_review(qtbot, tmp_path):
     window = _offline_window(qtbot, tmp_path, "home-card-route")
+    window.game_repository.save_snapshot(
+        "synthetic-home-route", "startpos", "e2e4 e7e5", "white",
+        "Synthetic Opponent", False, "300+0", "mate", "white",
+        white_player="Visual Coach", black_player="Synthetic Opponent")
     game = {
         "game_id": "synthetic-home-route", "status": "mate", "winner": "white",
         "color": "white", "opponent": "Synthetic Opponent", "started_at": "2026-11-01",
@@ -240,8 +244,9 @@ def test_home_recent_game_click_routes_to_library_details_without_opening_review
     window._render_dashboard_snapshot({"metrics": [], "recent_games": [game]})
     card = window._recent_games_layout.itemAt(0).widget()
     card.activated.emit()
-    assert window.screen_stack.currentWidget() is window.library_page
-    assert window._screen_mode != "review"
+    assert window.screen_stack.currentWidget() is window.review_workspace
+    assert window.review_workspace.review["game"]["game_id"] == "synthetic-home-route"
+    assert window._screen_mode == "review"
     window.close()
 
 

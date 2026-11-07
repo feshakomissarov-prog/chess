@@ -257,7 +257,7 @@ def test_new_account_home_scope_never_falls_back_to_all_accounts(qtbot, tmp_path
     window.close()
 
 
-def test_home_game_target_opens_by_id_while_saved_filters_exclude_it(qtbot, tmp_path, monkeypatch):
+def test_home_game_card_opens_exact_saved_review_directly(qtbot, tmp_path):
     settings = QSettings(str(tmp_path / "home-target.ini"), QSettings.Format.IniFormat)
     settings.setValue("workspace/library_page", 1)
     settings.setValue("workspace/library_filters", json.dumps({
@@ -277,29 +277,14 @@ def test_home_game_target_opens_by_id_while_saved_filters_exclude_it(qtbot, tmp_
     game["review_metrics"] = {"status": "без анализа", "coverage": "0/2",
                               "source": "нет данных"}
     window._render_dashboard_snapshot({"metrics": [], "recent_games": [game]})
-    window.show_saved_games()
-    qtbot.waitUntil(lambda: window.library_page.games.count() > 0, timeout=5000)
-    assert window._library_detail_target_id is None
-
     window._open_home_game_details(game)
-    qtbot.waitUntil(lambda: window.library_page._detail_game is not None
-                    and window.library_page._detail_game.get("game_id") == target,
-                    timeout=5000)
-    assert window.library_page.selected_game()["game_id"] != target
-    assert window.library_page._detail_game["game_id"] == target
-    assert window.library_page.detail_title.text() == "Поражение · Synthetic Opponent"
-    actions = []
-    monkeypatch.setattr(window, "_open_saved_game",
-                        lambda game: actions.append(("open", game["game_id"])) or True)
-    monkeypatch.setattr(window, "_export_saved_pgn",
-                        lambda game: actions.append(("export", game["game_id"])))
-    qtbot.waitUntil(lambda: window.library_page.detail_open.isEnabled(), timeout=5000)
-    window.library_page.detail_open.click()
-    window.library_page.export_game.click()
-    assert actions == [("open", target), ("export", target)]
+    assert window.screen_stack.currentWidget() is window.review_workspace
+    assert window._review_session is not None
+    assert window._review_session.game_id == target
+    assert window.review_workspace.review["game"]["game_id"] == target
     assert json.loads(settings.value("workspace/library_filters"))["outcome"] == "win"
     assert settings.value("workspace/library_page", type=int) == 1
-    assert window._screen_mode != "review"
+    assert window._screen_mode == "review"
     window.close()
 
 

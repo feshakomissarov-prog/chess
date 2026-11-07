@@ -117,6 +117,9 @@ class LichessGameSession:
         self.clock_initial = 0
         self.clock_control = "-"
         self.clock_state_valid: bool | None = None
+        self.clock_metadata_invalid = False
+        self.speed: str | None = None
+        self.days_per_turn: int | None = None
         self._clock_ply_seen: int | None = None
         self.rated = False
         self.winner = None
@@ -182,6 +185,11 @@ class LichessGameSession:
 
     def set_server_game_identity(self, game: dict) -> None:
         """Store the immutable opponent identity from gameStart/account-playing."""
+        speed = game.get("speed")
+        if isinstance(speed, str):
+            self.speed = speed
+        days = game.get("daysPerTurn")
+        self.days_per_turn = days if type(days) is int and 1 <= days <= 14 else None
         source = game.get("source")
         self.game_source = source if isinstance(source, str) else None
         opponent = game.get("opponent")
@@ -191,9 +199,13 @@ class LichessGameSession:
         if self.opponent_info:
             username = self.opponent_info.get("username")
             opponent_id = self.opponent_info.get("id")
-            self.opponent = (username if isinstance(username, str) and username else
-                             opponent_id if isinstance(opponent_id, str) and opponent_id else
-                             "Соперник")
+            ai_level = self.opponent_info.get("ai")
+            official_ai_name = (f"Lichess AI · уровень {ai_level}"
+                                if self.is_ai_opponent else None)
+            self.opponent = (official_ai_name
+                             or (username if isinstance(username, str) and username else None)
+                             or (opponent_id if isinstance(opponent_id, str) and opponent_id else None)
+                             or "Неизвестный соперник")
             title = self.opponent_info.get("title")
             self.opponent_title = title if isinstance(title, str) else None
 
@@ -401,14 +413,17 @@ class LichessGameSession:
         self.black_inc = self.white_inc
         if valid_initial and valid_increment:
             self.clock_control = f"{initial // 1000}+{increment // 1000}"
+            self.clock_metadata_invalid = False
         elif initial is None and increment is None:
             self.clock_control = "-"
             self.white_ms = self.black_ms = None
             self.clock_state_valid = None
+            self.clock_metadata_invalid = False
         else:
             self.clock_control = "-"
             self.white_ms = self.black_ms = None
             self.clock_state_valid = False
+            self.clock_metadata_invalid = True
 
     def can_interpolate_clock(self) -> bool:
         """Extrapolate only once the opening timer has started."""
@@ -435,10 +450,12 @@ class LichessGameSession:
         if any(type(value) is not int or value < 0 or value > _MAX_CLOCK_MS
                for value in times):
             self.clock_state_valid = False
+            self.clock_metadata_invalid = True
             return
         if any(type(value) is not int or value < 0 or value > _MAX_INCREMENT_MS
                for value in increments):
             self.clock_state_valid = False
+            self.clock_metadata_invalid = True
             return
         plies = len(self.moves.split())
         white_moves = (plies + 1) // 2
@@ -452,6 +469,7 @@ class LichessGameSession:
             white_upper = black_upper = _UNKNOWN_CONTROL_SAFE_MS
         if times[0] > white_upper or times[1] > black_upper:
             self.clock_state_valid = False
+            self.clock_metadata_invalid = True
             return
 
         # Repeated / delayed stream frames may carry an older clock snapshot for
@@ -478,6 +496,7 @@ class LichessGameSession:
         self.white_ms, self.black_ms = times
         self.white_inc, self.black_inc = increments
         self.clock_state_valid = True
+        self.clock_metadata_invalid = False
         self._clock_ply_seen = plies
         self._last_clock_at = time.monotonic()
 

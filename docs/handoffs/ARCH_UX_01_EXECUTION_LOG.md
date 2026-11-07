@@ -490,3 +490,28 @@ Synthetic preview benchmark (5 измерений, включая первое):
 ### Проверка после независимого ревью VIS6
 
 На новом визуальном прогоне обнаружена ошибка тестовой фикстуры: дата одной партии выставлялась на 18:30 UTC и могла оказаться в будущем, поэтому правильная SQL-выборка исключала её. Исправлено формирование всех восьми времён как `now - (days_ago + 1 day + 1 hour)`; реальная выборка «Прогресса» теперь содержит 8/8. Нативный Windows capture повторён полностью: **25/25 заполненных состояний PASS**, включая четыре вкладки Прогресса. Пары «арт / результат» заново сохранены в `visual-evidence/vis6-final/`. Полный локальный pytest после исправления — **837 PASS / 263.68 s**; compileall и diff check PASS. Первичный hosted run `42315427643` завершился FAIL из-за даты фикстуры. Второй run `42317068946` прошёл Progress, снял 17 изображений, затем выявил cp1252 на hosted Windows. Capture теперь переводит stdout/stderr в UTF-8. Третий run **#367 / 42317639521** на кодовом SHA `f1fdc28427bec04b47b51d549cfdacf677b49ff0` завершился **SUCCESS**: Windows Server 2025/Python 3.12, 837 PASS за 532.90 s, compileall, offline startup и native visual capture на scale 1/1.25/1.5 PASS. Artifact `visual-master-f1fdc28427bec04b47b51d549cfdacf677b49ff0` опубликован: [Windows run и скриншоты](https://github.com/feshakomissarov-prog/chess/actions/runs/42317639521#artifacts). Последующая запись этих результатов в документацию потребует нового exact-head CI.
+
+## ARCH-UX-01 VISUAL MASTER §15 — финальный консолидированный цикл, 07.11.2026
+
+Работа продолжена на исходном HEAD `5c375b070e6644dbded5fca62d960fc09c90651e` в существующей ветке `codex/arch-01-modular-refactor`, PR #44. `main` не менялся; PR не сливался. Отложенный `NAVIGATION_PATH_AUDIT_PARKED` не выполнялся.
+
+### Подтверждённые исправления и регрессии
+
+- **T-01:** credential revoke использует атомарный conditional delete по ожидаемому значению; replacement OAuth credential не удаляется конкурентной операцией. Barrier-тест проверяет конкурентную замену.
+- **T-02:** фоновые archive/puzzle/ready-analytics операции захватывают immutable account/auth-generation контекст; stale signals не обновляют текущий аккаунт. Проверено сменой аккаунта и поколения.
+- **T-03/T-06:** очередь различает валидные accuracy/evals, partial, no-data и времена попытки/успеха. Некорректный JSON не считается готовым результатом; источник и момент получения разделены.
+- **T-04:** Home preview не обращается к `handle_ref[0]` до возврата `OperationHandle`. Red test запускает worker синхронно до возврата handle и проверяет принятие/очистку результата.
+- **T-05:** закрытие LichessService выставляет stop event незавершённой очереди дозагрузки.
+- **R-01/R-02:** быстрый Home snapshot не выполняет тяжёлый source accuracy aggregate; queue lease не забирает живую задачу, просроченная lease восстанавливается. Использованы временные SQLite и синтетические данные.
+- **R-03:** конкурентные reader/writer, миграции и очереди покрываются изолированными SQLite regressions; личная БД не открывалась.
+- **R-04/R-05:** ограничения Lichess/429 и Fair Play остаются fail-closed; только fake transport, без настоящего UCI.
+- **VOICE-03:** длинная техническая подсказка точности заменена кратким tooltip; формула и provenance остаются в accessible description.
+- **VOICE-08:** активная партия больше не помечает архив и задачи как приостановленные. Только ready analytics и Stockfish получают «Отложено до конца игры». Ручная проверка явно сообщает блокировку и не начинает API-запрос.
+- **VOICE-09:** порция готовой аналитики отдаёт до 80% мест свежим завершённым партиям и резервирует до 20% старому backlog; свободные места заполняются общим due-порядком. SQLite regression проверяет свежий приоритет и дальнейший прогресс старого backlog, без миграции схемы.
+- Прочие изменения VID/VOICE, ранее реализованные в VIS6 (active games и authoritative mini-board, move sound ACK/dedup, безопасный приоритет ручного Stockfish, scoped ready-analysis retry, Home→Review), сохранены и перечислены с test references в acceptance matrix.
+
+### Проверки и ограничения
+
+Новые целевые Qt/SQLite regressions прошли: 39 PASS в focused наборе. Полный offscreen pytest собрал **861 тест**, завершился на 100% с `PYTEST_EXIT_CODE=0`; `PytestUnhandledThreadExceptionWarning` трактовался как ошибка. `compileall -q src scripts tests` и `git diff --check` — PASS. Видимый Windows capture на production MainWindow/temp synthetic SQLite прошёл **26 strict states**: фактические QWidget/QImage размеры 1672×941, 1360×860, 1280×720; фон дополнительно проверяет непересечение всех четырёх карточек, статусов/событий/кнопки и отсутствие обрезанных status labels. Финальные пары текущей итерации доступны локально в `%TEMP%/chess-coach-vis15-final-v7/`; GitHub Actions опубликует артефакт для итогового SHA.
+
+Сходство композиции с тремя PNG улучшено; также исправлены найденные при сравнении clipping ready-analytics и наложение diagnostics/event controls на узком размере. Итоговая эстетическая приёмка остаётся независимому ревью и владельцу; отчёт не называет визуальную часть принятой. Physical DPI 125/150%, личный звук, живой Lichess/OAuth, пользовательская SQLite/PGN и реальный Stockfish не проверялись. Exact-head Windows CI запускается после публикации commit.

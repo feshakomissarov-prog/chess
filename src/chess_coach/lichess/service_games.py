@@ -432,6 +432,8 @@ class LichessGameActionsMixin:
             self._archive_stop.set()
         if self._puzzle_stop is not None:
             self._puzzle_stop.set()
+        if self._analysis_backfill_stop is not None:
+            self._analysis_backfill_stop.set()
         if self._callback:
             self._callback.cancel()
             self._callback = None
@@ -621,6 +623,9 @@ class LichessGameActionsMixin:
                             context.generation, game_id, uci, request_id, 0)
                     return
                 self.client.send_move(token, game_id, uci)
+                if self.is_operation_context_current(context):
+                    self.session_move_accepted.emit(
+                        context.generation, game_id, uci, request_id)
             except Exception as exc:
                 status = exc.status if isinstance(exc, LichessError) and exc.status else 0
                 revoked = False

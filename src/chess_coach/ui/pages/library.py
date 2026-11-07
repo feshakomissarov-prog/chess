@@ -91,7 +91,7 @@ class LibraryPage(QWidget):
         super().__init__(parent)
         self._page = 0
         self._pages = 1
-        self.setMinimumSize(680, 520)
+        self.setMinimumSize(680, 460)
         layout = QVBoxLayout(self)
         layout.setSpacing(7)
         self.active_title = QLabel("Текущие партии")
@@ -228,10 +228,13 @@ class LibraryPage(QWidget):
         aside_layout = QVBoxLayout(aside)
         aside_layout.setContentsMargins(0, 0, 0, 0)
         aside_layout.setSpacing(8)
-        aside_layout.setSizeConstraint(QLayout.SizeConstraint.SetMinimumSize)
-        # Keep the filter grid and selected-game actions at readable heights;
-        # compact windows scroll this inspector instead of compressing controls.
-        aside.setMinimumHeight(520)
+        # The inspector is hosted by a resizable scroll area, so propagating
+        # its full content minimum to the page defeats that scroll area and
+        # pushes persistent pagination/actions below compact window bounds.
+        aside_layout.setSizeConstraint(QLayout.SizeConstraint.SetNoConstraint)
+        # Let the inspector scroll locally on compact windows; a fixed minimum
+        # here steals height from the persistent pagination/action row.
+        aside.setMinimumHeight(0)
         left_layout.addWidget(filter_panel)
         filter_panel.hide()
         self.filters_toggle.toggled.connect(filter_panel.setVisible)
@@ -239,7 +242,7 @@ class LibraryPage(QWidget):
         self.detail_panel.setObjectName("metricCard")
         detail_layout = QVBoxLayout(self.detail_panel)
         self.detail_title = QLabel("Выберите партию")
-        self.detail_title.setStyleSheet("font-size: 24px; font-weight: 700;")
+        self.detail_title.setStyleSheet("font-size: 29px; font-weight: 700;")
         self.detail_title.setWordWrap(True)
         detail_layout.addWidget(self.detail_title)
         self.detail_metadata = QLabel("Детали и оценки отображаются здесь.")
@@ -251,7 +254,7 @@ class LibraryPage(QWidget):
         self.detail_players.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.detail_players.setStyleSheet(
             "background: #232B3E; border: 1px solid #303950; border-radius: 10px;"
-            "padding: 10px; font-size: 16px; font-weight: 600;")
+            "padding: 13px; font-size: 20px; font-weight: 700;")
         self.detail_players.hide()
         detail_layout.addWidget(self.detail_players)
         self.detail_status = QLabel("Оценки требуют актуальной проверки безопасности.")
@@ -264,7 +267,9 @@ class LibraryPage(QWidget):
         badges = QHBoxLayout()
         self.source_badges = {name: QLabel() for name in ("Stockfish", "Lichess")}
         for badge in self.source_badges.values():
-            badge.setStyleSheet("background: #232B3E; border-radius: 8px; padding: 6px;")
+            badge.setStyleSheet(
+                "background: #232B3E; border: 1px solid #303950; border-radius: 8px; "
+                "padding: 8px; font-size: 15px; font-weight: 600;")
             badge.hide()
             badges.addWidget(badge, 1)
         detail_layout.addLayout(badges)
@@ -293,7 +298,7 @@ class LibraryPage(QWidget):
         self.detail_graph.compact = True
         self.detail_graph.setMinimumWidth(0)
         self.detail_graph.setMaximumHeight(190)
-        self.detail_graph.setMinimumHeight(120)
+        self.detail_graph.setMinimumHeight(145)
         self.detail_graph.setVisible(False)
         detail_layout.addWidget(self.detail_graph)
         self.detail_open = QPushButton("Открыть разбор")
@@ -334,6 +339,7 @@ class LibraryPage(QWidget):
         for button in (self.sync_button, self.background_button, self.settings_button):
             page_row.addWidget(button)
         layout.addLayout(page_row)
+        self.page_actions_row = page_row
         note_row = QHBoxLayout()
         self.note = QLineEdit()
         self.note.setPlaceholderText("Заметка к начальной позиции выбранной партии")
@@ -410,7 +416,7 @@ class LibraryPage(QWidget):
             value.hide()
         if not game:
             self.detail_title.setText("Выберите партию")
-            self.detail_title.setStyleSheet("font-size: 24px; font-weight: 700;")
+            self.detail_title.setStyleSheet("font-size: 29px; font-weight: 700;")
             self.detail_players.clear()
             self.detail_players.hide()
             self.detail_metadata.setText("Детали партии появятся здесь.")
@@ -426,7 +432,7 @@ class LibraryPage(QWidget):
         outcome = heading.partition(" с ")[0]
         self.detail_title.setText(f"{outcome} · {title}")
         outcome_color = {"Победа": "#79E599", "Поражение": "#FF737C"}.get(outcome, "#F5F6FD")
-        self.detail_title.setStyleSheet(f"font-size: 24px; font-weight: 700; color: {outcome_color};")
+        self.detail_title.setStyleSheet(f"font-size: 29px; font-weight: 700; color: {outcome_color};")
         white, black = game.get("white_player"), game.get("black_player")
         score = {"white": "1 – 0", "black": "0 – 1"}.get(game.get("winner"))
         if outcome == "Ничья":
@@ -477,7 +483,11 @@ class LibraryPage(QWidget):
              or any(official.get(side) is not None for side in ("white", "black"))),
         ):
             badge = self.source_badges[name]
-            badge.setText(f"{name} · {'Есть данные' if present else 'Нет данных'}")
+            has_server_moves = any(str(item).startswith("lichess") for item in available)
+            state = ("Нет данных" if not present else
+                     "Официальная точность" if name == "Lichess" and not has_server_moves else
+                     "Оценки ходов")
+            badge.setText(f"{name} · {state}")
             badge.show()
 
         def accuracy_for(side):
@@ -495,6 +505,7 @@ class LibraryPage(QWidget):
         for label, key in (("Неточности", "inaccuracy"), ("Ошибки", "mistake"), ("Зевки", "blunder")):
             lines.append(f"{label} · {classified('white', key)} / {classified('black', key)}")
         self.detail_metrics.setText("\n".join(lines))
+        self.detail_metrics.setStyleSheet("font-size: 17px; line-height: 1.2;")
         coverage = review.get("coverage") or {}
         values = [f"{accuracy_for('white')} / {accuracy_for('black')}",
                   *(f"{classified('white', key)} / {classified('black', key)}"

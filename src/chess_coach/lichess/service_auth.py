@@ -179,7 +179,11 @@ class LichessAuthMixin:
             revoke_generation = (self._cancel_active_session()
                                  if self.auth_method == "oauth" else self._auth_generation)
             oauth_store = self.oauth_token_store
-        if self.auth_method == "oauth":
+            is_oauth = self.auth_method == "oauth"
+            # Capture the exact credential before the asynchronous operation is
+            # queued. A later login must never change which token is revoked.
+            captured_token = oauth_store.get() if is_oauth else None
+        if is_oauth:
             self._emit_session_status(revoke_generation, "Отзываем сохранённый OAuth-токен…")
 
         def work():
@@ -187,7 +191,7 @@ class LichessAuthMixin:
                 with self._auth_lock:
                     if revoke_generation != self._auth_generation:
                         return
-                token = oauth_store.get()
+                token = captured_token
                 if not token:
                     self._emit_session_status(revoke_generation,
                                               "Сохранённый OAuth-токен не найден.")
@@ -195,8 +199,16 @@ class LichessAuthMixin:
                 self.client.revoke_token(token)
                 # A new OAuth login may have replaced the slot during the
                 # network request. Delete only the exact credential revoked.
-                if oauth_store.get() == token:
-                    oauth_store.delete()
+                conditional_delete = getattr(oauth_store, "delete_if_value", None)
+                if callable(conditional_delete):
+                    conditional_delete(token)
+                else:
+                    # Compatibility for test/custom stores: serialize app-owned
+                    # credential writes and the compare-delete under one lock.
+                    with self._auth_lock:
+                        if (revoke_generation == self._auth_generation
+                                and oauth_store.get() == token):
+                            oauth_store.delete()
                 self._emit_session_status(revoke_generation,
                                           "OAuth-токен отозван и удалён локально.")
             except Exception as exc:
@@ -379,12 +391,10 @@ class LichessAuthMixin:
             self.username = None
             previous_connection_stop.set()
             callback, self._callback = self._callback, None
-            if self._archive_stop is not None:
-                self._archive_stop.set()
-            if self._analysis_backfill_stop is not None:
-                self._analysis_backfill_stop.set()
-            if self._puzzle_stop is not None:
-                self._puzzle_stop.set()
+            puzzle_callback, self._puzzle_callback = self._puzzle_callback, None
+            for stop in (self._archive_stop, self._analysis_backfill_stop, self._puzzle_stop):
+                if stop is not None:
+                    stop.set()
             if self._username_challenge_stop:
                 self._username_challenge_stop.set()
             with self._pending_action_lock:
@@ -400,6 +410,8 @@ class LichessAuthMixin:
                 self._final_sync_game_ids.clear()
         if callback is not None:
             callback.cancel()
+        if puzzle_callback is not None:
+            puzzle_callback.cancel()
         return generation
 
     def is_auth_generation_current(self, generation: int) -> bool:

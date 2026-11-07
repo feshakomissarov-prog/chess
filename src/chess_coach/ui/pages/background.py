@@ -72,18 +72,20 @@ class BackgroundOperationsPage(QWidget):
             badge.setMinimumWidth(95)
             badge.setMaximumHeight(34)
             row.addWidget(badge)
-            detail_column = QVBoxLayout()
-            detail_column.setSpacing(6)
-            detail_column.addWidget(detail, 1)
             if key == "ready":
                 self.manual_check_button = QPushButton("Проверить сейчас")
                 self.manual_check_button.setObjectName("secondaryAction")
+                self.manual_check_button.setToolTip(
+                    "Запросить уже опубликованные оценки Lichess, если партия доступна для проверки.")
                 self.manual_check_button.clicked.connect(self.manual_check_requested.emit)
-                detail_column.addWidget(self.manual_check_button, 0, Qt.AlignmentFlag.AlignLeft)
+                row.addWidget(self.manual_check_button)
             elif key == "stockfish":
                 self.batch_button = QPushButton("Очередь Stockfish")
                 self.batch_button.clicked.connect(self.batch_requested.emit)
-                detail_column.addWidget(self.batch_button, 0, Qt.AlignmentFlag.AlignLeft)
+                row.addWidget(self.batch_button)
+            detail_column = QVBoxLayout()
+            detail_column.setSpacing(6)
+            detail_column.addWidget(detail, 1)
             row.addLayout(detail_column, 6)
             bar = QProgressBar()
             bar.setAccessibleName(f"{caption} · прогресс")
@@ -101,14 +103,20 @@ class BackgroundOperationsPage(QWidget):
             self._workflow_rows[key] = row
         self.details_toggle = QPushButton("Диагностика операций")
         self.details_toggle.setCheckable(True)
+        self.details_toggle.setObjectName("backgroundDiagnosticsToggle")
+        self.details_toggle.setMaximumHeight(30)
         self.operation_list = QListWidget()
         self.operation_list.setAccessibleName("Текущие фоновые операции")
-        root.addWidget(self.operation_list)
         self.operation_list.hide()
         self.details_toggle.toggled.connect(self.operation_list.setVisible)
         self.recent_events_title = QLabel("Последние события")
         self.recent_events_title.setStyleSheet("font-size: 23px; font-weight: 700;")
-        root.addWidget(self.recent_events_title)
+        events_header = QHBoxLayout()
+        events_header.setObjectName("backgroundEventsHeader")
+        events_header.addWidget(self.recent_events_title, 1)
+        events_header.addWidget(self.details_toggle)
+        root.addLayout(events_header)
+        root.addWidget(self.operation_list)
         self.recent_events = QListWidget()
         self.recent_events.setAccessibleName("Последние сохранённые события")
         self.recent_events.setMinimumHeight(162)
@@ -118,7 +126,6 @@ class BackgroundOperationsPage(QWidget):
         # saved rows fit in the approved desktop card without scrolling.
         self.recent_events.setStyleSheet("QListWidget::item { padding: 1px 8px; }")
         root.addWidget(self.recent_events)
-        root.addWidget(self.details_toggle, 0, Qt.AlignmentFlag.AlignLeft)
         self.source_summary = QLabel("")
         self.source_summary.setWordWrap(True)
         self.source_summary.setObjectName("secondary")
@@ -148,11 +155,15 @@ class BackgroundOperationsPage(QWidget):
         self.summary.setStyleSheet(
             f"font-size: {16 if compact else 19}px; font-weight: 700;")
         for card, icon, title in self._workflow_cards:
-            card.setMinimumHeight(94 if compact else 112)
-            icon.setFixedSize(36 if compact else 43, 36 if compact else 43)
+            card.setMinimumHeight(70 if compact else 100)
+            card.layout().setContentsMargins(10 if compact else 14,
+                                             4 if compact else 6,
+                                             10 if compact else 14,
+                                             4 if compact else 6)
+            icon.setFixedSize(32 if compact else 43, 32 if compact else 43)
             icon.setStyleSheet(
                 "background: #39365E; color: #C8BBFF; border-radius: 10px; "
-                f"font-size: {22 if compact else 26}px;")
+                f"font-size: {20 if compact else 26}px;")
             title.setStyleSheet(
                 f"font-size: {16 if compact else 18}px; font-weight: 700;")
         # Keep all four approved desktop event rows inside the list viewport.
@@ -160,6 +171,7 @@ class BackgroundOperationsPage(QWidget):
         self.recent_events.setMaximumHeight(104 if compact else 170)
         self.recent_events_title.setStyleSheet(
             f"font-size: {19 if compact else 23}px; font-weight: 700;")
+        self.details_toggle.setMaximumHeight(25 if compact else 30)
 
     def set_snapshot(self, operations, *, source_summary: str,
                      backfill_paused: bool, can_check: bool, can_pause: bool,

@@ -35,6 +35,10 @@ class LichessService(QObject, LichessAuthMixin, LichessSyncMixin, LichessGameAct
     session_action_started = Signal(int, str, str, str)
     session_action_completed = Signal(int, str, str, str, int)
     session_action_reconciled = Signal(int, str, str, str)
+    session_move_accepted = Signal(int, str, str, str)
+    # Background archive/puzzle updates carry the session generation so a
+    # queued Qt delivery from account A cannot paint account B's screens.
+    session_sync_event = Signal(int, str, str, object)
     # Endpoint-specific background failures must not be misread as account or
     # event-stream failures by the desktop session state machine.
     background_operation_status = Signal(int, str, int, str)

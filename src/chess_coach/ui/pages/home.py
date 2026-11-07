@@ -8,7 +8,7 @@ from PySide6.QtCore import QPointF, Qt
 from PySide6.QtGui import QColor, QPainter, QPainterPath, QPen
 from PySide6.QtWidgets import (
     QComboBox, QFrame, QGridLayout, QHBoxLayout, QLabel, QPushButton, QScrollArea,
-    QToolTip, QVBoxLayout, QWidget,
+    QSizePolicy, QToolTip, QVBoxLayout, QWidget,
 )
 
 
@@ -120,8 +120,8 @@ class HomePage(QWidget):
             card_layout.setContentsMargins(16, 13, 16, 13)
             card_layout.setSpacing(2)
             caption = QLabel(label)
-            caption.setStyleSheet("font-size: 17px; font-weight: 600;")
-            caption.setWordWrap(False)
+            caption.setStyleSheet("font-size: 19px; font-weight: 600;")
+            caption.setWordWrap(True)
             caption_row = QHBoxLayout()
             if key in {"games", "accuracy"}:
                 icon = QLabel("♟" if key == "games" else "◎")
@@ -132,7 +132,7 @@ class HomePage(QWidget):
                 caption_row.addWidget(icon)
             caption_row.addWidget(caption, 1)
             value = QLabel("—")
-            value.setStyleSheet("font-size: 48px; font-weight: 700;")
+            value.setStyleSheet("font-size: 54px; font-weight: 700;")
             detail = QLabel("Локальные данные")
             detail.setObjectName("muted")
             detail.setWordWrap(True)
@@ -160,21 +160,30 @@ class HomePage(QWidget):
         progress_layout.setContentsMargins(11, 8, 11, 8)
         progress_layout.setSpacing(4)
         progress_title = QLabel("Рейтинг задач")
-        progress_title.setStyleSheet("font-size: 17px; font-weight: 600;")
-        progress_layout.addWidget(progress_title)
+        progress_title.setStyleSheet("font-size: 19px; font-weight: 600;")
+        progress_title.setWordWrap(True)
+        self.home_all_progress_button = QPushButton("Весь прогресс")
+        self.home_all_progress_button.setMaximumHeight(32)
+        self.home_all_progress_button.clicked.connect(actions["show_statistics"])
+        progress_heading = QHBoxLayout()
+        progress_heading.addWidget(progress_title, 1)
+        progress_heading.addWidget(self.home_all_progress_button)
+        progress_layout.addLayout(progress_heading)
         self.puzzle_rating = QLabel("—")
-        self.puzzle_rating.setStyleSheet("font-size: 48px; font-weight: 700;")
+        self.puzzle_rating.setStyleSheet("font-size: 54px; font-weight: 700;")
         progress_layout.addWidget(self.puzzle_rating)
         self.puzzle_sparkline = PuzzleRatingSparkline(self.home_progress_card)
+        self.puzzle_sparkline.setMinimumHeight(70)
+        self.puzzle_sparkline.setMaximumHeight(80)
+        self.puzzle_sparkline.setMinimumWidth(0)
+        self.puzzle_sparkline.setSizePolicy(QSizePolicy.Policy.Ignored,
+                                            QSizePolicy.Policy.Preferred)
         progress_layout.addWidget(self.puzzle_sparkline)
         self.progress_trend = QLabel("Нет сохранённых точек тренда.")
         self.progress_trend.setObjectName("secondary")
         self.progress_trend.setWordWrap(True)
         self.progress_trend.setMaximumHeight(50)
         progress_layout.addWidget(self.progress_trend, 1)
-        self.home_all_progress_button = QPushButton("Весь прогресс")
-        self.home_all_progress_button.clicked.connect(actions["show_statistics"])
-        progress_layout.addWidget(self.home_all_progress_button, 0, Qt.AlignmentFlag.AlignLeft)
         self.dashboard_metrics["games"].layout().addWidget(
             self._dashboard_metric_values["analysis"])
         self._dashboard_metric_values["analysis"].setStyleSheet("font-size: 14px;")
@@ -336,3 +345,7 @@ class HomePage(QWidget):
                 visual_stretch[column] if columns == 3 else int(column < columns))
         for index, card in enumerate(cards):
             grid.addWidget(card, index // columns, index % columns)
+
+    def resizeEvent(self, event) -> None:  # noqa: N802 - Qt override
+        super().resizeEvent(event)
+        self.layout_metrics(event.size().width())
