@@ -1,3 +1,5 @@
+> **ВАЖНО — ПОВТОРНАЯ НЕЗАВИСИМАЯ ПРОВЕРКА 08.11.2026:** следующий Codex gate на SHA `09766297a1ff0e5d960681116d8763959d1c871f` завершён: Windows CI #408 **894 PASS**, но выявлены **4 подтверждённых code/UI остатка и 1 незакрытый пользовательский аудиоконтракт**. **Актуальное единственное ТЗ для следующего исправления — §E внизу этого файла (POST-01…05)**; прежние CORR-01…16 ниже остаются **историей закрываемого этапа**, не запускать их повторно без red regression. Общий статус **NO GO до устранения POST-01…04 и независимой проверки**, а физический звук/личные интеграции/художественная приёмка — отдельный внешний gate.
+
 # ARCH-UX-01 — НЕЗАВИСИМОЕ CODE + VISUAL REVIEW / ЕДИНОЕ КОРРЕКТИРУЮЩЕЕ ТЗ
 
 **Дата:** 07.11.2026. **Review target:** code draft [PR #44](https://github.com/feshakomissarov-prog/chess/pull/44), **exact HEAD `afb2cc63958da048fcc6683555f909942e94400d`**. **Базовый предыдущий checkpoint:** `5c375b070e6644dbded5fca62d960fc09c90651e`; **6 коммитов / 28 изменённых файлов** относительно этого checkpoint. **Автор исправлений:** Codex; **независимый source+artifact review** отдельно. **СТАТУС: NO GO / КОРРЕКЦИИ ОБЯЗАТЕЛЬНЫ ДО РУЧНОЙ ПРИЁМКИ.**
@@ -130,3 +132,64 @@
 - Owner's physical Windows + permitted real-data verification **still requires explicit consent and remains final external acceptance**. Do not use private credentials/data automatically, do not merge.
 
 **Final disposition as of `afb2cc6`:** **CI PASS / exact artifact inspected / VISUAL + OWNER ACCEPTANCE NOT PASS / CORRECTION REQUIRED.** This document is the *only* corrective work packet for this gate; retain existing unified §15 master and historical stages as references. No background execution authorized by this review file alone.
+
+
+---
+
+## E. Повторная независимая проверка после CORR-01…16 · **08.11.2026** · SHA `09766297a1ff0e5d960681116d8763959d1c871f`
+
+### E.0 Проверенные факты / честная оценка улучшений
+
+**Target:** [draft code PR #44](https://github.com/feshakomissarov-prog/chess/pull/44) exact `09766297a1ff0e5d960681116d8763959d1c871f`; **3 новых коммита относительно `afb2cc6`, 30 изменённых файлов** по GitHub compare (включая документы/тесты; не путать с отчётом 24 файлов из другого UI-diff). PR открыт, draft, не merged. **[Windows CI #408 / run 42419662079](https://github.com/feshakomissarov-prog/chess/actions/runs/42419662079) SUCCESS:** независимо прочитаны job log, **894 passed in 467.18 s** (Python 3.12.10, unhandled worker warning as errors), compileall, isolated MainWindow; visual-evidence job PASS.
+
+**Визуальное доказательство действительно получено и прочитано, не только доверие Codex:** скачан/разобран [Windows artifact #13593435525](https://github.com/feshakomissarov-prog/chess/actions/runs/42419662079/artifacts/13593435525) (**29,154,373 bytes**, `sha256:e8a8878143468d581607db492277b0da3e7e18c332aab6f3a4335795d69a9e37`), осмотрены `scale-1`, `scale-1.25`, `scale-1.5`, **30+23+23 = 76 native synthetic states** и owner-approved art pairs (Home/Library/Background). Подтверждён значительный прогресс: компактные Play/Training/Game/Review теперь отрисованы, нет ранее заметных пересечений, доступны локальные scroll и кнопки; готовые данные Lichess не фабрикуются; меры по OAuth/generation, SQLite leases и daily budget получили новые тесты. **Не требовать переделки всех CORR-01…16.**
+
+Но логический review выявил оставшиеся ошибки, **которых CI/76 screenshots не тестируют**. Классификация: POST-01,02,03,04 — `CONFIRMED SOURCE` / `CONFIRMED VISUAL` и должны иметь red→green. POST-05 — **неисполненный UX/physical-audio acceptance**, не выдавать его за доказанную поломку sound API.
+
+### POST-01 · P1 · «Повторить проверку выбранной партии» на деле запускает массовый backfill — CONFIRMED SOURCE
+
+**Точная цепочка:**
+- `src/chess_coach/window.py:7825–7853::retry_selected_analysis()`: вызывает `_start_lichess_analysis_backfill(generation, manual=True, preferred_game_id=selected_id)` и сообщает: **«Повторно проверяется только выбранная партия»**.
+- `src/chess_coach/infrastructure/sqlite/jobs.py:146–184::list_lichess_analysis_backfill()`: `preferred_game_id` — только `CASE WHEN q.game_id=? THEN 0 ELSE 1 END` внутри **ORDER BY**, при `limit=10` результат дополняется 9 прочими due-играми. `archive.py:265–410::refresh_ready_analytics()` делает сетевые вызовы **для ВСЕХ returned candidates**. Значит подтверждённое обещание «только одна» неверно, один ручной клик может расходовать дополнительные до 9 запросов и дневную квоту. Если выбранная игра вообще не due, могут проверяться **только посторонние**.
+- Имеющийся `tests/test_corr_gate_regressions.py::test_manual_global_backfill_check_does_not_clear_account_wide_ttls` вызывает **limit=1** и потому не ловит производственный `limit=10`.
+
+**Fix:** отдельный exact game+account+line_revision **strict-scope parameter/selection** (не просто preferred ORDER BY) для ручной адресной проверки, с due + budget + Retry-After, если выбранная revision устарела/готовые данные уже есть — объяснить статус и **не расходовать квоту на другие игры**. Глобальная фоновая дорожка по-прежнему обрабатывает до 10 по справедливому свежему/старому приоритету. **Red:** 20 due unrelated + selected partial/no-data + case selected not due/expired; one click produces **ровно 0 или 1 network request for selected sourceGameId**, never unrelated; quota 25, 429, TTL, duplicate clicks, cancel/auth switch. Green per-game report and click-UI. **Требование CORR-10 осталось частично незакрытым.**
+
+### POST-02 · P1 security/account isolation · Избранный Library account A не сверяется с текущим OAuth/PAT account B — CONFIRMED SOURCE
+
+**Source:** `window.py:7835–7853` берёт `account_id=game.get("account_id")` при наличии `lichess:`, но **не сравнивает его с каноническим авторизованным `self.lichess.username`**. Локальный `retry_lichess_analysis_game(account_A, game_A)` в `jobs.py:186–220` проверяет связь игры с **запрошенным A**, а не право токена текущей сессии B на этот account. Затем `_start_lichess_analysis_backfill` всегда запускает `LichessService.refresh_lichess_analysis_background` с username **B** и тем же `preferred_game_id=A.game`. Итог: локальная TTL/очередь **A изменяется без актуального разрешения A**; реальные API расходуют лимиты **B** и статус может ложно объявить проверенной игру A. Это нарушение границы акаунтов, даже если чужой HTTP JSON не записался.
+
+**Fix:** перед **любой** SQLite mutation проверить canonical selected `account_id` ↔ current authenticated account identity, auth_generation, source game linked/current revision; при mismatch — остановка без изменения БД и без запросов, понятная подсказка «Выберите/подключите аккаунт X». При асинхронности повторить fence непосредственно перед network и commit. **Red:** локальный archive A, подключенный Lichess B, Library filter A/All, одна и та же game_id связана с A+B, + late auth A→B; zero modifications to either account and zero network on mismatch, credentials not exposed. Green negative + positive A→A.
+
+### POST-03 · P1 · Finished timed game снова показывает ложное «без часов», если clock snapshot **отсутствует**, а не повреждён — CONFIRMED SOURCE
+
+**Source:** `window.py:7560–7599::_update_clock()`. Исправлено только `session.clock_state_valid is False`, и тест `test_finished_timed_game_with_invalid_clock_keeps_known_time_control` задаёт именно `False`. Но обычный reconnect `session.clock_state_valid is None`, `session.white_ms=black_ms=None`, `session.clock_control="180+2"`, `status="mate"` приводит в следующую ветку: `if white_ms is None or black_ms is None` → `"Без часов"` / `"Партия завершена · без часов"`. Ложное утверждение, будто партии вообще не было с контролем, несмотря на известный timed clock. **Тот же предыдущий CORR-12, но не покрытый случай.**
+
+**Fix:** unified distinct states: timed known control + finished/no snapshot → «Контроль 3+2 · партия завершена; часы недоступны/остановлены», но **не «без часов»**; running timed missing snapshot → «ждём серверные часы»; correspondence/unlimited → honestly «без обычных часов» / days-per-turn; no invented milliseconds. **Red:** status mate + speed blitz + 180+2 + state None/white_ms None/black_ms None; same with state False, stale values, correspondence, unlimited, missing metadata; require exact UI labels. Validate GameFull-only reconnect and terminal gameFinish.
+
+### POST-04 · P2/P1 UX · Review показывает стартовую позицию, но скроллит список на поздние ходы — CONFIRMED VISUAL + SOURCE
+
+**Source PNGs** в exact artifact: `scale-1.5/1120x640-game-review.png`, `scale-1.25/1280x720-game-review.png`. В кадрах chessboard в **стартовой позиции**, заголовок «Начальная позиция · +0.00» и диаграмма на полуходе **0**, а список ходов прокручен к **строкам №5–8 / №6–8**. Ранние ходы `1.e4...` не видны; активный SAN визуально не соответствует положению доски. **Никакого доказательства пропажи/порчи партии нет** — это сбитое viewport/selection состояние.
+
+**Source:** `ui/game_review.py:803–842::load_game` устанавливает `selected_ply=0` и начальную доску, `ui/move_table.py:271–293::select_ply(0)` при отсутствии item with ply0 вызывает **только `clearSelection()`**, не scroll-to-top; при других ply `PositionAtBottom` может оставлять контекст неудобным. Native capture `scripts/capture_visual_master.py:953–955` не утверждает, что видимые строки и текущая доска согласованы.
+
+**Fix:** при выбранной начальной позиции (`ply=0`) явно прокрутить SAN table на первый видимый полный ход, без выделения ложного ply; при любом другом ply scrollToItem `EnsureVisible` или deterministic positioning plus selected-cell highlighting после queued layout; клавиатура, graph, previous/next, initial→last→initial. **Red:** loaded 17-ply review, initial board and row1 visible at 1120/1.5; select ply17 => SAN 9.h3 visibly selected + board position17, jump ply0 => row1 visible and board initial; late QTimer cannot revert viewport. Positive screenshot + Qt visualItemRect / scrollbar assertions.
+
+### POST-05 · P1 UX / OWNER AUDIO GATE · «мгновенный звук хода» всё ещё не обеспечен; protocol-safe choice must be explicit — CONFIRMED REQUIREMENT GAP, не дефект подтверждения
+
+**Source:** `window.py::on_move_intent` ставит `pending sound intent`, `lichess/service_games.py::send_move` подтверждает только после HTTP return; `window.py::_lichess_session_move_accepted` вызывает `sound_player.play_move` только на ACK. Новый `test_online_move_is_pending_immediately_but_confirmed_sound_waits_for_server` буквально требует `calls == []` **до** ACK при 0/0.5/1.5 seconds — это корректная антифальсификация **подтверждённого** звука, но **не решает исходную жалобу из аудио** на длинную задержку от клика до слышимого отклика. В UI pending-текст появляется сразу — это не звук.
+
+**Decision/accept:** обсудить и реализовать (если UX contract требует именно слышимый моментальный отклик) два независимых сигнала: немедленный **neutral pending-input click** при действительно допустимом намерении и один истинный **confirmed move** после ACK; разные assets/meaning, no duplicate on stream, rejection/rollback no confirmed move, premove/castling/promotion. Если моментальный звук принципиально не разрешён выбранными настройками/продуктовым решением, **не заявлять VOICE-06 полностью исправленным**, задокументировать пользовательский trade-off и оставить физическую приёмку без подмены. Synthetic measured timing + real Windows audio on owner PC remain needed. Не запускать реальные сетевые шахматы для звукового теста без отдельного согласования.
+
+### E.1 Что не нужно повторно «исправлять» и какие gate остаются открыты
+
+- По новому ZIP **предыдущие gross-overlap/clipping Play/Training/Game/Review на 150% в основном устранены**, для последних 76 нативных кадра действительно существуют. Отличие трёх actual Home/Library/Background от approved art остаётся **эстетическим acceptance**, не доказанным corruption/invalid metric bug; согласовывает владелец. Не делать бесконечный refactor из-за пиксельного сходства.
+- Результаты fake-only 894/894, CAS/lease heartbeat, 3510 archive selection, connected safety guards, revised SQLite schema v22 — настоящие полезные регрессии. В новой итерации добавить узкие тесты POST, не откатывать уже фиксированное. Не утверждать, что schema migration на личной SQLite/real Windows verified: источники данных синтетические.
+- Physical DPI/real audio, PAT/OAuth/Lichess, реальные пользовательские SQLite/PGN и Stockfish/UCI всё ещё **NOT TESTED**. Это внешние gates после исправлений с разрешения владельца, не повод придумывать production failures сейчас. Fair Play live-human остаётся fail-closed.
+- **До повторной code+visual проверки POST-01…04 — NO GO для final acceptance/merge.** POST-05 требует точного продукта/физического теста, не опровергает успешный CI.
+
+### E.2 Один компактный Codex corrective cycle в существующем PR #44
+
+**Base exact SHA `09766297a1ff0e5d960681116d8763959d1c871f`**, перед началом снова сверить current #44 HEAD; полный MASTER §15+16 и исторические CORR-01…16 сохранить. **ИСПРАВИТЬ ТОЛЬКО POST-01…04 и осмысленно закрыть/пометить POST-05** (а не заново все 16). Test-first `red` on reported exact edge → correct minimum production code change → `green`, no new PR/RF/VIS, no scope expansion, no roadmap/navigation-path work, no direct owner data/credentials/Stockfish, no main/merge.
+
+**Required proof on updated exact SHA:** full Windows pytest (894 previous remain green + new tests), compileall/offline Qt, `git diff --check`, native screenshots at 100/125/150 incl **start review SAN row1 / selected last / reset**, manual single-game request fake transport counters 20+ due rows / A↔B identity, clock None vs False; three unchanged approved art pairs and compact populated surfaces. In PR report matrix per `POST-01…05 | before red test/PNG | code | after green | limitations` and CI+artifact. Review again independently before owner acceptance. **NO MERGE.**
