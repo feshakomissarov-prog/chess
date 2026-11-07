@@ -166,6 +166,19 @@ def test_library_note_draft_stays_bound_to_the_game_where_it_was_typed(qtbot):
     assert saved == [("game-a", "position note")]
 
 
+def test_library_initial_selection_requests_details_once(qtbot):
+    page = LibraryPage()
+    qtbot.addWidget(page)
+    requests = []
+    page.detail_requested.connect(requests.append)
+
+    game = {"game_id": "initial-selection", "line_revision": 2}
+    page.set_results([(game, "Synthetic game", "Local")], page=0, pages=1, total=1)
+
+    assert page.selected_game() == game
+    assert requests == [game]
+
+
 def test_library_keeps_independent_note_drafts_per_selected_game(qtbot):
     page = LibraryPage()
     qtbot.addWidget(page)

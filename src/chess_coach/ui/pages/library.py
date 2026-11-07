@@ -623,7 +623,11 @@ class LibraryPage(QWidget):
         self.summary.setText(f"Завершённые партии · {max(0, int(total))} в текущей выборке")
         self.previous.setEnabled(self._page > 0)
         self.following.setEnabled(self._page + 1 < self._pages)
-        self._selection_changed(self.games.currentItem(), None)
+        # Selecting the restored/first row above emits currentItemChanged and
+        # loads its details. Calling the handler again here cancelled that
+        # request immediately and could leave the inspector stuck in "loading".
+        if self.games.currentItem() is None and previous is None:
+            self._selection_changed(None, None)
 
     def selected_game(self) -> dict | None:
         item = self.games.currentItem()
