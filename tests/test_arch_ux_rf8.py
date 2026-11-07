@@ -221,7 +221,10 @@ def test_application_resumes_bounded_v2_materialization_in_background_and_masks_
     window = MainWindow(runtime=runtime)
     qtbot.addWidget(window)
     window.show_background_analytics()
-    qtbot.waitUntil(lambda: runtime_repo.count_stale_analysis_metrics() == 0, timeout=12000)
+    # The startup coordinator deliberately processes at most ten saved runs per
+    # writer batch.  This fixture has 43 runs, so a slower hosted Windows runner
+    # needs several event-loop turns and SQLite transactions before it is done.
+    qtbot.waitUntil(lambda: runtime_repo.count_stale_analysis_metrics() == 0, timeout=45000)
     qtbot.waitUntil(lambda: "43/43" in window._background_operations_page.local_metrics_status.text(),
                     timeout=5000)
     with runtime_repo._connection() as db:

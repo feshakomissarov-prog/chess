@@ -495,3 +495,7 @@ CI #397 после первого исправления прошёл Home и с
 CI #398: test job SUCCESS на SHA `79005c04b6f4d23058b25a133d2c9e407cc49111`, но native visual job обнаружил пересечение карточек Background в узком 150% режиме 1120×640. Добавлен отдельный tight-layout breakpoint при высоте страницы <540px и интеграционная Qt-регрессия. После этого изменения запланированы полный 864-test suite и новый exact-head Windows run; CI #398 целиком остаётся FAIL и не считается приёмкой.
 
 После tight-layout изменения полный локальный набор: **864 PASS** на Python 3.12.10; worker-thread exceptions — errors; compileall, `git diff --check`, collect count 864 и три целевые Qt-регрессии (125% статус, 150% геометрия, одиночная загрузка выбранной партии) PASS. Новый Windows CI на точном финальном SHA ожидает публикации.
+
+### VIS15 follow-up — CI #399 timing diagnosis
+
+На SHA `f77d866a805127a61c855ccd4fba3ecc2c2c0e1b` native Windows `visual-evidence` прошёл и создал артефакт `visual-master-f77d866a805127a61c855ccd4fba3ecc2c2c0e1b`; основной job завершился 863 PASS / 1 timeout. Логи подтвердили, что стартовая миграция выполнялась в штатных bounded-порциях по 10 анализов для fixture с 43 записями, а ожидание теста в 12 секунд было короче надёжного завершения всех порций на hosted runner. Production код не менялся. Timeout теста увеличен до 45 секунд; targeted regression и полный локальный pytest (**864 PASS**, warnings-as-errors), compileall и diff-check — PASS. Требуется новый exact-head Windows CI, поскольку #399 overall был FAIL.
