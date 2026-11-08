@@ -519,3 +519,7 @@ Exact-head Windows CI #400 для кода и regression timeout update `0f87115
 ### POST-01…05 CI — 08.11.2026
 
 Windows CI run #413 на code SHA `e2d6b2165e558a95039db5c73c69a8617aae76c2` — SUCCESS: pytest, compileall, isolated offline startup и native screenshot capture завершились успешно. [Артефакт скриншотов](https://github.com/feshakomissarov-prog/chess/actions/runs/42434311314#artifacts-13598792985). Отчёт требует повторного exact-head CI после этого документационного обновления. Реальные Lichess/OAuth/PAT, пользовательская SQLite/PGN и Stockfish не использовались; звучание pending-beep физически не проверено владельцем.
+
+### POST-01…05 Windows CI rerun note
+
+Windows run #414 выявил test-isolation failure: account-switch Fair Play regression оставляла включёнными не относящиеся к сценарию таймеры синхронизации архива/задач, из-за чего teardown на медленном runner не мог закрыть окно синхронно. В тесте эти две автосинхронизации теперь выключены до stream-ready. Три варианта account-session regression прошли; повторный локальный полный набор — 904 PASS, compileall и diff-check PASS. Native visual job run #414 прошёл, artifact опубликован. Полный exact-head Windows CI для фикса ещё ожидается; production logic не менялась.
