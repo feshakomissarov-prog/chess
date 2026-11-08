@@ -2191,13 +2191,14 @@ class MainWindow(QMainWindow):
         if self.board.width() != actual or self.board.height() != actual:
             self.board.setFixedSize(actual, actual)
         if hasattr(self, "review_workspace"):
-            sidebar_width = self.sidebar.width() if hasattr(self, "sidebar") else 212
-            focus = bool(getattr(self, "_board_focus_mode", False))
-            inspector_width = 0 if focus else 340
-            review_width = max(320, self.width() - sidebar_width - inspector_width - 96)
-            review_height = max(320, self.height() - 64 - 210)
-            review_size = max(320, min(requested, review_width, review_height))
-            self.review_workspace.review_board.setFixedSize(review_size, review_size)
+            # The review graph and metadata rows share the shell's vertical
+            # viewport. Reserve room for those rows before fixing its board.
+            review_viewport_height = (self.screen_stack.height()
+                                      if hasattr(self, "screen_stack") else self.height())
+            review_limit = max(160, review_viewport_height - 360)
+            self.review_workspace.review_board.setFixedSize(
+                min(requested, review_limit), min(requested, review_limit))
+            QTimer.singleShot(0, self.review_workspace._fit_review_board)
 
     def _game_layout_should_stack(self) -> bool:
         """Stack game board and controls when either dimension is compact.
@@ -2225,9 +2226,7 @@ class MainWindow(QMainWindow):
         if (hasattr(self, "sidebar") and hasattr(self, "screen_stack")
                 and not self._sidebar_explicit_override):
             current = self.screen_stack.currentWidget()
-            board_route = current in (
-                self.game_page, self.result_page, getattr(self, "review_workspace", None))
-            should_collapse = self.width() < 1160 or board_route
+            should_collapse = self.width() < 1160
             if (self.sidebar.width() <= 60) != should_collapse:
                 self._set_sidebar_collapsed(should_collapse)
             elif not should_collapse:
@@ -2492,7 +2491,8 @@ class MainWindow(QMainWindow):
             if margins.bottom() != target_bottom:
                 self._outer_content_layout.setContentsMargins(
                     margins.left(), margins.top(), margins.right(), target_bottom)
-        self.screen_title.setVisible(current is not self.review_workspace)
+        self.screen_title.setVisible(
+            current is not self.review_workspace and current is not self.analysis_page)
         # The approved dark visual tokens are the application-wide design
         # system. Previously only Home/Library/Background activated them,
         # leaving Play, Analysis, Training, Progress and nested game screens
@@ -2549,10 +2549,12 @@ class MainWindow(QMainWindow):
         self._active_route = route.value
         self._set_active_route(route.value)
         self.back_button.setVisible(
-            route is not WorkspaceRoute.HOME and self.workspace_navigator.can_go_back)
+            current is not self.analysis_page and current is not self.review_workspace
+            and route is not WorkspaceRoute.HOME
+            and self.workspace_navigator.can_go_back)
         self._update_return_to_game_button()
         if not self._sidebar_explicit_override:
-            self._set_sidebar_collapsed(is_board or self.width() < 1160)
+            self._set_sidebar_collapsed(self.width() < 1160)
         self._schedule_workspace_save()
 
     def _restore_window_frame(self) -> None:

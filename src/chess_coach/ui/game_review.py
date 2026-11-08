@@ -113,6 +113,8 @@ class ReviewGraph(QWidget):
         self.full_ply_count = 0
         self.analysis_source = ""
         self.analysis_status = ""
+        self.empty_title = "Оценка отсутствует"
+        self.empty_detail = "Здесь появится график оценки после запуска анализа Stockfish."
         self.delta_mode = False
         self.compact = False
         self.markers_visible = False
@@ -202,6 +204,15 @@ class ReviewGraph(QWidget):
         painter.setPen(QPen(QColor(TOKENS.border), 1))
         painter.drawRect(rect)
         values = self._values()
+        if not values:
+            painter.setPen(QPen(QColor(TOKENS.border), 1))
+            painter.setBrush(QColor(TOKENS.surface))
+            painter.drawRoundedRect(self.rect().adjusted(1, 1, -2, -2), 9, 9)
+            painter.setPen(QColor(TOKENS.text))
+            painter.drawText(self.rect().adjusted(24, 20, -24, -20),
+                             Qt.AlignmentFlag.AlignCenter,
+                             f"▥\n{self.empty_title}\n{self.empty_detail}")
+            return
         max_ply = max(1, self.full_ply_count,
                       max((ply for ply, _score, _mate in values), default=0))
         numeric_values = [score for _ply, score, mate in values if mate is None]
@@ -444,6 +455,7 @@ class GameReviewWorkspace(QWidget):
         self.settings = settings or QSettings()
         self.training_allowed = training_allowed
         self.evaluation_allowed = training_allowed
+        self.position_evaluations_available = False
         self.training_block_reason = training_block_reason
         self.review: dict | None = None
         self.selected_ply = 0
@@ -473,7 +485,7 @@ class GameReviewWorkspace(QWidget):
         self.title.setWordWrap(False)
         self.title.setMinimumWidth(0)
         self.title.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Fixed)
-        self.title.setStyleSheet("font-size: 13px; font-weight: 700;")
+        self.title.setStyleSheet("font-size: 24px; font-weight: 700;")
         header.addWidget(self.title, 1)
         back = QPushButton("К партиям")
         back.clicked.connect(self.return_requested.emit)
@@ -484,7 +496,8 @@ class GameReviewWorkspace(QWidget):
         root.addLayout(header)
         self.subtitle = QLabel()
         self.subtitle.setObjectName("secondary")
-        self.subtitle.setVisible(False)
+        self.subtitle.setWordWrap(False)
+        root.addWidget(self.subtitle)
 
         split = QSplitter(Qt.Orientation.Horizontal)
         board_column = QWidget()
@@ -506,10 +519,14 @@ class GameReviewWorkspace(QWidget):
         self.ephemeral_controls = QWidget()
         ephemeral_layout = QHBoxLayout(self.ephemeral_controls)
         ephemeral_layout.setContentsMargins(0, 0, 0, 0)
-        self.ephemeral_status = QLabel("Ветка исследования временная и не сохранится в PGN.")
+        self.ephemeral_status = QLabel("Временная ветка.")
         self.ephemeral_status.setWordWrap(True)
-        self.ephemeral_undo_button = QPushButton("Отменить ход ветки")
+        self.ephemeral_status.setToolTip(
+            "Ходы исследования не попадут в PGN, SQLite или онлайн-партию.")
+        self.ephemeral_undo_button = QPushButton("Отменить ход")
+        self.ephemeral_undo_button.setToolTip("Отменить последний ход временной ветки.")
         self.ephemeral_reset_button = QPushButton("Сбросить ветку")
+        self.ephemeral_reset_button.setToolTip("Сбросить временную ветку к выбранной позиции.")
         self.ephemeral_undo_button.clicked.connect(self.undo_ephemeral_move)
         self.ephemeral_reset_button.clicked.connect(self.reset_ephemeral_branch)
         ephemeral_layout.addWidget(self.ephemeral_status, 1)
@@ -581,6 +598,27 @@ class GameReviewWorkspace(QWidget):
             "Официальная Lichess accuracy доступна только для партии целиком. "
             "Фазовая точность не выводится без отдельной доказанной метрики.")
         metrics_column.addWidget(self.phase_summary)
+        self.left_metrics_title = QLabel("Сводка по партии")
+        self.left_metrics_title.setStyleSheet("font-size: 20px; font-weight: 700;")
+        metrics_column.insertWidget(0, self.left_metrics_title)
+        self.no_analysis_summary = QFrame()
+        self.no_analysis_summary.setObjectName("reviewEmptySummary")
+        self.no_analysis_summary.setStyleSheet(
+            "QFrame#reviewEmptySummary { background: #242642; border: 1px solid #3b3e62; "
+            "border-radius: 10px; padding: 10px; }")
+        empty_layout = QVBoxLayout(self.no_analysis_summary)
+        empty_layout.setContentsMargins(10, 8, 10, 8)
+        empty_layout.setSpacing(5)
+        self.no_analysis_title = QLabel("Данные движка отсутствуют")
+        self.no_analysis_title.setStyleSheet("font-weight: 700;")
+        self.no_analysis_detail = QLabel(
+            "У этой партии нет локального анализа. Запустите анализ, чтобы получить точность, "
+            "оценки и подробные комментарии.")
+        self.no_analysis_detail.setObjectName("secondary")
+        self.no_analysis_detail.setWordWrap(True)
+        empty_layout.addWidget(self.no_analysis_title)
+        empty_layout.addWidget(self.no_analysis_detail)
+        metrics_column.insertWidget(1, self.no_analysis_summary)
         split.addWidget(self.left_metrics)
         split.addWidget(board_column)
 
@@ -656,6 +694,7 @@ class GameReviewWorkspace(QWidget):
         root.addWidget(split, 1)
 
         self.graph_title = QLabel("Оценка позиции за белых · Δ — изменение оценки, не качество хода")
+        self.graph_title.setText("Анализ")
         self.graph_title.setStyleSheet("font-size: 12px; font-weight: 700;")
         graph_controls = QHBoxLayout()
         graph_controls.addWidget(self.graph_title, 1)
@@ -784,7 +823,23 @@ class GameReviewWorkspace(QWidget):
         if (not hasattr(self, "review_board") or
                 self.workspace_splitter.orientation() != Qt.Orientation.Horizontal):
             return
-        side = max(0, min(self.board_column.width() - 4, self.board_column.height() - 8))
+        layout = self.board_column.layout()
+        margins = layout.contentsMargins()
+        visible_non_board = [
+            item.widget() for index in range(layout.count())
+            if (item := layout.itemAt(index)).widget() is not None
+            and item.widget() is not self.review_board
+            and not item.widget().isHidden()]
+        available_width = max(0, self.board_column.contentsRect().width()
+                              - margins.left() - margins.right())
+        occupied_height = sum(
+            max(widget.sizeHint().height(), widget.heightForWidth(available_width))
+            if widget.hasHeightForWidth() else widget.sizeHint().height()
+            for widget in visible_non_board)
+        occupied_height += max(0, len(visible_non_board)) * layout.spacing()
+        available_height = max(0, self.board_column.height() - margins.top()
+                               - margins.bottom() - occupied_height)
+        side = min(available_width, available_height)
         if side and self.review_board.width() != side:
             self.review_board.setFixedSize(side, side)
 
@@ -798,8 +853,10 @@ class GameReviewWorkspace(QWidget):
         self._ephemeral_undo.clear()
         self.ephemeral_controls.setVisible(self._ephemeral_study)
         self.ephemeral_status.setText(
-            "Исследование временное: ходы не попадут в PGN, SQLite или онлайн-партию."
+            "Временная ветка."
             if self._ephemeral_study else "")
+        self.ephemeral_status.setToolTip(
+            "Ходы исследования не попадут в PGN, SQLite или онлайн-партию.")
         self.review = load_game_review(self.repository, game,
                                        analysis_source=analysis_source)
         if training_allowed is not None:
@@ -813,6 +870,50 @@ class GameReviewWorkspace(QWidget):
             # Preserve stored runs in the repository/read model, but do not
             # consult them to build presentation state before a fresh lease.
             analysis = {}
+        scored_rows = [row for row in analysis.get("assessments", [])
+                       if row.get("white_cp") is not None or row.get("mate_white") is not None]
+        self.position_evaluations_available = bool(self.evaluation_allowed and scored_rows)
+        official_accuracy = self.review.get("official_accuracy") or {}
+        local_accuracy = self.review.get("local_game_accuracy") or {}
+        has_accuracy = bool(self.evaluation_allowed and any(
+            official_accuracy.get(side) is not None or local_accuracy.get(side) is not None
+            for side in ("white", "black")))
+        has_summary_metrics = self.position_evaluations_available or has_accuracy
+        self.left_metrics_title.setText("Сводка по партии" if has_summary_metrics else
+                                        "Оценки скрыты" if not self.evaluation_allowed else
+                                        "Сводка по партии")
+        self.no_analysis_title.setText(
+            "Аналитика скрыта правилами Fair Play." if not self.evaluation_allowed else
+            "Данные движка отсутствуют")
+        self.no_analysis_detail.setText(
+            self.training_block_reason or "Оценки и классификация скрыты до свежей проверки безопасности."
+            if not self.evaluation_allowed else
+            "У этой партии нет локального анализа. Запустите анализ, чтобы получить точность, "
+            "оценки и подробные комментарии.")
+        self.no_analysis_summary.setVisible(not has_summary_metrics)
+        self.phase_selector.setVisible(has_summary_metrics and self.position_evaluations_available)
+        self.side_metrics_summary.setVisible(has_summary_metrics)
+        self.phase_summary.setVisible(has_summary_metrics and self.position_evaluations_available)
+        self.graph_title.setText("Оценка позиции за белых · Δ — изменение оценки, не качество хода"
+                                 if self.position_evaluations_available else "Анализ")
+        self.graph_mode.setVisible(self.position_evaluations_available)
+        self.error_markers_toggle.setVisible(self.position_evaluations_available)
+        self.graph_legend.setVisible(self.position_evaluations_available)
+        self.graph.empty_title = (
+            "Оценки скрыты правилами Fair Play." if not self.evaluation_allowed else
+            "Оценка отсутствует")
+        self.graph.empty_detail = (
+            "Оценки появятся после безопасной проверки." if not self.evaluation_allowed else
+            "Здесь появится график оценки после запуска анализа Stockfish.")
+        self.graph.setAccessibleName("Анализ партии" if not self.position_evaluations_available
+                                      else "Интерактивный график оценки по ходам")
+        self.graph.setAccessibleDescription(
+            self.graph.empty_title + ". " + self.graph.empty_detail
+            if not self.position_evaluations_available else
+            "Интерактивный график сохранённых оценок по полуходам.")
+        self.advantage_bar.setVisible(self.position_evaluations_available)
+        self.advantage_label.setVisible(self.position_evaluations_available)
+        self.selected_move_summary.setVisible(self.position_evaluations_available)
         game_finished = game.get("status") not in {
             "created", "started", "started_soon", "playing"}
         has_engine_analysis = (self.evaluation_allowed and
@@ -823,6 +924,10 @@ class GameReviewWorkspace(QWidget):
                                      else "Проанализировать Stockfish")
         white = game.get("white_player") or "Белые"
         black = game.get("black_player") or "Чёрные"
+        if white.strip() in {"?", "Unknown", "unknown"}:
+            white = "Белые"
+        if black.strip() in {"?", "Unknown", "unknown"}:
+            black = "Чёрные"
         result = ("½–½" if game.get("status") in {"draw", "stalemate", "repetition",
                                                    "50moves", "insufficientMaterial"}
                   else "1–0" if game.get("winner") == "white"
@@ -831,13 +936,16 @@ class GameReviewWorkspace(QWidget):
         game_details = (f"{format_game_timeline(game)} · "
                         f"{format_clock_control(game.get('clock'))} · "
                         f"{game_opening_name(game)}")
-        self.title.setText(f"{white} — {black} · {result} · {game_details}")
+        self.title.setText("Разбор партии")
         self.title.setToolTip(f"{white} — {black} · {result}\n{game_details}")
-        self.subtitle.setText(game_details)
+        self.subtitle.setText(f"{white} — {black} · {result} · {game_details}")
         self.subtitle.setToolTip(opening_tooltip(game.get("opening_name")))
         self.white_name.setText(f"♔  {white}")
         self.black_name.setText(f"♚  {black}")
         color = self.review["owner_color"]
+        self.side_metrics_summary.setHorizontalHeaderLabels(
+            ("Показатель", "Я", "Сопер.") if color in {"white", "black"}
+            else ("Показатель", "Белые", "Чёрные"))
         self.review_board.set_flipped(color == "black")
         self.review_board.set_position(self.review["positions"][0])
         if self._ephemeral_study:
@@ -1249,7 +1357,8 @@ class GameReviewWorkspace(QWidget):
         score_for_bar = (None if position_score.get("mate_white") is not None
                          else position_score.get("white_cp"))
         self.advantage_bar.set_evaluation(score_for_bar,
-                                          allowed=self.evaluation_allowed,
+                                          allowed=(self.evaluation_allowed
+                                                   and self.position_evaluations_available),
                                           mate_white=position_score.get("mate_white"),
                                           terminal_checkmate=terminal_position,
                                           terminal_winner_white=terminal_winner_white)

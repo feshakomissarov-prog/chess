@@ -145,7 +145,8 @@ def test_review_moves_graph_and_training_share_position_without_mutating_saved_p
         assert "Точность Lichess · сервер:" in workspace.metrics_label.text()
         assert "Расчёт Chess Coach (методика Lichess" in workspace.metrics_label.text()
         assert "неофициально" in workspace.metrics_label.text()
-        assert "1–0" in workspace.title.text()
+        assert workspace.title.text() == "Разбор партии"
+        assert "1–0" in workspace.subtitle.text()
         assert "Stockfish" not in workspace.subtitle.text()
         workspace.moves_list.setCurrentRow(2)
         assert workspace.selected_ply == 2
@@ -585,6 +586,35 @@ def test_review_layout_has_no_outer_scroll_and_renders_at_desktop_sizes(qtbot, t
                         assert workspace.moves_list.table.fontMetrics().horizontalAdvance(
                             item.text()) <= workspace.moves_list.table.columnWidth(column)
         assert workspace.workspace_splitter.orientation().name == "Horizontal"
+    finally:
+        repo.shutdown()
+
+
+def test_review_without_engine_data_shows_honest_summary_and_no_fake_metrics(qtbot, tmp_path):
+    repo = GameRepository(tmp_path / "review-empty-analysis.sqlite3")
+    repo.save_snapshot("review-empty", "startpos", "e2e4 e7e5 g1f3", "white",
+                       "Opponent", False, "5+0", "mate", "white",
+                       white_player="Me", black_player="Opponent")
+    game = repo.get_game("review-empty")
+    try:
+        workspace = GameReviewWorkspace(repo, training_allowed=True)
+        qtbot.addWidget(workspace)
+        workspace.load_game(game, training_allowed=True)
+        workspace.resize(1360, 860)
+        workspace.show()
+        qtbot.wait(20)
+        assert workspace.no_analysis_summary.isVisible()
+        assert workspace.no_analysis_title.text() == "Данные движка отсутствуют"
+        assert workspace.side_metrics_summary.isHidden()
+        assert workspace.phase_selector.isHidden()
+        assert workspace.graph_legend.isHidden()
+        assert workspace.graph_mode.isHidden()
+        assert workspace.graph.empty_title == "Оценка отсутствует"
+        assert workspace.graph.empty_detail.startswith("Здесь появится график")
+        assert workspace.analysis_button.isVisible()
+        assert workspace.analysis_button.isEnabled()
+        assert not workspace.advantage_bar.isVisible()
+        assert workspace.moves_list.table.rowCount() == 2
     finally:
         repo.shutdown()
 

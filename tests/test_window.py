@@ -82,7 +82,8 @@ def test_saved_game_orientation_uses_selected_account_color(qtbot, tmp_path):
     assert window.online_session.color == chess.BLACK
     assert window.board._flipped
     assert window.screen_title.isHidden()
-    assert window.review_workspace.title.text().startswith("Owner — Opponent · 1–0 ·")
+    assert window.review_workspace.title.text() == "Разбор партии"
+    assert "Owner — Opponent · 1–0" in window.review_workspace.subtitle.text()
     window.show_home()
     assert not window.screen_title.isHidden()
 
@@ -306,6 +307,35 @@ def test_analysis_position_editor_open_action_fits_1280x720_viewport(qtbot, tmp_
     assert top_left.y() >= 0
     assert top_left.y() + action.height() <= window.screen_stack.height()
     assert action.width() > 200
+    window.close()
+
+
+def test_review_board_fits_shell_column_and_keeps_full_navigation(qtbot, tmp_path):
+    window = MainWindow(QSettings(str(tmp_path / "review-fit.ini"),
+                                  QSettings.Format.IniFormat), offline_mode=True)
+    qtbot.addWidget(window)
+    window.resize(1360, 890)
+    window.game_repository.save_snapshot(
+        "review-fit-game", "startpos", "e2e4 e7e5 g1f3", "white", "Opponent",
+        False, "5+0", "mate", "white", white_player="Local", black_player="Opponent")
+    game = window.game_repository.get_game("review-fit-game")
+    game["owner_color"] = None
+    game["account_color"] = None
+    game["color"] = None
+    game["white_player"] = "?"
+    game["black_player"] = "?"
+    window.review_workspace.load_game(game, training_allowed=False, ephemeral=True)
+    window.screen_stack.setCurrentWidget(window.review_workspace)
+    window._screen_mode = "review"
+    window.show()
+    qtbot.wait(100)
+    assert window.sidebar.width() > 60
+    assert window.review_workspace.review_board.height() <= \
+        window.review_workspace.board_column.height() - 8
+    assert window.review_workspace.title.text() == "Разбор партии"
+    assert window.review_workspace.subtitle.text().startswith("Белые — Чёрные ·")
+    assert window.review_workspace.side_metrics_summary.horizontalHeaderItem(1).text() == "Белые"
+    assert window.review_workspace.side_metrics_summary.horizontalHeaderItem(2).text() == "Чёрные"
     window.close()
 
 
