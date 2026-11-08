@@ -8,10 +8,33 @@ from PySide6.QtWidgets import (QApplication, QMainWindow, QPushButton, QScrollAr
                                QStackedWidget, QVBoxLayout, QWidget)
 
 from chess_coach.ui.pages import LibraryPage, PlayPage, ResultPage
+from chess_coach.ui.pages.analysis import AnalysisLandingPage
 from chess_coach.ui.pages.background import BackgroundOperationsPage
 from chess_coach.ui.pages.position_setup import PositionSetupWidget
 from chess_coach.ui.dialogs import SettingsDialog
 from PySide6.QtCore import QSettings
+
+
+def test_analysis_landing_has_four_cards_and_one_three_tab_breakdown(qtbot):
+    opened = []
+    page = AnalysisLandingPage({
+        "games": lambda: opened.append("archive"),
+        "openings": lambda: opened.append("openings"),
+        "open_text": lambda text: opened.append(text),
+        "open_file": lambda: opened.append("file"),
+    })
+    qtbot.addWidget(page)
+    assert len(page.cards) == 4
+    assert page.buttons["weakness"].isEnabled() is False
+    assert page.buttons["opponent"].isEnabled() is False
+    assert page.tabs.count() == 3
+    assert [page.tabs.tabText(i) for i in range(page.tabs.count())] == [
+        "Мои партии", "Вставить ходы", "Расставить позицию"]
+    page.show_breakdown(1)
+    assert page.workspace.currentWidget() is page.breakdown_page
+    assert page.tabs.currentIndex() == 1
+    page.show_landing()
+    assert page.workspace.currentIndex() == 0
 
 
 def test_play_page_mode_cards_only_select_and_explicit_button_starts(qtbot):

@@ -424,7 +424,7 @@ def test_m46_shell_has_stable_routes_and_collapses_for_board_screens(qtbot, tmp_
     qtbot.addWidget(window)
     assert window.sidebar.width() == (60 if window.width() < 1160 else 212)
     assert set(window._nav_buttons) == {
-        "home", "play", "games", "analysis", "training", "progress"}
+        "home", "play", "analysis", "training", "progress"}
     assert window._nav_buttons["home"].property("active") is True
     window.start_local_game()
     assert window.sidebar.width() == 60
@@ -463,7 +463,7 @@ def test_visual_sidebar_recovers_after_wide_resize_and_routes_but_respects_expli
     # owner drags it to the approved wide desktop size, without another click.
     window.resize(1672, 941)
     qtbot.waitUntil(lambda: window.sidebar.width() == 272)
-    qtbot.mouseClick(window._nav_buttons["games"], Qt.MouseButton.LeftButton)
+    window.show_saved_games()
     assert window.sidebar.width() == 272
     window.show_background_analytics()
     assert window.sidebar.width() == 272
@@ -3637,20 +3637,25 @@ def test_sidebar_play_opens_mode_picker_without_resetting_local_game(qtbot, tmp_
     window.close()
 
 
-def test_shell_has_six_typed_routes_and_games_analysis_progress_are_in_stack(qtbot, tmp_path):
+def test_shell_has_five_primary_routes_and_archive_is_nested_in_analysis(qtbot, tmp_path):
     window = MainWindow(QSettings(str(tmp_path / "typed-routes.ini"),
                                   QSettings.Format.IniFormat), offline_mode=True)
     qtbot.addWidget(window)
     assert list(window._nav_buttons) == [
-        "home", "play", "games", "analysis", "training", "progress"]
+        "home", "play", "analysis", "training", "progress"]
 
     window.show_saved_games()
-    assert window.screen_stack.currentWidget() is window.library_page
+    assert window.screen_stack.currentWidget() is window.analysis_page
+    assert window.analysis_page.workspace.currentWidget() is window.analysis_page.breakdown_page
+    assert window.analysis_page.tabs.currentIndex() == 0
+    assert window.screen_stack.indexOf(window.library_page) == -1
+    assert window.analysis_page.archive_layout.indexOf(window.library_page) >= 0
     window.show_analysis()
     assert window.screen_stack.currentWidget() is window.analysis_page
+    assert window.analysis_page.workspace.currentWidget() is not window.analysis_page.breakdown_page
     assert window.workspace_navigator.current.route.value == "analysis"
     window.navigate_back()
-    assert window.screen_stack.currentWidget() is window.library_page
+    assert window.screen_stack.currentWidget() is window.home_page
 
     window.show_statistics()
     assert window.screen_stack.currentWidget() is window._statistics_dialog

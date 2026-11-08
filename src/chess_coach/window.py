@@ -1870,11 +1870,12 @@ class MainWindow(QMainWindow):
         self.screen_stack.addWidget(self.play_page)
         self.analysis_page = AnalysisLandingPage({
             "games": self.show_saved_games,
-            "batch": self.show_batch_analysis,
-            "progress": self.show_statistics,
+            "openings": self._open_opening_statistics,
             "open_text": self.open_external_study_text,
             "open_file": self.open_external_pgn_file,
         })
+        self.analysis_page.archive_requested.connect(self.show_saved_games)
+        self.analysis_page.back_requested.connect(self.show_analysis)
         self.screen_stack.addWidget(self.analysis_page)
 
         splitter = QSplitter(Qt.Orientation.Horizontal)
@@ -2229,7 +2230,7 @@ class MainWindow(QMainWindow):
                 # approved navigation width without requiring a route click.
                 visual_route = current in (
                     self.home_page, getattr(self, "library_page", None),
-                    getattr(self, "_background_operations_page", None))
+                    getattr(self, "_background_operations_page", None)) or self._analysis_archive_active()
                 target_width = 272 if visual_route and self.width() >= 1500 else 212
                 if self.sidebar.width() != target_width:
                     self._set_sidebar_collapsed(False)
@@ -2341,7 +2342,6 @@ class MainWindow(QMainWindow):
         self._nav_buttons: dict[str, QPushButton] = {}
         items = (("home", "⌂", "Главная", self.show_home),
                  ("play", "♟", "Играть", self.show_play),
-                 ("games", "▤", "Мои партии", self.show_saved_games),
                  ("analysis", "⌁", "Анализ", self.show_analysis),
                  ("training", "♞", "Обучение", self.open_puzzle_history_local),
                  ("progress", "◷", "Прогресс", self.show_statistics))
@@ -2368,14 +2368,21 @@ class MainWindow(QMainWindow):
         self._sidebar_explicit_override = False
         return sidebar
 
+    def _analysis_archive_active(self) -> bool:
+        page = getattr(self, "analysis_page", None)
+        return bool(page is not None
+                    and page.workspace.currentWidget() is page.breakdown_page
+                    and page.tabs.currentIndex() == 0)
+
     def _set_sidebar_collapsed(self, collapsed: bool, *, explicit: bool = False) -> None:
         if explicit:
             self._sidebar_explicit_override = True
         collapsed = bool(collapsed)
         current = self.screen_stack.currentWidget()
-        visual_route = current in (getattr(self, "home_page", None),
-                                   getattr(self, "library_page", None),
-                                   getattr(self, "_background_operations_page", None))
+        visual_route = (current in (getattr(self, "home_page", None),
+                                    getattr(self, "library_page", None),
+                                    getattr(self, "_background_operations_page", None))
+                        or self._analysis_archive_active())
         expanded_width = 272 if visual_route and self.width() >= 1500 else 212
         self.sidebar.setFixedWidth(60 if collapsed else expanded_width)
         self.sidebar_brand.setVisible(not collapsed)
@@ -2447,7 +2454,13 @@ class MainWindow(QMainWindow):
             if handle is not None and handle.is_alive():
                 self._external_study_generation += 1
                 handle.cancel("session_replaced")
-        if self.screen_stack.currentWidget() is not getattr(self, "library_page", None):
+        in_nested_archive = (
+            self.screen_stack.currentWidget() is getattr(self, "analysis_page", None)
+            and hasattr(self, "analysis_page")
+            and self.analysis_page.tabs.currentIndex() == 0
+            and self.analysis_page.workspace.currentWidget() is self.analysis_page.breakdown_page)
+        if (self.screen_stack.currentWidget() is not getattr(self, "library_page", None)
+                and not in_nested_archive):
             handle = getattr(self, "_library_query_handle", None)
             if handle is not None and handle.is_alive():
                 self._library_query_generation += 1
@@ -2467,7 +2480,7 @@ class MainWindow(QMainWindow):
         current = self.screen_stack.currentWidget()
         visual_route = current in (
             getattr(self, "home_page", None), getattr(self, "library_page", None),
-            getattr(self, "_background_operations_page", None))
+            getattr(self, "_background_operations_page", None)) or self._analysis_archive_active()
         if hasattr(self, "_outer_content_layout"):
             margins = self._outer_content_layout.contentsMargins()
             target_bottom = 8 if visual_route else 20
@@ -2845,7 +2858,19 @@ class MainWindow(QMainWindow):
     def show_analysis(self) -> None:
         """Show analysis entry points without starting an engine or network job."""
         self.screen_title.setText("Анализ")
+        self.analysis_page.show_landing()
         self.screen_stack.setCurrentWidget(self.analysis_page)
+
+    def _open_opening_statistics(self) -> None:
+        """Route the approved Opening card to existing, source-backed statistics."""
+        self.show_statistics()
+        dialog = getattr(self, "_statistics_dialog", None)
+        if dialog is None:
+            return
+        for index in range(dialog.tabs.count()):
+            if "дебют" in dialog.tabs.tabText(index).casefold():
+                dialog.tabs.setCurrentIndex(index)
+                break
 
     def open_external_pgn_file(self) -> None:
         path, _ = QFileDialog.getOpenFileName(
@@ -2981,7 +3006,8 @@ class MainWindow(QMainWindow):
                 return
             target = self.play_page
         elif route is WorkspaceRoute.GAMES:
-            target = getattr(self, "library_page", self.home_page)
+            self.analysis_page.show_breakdown(0)
+            target = self.analysis_page
         elif route is WorkspaceRoute.ANALYSIS:
             target = (self._batch_dialog if entry.context == "batch" and
                       self._batch_dialog is not None else
@@ -7765,10 +7791,11 @@ class MainWindow(QMainWindow):
             self.lichess.draw(session.game_id, True)
 
     def show_saved_games(self) -> None:
-        self.screen_title.setText("Мои партии")
+        self.screen_title.setText("Анализ")
         existing = getattr(self, "library_page", None)
         if existing is not None:
-            self.screen_stack.setCurrentWidget(existing)
+            self.analysis_page.show_breakdown(0)
+            self.screen_stack.setCurrentWidget(self.analysis_page)
             self._update_library_active_games()
             self._library_reload(existing.current_filters(), existing._page)
             return
@@ -8065,13 +8092,13 @@ class MainWindow(QMainWindow):
         page.retry_analysis_requested.connect(retry_selected_analysis)
         load_page(page.current_filters(), int(self.settings.value(
             "workspace/library_page", 0, type=int)))
-        page.close_button.setText("Главная")
-        page.close_button.clicked.connect(self.show_home)
+        page.close_button.hide()
         self.library_page = page
         self._library_reload = load_page
         self._update_library_active_games()
-        self.screen_stack.addWidget(page)
-        self.screen_stack.setCurrentWidget(page)
+        self.analysis_page.set_archive_widget(page)
+        self.analysis_page.show_breakdown(0)
+        self.screen_stack.setCurrentWidget(self.analysis_page)
 
     def _library_query_result_ready(self, generation: int, result: object,
                                     error: object) -> None:
