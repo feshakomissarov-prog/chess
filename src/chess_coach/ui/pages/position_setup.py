@@ -110,6 +110,16 @@ class PositionSetupWidget(QGroupBox):
 
         set_layout_visible(self.layout())
 
+    def set_embedded(self) -> None:
+        """Show the editor permanently when it is hosted inside another page."""
+        try:
+            self.toggled.disconnect(self._set_content_visible)
+        except (RuntimeError, TypeError):
+            pass
+        self.setCheckable(False)
+        self.setTitle("")
+        self._set_content_visible(True)
+
     def _place_selected_piece(self, square: int) -> None:
         symbol = str(self.piece_selector.currentData() or "")
         piece = chess.Piece.from_symbol(symbol) if symbol else None

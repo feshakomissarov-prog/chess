@@ -4115,6 +4115,7 @@ def test_offline_play_mode_selection_enables_free_board_action(qtbot, tmp_path):
     page.start_button.click()
     assert window._screen_mode == "local"
     assert window.screen_stack.currentWidget() is window.game_page
+    assert window.screen_title.text() == "Игра"
     window.close()
 
 

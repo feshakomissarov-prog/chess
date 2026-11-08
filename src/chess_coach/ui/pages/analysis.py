@@ -171,8 +171,7 @@ class AnalysisLandingPage(QWidget):
         layout = QVBoxLayout(page)
         layout.setContentsMargins(0, 6, 0, 0)
         self.position_setup = PositionSetupWidget(page)
-        self.position_setup.setCheckable(False)
-        self.position_setup.setTitle("")
+        self.position_setup.set_embedded()
         self.position_setup.position_requested.connect(lambda fen: actions["open_text"](fen))
         layout.addWidget(self.position_setup, 1)
 

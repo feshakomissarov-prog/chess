@@ -2531,7 +2531,10 @@ class MainWindow(QMainWindow):
             WorkspaceRoute.TRAINING: "Обучение", WorkspaceRoute.PROGRESS: "Прогресс",
             WorkspaceRoute.SETTINGS: "Настройки",
         }
-        if current is self.review_workspace:
+        if current in (self.game_page, self.result_page):
+            self.screen_title.setText(
+                "Партия завершена" if self._screen_mode == "result" else "Игра")
+        elif current is self.review_workspace:
             self.screen_title.setText("Временный разбор" if self._ephemeral_study else "Разбор партии")
         elif current is getattr(self, "_batch_dialog", None) and current is not None:
             self.screen_title.setText("Массовый анализ")

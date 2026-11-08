@@ -35,6 +35,11 @@ def test_analysis_landing_has_four_cards_and_one_three_tab_breakdown(qtbot):
     assert page.tabs.currentIndex() == 1
     page.show_landing()
     assert page.workspace.currentIndex() == 0
+    page.show_breakdown(2)
+    page.show()
+    assert page.position_setup.piece_selector.isVisible()
+    assert page.position_setup.board_view.isVisible()
+    assert page.position_setup.open_button.isVisible()
 
 
 def test_play_preferences_are_saved_per_mode_and_restored(qtbot, tmp_path):
