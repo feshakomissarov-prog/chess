@@ -5,7 +5,8 @@ from types import SimpleNamespace
 
 import chess
 import random
-from PySide6.QtCore import QSettings
+from PySide6.QtCore import QSettings, Qt
+from PySide6.QtTest import QTest
 
 from chess_coach.lichess.archive import ArchiveSync
 from chess_coach.lichess.repository import GameRepository
@@ -194,10 +195,9 @@ def test_library_retry_rejects_archive_account_not_matching_authenticated_identi
     qtbot.addWidget(window)
     repository = window.game_repository
     account_a_game_id = _make_archive(repository, "AccountA", "same-game")
-    game = repository.get_game(account_a_game_id)
-    line = repository.current_line(account_a_game_id)
-    game.update({"account_id": "lichess:accounta", "source_game_id": "same-game",
-                 "source": "lichess_archive", "line_revision": line["line_revision"]})
+    game = window.library_queries.search({"account_id": "lichess:accounta"})["items"][0]
+    assert game["game_id"] == account_a_game_id
+    assert game["account_id"] == "lichess:accounta"
     account_b = repository.ensure_archive_account("AccountB")
     with repository._connection() as db:
         db.execute("INSERT INTO account_games(account_id,game_id,remote_id,imported_at,color,opponent) "
@@ -222,9 +222,12 @@ def test_library_retry_rejects_archive_account_not_matching_authenticated_identi
                                      is_auth_generation_current=lambda generation: generation == 9)
     window._lichess_connected = True
     try:
+        window.offline_mode = False
         window.show_saved_games()
         page = window.library_page
-        page.retry_analysis_requested.emit(game)
+        page.set_results([(game, "Synthetic game", "Lichess")], page=0, pages=1, total=1)
+        page.show_game_detail(game)
+        QTest.mouseClick(page.retry_analysis_button, Qt.MouseButton.LeftButton)
         assert calls == []
         assert repository.lichess_analysis_backfill_state(
             "lichess:accounta", account_a_game_id) == state_before
@@ -244,10 +247,10 @@ def test_library_retry_for_matching_authenticated_account_starts_only_selected_g
     qtbot.addWidget(window)
     repository = window.game_repository
     game_id = _make_archive(repository, "AccountA", "selected-only")
-    game = repository.get_game(game_id)
+    game = window.library_queries.search({"account_id": "lichess:accounta"})["items"][0]
     line = repository.current_line(game_id)
-    game.update({"account_id": "lichess:accounta", "source_game_id": "selected-only",
-                 "source": "lichess_archive", "line_revision": line["line_revision"]})
+    assert game["game_id"] == game_id
+    assert game["account_id"] == "lichess:accounta"
     calls = []
     monkeypatch.setattr(window, "_online_actions_allowed", lambda: True)
     monkeypatch.setattr(window, "_sessions_for_safety", lambda: [])
@@ -256,13 +259,19 @@ def test_library_retry_for_matching_authenticated_account_starts_only_selected_g
     monkeypatch.setattr(window, "_notify_inline", lambda message: calls.append(("status", message)))
     monkeypatch.setattr(window, "_start_lichess_analysis_backfill",
                         lambda *args, **kwargs: calls.append(("worker", args, kwargs)))
+    window.offline_mode = False
+    window._lichess_stream_ready_generation = 9
     window.lichess = SimpleNamespace(
         username="AccountA", auth_generation=9,
         is_auth_generation_current=lambda generation: generation == 9)
     window._lichess_connected = True
     try:
         window.show_saved_games()
-        window.library_page.retry_analysis_requested.emit(game)
+        page = window.library_page
+        page.set_results([(game, "Synthetic game", "Lichess")], page=0, pages=1, total=1)
+        page.show_game_detail(game)
+        QTest.mouseClick(page.retry_analysis_button, Qt.MouseButton.LeftButton)
+        qtbot.waitUntil(lambda: any(call[0] == "worker" for call in calls), timeout=5000)
         worker = [call for call in calls if call[0] == "worker"]
         assert len(worker) == 1
         assert worker[0][2]["selected_game_id"] == game_id

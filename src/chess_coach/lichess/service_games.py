@@ -426,14 +426,18 @@ class LichessGameActionsMixin:
         """Stop workers cooperatively. Return False while any worker still owns resources."""
         with self._thread_lock:
             self._closing = True
+        # Do not retain a selected-game retry that could be reconsidered by a
+        # worker finalizer during shutdown.
+        with self._analysis_backfill_lock:
+            self._pending_selected_analysis.clear()
+            if self._analysis_backfill_stop is not None:
+                self._analysis_backfill_stop.set()
         self._stop.set()
         self._connection_stop.set()
         if self._archive_stop is not None:
             self._archive_stop.set()
         if self._puzzle_stop is not None:
             self._puzzle_stop.set()
-        if self._analysis_backfill_stop is not None:
-            self._analysis_backfill_stop.set()
         if self._callback:
             self._callback.cancel()
             self._callback = None

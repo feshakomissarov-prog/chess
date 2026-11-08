@@ -9,8 +9,6 @@ from typing import Callable
 
 import chess
 from PySide6.QtCore import QObject, QUrl
-from PySide6.QtWidgets import QApplication
-
 try:
     from PySide6.QtMultimedia import QSoundEffect
 except ImportError:  # Audio is an optional runtime facility; the board remains usable.
@@ -19,6 +17,7 @@ except ImportError:  # Audio is an optional runtime facility; the board remains 
 
 _ASSET_DIR = Path(__file__).resolve().parents[1] / "assets" / "sounds"
 _CATALOG_PATH = _ASSET_DIR / "catalog.json"
+_PENDING_ASSET = _ASSET_DIR / "pending-input-neutral-v1.wav"
 
 
 def _load_catalog() -> dict:
@@ -129,6 +128,7 @@ class ChessSoundPlayer(QObject):
         self.effect_factory = effect_factory or QSoundEffect
         self.effects: dict[str, object] = {}
         self._effects_by_id: dict[str, object] = {}
+        self.pending_effect = None
         self.available = self.effect_factory is not None
         if not self.available:
             return
@@ -148,6 +148,14 @@ class ChessSoundPlayer(QObject):
             self.effects.clear()
             self._effects_by_id.clear()
             self.available = False
+        if self.available and _PENDING_ASSET.is_file():
+            try:
+                self.pending_effect = self.effect_factory(self)
+                self.pending_effect.setSource(QUrl.fromLocalFile(str(_PENDING_ASSET)))
+                self.pending_effect.setLoopCount(1)
+                self.pending_effect.setVolume(self.volume / 100)
+            except (OSError, RuntimeError, ValueError):
+                self.pending_effect = None
 
     def _select_effects(self) -> None:
         self.effects = {
@@ -168,6 +176,8 @@ class ChessSoundPlayer(QObject):
             self._select_effects()
         for effect in self._effects_by_id.values():
             effect.setVolume(self.volume / 100)
+        if self.pending_effect is not None:
+            self.pending_effect.setVolume(self.volume / 100)
 
     def play_move(self, game_id: str, ply: int, before: chess.Board, move: chess.Move,
                   *, game_finished: bool = False, source: str = "confirmed") -> bool:
@@ -200,13 +210,15 @@ class ChessSoundPlayer(QObject):
         """Give immediate neutral feedback without claiming a move was accepted.
 
         The configured recording remains reserved for an authoritative server
-        acceptance. A pending-input beep is a system cue, not a chess sound asset.
+        acceptance. This separate neutral cue obeys the same app gain; if the
+        audio backend/asset is unavailable, the pending state remains visual.
         """
         request_id = str(request_id or "").strip()
-        if (not request_id or not self.moves_enabled
+        if (not request_id or not self.moves_enabled or self.volume <= 0
+                or self.pending_effect is None
                 or not self.deduplicator.claim(f"pending-move:{request_id}", 0)):
             return False
-        QApplication.beep()
+        self.pending_effect.play()
         return True
 
     def play_notification(self, event_key: str) -> bool:

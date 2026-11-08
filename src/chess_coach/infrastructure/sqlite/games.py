@@ -133,9 +133,22 @@ class GamesStoreMixin:
             total = db.execute("SELECT COUNT(DISTINCT g.game_id) FROM games g" + join + where,
                                params).fetchone()[0]
             selected = ("g.*, (SELECT r.line_hash FROM game_revisions r "
-                        "WHERE r.game_id=g.game_id AND r.is_current=1) AS line_hash")
+                        "WHERE r.game_id=g.game_id AND r.is_current=1) AS line_hash,"
+                        "(SELECT COUNT(DISTINCT scope.account_id) FROM account_games scope "
+                        "WHERE scope.game_id=g.game_id) AS account_link_count")
             if account_id:
-                selected += ",ag.opponent AS account_opponent,ag.player_name AS account_player_name,ag.color AS account_color"
+                selected += (",ag.account_id AS account_id,ag.remote_id AS account_remote_id,"
+                             "ag.opponent AS account_opponent,ag.player_name AS account_player_name,"
+                             "ag.color AS account_color")
+            else:
+                selected += (",CASE WHEN (SELECT COUNT(DISTINCT scope.account_id) "
+                             "FROM account_games scope WHERE scope.game_id=g.game_id)=1 "
+                             "THEN (SELECT MIN(scope.account_id) FROM account_games scope "
+                             "WHERE scope.game_id=g.game_id) ELSE NULL END AS account_id,"
+                             "CASE WHEN (SELECT COUNT(DISTINCT scope.account_id) FROM account_games scope "
+                             "WHERE scope.game_id=g.game_id)=1 THEN (SELECT MIN(scope.remote_id) "
+                             "FROM account_games scope WHERE scope.game_id=g.game_id) ELSE NULL END "
+                             "AS account_remote_id")
             if order_by_game_time:
                 activity_epoch = ("CASE WHEN g.last_move_at>0 THEN g.last_move_at/1000.0 "
                                   "WHEN g.game_time_precision='timestamp' THEN unixepoch(g.started_at) "
@@ -154,6 +167,22 @@ class GamesStoreMixin:
         return {"items": [dict(row) for row in rows], "total": total,
                 "page": page, "page_size": page_size,
                 "pages": (total + page_size - 1) // page_size}
+
+    def validate_lichess_game_link(self, account_id: str, game_id: str, *,
+                                   line_revision: int, source_game_id: str) -> dict | None:
+        """Revalidate selected-account provenance and current line in one read snapshot."""
+        with self._connection() as db:
+            row = db.execute(
+                "SELECT ag.account_id,ag.remote_id,g.source_game_id,g.source,g.line_revision,"
+                "gr.line_hash,g.status FROM account_games ag "
+                "JOIN games g ON g.game_id=ag.game_id "
+                "JOIN game_revisions gr ON gr.game_id=g.game_id AND gr.is_current=1 "
+                "WHERE ag.account_id=? AND ag.game_id=? AND ag.remote_id=? "
+                "AND g.source_game_id=? AND gr.line_revision=? "
+                "AND g.status NOT IN ('created','started','started_soon','playing')",
+                (str(account_id), str(game_id), str(source_game_id), str(source_game_id),
+                 int(line_revision))).fetchone()
+            return dict(row) if row else None
 
     def save_note(self, game_id: str, body: str, *, line_revision: int | None = None,
                   ply: int | None = None, position_uid: str | None = None,

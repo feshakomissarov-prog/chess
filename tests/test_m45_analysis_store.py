@@ -55,7 +55,7 @@ def test_schema_v16_includes_openings_and_date_precision_without_copying_game_fa
     path = tmp_path / "synthetic.sqlite3"
     repository, line_hash = _seed_repository(path)
     try:
-        assert SCHEMA_VERSION == 22
+        assert SCHEMA_VERSION == 23
         with repository._connection() as db:
             version = db.execute("PRAGMA user_version").fetchone()[0]
             game = db.execute("SELECT game_id,pgn,moves FROM games WHERE game_id=?",

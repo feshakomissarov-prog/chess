@@ -86,6 +86,8 @@ class LichessService(QObject, LichessAuthMixin, LichessSyncMixin, LichessGameAct
         self.work_coordinator = work_coordinator
         self._archive_stop: threading.Event | None = None
         self._analysis_backfill_stop: threading.Event | None = None
+        self._analysis_backfill_lock = threading.RLock()
+        self._pending_selected_analysis: dict[tuple[str, int, str], dict] = {}
         self._puzzle_stop: threading.Event | None = None
         self._puzzle_callback: OAuthCallbackServer | None = None
         self._stop = threading.Event()

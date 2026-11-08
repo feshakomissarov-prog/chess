@@ -364,6 +364,7 @@ class MainWindow(QMainWindow):
     library_query_finished = Signal(int, object, object)
     library_target_finished = Signal(int, str, object, object)
     library_detail_finished = Signal(int, str, object, object)
+    library_retry_finished = Signal(int, object)
     note_save_finished = Signal(str, str, object)
     saved_game_analysis_read_finished = Signal(int, str, object, object)
     pgn_export_finished = Signal(str, str, str, object)
@@ -602,6 +603,7 @@ class MainWindow(QMainWindow):
         self.library_query_finished.connect(self._library_query_result_ready)
         self.library_target_finished.connect(self._library_target_result_ready)
         self.library_detail_finished.connect(self._library_detail_result_ready)
+        self.library_retry_finished.connect(self._library_retry_result_ready)
         self.home_game_read_finished.connect(self._home_game_read_result_ready)
         self.note_save_finished.connect(self._note_save_result_ready)
         self.saved_game_analysis_read_finished.connect(
@@ -1088,17 +1090,26 @@ class MainWindow(QMainWindow):
                 or self.settings.value("lichess/ready_analytics_paused", False, type=bool)
                 or any(session.status in {"started", "playing"}
                        for session in self._sessions_for_safety())):
-            return
-        self.lichess.refresh_lichess_analysis_background(
+            return "rejected"
+        outcome = self.lichess.refresh_lichess_analysis_background(
             generation=generation, limit=10,
             daily_limit=self.settings.value("lichess/ready_analytics_daily_limit", 25, type=int),
             force_retry=force_retry, preferred_game_id=preferred_game_id,
             selected_game_id=selected_game_id,
             expected_line_revision=expected_line_revision,
             expected_source_game_id=expected_source_game_id)
-        self.lichess_analysis_status.setText(
-            "Lichess · проверяем выбранную партию…" if selected_game_id else
-            "Lichess · проверяем до 10 завершённых партий…")
+        if outcome == "queued":
+            self.lichess_analysis_status.setText(
+                "Lichess · выбранная партия в очереди после текущей проверки…")
+        elif outcome in {None, "started"}:
+            self.lichess_analysis_status.setText(
+                "Lichess · проверяем выбранную партию…" if selected_game_id else
+                "Lichess · проверяем до 10 завершённых партий…")
+        elif outcome == "busy":
+            self.lichess_analysis_status.setText("Lichess · фоновая проверка уже выполняется…")
+        else:
+            return "rejected"
+        return outcome or "started"
 
     def _lichess_analysis_backfill_progress(self, generation: int, username: str,
                                            done: int, total: int, _game: dict) -> None:
@@ -7246,6 +7257,15 @@ class MainWindow(QMainWindow):
             # classification established by gameStart/account-playing; player
             # decoration in later snapshots is not sufficient to redefine it.
             username = (self.lichess.username or "").casefold()
+            # Some resumed streams begin with a complete gameFull and omit
+            # gameStart. Use only the complete server identity tuple when it is
+            # present; otherwise preserve a previously authenticated identity
+            # and leave an unclassified opponent fail-closed.
+            identity_event = event.get("game") if isinstance(event.get("game"), dict) else event
+            if (session.game_source is None or session.opponent_info is None) and (
+                    isinstance(identity_event.get("source"), str)
+                    and isinstance(identity_event.get("opponent"), dict)):
+                session.set_server_game_identity(identity_event)
             white = event.get("white", {})
             black = event.get("black", {})
             if username and white.get("name", "").casefold() == username:
@@ -7294,6 +7314,12 @@ class MainWindow(QMainWindow):
                     game_id, event, generation,
                     color="white" if session.color == chess.WHITE else "black")
         if (session.status in {"started", "playing"} and not session.is_ai_opponent):
+            if (previous_status not in {"started", "playing"}
+                    or event.get("type") == "gameFull"):
+                # A resumed human/unknown game may arrive without gameStart.
+                # Run the same stop-heavy-work safety path before any follow-up
+                # UI action, not just the narrower single-analysis revocation.
+                self._pause_heavy_work_for_live_game()
             self._dashboard_analysis_safety_allowed = False
             self._refresh_dashboard_analysis_visibility()
             self._revoke_review_safety(
@@ -7878,67 +7904,89 @@ class MainWindow(QMainWindow):
             current_account_id = f"lichess:{username.casefold()}"
             account_id = str(game.get("account_id") or "")
             if account_id != current_account_id:
+                linked_account = account_id.partition(":")[2] or "неизвестный"
                 self._notify_inline(
-                    f"Выберите или подключите аккаунт Lichess «{account_id.partition(':')[2] or 'партии'}», "
-                    "которому принадлежит эта партия.")
+                    f"Партия принадлежит аккаунту «{linked_account}». "
+                    "Выберите его в фильтре аккаунта перед повторной проверкой.")
                 return
             generation = int(getattr(self.lichess, "auth_generation", -1))
-
-            def retry_identity_is_current() -> bool:
-                return bool(
-                    self._online_actions_allowed()
-                    and self._current_lichess_generation(generation)
-                    and f"lichess:{str(getattr(self.lichess, 'username', '') or '').strip().casefold()}"
-                    == current_account_id)
-
-            if not retry_identity_is_current():
-                self._notify_inline("Подключение Lichess сменилось; повторите действие после синхронизации.")
-                return
             selected_game_id = str(game.get("game_id") or "")
             source_game_id = str(game.get("source_game_id") or "")
             line_revision = game.get("line_revision")
-            current_line = (self.game_repository.current_line(selected_game_id)
-                            if selected_game_id else None)
-            if (line_revision is None or current_line is None
-                    or int(current_line["line_revision"]) != int(line_revision)):
-                self._notify_inline("Выбранная партия или её линия изменилась; обновите список.")
+            if line_revision is None or not selected_game_id:
+                self._notify_inline("У выбранной партии нет текущей версии линии; обновите список.")
                 return
-            if not retry_identity_is_current():
-                self._notify_inline("Подключение Lichess сменилось; очередь не изменена.")
+            if (str(game.get("account_remote_id") or source_game_id) != source_game_id
+                    or int(game.get("account_link_count") or 0) < 1):
+                self._notify_inline("Связь выбранной партии с аккаунтом не подтверждена; обновите список.")
                 return
-            if not self.game_repository.enqueue_lichess_analysis_backfill(
-                    account_id, game_id=selected_game_id,
-                    expected_line_revision=int(line_revision),
-                    expected_source_game_id=source_game_id):
-                # Existing due entries need not be rewritten; they remain scoped below.
-                state = self.game_repository.lichess_analysis_backfill_state(
-                    account_id, selected_game_id)
-                if not state:
-                    self._notify_inline("Не удалось поставить выбранную партию в очередь.")
-                    return
-            if not retry_identity_is_current():
-                self._notify_inline("Подключение Lichess сменилось; повторная проверка отменена.")
+            retry_key = (current_account_id, selected_game_id, int(line_revision), generation)
+            if getattr(self, "_library_retry_pending_key", None) == retry_key:
                 return
-            if not self.game_repository.retry_lichess_analysis_game(
-                    account_id, selected_game_id, line_revision=int(line_revision),
-                    source_game_id=source_game_id):
-                state = self.game_repository.lichess_analysis_backfill_state(
-                    account_id, selected_game_id) or {}
-                if "rate_limited" in {state.get("accuracy_status"), state.get("evals_status")}:
-                    self._notify_inline("Для выбранной партии действует ограничение Lichess; дождитесь срока повтора.")
-                elif "has_data" in {state.get("accuracy_status"), state.get("evals_status")}:
-                    self._notify_inline("Готовые данные по выбранной партии уже сохранены.")
-                else:
-                    self._notify_inline("Выбранная партия пока не готова к повторной проверке.")
-                return
-            if not retry_identity_is_current():
-                self._notify_inline("Подключение Lichess сменилось; повторная проверка отменена.")
-                return
-            self._start_lichess_analysis_backfill(
-                generation, manual=True, selected_game_id=selected_game_id,
-                expected_line_revision=int(line_revision),
-                expected_source_game_id=source_game_id)
-            self._notify_inline("Повторно проверяется только выбранная партия; лимиты Lichess сохранены.")
+            self._library_retry_generation = int(getattr(self, "_library_retry_generation", 0)) + 1
+            request_generation = self._library_retry_generation
+            self._library_retry_pending_key = retry_key
+            page.retry_analysis_button.setEnabled(False)
+            page.set_sync_status("Lichess · проверяю связь выбранной партии с аккаунтом…")
+            service = self.lichess
+            stop_event = threading.Event()
+
+            def worker() -> None:
+                result = {"key": retry_key, "account_id": account_id,
+                          "game_id": selected_game_id, "revision": int(line_revision),
+                          "source_game_id": source_game_id, "generation": generation}
+                try:
+                    if stop_event.is_set() or service is not self.lichess:
+                        result["state"] = "cancelled"
+                    elif (not service.is_auth_generation_current(generation)
+                          or f"lichess:{str(service.username or '').strip().casefold()}" != account_id):
+                        result["state"] = "stale_account"
+                    else:
+                        identity = self.game_repository.validate_lichess_game_link(
+                            account_id, selected_game_id, line_revision=int(line_revision),
+                            source_game_id=source_game_id)
+                        if identity is None:
+                            result["state"] = "stale_game"
+                        else:
+                            self.game_repository.enqueue_lichess_analysis_backfill(
+                                account_id, game_id=selected_game_id,
+                                expected_line_revision=int(line_revision),
+                                expected_source_game_id=source_game_id)
+                            result["accepted"] = self.game_repository.retry_lichess_analysis_game(
+                                account_id, selected_game_id, line_revision=int(line_revision),
+                                source_game_id=source_game_id, manual=True)
+                            result["queue_state"] = self.game_repository.lichess_analysis_backfill_state(
+                                account_id, selected_game_id) or {}
+                            result["state"] = "accepted" if result["accepted"] else "deferred"
+                            if not result["accepted"]:
+                                retry_after = self.game_repository.lichess_analysis_retry_after(account_id)
+                                state = result["queue_state"]
+                                deadlines = [retry_after] if retry_after else []
+                                if state.get("manual_retry_at"):
+                                    deadlines.append((datetime.fromisoformat(
+                                        state["manual_retry_at"]) + timedelta(minutes=5)).isoformat())
+                                for facet in ("accuracy", "evals"):
+                                    status = state.get(f"{facet}_status")
+                                    checked = state.get(f"{facet}_checked_at")
+                                    if status in {"no_server_data", "partial"} and checked:
+                                        deadlines.append((datetime.fromisoformat(checked)
+                                                          + timedelta(minutes=5)).isoformat())
+                                    elif status in {"rate_limited", "error", "stale_line"}:
+                                        deadline = state.get(f"{facet}_next_retry_at")
+                                        if deadline:
+                                            deadlines.append(deadline)
+                                result["next_eligible_at"] = max(deadlines) if deadlines else None
+                except Exception as exc:
+                    result["state"] = "error"
+                    result["error_type"] = type(exc).__name__
+                if not stop_event.is_set():
+                    self.library_retry_finished.emit(request_generation, result)
+
+            handle = self._start_registered_work(
+                worker, kind="selected_lichess_analysis_retry",
+                lane=OperationLane.SQLITE_WRITER, thread_name="cc-library-analysis-retry",
+                stop_event=stop_event)
+            page.destroyed.connect(lambda *_: handle.cancel("library_closed"))
 
         page.query_requested.connect(load_page)
         page.open_requested.connect(open_selected)
@@ -8124,6 +8172,82 @@ class MainWindow(QMainWindow):
                 f"осталось {int(materialization.get('remaining') or 0)}. Движок не запускался.")
         if target_match:
             self._library_detail_target_id = None
+
+    def _library_retry_result_ready(self, generation: int, result: object) -> None:
+        if generation != getattr(self, "_library_retry_generation", -1):
+            return
+        if not isinstance(result, dict):
+            return
+        key = result.get("key")
+        if key == getattr(self, "_library_retry_pending_key", None):
+            self._library_retry_pending_key = None
+        page = getattr(self, "library_page", None)
+        if page is None:
+            return
+        selected = page.selected_game() or {}
+        same_selection = (str(selected.get("game_id") or "") == str(result.get("game_id"))
+                         and selected.get("line_revision") == result.get("revision"))
+        if same_selection:
+            page.retry_analysis_button.setEnabled(bool(
+                selected.get("account_id") and selected.get("source_game_id")
+                and selected.get("source") in {"lichess", "lichess_archive", "lichess-json"}))
+        if (not self._online_actions_allowed()
+                or not self._current_lichess_generation(int(result.get("generation", -1)))
+                or f"lichess:{str(getattr(self.lichess, 'username', '') or '').casefold()}"
+                    != str(result.get("account_id"))):
+            if same_selection:
+                page.set_sync_status("Запрос проверки отменён: аккаунт Lichess сменился.")
+            return
+        state = str(result.get("state") or "error")
+        if state == "stale_account":
+            if same_selection:
+                page.set_sync_status("Аккаунт Lichess сменился; очередь не изменена.")
+            return
+        if state == "stale_game":
+            if same_selection:
+                page.set_sync_status("Партия или её версия изменилась; обновите список.")
+            return
+        if state == "error":
+            if same_selection:
+                page.set_sync_status(f"Не удалось поставить проверку в очередь ({result.get('error_type', 'ошибка')}).")
+            return
+        if not result.get("accepted"):
+            row = result.get("queue_state") or {}
+            if "rate_limited" in {row.get("accuracy_status"), row.get("evals_status")}:
+                reason = "Retry-After Lichess"
+            elif "has_data" in {row.get("accuracy_status"), row.get("evals_status")}:
+                reason = None
+            else:
+                reason = "внутренний интервал повторной проверки"
+            if same_selection:
+                next_at = result.get("next_eligible_at")
+                if reason is None:
+                    message = "Готовые данные по выбранной партии уже сохранены."
+                elif next_at:
+                    try:
+                        local_time = datetime.fromisoformat(str(next_at)).astimezone().strftime("%d.%m %H:%M")
+                    except (TypeError, ValueError, OverflowError):
+                        local_time = str(next_at)
+                    message = f"Повтор отложен ({reason}); следующий запрос после {local_time}."
+                else:
+                    message = f"Повтор отложен ({reason}); выберите аккаунт или дождитесь доступности очереди."
+                page.set_sync_status(message)
+            return
+        outcome = self._start_lichess_analysis_backfill(
+            int(result["generation"]), manual=True,
+            selected_game_id=str(result["game_id"]),
+            expected_line_revision=int(result["revision"]),
+            expected_source_game_id=str(result["source_game_id"]))
+        if same_selection:
+            if outcome == "queued":
+                page.set_sync_status(
+                    "Lichess · выбранная партия поставлена в очередь после текущей проверки.")
+            elif outcome == "started" or outcome is None:
+                page.set_sync_status("Lichess · проверяется только выбранная партия…")
+            elif outcome == "busy":
+                page.set_sync_status("Lichess · запрос ожидает завершения текущей фоновой операции.")
+            else:
+                page.set_sync_status("Запрос проверки не запущен: проверьте подключение, паузу или активную партию.")
 
     def _note_save_result_ready(self, request_id: str, game_id: str, error: object) -> None:
         request = self._note_save_requests.pop(str(request_id), None)

@@ -373,7 +373,7 @@ class LibraryPage(QWidget):
         self.refresh_game.setVisible(False)
         self.retry_analysis_button = QPushButton("Повторить проверку аналитики Lichess")
         self.retry_analysis_button.setToolTip(
-            "Ставит на повтор только выбранную завершённую партию. Суточный лимит и Retry-After сохраняются.")
+            "Ставит на повтор только выбранную завершённую партию. Для партий нескольких аккаунтов сначала выберите владельца; суточный лимит и Retry-After сохраняются.")
         self.retry_analysis_button.clicked.connect(lambda _checked=False: self._emit_for_detail(
             self.retry_analysis_requested))
         self.retry_analysis_button.setEnabled(False)
@@ -481,7 +481,13 @@ class LibraryPage(QWidget):
         self.analyze_game.setEnabled(True)
         self.retry_analysis_button.setEnabled(bool(
             game.get("source_game_id") and
-            game.get("source") in {"lichess", "lichess_archive", "lichess-json"}))
+            game.get("source") in {"lichess", "lichess_archive", "lichess-json"}
+            and game.get("account_id")
+            and str(game.get("account_remote_id") or game.get("source_game_id"))
+                == str(game.get("source_game_id"))))
+        if game.get("source_game_id") and not game.get("account_id"):
+            self.retry_analysis_button.setToolTip(
+                "Эта партия связана с несколькими аккаунтами. Выберите владельца в фильтре аккаунта.")
         self.detail_open.setEnabled(review is not None)
         if not safety_allowed:
             self.detail_status.setText("Оценки и график скрыты до подтверждения безопасности Lichess.")

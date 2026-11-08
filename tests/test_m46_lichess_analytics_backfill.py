@@ -593,7 +593,10 @@ def test_v18_queue_migration_preserves_rows_and_allows_stale_line_status(tmp_pat
             evals_next_retry_at TEXT,attempts INTEGER NOT NULL DEFAULT 0,last_error TEXT,
             updated_at TEXT NOT NULL,PRIMARY KEY(account_id,game_id))""")
         now = "2026-11-03T00:00:00+00:00"
-        db.execute("INSERT INTO lichess_analysis_backfill VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        db.execute("INSERT INTO lichess_analysis_backfill(account_id,game_id,line_revision,line_hash,"
+                   "accuracy_status,evals_status,accuracy_checked_at,evals_checked_at,"
+                   "accuracy_next_retry_at,evals_next_retry_at,attempts,last_error,updated_at) "
+                   "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
                    (account_id, game_id, queued["line_revision"], queued["line_hash"],
                     "partial", "partial", None, None, now, now, 1, "previous", now))
         db.execute("CREATE INDEX idx_lichess_analysis_backfill_due ON "

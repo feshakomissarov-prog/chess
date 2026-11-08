@@ -19,6 +19,13 @@
 | Ход 25 · Wooden chess placement | `move-chess-placement-v1.wav` | Jeff Final Boss / El Final Boss, [RouteNote Licensing](https://licensing.routenote.com/sound-effect/board-game-wood-piece-placement) | Файл CC0-превью ChessGameWorld | `84f7a2718936b976ca0f0321a5015770cac8eb2a68094a64264e635563f99136` |
 | Взятие 09 · Falling chess pieces (по умолчанию) | `capture-chess-pieces-drop-v1.wav` | IENBA, [Freesound](https://freesound.org/people/IENBA/sounds/755250/) | Файл CC0-превью ChessGameWorld | `54b09cc749259315866099117e91048dd3c7671ab18512495001e3721bf054f1` |
 
+Pending-input acknowledgment использует отдельный 45 ms нейтральный тон
+`pending-input-neutral-v1.wav`, созданный в проекте как mono PCM16 / 48 kHz
+(SHA-256 `4635ebad6a22a770132b65ff4e59d0dad5f4c83914c62186cfb625afc648a7bd`).
+Это не запись шахматного хода и не входит в выбираемый каталог. Qt audio effect
+получает ту же громкость приложения; при mute или недоступном backend сигнал
+бесшумный, а ожидающий статус остаётся видимым в интерфейсе.
+
 Начальный сигнал оставлен из уже включённого `Board Start`; сигнал MyInstants
 остаётся только личным референсом и в приложение не копируется. Удалены прежние
 непринятые `Piece Slide` и `Piece Capture` варианты. Владелец должен подтвердить

@@ -360,14 +360,28 @@ class LichessSyncMixin:
         """Resume one small, authenticated JSON backfill batch on the current account."""
         if (self.repository is None or not self.username or self._closing
                 or not self.is_auth_generation_current(generation)):
-            return
+            return "rejected"
         context = self.capture_operation_context(command="lichess_analysis_backfill")
         if context.generation != generation:
-            return
-        if self._analysis_backfill_stop is not None and not self._analysis_backfill_stop.is_set():
-            return
-        stop = threading.Event()
-        self._analysis_backfill_stop = stop
+            return "rejected"
+        with self._analysis_backfill_lock:
+            if self._analysis_backfill_stop is not None and not self._analysis_backfill_stop.is_set():
+                if selected_game_id:
+                    key = (str(self.username).casefold(), int(generation), str(selected_game_id))
+                    # The SQLite queue was durably marked by the selected-game
+                    # command; coalesce its exact account/revision identity here
+                    # and dispatch it after the bounded batch releases its worker.
+                    self._pending_selected_analysis[key] = {
+                        "generation": int(generation), "limit": int(limit),
+                        "daily_limit": int(daily_limit), "force_retry": bool(force_retry),
+                        "preferred_game_id": None, "selected_game_id": str(selected_game_id),
+                        "expected_line_revision": expected_line_revision,
+                        "expected_source_game_id": expected_source_game_id,
+                    }
+                    return "queued"
+                return "busy"
+            stop = threading.Event()
+            self._analysis_backfill_stop = stop
         username = self.username
 
         def work():
@@ -380,19 +394,20 @@ class LichessSyncMixin:
                 if not token:
                     return
                 account_id = self.repository.ensure_archive_account(username)
-                if (selected_game_id is None and
-                        not self.repository.lichess_analysis_backfill_has_due_work(
-                            account_id, daily_limit=daily_limit,
-                            force_retry=force_retry)):
-                    # Avoid spending an account/playing API request when the
-                    # durable local queue is paused, complete, cooling down,
-                    # or has already reached its daily request budget.
+                if not self.repository.lichess_analysis_backfill_has_due_work(
+                        account_id, daily_limit=daily_limit,
+                        force_retry=force_retry):
+                    # Check pause, Retry-After, item TTL, and the daily cap
+                    # before making even the playing-games preflight call.
+                    # The explicit selected-game TTL exception has already
+                    # been recorded durably by the user's scoped retry action.
                     summary = self.repository.lichess_analysis_backfill_summary(account_id)
                     retry_at = self.repository.lichess_analysis_retry_after(account_id)
                     next_eligible = self.repository.lichess_analysis_backfill_next_eligible_at(
                         account_id, daily_limit=daily_limit, force_retry=force_retry) or ""
                     message = ("приостановлено" if self.repository.lichess_analysis_backfill_paused(account_id)
                                else "пауза · Retry-After" if retry_at
+                               else "пауза · суточный лимит достигнут" if next_eligible
                                else "очередь готовой аналитики пуста")
                     self.lichess_analysis_backfill_finished.emit(
                         generation, username,
@@ -482,9 +497,26 @@ class LichessSyncMixin:
                         int(summary.get("no_data") or 0), int(summary.get("errors") or 0),
                         message, next_eligible)
             finally:
-                if self._analysis_backfill_stop is stop:
-                    self._analysis_backfill_stop = None
+                pending = None
+                with self._analysis_backfill_lock:
+                    if self._analysis_backfill_stop is stop:
+                        self._analysis_backfill_stop = None
+                    current_account = str(self.username or "").casefold()
+                    if self._analysis_backfill_stop is None:
+                        for key, request in list(self._pending_selected_analysis.items()):
+                            if key[0] != current_account or key[1] != generation:
+                                self._pending_selected_analysis.pop(key, None)
+                                continue
+                            pending = self._pending_selected_analysis.pop(key)
+                            break
+                if (pending and not self._closing
+                        and int(getattr(self, "_auth_generation", -1)) == generation):
+                    # The prior network request and lease are released. This
+                    # dispatch happens outside the queue lock to preserve the
+                    # auth-lock -> pending-lock order used during disconnect.
+                    self.refresh_lichess_analysis_background(**pending)
         self._thread(work, "chess-coach-lichess-analysis-backfill")
+        return "started"
 
     def refresh_missing_archive_evaluations(self, *, limit: int = 25) -> None:
         """Explicit, bounded refresh of missing Lichess PGN evals using saved OAuth only."""
@@ -528,5 +560,7 @@ class LichessSyncMixin:
         self._thread(work, "chess-coach-archive-eval-refresh")
 
     def cancel_lichess_analysis_backfill(self) -> None:
-        if self._analysis_backfill_stop is not None:
-            self._analysis_backfill_stop.set()
+        with self._analysis_backfill_lock:
+            self._pending_selected_analysis.clear()
+            if self._analysis_backfill_stop is not None:
+                self._analysis_backfill_stop.set()

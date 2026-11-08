@@ -395,6 +395,10 @@ class LichessAuthMixin:
             for stop in (self._archive_stop, self._analysis_backfill_stop, self._puzzle_stop):
                 if stop is not None:
                     stop.set()
+            pending_lock = getattr(self, "_analysis_backfill_lock", None)
+            if pending_lock is not None:
+                with pending_lock:
+                    self._pending_selected_analysis.clear()
             if self._username_challenge_stop:
                 self._username_challenge_stop.set()
             with self._pending_action_lock:

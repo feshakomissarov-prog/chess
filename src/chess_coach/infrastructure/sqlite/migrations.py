@@ -238,6 +238,7 @@ class SQLiteMigrationMixin:
                     evals_next_retry_at TEXT,
                     attempts INTEGER NOT NULL DEFAULT 0,
                     last_error TEXT,
+                    manual_retry_at TEXT,
                     updated_at TEXT NOT NULL,
                     PRIMARY KEY(account_id,game_id)
                 );
@@ -336,7 +337,8 @@ class SQLiteMigrationMixin:
             backfill_columns = {row[1] for row in
                                 db.execute("PRAGMA table_info(lichess_analysis_backfill)")}
             for name, definition in (("lease_owner", "TEXT"),
-                                     ("lease_heartbeat_at", "TEXT")):
+                                     ("lease_heartbeat_at", "TEXT"),
+                                     ("manual_retry_at", "TEXT")):
                 if name not in backfill_columns:
                     db.execute(f"ALTER TABLE lichess_analysis_backfill ADD COLUMN {name} {definition}")
             budget_columns = {row[1] for row in db.execute(

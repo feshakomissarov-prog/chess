@@ -45,6 +45,14 @@ def test_versioned_recording_assets_are_packaged_mono_pcm_wav(tmp_path):
             assert wav.getnframes() > 100
     assert assets["move"] != assets["capture"]
     assert assets["game_start"] not in {assets["move"], assets["capture"]}
+    selected_move_asset = sound_asset_path(DEFAULT_SOUND_SELECTIONS["move"])
+    assert selected_move_asset is not None
+    pending = selected_move_asset.with_name("pending-input-neutral-v1.wav")
+    assert pending.is_file()
+    with wave.open(str(pending), "rb") as wav:
+        assert wav.getnchannels() == 1 and wav.getsampwidth() == 2
+        assert wav.getframerate() == 48_000
+        assert 0.04 <= wav.getnframes() / wav.getframerate() <= 0.05
     for cue, definition in SOUND_CATALOG["cues"].items():
         assert len(definition["options"]) == (1 if cue != "move" else 5)
         for option in definition["options"]:
@@ -95,22 +103,17 @@ def test_optimistic_move_and_duplicate_server_ack_play_once(tmp_path):
     assert sum(effect.play_count for effect in player.effects.values()) == 1
 
 
-def test_pending_move_uses_separate_neutral_system_signal_and_deduplicates(
-        tmp_path, monkeypatch):
-    from chess_coach.ui.sounds import QApplication
-
+def test_pending_move_uses_volume_controlled_neutral_asset_and_deduplicates(tmp_path):
     player = _player(tmp_path)
-    system_signals = []
-    monkeypatch.setattr(QApplication, "beep", lambda: system_signals.append("pending"))
     assert player.play_pending_move("request-1")
     assert not player.play_pending_move("request-1")
-    assert system_signals == ["pending"]
+    assert player.pending_effect.play_count == 1
     # Pending input never consumes or plays the selected confirmed move recording.
     assert all(effect.play_count == 0 for effect in player.effects.values())
     player.configure(moves_enabled=False, notifications_enabled=True,
                      history_enabled=False, volume=45)
     assert not player.play_pending_move("request-muted")
-    assert system_signals == ["pending"]
+    assert player.pending_effect.play_count == 1
 
 
 def test_muting_volume_history_and_premove_notification_preferences(tmp_path):
@@ -187,12 +190,13 @@ def test_recording_sources_are_preloaded_once_and_reused_for_later_games(tmp_pat
         return effect
     player = ChessSoundPlayer(tmp_path / "sounds", effect_factory=factory)
     assert set(player.effects) == {"game_start", "move", "capture"}
-    assert len(created) == 7
+    assert len(created) == 8
     assert all(effect.source.isLocalFile() for effect in player.effects.values())
     assert player.effects["game_start"].source.toLocalFile().endswith("game-start-cc0-v1.wav")
     assert player.effects["move"].source.toLocalFile().endswith("move-queen-on-wood-v1.wav")
     assert player.effects["capture"].source.toLocalFile().endswith(
         "capture-chess-pieces-drop-v1.wav")
+    assert player.pending_effect.source.toLocalFile().endswith("pending-input-neutral-v1.wav")
     board = chess.Board()
     e4 = chess.Move.from_uci("e2e4")
     for game_id in ("game-1", "game-2", "game-3"):
@@ -200,7 +204,7 @@ def test_recording_sources_are_preloaded_once_and_reused_for_later_games(tmp_pat
         assert player.play_game_start(game_id)
     assert player.effects["move"].play_count == 3
     assert player.effects["game_start"].play_count == 3
-    assert len(created) == 7
+    assert len(created) == 8
 
 
 def test_sound_library_selection_changes_live_cue_and_preview(tmp_path):

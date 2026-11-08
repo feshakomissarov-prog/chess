@@ -104,6 +104,7 @@ class AnalysisJobsStoreMixin:
                   accuracy_status='queued',evals_status='queued',
                   accuracy_checked_at=NULL,evals_checked_at=NULL,
                   accuracy_next_retry_at=NULL,evals_next_retry_at=NULL,
+                  manual_retry_at=NULL,
                   last_error=NULL,updated_at=excluded.updated_at
                 WHERE lichess_analysis_backfill.line_revision<>excluded.line_revision
                    OR lichess_analysis_backfill.line_hash<>excluded.line_hash
@@ -212,9 +213,16 @@ class AnalysisJobsStoreMixin:
 
     def retry_lichess_analysis_game(self, account_id: str, game_id: str, *,
                                     line_revision: int,
-                                    source_game_id: str | None = None) -> bool:
-        """Retry one selected game only after its durable per-game TTL expires."""
-        now = datetime.now(timezone.utc).isoformat()
+                                    source_game_id: str | None = None,
+                                    manual: bool = False) -> bool:
+        """Queue one selected game; manual no-data retries use a five-minute debounce.
+
+        The manual exception applies only to the application's no-data cache TTL.
+        It never overrides a server 429/Retry-After or the account request budget.
+        """
+        now_dt = datetime.now(timezone.utc)
+        now = now_dt.isoformat()
+        manual_cooldown = (now_dt - timedelta(minutes=5)).isoformat()
         with self._connection() as db:
             db.execute("BEGIN IMMEDIATE")
             current = db.execute(
@@ -222,41 +230,84 @@ class AnalysisJobsStoreMixin:
                 "AND gr.is_current=1 AND gr.line_revision=? "
                 "JOIN account_games ag ON ag.game_id=g.game_id AND ag.account_id=? "
                 "WHERE g.game_id=? AND (? IS NULL OR g.source_game_id=?) "
-                "AND g.status NOT IN "
+                "AND (? IS NULL OR ag.remote_id=?) AND g.status NOT IN "
                 "('created','started','started_soon','playing') AND g.source_game_id IS NOT NULL",
                 (int(line_revision), str(account_id), str(game_id), source_game_id,
-                 source_game_id)).fetchone()
+                 source_game_id, source_game_id, source_game_id)).fetchone()
             if not current:
                 return False
+            queue = db.execute(
+                "SELECT * FROM lichess_analysis_backfill WHERE account_id=? AND game_id=? "
+                "AND line_revision=?", (str(account_id), str(game_id),
+                int(line_revision))).fetchone()
+            if not queue:
+                return False
+            if manual:
+                budget = db.execute(
+                    "SELECT retry_after_at FROM lichess_analysis_backfill_budget WHERE account_id=?",
+                    (str(account_id),)).fetchone()
+                if budget and budget["retry_after_at"] and budget["retry_after_at"] > now:
+                    return False
+                if queue["manual_retry_at"] and queue["manual_retry_at"] > manual_cooldown:
+                    return False
+                if any(queue[f"{facet}_status"] == "rate_limited" and
+                       queue[f"{facet}_next_retry_at"] and
+                       queue[f"{facet}_next_retry_at"] > now
+                       for facet in ("accuracy", "evals")):
+                    return False
+                # Do not turn a recent/no-data or a fresh queued click into an
+                # API hammer. Aged internal no-data/partial TTL can be bypassed
+                # once by an explicit selected-game request.
+                has_expired_cache_entry = any(
+                    queue[f"{facet}_status"] in {"no_server_data", "partial"}
+                    and queue[f"{facet}_next_retry_at"] and
+                    queue[f"{facet}_next_retry_at"] > now
+                    for facet in ("accuracy", "evals"))
+                if has_expired_cache_entry:
+                    checked = [queue[f"{facet}_checked_at"] for facet in ("accuracy", "evals")
+                               if queue[f"{facet}_status"] in {"no_server_data", "partial"}
+                               and queue[f"{facet}_checked_at"]]
+                    if checked and max(checked) > manual_cooldown:
+                        return False
+            override_no_data = int(bool(manual))
             changed = db.execute(
                 "UPDATE lichess_analysis_backfill SET "
                 "accuracy_status=CASE WHEN accuracy_status IN "
                 "('no_server_data','partial','error','stale_line') AND "
-                "(accuracy_next_retry_at IS NULL OR accuracy_next_retry_at<=?) "
+                "((accuracy_next_retry_at IS NULL OR accuracy_next_retry_at<=?) OR "
+                "(?=1 AND accuracy_status IN ('no_server_data','partial'))) "
                 "THEN 'queued' ELSE accuracy_status END,"
                 "evals_status=CASE WHEN evals_status IN "
                 "('no_server_data','partial','error','stale_line') AND "
-                "(evals_next_retry_at IS NULL OR evals_next_retry_at<=?) "
+                "((evals_next_retry_at IS NULL OR evals_next_retry_at<=?) OR "
+                "(?=1 AND evals_status IN ('no_server_data','partial'))) "
                 "THEN 'queued' ELSE evals_status END,"
                 "accuracy_next_retry_at=CASE WHEN accuracy_status IN "
                 "('no_server_data','partial','error','stale_line') AND "
-                "(accuracy_next_retry_at IS NULL OR accuracy_next_retry_at<=?) THEN NULL "
+                "((accuracy_next_retry_at IS NULL OR accuracy_next_retry_at<=?) OR "
+                "(?=1 AND accuracy_status IN ('no_server_data','partial'))) THEN NULL "
                 "ELSE accuracy_next_retry_at END,"
                 "evals_next_retry_at=CASE WHEN evals_status IN "
                 "('no_server_data','partial','error','stale_line') AND "
-                "(evals_next_retry_at IS NULL OR evals_next_retry_at<=?) THEN NULL "
+                "((evals_next_retry_at IS NULL OR evals_next_retry_at<=?) OR "
+                "(?=1 AND evals_status IN ('no_server_data','partial'))) THEN NULL "
                 "ELSE evals_next_retry_at END,last_error=NULL,"
+                "manual_retry_at=CASE WHEN ?=1 THEN ? ELSE manual_retry_at END,"
                 "updated_at=? WHERE account_id=? AND game_id=? AND line_revision=? "
                 "AND ((accuracy_status IN ('no_server_data','partial','error','stale_line') "
-                "AND (accuracy_next_retry_at IS NULL OR accuracy_next_retry_at<=?)) "
+                "AND ((accuracy_next_retry_at IS NULL OR accuracy_next_retry_at<=?) OR "
+                "(?=1 AND accuracy_status IN ('no_server_data','partial')))) "
                 "OR (evals_status IN ('no_server_data','partial','error','stale_line') "
-                "AND (evals_next_retry_at IS NULL OR evals_next_retry_at<=?)))",
-                (now, now, now, now, now, str(account_id), str(game_id),
-                 int(line_revision), now, now)).rowcount
+                "AND ((evals_next_retry_at IS NULL OR evals_next_retry_at<=?) OR "
+                "(?=1 AND evals_status IN ('no_server_data','partial')))))",
+                (now, override_no_data, now, override_no_data,
+                 now, override_no_data, now, override_no_data,
+                 int(manual), now, now, str(account_id), str(game_id),
+                 int(line_revision), now, override_no_data, now, override_no_data)).rowcount
             if changed:
                 return True
-            # Already-due queued work is eligible. Future per-game deadlines,
-            # account Retry-After, running, and complete states stay untouched.
+            # Already-due queued work is eligible. Record a manual cooldown so
+            # repeated clicks cannot enqueue repeated requests before dispatch.
             queued = db.execute(
                 "SELECT 1 FROM lichess_analysis_backfill WHERE account_id=? AND game_id=? "
                 "AND line_revision=? AND ((accuracy_status='queued' AND "
@@ -264,7 +315,13 @@ class AnalysisJobsStoreMixin:
                 "(evals_status='queued' AND "
                 "(evals_next_retry_at IS NULL OR evals_next_retry_at<=?)))",
                 (str(account_id), str(game_id), int(line_revision), now, now)).fetchone()
-            return bool(queued)
+            if not queued:
+                return False
+            if manual:
+                db.execute("UPDATE lichess_analysis_backfill SET manual_retry_at=?,updated_at=? "
+                           "WHERE account_id=? AND game_id=? AND line_revision=?",
+                           (now, now, str(account_id), str(game_id), int(line_revision)))
+            return True
 
     def lichess_analysis_backfill_has_due_work(self, account_id: str, *,
                                                 daily_limit: int = 25,
