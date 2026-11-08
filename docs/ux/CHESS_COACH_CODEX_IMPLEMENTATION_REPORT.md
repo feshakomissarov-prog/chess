@@ -3,13 +3,27 @@
 Дата: 08.11.2026  
 Рабочая ветка: `codex/unified-desktop-ux-2026-11-08`  
 База: `main` / `d94efeb1a03a9ff16026a92aad3db507c758c093`  
-Последний SHA с изменениями кода: `4d3db44f06c0766a70fbe04b266c05ef20943abd`.
+Последний SHA с изменениями кода: `f558da50385215d0b4bbc5f3bd690260ca04da0d`.
+
+## Дополнение после независимого source review PR #46
+
+Исправления находятся в существующем Draft PR [#46](https://github.com/feshakomissarov-prog/chess/pull/46), без нового PR, merge, force-push или изменения `main`. Основной кодовый коммит: `6dd79a98bfa1d4aa5da89ed0ba72163471d397fd`; source-owner уточнение: `f558da50385215d0b4bbc5f3bd690260ca04da0d`. PR остаётся draft, поскольку пользовательскую визуальную приёмку 13 эталонов ещё предстоит выполнить.
+
+| Пункт ревью | Статус | Реализация и регрессионное покрытие |
+|---|---|---|
+| CC46-P1-01 · автоматический Stockfish для внешних PGN/FEN | DONE | Добавлен локальный параметр `analysis/auto_external_studies` (default ON; OFF сохраняется). После явного Open включён путь через существующие coordinator, engine manager и Fair Play admission. Главная линия анализируется по всем позициям; FEN — по одной позиции. Внешние игра, оценки и классификация остаются в `EphemeralReviewRepository` в памяти. Ручная CTA работает при выключенной автозапуске. Тесты проверяют mainline/FEN, сохранность вне SQLite, режим OFF/NO_ENGINE и BLOCKED_FAIR_PLAY при активной человеческой партии. Реальный Stockfish binary и живое Lichess разрешение не использовались.
+| CC46-P1-02 · inline chooser для нескольких PGN | DONE | Общий встроенный chooser используется после разбора нескольких вставленных или файловых PGN. Строка только выбирает игру; существующая «Открыть на доске» подтверждает её. Нет `QInputDialog`; draft сохраняется при возврате к тексту/повторной загрузке. Проверены отсутствие модального вызова, выбор без открытия и сохранность draft.
+| CC46-P1-03 · владелец async parse | DONE | Parse callback fenced по source (`paste`/`file`/`editor`), generation, вложенной вкладке, account и auth generation. Смена инструмента, аккаунта или auth generation отбрасывает запоздалый результат. Проверены смена вкладки, смена auth generation и устаревшее поколение.
+| CC46-P2-04 · source-aware Back | DONE | Временный Review возвращается в исходную вкладку, сохраняя текст, список кандидатов и выбранную строку; позиционный редактор остаётся на вкладке редактора. Проверены PGN и editor.
+| CC46-P2-05 · «Вызвать снова» через Play | DONE | AI и подтверждённый nickname соперника открывают общий Play с предзаполненными параметрами. Уровень/цвет AI берутся из подтверждённой сессии; поля формы не создают игру до Start. Username валидируется до запроса. Fake-service тесты проверяют 0 запросов до Start и ровно 1 после него, включая отказ некорректного имени.
+
+Текущая локальная проверка на Windows для кода `f558da5…` и актуального тестового дерева: `QT_QPA_PLATFORM=offscreen; .venv312\Scripts\python.exe -m pytest -q` — **959 тестов, exit code 0**; `python -m compileall -q src tests` — exit code 0; `git diff --check` — exit code 0. Windows Actions run `42514668486` на SHA `6dd79a9…`: `test` и `visual-evidence` оба завершились SUCCESS. После отправки финальных тестов и отчёта будет проверен ещё один exact-head Windows run. Нативный GUI/реальный Stockfish smoke для этих новых маршрутов не запускался. Сравнение всех 13 утверждённых эталонов остаётся отдельным следующим этапом.
 
 PR #46 был создан на SHA `95361e95e641b4ae6ce7974d7e4ff116f21b5e2d`; после этой строки отчёт обновляется отдельным docs-only коммитом.
 
 ## Краткий статус
 
-В ветке реализованы основные маршруты NOW для Play, Analysis, вложенного архива, импорта PGN/FEN, редактора позиции и Review без оценки. Сохранены существующие функции приложения; FUTURE-карточки диагностики слабостей и подготовки к сопернику остаются неактивными. Локальный полный набор тестов на Windows прошёл: **939 тестов** (`QT_QPA_PLATFORM=offscreen`, exit code 0).
+В ветке реализованы основные маршруты NOW для Play, Analysis, вложенного архива, импорта PGN/FEN, редактора позиции и Review без оценки. Сохранены существующие функции приложения; FUTURE-карточки диагностики слабостей и подготовки к сопернику остаются неактивными. Результат 939 тестов относится к предыдущему SHA. После source-review исправлений локально прошли **957 тестов** (`QT_QPA_PLATFORM=offscreen`, exit code 0).
 
 Визуальная приёмка **не завершена по всем 13 эталонам**. В репозитории сохранены шесть нативных скриншотов ключевых экранов; финальная capture-сессия прошла 25 синтетических состояний в настоящем Windows Qt при 1280×720. Кадры сессии лежат в отдельной папке визуализаций этой задачи, не в репозитории; 13 side-by-side сравнений с эталонами UX-01…UX-13 не создано. Draft PR [#46](https://github.com/feshakomissarov-prog/chess/pull/46) открыт для проверки. Windows CI для конечного SHA ещё ожидается.
 
@@ -27,13 +41,14 @@ PR #46 был создан на SHA `95361e95e641b4ae6ce7974d7e4ff116f21b5e2d`; 
 ## Изменённые части
 
 - `src/chess_coach/window.py` — оболочка, маршруты, запуск Review/PGN, размер доски и адаптивное поведение.
+- `src/chess_coach/ui/dialogs.py` — сохранённая настройка автозапуска transient-анализа внешних материалов.
 - `src/chess_coach/ui/pages/analysis.py` — landing и три вкладки вложенного разбора.
 - `src/chess_coach/ui/pages/play.py` — режимные карточки и формы.
 - `src/chess_coach/ui/pages/position_setup.py` — встроенный редактор позиции.
 - `src/chess_coach/ui/game_review.py` — сводка Review без данных и честный пустой график.
 - `src/chess_coach/ui/theme.py` — точечные токены новых карточек.
 - `scripts/capture_visual_master.py` — актуализирован переход в архив через Analysis и состояния Active для новой UI-модели.
-- `tests/test_window.py`, `tests/test_ui_pages.py`, `tests/test_game_review.py`, `tests/test_corr_gate_regressions.py`, `tests/test_arch_ux_rf5.py` — обновлённые проверки переходов, размеров, состояний и сохранения safety.
+- `tests/test_pr46_review_fixes.py`, `tests/test_window.py`, `tests/test_ui_pages.py`, `tests/test_game_review.py`, `tests/test_corr_gate_regressions.py`, `tests/test_arch_ux_rf5.py` — регрессионные проверки новых переходов, transient анализа, сохранения состояния и Fair Play.
 
 ## Сопоставление визуальных эталонов UX-01…UX-13
 
