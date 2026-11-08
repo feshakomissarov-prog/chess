@@ -578,7 +578,9 @@ class GameReviewWorkspace(QWidget):
         self.side_metrics_summary.verticalHeader().setVisible(False)
         self.side_metrics_summary.setWordWrap(False)
         self.side_metrics_summary.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        self.side_metrics_summary.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        # At compact window heights the summary may be shorter than all seven
+        # rows; keep every metric reachable instead of clipping the last rows.
+        self.side_metrics_summary.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
         self.side_metrics_summary.horizontalHeader().setSectionResizeMode(
             0, QHeaderView.ResizeMode.ResizeToContents)
         self.side_metrics_summary.horizontalHeader().setSectionResizeMode(

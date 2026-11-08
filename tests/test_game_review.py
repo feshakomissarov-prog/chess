@@ -591,6 +591,8 @@ def test_review_layout_has_no_outer_scroll_and_renders_at_desktop_sizes(qtbot, t
 
 
 def test_review_without_engine_data_shows_honest_summary_and_no_fake_metrics(qtbot, tmp_path):
+    from PySide6.QtCore import Qt
+
     repo = GameRepository(tmp_path / "review-empty-analysis.sqlite3")
     repo.save_snapshot("review-empty", "startpos", "e2e4 e7e5 g1f3", "white",
                        "Opponent", False, "5+0", "mate", "white",
@@ -606,6 +608,8 @@ def test_review_without_engine_data_shows_honest_summary_and_no_fake_metrics(qtb
         assert workspace.no_analysis_summary.isVisible()
         assert workspace.no_analysis_title.text() == "Данные движка отсутствуют"
         assert workspace.side_metrics_summary.isHidden()
+        assert workspace.side_metrics_summary.verticalScrollBarPolicy() == (
+            Qt.ScrollBarPolicy.ScrollBarAsNeeded)
         assert workspace.phase_selector.isHidden()
         assert workspace.graph_legend.isHidden()
         assert workspace.graph_mode.isHidden()

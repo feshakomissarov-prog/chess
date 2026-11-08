@@ -359,11 +359,14 @@ def wait_review_workspace(page, expected_game_id: str) -> None:
 
 
 def navigate_to_games(window: MainWindow, selected_game_id: str) -> None:
-    QTest.mouseClick(window._nav_buttons["games"], Qt.MouseButton.LeftButton)
+    preexisting_top_level_widgets = set(QApplication.topLevelWidgets())
+    QTest.mouseClick(window._nav_buttons["analysis"], Qt.MouseButton.LeftButton)
+    QTest.mouseClick(window.analysis_page.buttons["games"], Qt.MouseButton.LeftButton)
     page = window.library_page
     assert not page.findChildren(QWidget, "sortDescription")
     qt_floats = [widget for widget in QApplication.topLevelWidgets()
-                 if widget is not window and widget.isVisible()]
+                 if widget is not window and widget not in preexisting_top_level_widgets
+                 and widget.isVisible()]
     assert not qt_floats, (
         "Entering My Games must not open a sorting/help popup; visible top-level widgets: "
         + ", ".join(f"{type(widget).__name__}:{widget.windowTitle()}" for widget in qt_floats))
@@ -439,7 +442,7 @@ def wait_background(window, *, active: bool) -> None:
 def exercise_play_mode_targets(window: MainWindow) -> None:
     page = window._play_mode_page
     create_spy = QSignalSpy(page.create_requested)
-    for mode in ("local", "ai", "friend", "challenge", "active"):
+    for mode in ("local", "ai", "friend", "challenge"):
         button = page.buttons[mode]
         assert_scroll_action(page.content_scroll, button, f"Play mode {mode}")
         assert_action_target(window, button, f"Play mode {mode}")
@@ -453,17 +456,17 @@ def exercise_play_mode_targets(window: MainWindow) -> None:
             f"Clicking {mode} must select that mode exactly once."
         )
         assert all(not card.isHidden() for card in page.cards), (
-            "Every game mode must remain reachable while Active is selected."
+            "All game-mode cards must remain visible after selection."
         )
-        assert page.active_panel.isVisible() == (mode == "active"), (
-            "Active-games content must only show in the Active mode."
+        expected_active_panel = page.active_games.count() > 0
+        assert page.active_panel.isVisible() == expected_active_panel, (
+            "The active-games panel is visible only when confirmed games are listed."
         )
         assert create_spy.count() == 0, "Selecting a mode must not submit a game/challenge POST."
-        if mode == "active":
-            page.active_games.clearSelection()
-            page._clear_active_preview("Синтетическая позиция не загружена.")
-            assert page.active_preview_board.isHidden()
-            assert not page.active_open.isEnabled()
+    page.active_games.clearSelection()
+    page._clear_active_preview("Синтетическая позиция не загружена.")
+    assert page.active_preview_board.isHidden()
+    assert not page.active_open.isEnabled()
     page.select_mode("local")
     page.content_scroll.verticalScrollBar().setValue(0)
 
@@ -484,11 +487,13 @@ def capture(window: MainWindow, output: Path, name: str, width: int, height: int
         assert all(not card.isHidden() for card in page.cards), (
             "Every game mode must remain reachable while Active is selected."
         )
-        assert page.active_panel.isVisible() == (mode == "active"), (
-            "Active-games content must only show in the Active mode."
+        expected_active_panel = page.active_games.count() > 0
+        assert page.active_panel.isVisible() == expected_active_panel, (
+            "Active-games content is visible only when confirmed games are listed."
         )
-        assert_scroll_action(page.content_scroll, page.buttons[mode], f"Play mode {mode}")
-        assert_action_target(window, page.buttons[mode], f"Play mode {mode}")
+        if mode in page.buttons:
+            assert_scroll_action(page.content_scroll, page.buttons[mode], f"Play mode {mode}")
+            assert_action_target(window, page.buttons[mode], f"Play mode {mode}")
         page.content_scroll.verticalScrollBar().setValue(0)
         QTest.qWait(20)
     if current is window.game_page:
@@ -579,7 +584,7 @@ def capture(window: MainWindow, output: Path, name: str, width: int, height: int
             page.select_ply(0)
     if current is window.home_page:
         for route, button in window._nav_buttons.items():
-            if route in {"home", "games", "play", "analysis", "training", "progress"}:
+            if route in {"home", "play", "analysis", "training", "progress"}:
                 assert button.isVisible() and button.isEnabled()
                 assert_action_target(window, button, f"Navigation {route}")
     if isinstance(current, BackgroundOperationsPage):
@@ -668,7 +673,7 @@ def capture(window: MainWindow, output: Path, name: str, width: int, height: int
                        for button in buttons), (
                 "Compact library pagination and primary actions must remain visible."
             )
-    elif current is window._background_operations_page:
+    elif current is getattr(window, "_background_operations_page", None):
         active = any(
             operation.status.value == "running"
             and getattr(operation.context, "kind", "") in {
@@ -851,7 +856,7 @@ def main() -> None:
             image = capture(window, output, route, width, height)
             captured[route] = image
             if route == "play":
-                for mode in ("ai", "friend", "challenge", "active"):
+                for mode in ("ai", "friend", "challenge"):
                     button = window._play_mode_page.buttons[mode]
                     QCursor.setPos(button.mapToGlobal(button.rect().center()))
                     QTest.mouseClick(button, Qt.MouseButton.LeftButton)
@@ -861,8 +866,6 @@ def main() -> None:
                 window._play_mode_page.select_mode("local")
                 board = chess.Board()
                 board.push_uci("e2e4")
-                window._play_mode_page.mode_selector.setCurrentIndex(
-                    window._play_mode_page.mode_selector.findData("active"))
                 window._play_mode_page.set_active_games([{
                     "gameId": "synthetic-active-ai", "source": "ai",
                     "opponent": {"id": None, "ai": 3}, "color": "black",
@@ -991,7 +994,7 @@ def main() -> None:
         captured["game-review"] = capture(window, output, "game-review", width, height)
 
         # Settings are captured once per tab at the largest target size.
-        expected_count = (3 * len(target_sizes) + len(offline_sizes) + 17
+        expected_count = (3 * len(target_sizes) + len(offline_sizes) + 16
                           + tabs.count())
         assert len(captured) == expected_count, (
             f"Expected {expected_count} screenshot states, got {len(captured)}"
