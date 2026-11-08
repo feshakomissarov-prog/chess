@@ -37,6 +37,42 @@ def test_analysis_landing_has_four_cards_and_one_three_tab_breakdown(qtbot):
     assert page.workspace.currentIndex() == 0
 
 
+def test_play_preferences_are_saved_per_mode_and_restored(qtbot, tmp_path):
+    settings = QSettings(str(tmp_path / "play-modes.ini"), QSettings.Format.IniFormat)
+    page = PlayPage({}, settings=settings)
+    qtbot.addWidget(page)
+    assert len(page.cards) == 4
+    assert page.mode_selector.currentData() == "ai"
+    page.color.setCurrentIndex(page.color.findData("black"))
+    page.clock.setCurrentIndex(page.clock.findText("5 + 0"))
+    page.level.setCurrentIndex(page.level.findData(8))
+    page.select_mode("friend")
+    page.color.setCurrentIndex(page.color.findData("white"))
+    page.clock.setCurrentIndex(page.clock.findText("15 + 10"))
+    page.rated.setChecked(True)
+    page.select_mode("challenge")
+    page.username.setText("ExampleOpponent")
+    page.select_mode("ai")
+    assert page.color.currentData() == "black"
+    assert page.clock.currentData() == (300, 0)
+    assert page.level.currentData() == 8
+    page.close()
+
+    restored = PlayPage({}, settings=QSettings(
+        str(tmp_path / "play-modes.ini"), QSettings.Format.IniFormat))
+    qtbot.addWidget(restored)
+    assert restored.mode_selector.currentData() == "ai"
+    assert restored.color.currentData() == "black"
+    assert restored.clock.currentData() == (300, 0)
+    assert restored.level.currentData() == 8
+    restored.select_mode("friend")
+    assert restored.color.currentData() == "white"
+    assert restored.clock.currentData() == (900, 10)
+    assert restored.rated.isChecked()
+    restored.select_mode("challenge")
+    assert restored.username.text() == "ExampleOpponent"
+
+
 def test_play_page_mode_cards_only_select_and_explicit_button_starts(qtbot):
     calls = []
     actions = {key: (lambda key=key: calls.append(key))

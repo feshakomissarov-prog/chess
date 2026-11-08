@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections.abc import Callable
 
 import chess
-from PySide6.QtCore import Qt, Signal
+from PySide6.QtCore import Qt, Signal, QSignalBlocker, QSettings
 from PySide6.QtWidgets import (QCheckBox, QComboBox, QApplication, QFrame, QGridLayout, QHBoxLayout,
                                QLabel, QLineEdit, QListWidget, QListWidgetItem, QPushButton, QScrollArea,
                                QSpinBox, QVBoxLayout, QWidget)
@@ -21,15 +21,16 @@ class PlayPage(QWidget):
     active_game_requested = Signal(dict)
 
     _MODES = (
-        ("Локально", "Свободная доска для двух сторон.", "Свободная доска", "local", True),
-        ("Lichess AI", "Нерейтинговая партия против встроенного AI.", "Играть против AI", "ai", False),
-        ("Друг", "Создать ссылку-приглашение или открыть игру.", "Играть с другом", "friend", False),
-        ("Соперник Lichess", "Вызвать игрока по имени аккаунта.", "Вызвать игрока", "challenge", False),
-        ("Активные партии", "Открыть и продолжить текущую сетевую игру.", "Показать партии", "active", False),
+        ("Lichess AI", "Сыграйте против искусственного интеллекта Lichess.", "ai"),
+        ("Друг по ссылке", "Создайте ссылку и сыграйте с другом.", "friend"),
+        ("Вызвать игрока", "Найдите соперника на Lichess и сыграйте с ним.", "challenge"),
+        ("Свободная доска", "Откройте локальную доску для игры за обе стороны.", "local"),
     )
 
-    def __init__(self, actions: dict[str, Callable], parent=None) -> None:
+    def __init__(self, actions: dict[str, Callable], parent=None,
+                 settings: QSettings | None = None) -> None:
         super().__init__(parent)
+        self.settings = settings
         root_layout = QVBoxLayout(self)
         title = QLabel("Выберите режим игры")
         title.setObjectName("pageTitle")
@@ -50,10 +51,11 @@ class PlayPage(QWidget):
         self.content_scroll.setWidget(self.content)
         root_layout.addWidget(self.content_scroll, 1)
         self.mode_selector = QComboBox()
-        for label, value in (("Свободная доска", "local"),
-                             ("Lichess AI", "ai"), ("Друг по ссылке", "friend"),
-                             ("Вызов по имени", "challenge"),
-                             ("Продолжить активную партию", "active")):
+        for label, value in (("Lichess AI", "ai"), ("Друг по ссылке", "friend"),
+                             ("Вызвать игрока", "challenge"),
+                             ("Свободная доска", "local"),
+                             # Retained only for old callers; active games are above the cards.
+                             ("Активные партии", "active")):
             self.mode_selector.addItem(label, value)
         self.username = QLineEdit()
         self.username.setPlaceholderText("Имя пользователя Lichess")
@@ -66,6 +68,7 @@ class PlayPage(QWidget):
                              ("5 + 0", (300, 0)), ("10 + 0", (600, 0)),
                              ("15 + 10", (900, 10)), ("Свой…", ("custom", None))):
             self.clock.addItem(label, value)
+        self.clock.setCurrentIndex(self.clock.findData((600, 0)))
         self.custom_minutes = QSpinBox()
         self.custom_minutes.setRange(1, 180)
         self.custom_minutes.setValue(5)
@@ -85,6 +88,7 @@ class PlayPage(QWidget):
         self.level = QComboBox()
         for value in range(1, 9):
             self.level.addItem(f"Уровень {value}", value)
+        self.level.setCurrentIndex(self.level.findData(4))
         self.rated = QCheckBox("Рейтинговая партия")
         self.start_button = QPushButton("Начать свободную доску")
         self.start_button.setObjectName("primaryAction")
@@ -101,23 +105,21 @@ class PlayPage(QWidget):
         form.setObjectName("metricCard")
         form_layout = QVBoxLayout(form)
         self.form_rows: dict[str, QWidget] = {}
-        for label, widget in (("Режим", self.mode_selector), ("Ваш цвет", self.color),
-                              ("Контроль времени", self.clock), ("Уровень Lichess AI", self.level),
-                              ("Соперник", self.username)):
+        self.form_rows["Режим"] = self.mode_selector
+        self.mode_selector.hide()
+        form_grid = QGridLayout()
+        form_grid.setHorizontalSpacing(16)
+        for index, (label, widget) in enumerate((
+                ("Ваш цвет", self.color), ("Уровень Lichess AI", self.level),
+                ("Контроль времени", self.clock), ("Соперник", self.username))):
             row_widget = QWidget()
-            row = QHBoxLayout()
+            row = QVBoxLayout(row_widget)
             row.setContentsMargins(0, 0, 0, 0)
             row.addWidget(QLabel(label))
             row.addWidget(widget, 1)
-            row_widget.setLayout(row)
             self.form_rows[label] = row_widget
-            form_layout.addWidget(row_widget)
-        # The five mode cards are the primary mode navigation. Keeping a second
-        # visible mode combo here duplicated the same choice and pushed the
-        # actual controls below the fold on compact/high-DPI windows. Retain the
-        # combo as the keyboard/accessibility-backed selection model, but expose
-        # mode selection through the cards and keep the form for mode options.
-        self.form_rows["Режим"].hide()
+            form_grid.addWidget(row_widget, index // 3, index % 3)
+        form_layout.addLayout(form_grid)
         form_layout.addWidget(self.custom_clock_row)
         form_layout.addWidget(self.rated)
         form_layout.addWidget(self.form_status)
@@ -129,8 +131,7 @@ class PlayPage(QWidget):
         self.invitation_link.setAccessibleName("Ссылка приглашения Lichess")
         invitation_layout.addWidget(self.invitation_link, 1)
         self.copy_invitation_button = QPushButton("Копировать ссылку")
-        self.copy_invitation_button.clicked.connect(
-            lambda: QApplication.clipboard().setText(self.invitation_link.text()))
+        self.copy_invitation_button.clicked.connect(self._copy_invitation)
         invitation_layout.addWidget(self.copy_invitation_button)
         self.cancel_invitation_button = QPushButton("Отменить приглашение")
         self.cancel_invitation_button.clicked.connect(self.cancel_invitation_requested.emit)
@@ -179,36 +180,47 @@ class PlayPage(QWidget):
         active_layout.addWidget(self.active_open)
         self.active_panel.hide()
         layout.addWidget(self.active_panel)
-        self.mode_selector.currentIndexChanged.connect(self._update_form)
+        stored_mode = str(settings.value("play/last_selected_mode", "ai", type=str)) if settings else "ai"
+        mode_index = self.mode_selector.findData(stored_mode)
+        if mode_index < 0 or stored_mode == "active":
+            mode_index = self.mode_selector.findData("ai")
+        self.mode_selector.setCurrentIndex(mode_index)
+        self._last_mode = str(self.mode_selector.currentData() or "ai")
+        self._restore_mode_preferences(self._last_mode)
+        self.mode_selector.currentIndexChanged.connect(self._mode_changed)
+        self.clock.currentIndexChanged.connect(self._clock_changed)
+        self.color.currentIndexChanged.connect(lambda *_: self._save_mode_preferences())
+        self.level.currentIndexChanged.connect(lambda *_: self._save_mode_preferences())
+        self.rated.toggled.connect(lambda *_: self._save_mode_preferences())
+        self.username.textChanged.connect(lambda *_: self._save_mode_preferences())
         self.clock.currentIndexChanged.connect(self._update_form)
         self.start_button.clicked.connect(self._emit_create)
         self._request_pending = False
         self._update_form()
+        self._set_mode_description()
         self.grid = QGridLayout()
         self.grid.setHorizontalSpacing(12)
         self.grid.setVerticalSpacing(12)
         self.buttons: dict[str, QPushButton] = {}
         self.cards: list[QFrame] = []
-        for index, (heading, description, button_text, key, primary) in enumerate(self._MODES):
-            card = QFrame()
-            card.setObjectName("metricCard")
+        for index, (heading, description, key) in enumerate(self._MODES):
+            card = QPushButton()
+            card.setObjectName("playModeCard")
             card.setProperty("playMode", key)
+            card.setCheckable(True)
+            card.setAccessibleName(heading)
+            card.setToolTip(description)
             card_layout = QVBoxLayout(card)
-            card_layout.setContentsMargins(14, 12, 14, 12)
+            card_layout.setContentsMargins(18, 12, 18, 12)
             title_label = QLabel(heading)
-            title_label.setStyleSheet("font-size: 16px; font-weight: 700;")
+            title_label.setStyleSheet("font-size: 20px; font-weight: 700;")
             card_layout.addWidget(title_label)
             description_label = QLabel(description)
             description_label.setObjectName("secondary")
             description_label.setWordWrap(True)
             card_layout.addWidget(description_label)
-            button = QPushButton(button_text)
-            if primary:
-                button.setObjectName("primaryAction")
-            button.setCheckable(True)
-            button.clicked.connect(lambda _checked=False, key=key: self.select_mode(key))
-            self.buttons[key] = button
-            card_layout.addWidget(button)
+            card.clicked.connect(lambda _checked=False, key=key: self.select_mode(key))
+            self.buttons[key] = card
             self.cards.append(card)
         self._columns = 2
         self._place_cards()
@@ -216,6 +228,14 @@ class PlayPage(QWidget):
         for card in self.cards:
             card.setVisible(True)
         self._update_form()
+        layout.removeWidget(form)
+        layout.removeWidget(self.active_panel)
+        layout.removeItem(self.grid)
+        layout.insertWidget(0, self.active_panel)
+        layout.insertLayout(1, self.grid)
+        layout.insertWidget(2, form)
+        for card in self.cards:
+            card.setMinimumHeight(132)
         layout.addStretch(1)
 
     def select_mode(self, mode: str) -> None:
@@ -226,11 +246,88 @@ class PlayPage(QWidget):
         for key, button in getattr(self, "buttons", {}).items():
             button.setChecked(key == mode)
 
+    def _mode_changed(self, *_args) -> None:
+        previous = self._last_mode
+        mode = str(self.mode_selector.currentData() or "ai")
+        if previous != "active":
+            self._save_mode_preferences(previous)
+        if mode != "active":
+            self._last_mode = mode
+            if self.settings is not None:
+                self.settings.setValue("play/last_selected_mode", mode)
+            self._restore_mode_preferences(mode)
+        else:
+            self._last_mode = mode
+        self._update_form()
+        self._set_mode_description()
+
+    def _set_mode_description(self) -> None:
+        if self._request_pending or self.invitation_row.isVisible():
+            return
+        mode = str(self.mode_selector.currentData() or "ai")
+        self.form_status.setText({
+            "ai": "Выберите цвет, контроль времени и уровень Lichess AI.",
+            "friend": "Настройте ссылку-приглашение и подтвердите создание.",
+            "challenge": "Введите имя игрока Lichess и параметры вызова.",
+            "local": "Локальная партия работает без сети и часов.",
+            "active": "Выберите подтверждённую активную партию выше.",
+        }.get(mode, "Выберите режим и параметры партии."))
+
+    def _copy_invitation(self) -> None:
+        url = self.invitation_link.text().strip()
+        if not url:
+            return
+        QApplication.clipboard().setText(url)
+        self.set_status("Ссылка скопирована в буфер обмена.")
+
+    def _save_mode_preferences(self, mode: str | None = None) -> None:
+        if self.settings is None:
+            return
+        mode = str(mode or self.mode_selector.currentData() or self._last_mode)
+        if mode not in {"ai", "friend", "challenge"}:
+            return
+        prefix = f"play/modes/{mode}/"
+        self.settings.setValue(prefix + "color", str(self.color.currentData() or "random"))
+        self.settings.setValue(prefix + "clock_index", self.clock.currentIndex())
+        self.settings.setValue(prefix + "custom_minutes", self.custom_minutes.value())
+        self.settings.setValue(prefix + "custom_increment", self.custom_increment.value())
+        self.settings.setValue(prefix + "rated", self.rated.isChecked())
+        if mode == "ai":
+            self.settings.setValue(prefix + "level", int(self.level.currentData() or 1))
+        if mode == "challenge":
+            self.settings.setValue(prefix + "username", self.username.text())
+
+    def _restore_mode_preferences(self, mode: str) -> None:
+        if self.settings is None or mode not in {"ai", "friend", "challenge"}:
+            return
+        prefix = f"play/modes/{mode}/"
+        blockers = [QSignalBlocker(widget) for widget in (
+            self.color, self.clock, self.custom_minutes, self.custom_increment,
+            self.rated, self.level, self.username)]
+        color_index = self.color.findData(str(self.settings.value(prefix + "color", "random")))
+        self.color.setCurrentIndex(color_index if color_index >= 0 else 0)
+        clock_index = self.settings.value(prefix + "clock_index", self.clock.currentIndex(), type=int)
+        if 0 <= clock_index < self.clock.count():
+            self.clock.setCurrentIndex(clock_index)
+        self.custom_minutes.setValue(self.settings.value(prefix + "custom_minutes", 5, type=int))
+        self.custom_increment.setValue(self.settings.value(prefix + "custom_increment", 0, type=int))
+        self.rated.setChecked(self.settings.value(prefix + "rated", False, type=bool))
+        level_index = self.level.findData(self.settings.value(prefix + "level", 4, type=int))
+        if level_index >= 0:
+            self.level.setCurrentIndex(level_index)
+        if mode == "challenge":
+            self.username.setText(str(self.settings.value(prefix + "username", "", type=str)))
+        del blockers
+
+    def _clock_changed(self, *_args) -> None:
+        mode = str(self.mode_selector.currentData() or "ai")
+        if mode != "active":
+            self._save_mode_preferences(mode)
+
     def _update_form(self, *_args) -> None:
         mode = str(self.mode_selector.currentData() or "local")
         for key, button in getattr(self, "buttons", {}).items():
             button.setChecked(key == mode)
-        self.active_panel.setVisible(mode == "active")
         for card in getattr(self, "cards", ()):
             card.setVisible(True)
         online = mode in {"ai", "friend", "challenge"}
@@ -310,6 +407,7 @@ class PlayPage(QWidget):
         self.active_status.setText(status or (
             "Выберите партию для продолжения." if self.active_games.count()
             else "Активных партий нет."))
+        self.active_panel.setVisible(self.active_games.count() > 0)
         self._update_form()
 
     def _show_active_preview(self, item, _previous=None) -> None:

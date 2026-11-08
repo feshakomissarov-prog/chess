@@ -3622,12 +3622,11 @@ def test_sidebar_play_opens_mode_picker_without_resetting_local_game(qtbot, tmp_
     window._nav_buttons["play"].click()
     assert window.screen_stack.currentWidget() is window.play_page
     assert tuple(window.controller.board.move_stack) == before
-    # One embedded creation form plus the five existing mode action cards.
-    assert sum(widget.objectName() == "metricCard"
-               for widget in window.play_page.findChildren(QFrame)) == 6
-    assert window.play_local_button.text() == "Свободная доска"
+    assert len(window.play_page.cards) == 4
+    assert window.play_page.active_panel.isHidden()
+    assert window.play_local_button.accessibleName() == "Свободная доска"
     assert window.play_ai_button.isEnabled()
-    assert window.play_active_button.toolTip()
+    assert window.play_page.buttons.get("active") is None
     window.setFixedSize(1000, 720)
     window._layout_play_mode_cards()
     assert window._play_mode_columns == 1

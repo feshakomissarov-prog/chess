@@ -2711,7 +2711,7 @@ class MainWindow(QMainWindow):
             "friend": self.open_friend_game,
             "challenge": self.challenge_username,
             "active": self.show_active_games,
-        })
+        }, settings=self.settings)
         page.active_game_requested.connect(lambda game: self.open_active_game(game))
         page.create_requested.connect(self._create_play_request)
         page.cancel_requested.connect(self._cancel_play_challenge_wait)
@@ -2722,7 +2722,6 @@ class MainWindow(QMainWindow):
         self.play_ai_button = page.buttons["ai"]
         self.play_friend_button = page.buttons["friend"]
         self.play_challenge_button = page.buttons["challenge"]
-        self.play_active_button = page.buttons["active"]
         return page
 
     def _layout_play_mode_cards(self) -> None:
@@ -3031,15 +3030,15 @@ class MainWindow(QMainWindow):
         if not hasattr(self, "play_ai_button"):
             return
         online = self._online_actions_allowed()
-        for button in (self.play_ai_button, self.play_friend_button,
-                       self.play_challenge_button, self.play_active_button):
-            # Mode cards are navigation, not request controls. Keep them
-            # selectable offline so the owner can inspect/configure a mode;
-            # _create_play_request remains the single strict network gate and
-            # never sends a POST until the connection is ready.
+        for button in (self.play_ai_button, self.play_friend_button, self.play_challenge_button,
+                       self._play_mode_page.buttons["local"]):
             button.setEnabled(True)
-            button.setToolTip("Подключите Lichess; запросы остаются отключены до готовности соединения."
-                              if not online else "Доступно при активном соединении Lichess.")
+        mode = str(self._play_mode_page.mode_selector.currentData() or "ai")
+        can_start = mode == "local" or (online and mode in {"ai", "friend", "challenge"})
+        self._play_mode_page.start_button.setEnabled(can_start and not self._awaiting_game_start)
+        self._play_mode_page.start_button.setToolTip(
+            "Подключите Lichess, чтобы начать сетевую игру."
+            if not online and mode != "local" else "")
         if self._pending_play_request_mode:
             self._render_play_pending()
         else:
@@ -6433,8 +6432,7 @@ class MainWindow(QMainWindow):
         if dialog and dialog.isVisible():
             dialog.set_games(games)
         self._remote_active_games = [dict(game) for game in games if isinstance(game, dict)]
-        if not self._play_mode_page.active_panel.isHidden():
-            self._play_mode_page.set_active_games(self._remote_active_games)
+        self._play_mode_page.set_active_games(self._remote_active_games)
         if self.lichess and generation is not None:
             owner = self.lichess.username or ""
             for game in self._remote_active_games:
