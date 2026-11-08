@@ -618,6 +618,14 @@ class SettingsDialog(QDialog):
 
         layout = add_settings_tab("Stockfish и анализ")
         layout.addWidget(QLabel("Stockfish для завершённых партий и свободной доски"))
+        self.auto_external_analysis = QCheckBox(
+            "Автоматически анализировать открытые PGN и позиции")
+        self.auto_external_analysis.setChecked(settings.value(
+            "analysis/auto_external_studies", True, type=bool))
+        self.auto_external_analysis.setToolTip(
+            "После явного открытия внешнего PGN или позиции запустить локальный Stockfish "
+            "после проверки Fair Play. Материал и оценки остаются временными.")
+        layout.addWidget(self.auto_external_analysis)
         engine_row = QHBoxLayout()
         configured_path = settings.value("stockfish_path", "", type=str)
         self.engine_path = QLineEdit(discover_stockfish(configured_path) or configured_path)
@@ -827,6 +835,7 @@ class SettingsDialog(QDialog):
         settings.setValue("analysis_preset", self.analysis_preset.currentData())
         settings.setValue("analysis_limit_kind", self.analysis_limit.currentData())
         settings.setValue("analysis_limit_value", self.analysis_limit_value.value())
+        settings.setValue("analysis/auto_external_studies", self.auto_external_analysis.isChecked())
         settings.setValue("batch_analysis_nodes", self.batch_analysis_nodes.value())
         settings.setValue("stockfish_threads", self.engine_threads.value())
         settings.setValue("stockfish_hash_mb", self.engine_hash.value())

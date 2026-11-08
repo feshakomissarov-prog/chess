@@ -6,7 +6,8 @@ from collections.abc import Callable
 
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
-    QFrame, QGridLayout, QHBoxLayout, QLabel, QLineEdit, QPushButton, QStackedWidget,
+    QFrame, QGridLayout, QHBoxLayout, QLabel, QLineEdit, QListWidget, QListWidgetItem,
+    QPushButton, QStackedWidget,
     QTabWidget, QTextEdit, QVBoxLayout, QWidget,
 )
 
@@ -18,6 +19,7 @@ class AnalysisLandingPage(QWidget):
 
     back_requested = Signal()
     archive_requested = Signal()
+    nested_tool_changed = Signal(int)
 
     _CARDS = (
         ("♜", "Разбор партии", "Архив, PGN/FEN, редактор позиции и анализ ходов",
@@ -157,15 +159,75 @@ class AnalysisLandingPage(QWidget):
         self.external_status.setObjectName("secondary")
         self.external_status.setWordWrap(True)
         card_layout.addWidget(self.external_status)
+        self.candidate_heading = QLabel()
+        self.candidate_heading.setObjectName("secondary")
+        self.candidate_heading.setVisible(False)
+        card_layout.addWidget(self.candidate_heading)
+        self.candidate_list = QListWidget()
+        self.candidate_list.setObjectName("externalStudyCandidates")
+        self.candidate_list.setMaximumHeight(190)
+        self.candidate_list.setVisible(False)
+        card_layout.addWidget(self.candidate_list)
+        self.candidates: list[dict] = []
+        self.back_to_text_button = QPushButton("Назад к тексту")
+        self.back_to_text_button.setVisible(False)
+        self.back_to_text_button.clicked.connect(self.clear_candidates)
+        card_layout.addWidget(self.back_to_text_button, 0, Qt.AlignmentFlag.AlignLeft)
         actions_row = QHBoxLayout()
         actions_row.addStretch(1)
         self.open_text_button = QPushButton("Открыть на доске")
         self.open_text_button.setObjectName("primaryAction")
-        self.open_text_button.clicked.connect(lambda: actions["open_text"](
-            self.external_text.toPlainText()))
+        self._open_text_action = actions["open_text"]
+        self.open_text_button.clicked.connect(self._open_selected_or_text)
         actions_row.addWidget(self.open_text_button)
         card_layout.addLayout(actions_row)
         layout.addWidget(card, 1)
+
+    def _open_selected_or_text(self) -> None:
+        if self.candidates:
+            row = self.candidate_list.currentRow()
+            if row < 0 or row >= len(self.candidates):
+                self.set_external_status("Выберите партию в списке.")
+                return
+            self._open_text_action(dict(self.candidates[row]))
+            return
+        self._open_text_action(self.external_text.toPlainText())
+
+    def set_candidates(self, games: list[dict]) -> None:
+        self.candidates = [dict(game) for game in games]
+        self.candidate_list.clear()
+        for index, game in enumerate(self.candidates, 1):
+            headers = game.get("headers") or {}
+            white = str(headers.get("White") or "Белые")
+            black = str(headers.get("Black") or "Чёрные")
+            if white.strip().casefold() in {"?", "unknown"}:
+                white = "Белые"
+            if black.strip().casefold() in {"?", "unknown"}:
+                black = "Чёрные"
+            date = str(headers.get("Date") or "дата не указана")
+            result = str(headers.get("Result") or "результат не указан")
+            if result == "*":
+                result = "результат не указан"
+            eco = str(headers.get("ECO") or "")
+            label = f"{index}. {white} — {black} · {date} · {result}"
+            if eco:
+                label += f" · {eco}"
+            preview = str(game.get("preview") or "")
+            item = QListWidgetItem(label + (f"\n{preview}" if preview else ""))
+            self.candidate_list.addItem(item)
+        self.candidate_heading.setText(f"Найдено {len(self.candidates)} партий. Выберите одну.")
+        self.candidate_heading.setVisible(bool(self.candidates))
+        self.candidate_list.setVisible(bool(self.candidates))
+        self.back_to_text_button.setVisible(bool(self.candidates))
+        self.set_external_status("Выберите партию, затем нажмите «Открыть на доске».")
+
+    def clear_candidates(self) -> None:
+        self.candidates.clear()
+        self.candidate_list.clear()
+        self.candidate_heading.hide()
+        self.candidate_list.hide()
+        self.back_to_text_button.hide()
+        self.set_external_status("Черновик сохранён. Можно изменить текст или открыть другую партию.")
 
     def _build_editor_tab(self, page: QWidget, actions: dict[str, Callable]) -> None:
         layout = QVBoxLayout(page)
@@ -176,6 +238,7 @@ class AnalysisLandingPage(QWidget):
         layout.addWidget(self.position_setup, 1)
 
     def _tab_changed(self, index: int) -> None:
+        self.nested_tool_changed.emit(index)
         if index == 0 and not self._switching_tab:
             self.archive_requested.emit()
 
@@ -200,6 +263,7 @@ class AnalysisLandingPage(QWidget):
             self._switching_tab = False
 
     def show_landing(self) -> None:
+        self.nested_tool_changed.emit(-1)
         self.workspace.setCurrentIndex(0)
 
     def set_external_status(self, text: str) -> None:

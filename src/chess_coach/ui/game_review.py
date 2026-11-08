@@ -921,9 +921,15 @@ class GameReviewWorkspace(QWidget):
         has_engine_analysis = (self.evaluation_allowed and
                                analysis.get("source") == "stockfish" and
                                analysis.get("status") == "complete")
-        self.analysis_button.setVisible(game_finished and not self._ephemeral_study)
-        self.analysis_button.setText("Повторить анализ Stockfish" if has_engine_analysis
-                                     else "Проанализировать Stockfish")
+        self.analysis_button.setVisible(game_finished)
+        self.analysis_button.setText(
+            "Повторить анализ Stockfish" if has_engine_analysis else
+            "Проанализировать внешнюю партию" if self._ephemeral_study else
+            "Проанализировать Stockfish")
+        self.analysis_button.setToolTip(
+            "Запускает временный локальный анализ после проверки Fair Play; результат не сохраняется."
+            if self._ephemeral_study else
+            "Явно запускает сохранённый послепартийный анализ после проверки Fair Play.")
         white = game.get("white_player") or "Белые"
         black = game.get("black_player") or "Чёрные"
         if white.strip() in {"?", "Unknown", "unknown"}:
@@ -1125,9 +1131,15 @@ class GameReviewWorkspace(QWidget):
         self.training_safety_button.setToolTip(reason or "Проверить текущие активные партии Lichess.")
         self.training_status.setText("" if allowed else reason or (
             "Нет ошибок, для которых сохранённые оценки позволяют проверить улучшение."))
+        self.training_status.setVisible(self._ephemeral_study or allowed or bool(reason))
         if not self.evaluation_allowed:
             self.mask_review_analysis(self.training_block_reason)
         self._fit_review_board()
+
+    def set_external_analysis_status(self, text: str) -> None:
+        if self._ephemeral_study:
+            self.training_status.setText(str(text))
+            self.training_status.setVisible(True)
 
     def _phase_scope_changed(self, *_args):
         if self.review and self.evaluation_allowed:

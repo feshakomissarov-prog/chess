@@ -196,7 +196,8 @@ def test_ephemeral_study_can_explore_legal_branch_undo_and_reset_without_persist
     workspace.load_game(game, training_allowed=False, ephemeral=True)
     assert not workspace.ephemeral_controls.isHidden()
     assert workspace.review_board._interaction_enabled
-    assert workspace.analysis_button.isHidden()
+    assert not workspace.analysis_button.isHidden()
+    assert workspace.analysis_button.text() == "Проанализировать внешнюю партию"
     workspace.review_board.move_intent.emit(chess.Move.from_uci("d2d4"))
     assert workspace._ephemeral_board.piece_at(chess.D4) == chess.Piece(chess.PAWN, chess.WHITE)
     assert workspace._ephemeral_branch == [chess.Move.from_uci("d2d4")]

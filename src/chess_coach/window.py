@@ -171,12 +171,48 @@ class EphemeralReviewRepository:
         self._line = {"game_id": self.game_id, "line_revision": 1,
                       "line_hash": "ephemeral", "initial_fen": initial_fen,
                       "moves": moves}
+        self._game: dict | None = None
+        self._analysis: dict | None = None
+
+    def bind_game(self, game: dict) -> None:
+        self._game = dict(game)
+
+    def get_game(self, game_id: str) -> dict | None:
+        return dict(self._game) if self._game and str(game_id) == self.game_id else None
 
     def current_line(self, game_id: str) -> dict | None:
         return dict(self._line) if str(game_id) == self.game_id else None
 
     def latest_analysis_detail(self, *_args, **_kwargs) -> None:
+        return dict(self._analysis) if self._analysis else None
+
+    def find_analysis_cache(self, *_args, **_kwargs) -> None:
         return None
+
+    def phase_for_ply(self, _game_id: str, _revision: int, ply: int) -> str:
+        return "opening" if ply <= 20 else "middlegame"
+
+    def save_analysis(self, game_id: str, *, assessments: list[dict],
+                      classifications: list[dict], **_kwargs) -> str:
+        if str(game_id) != self.game_id:
+            raise KeyError(game_id)
+        assessments_by_ply = {int(item["ply"]): dict(item) for item in assessments}
+        metrics = []
+        for item in classifications:
+            ply = int(item["ply"])
+            before, after = assessments_by_ply.get(ply - 1, {}), assessments_by_ply.get(ply, {})
+            before_cp, after_cp = before.get("white_cp"), after.get("white_cp")
+            mover = str(item.get("mover") or "")
+            loss = (None if before_cp is None or after_cp is None else max(
+                0, int(before_cp) - int(after_cp) if mover == "white"
+                else int(after_cp) - int(before_cp)))
+            metrics.append({"ply": ply, "severity": item.get("label", "unknown"),
+                            "cp_loss": loss, "source": "stockfish"})
+        self._analysis = {"run_id": "ephemeral", "source": "stockfish",
+                          "status": "complete", "assessments": list(assessments),
+                          "classifications": list(classifications), "move_metrics": metrics,
+                          "events": [], "alternatives": []}
+        return "ephemeral"
 
     def lichess_analysis_backfill_state(self, *_args, **_kwargs) -> None:
         return None
@@ -1879,6 +1915,7 @@ class MainWindow(QMainWindow):
         })
         self.analysis_page.archive_requested.connect(self.show_saved_games)
         self.analysis_page.back_requested.connect(self.show_analysis)
+        self.analysis_page.nested_tool_changed.connect(self._external_study_tool_changed)
         self.screen_stack.addWidget(self.analysis_page)
 
         splitter = QSplitter(Qt.Orientation.Horizontal)
@@ -2453,6 +2490,10 @@ class MainWindow(QMainWindow):
             QTimer.singleShot(0, self._apply_board_size)
         if not hasattr(self, "sidebar"):
             return
+        worker_context = getattr(self, "_analysis_worker_context", None)
+        if (worker_context and str(worker_context[1]).startswith("external:")
+                and self.screen_stack.currentWidget() is not self.review_workspace):
+            worker_context[5].set()
         if self.screen_stack.currentWidget() is not self.analysis_page:
             handle = getattr(self, "_external_study_handle", None)
             if handle is not None and handle.is_alive():
@@ -2806,8 +2847,9 @@ class MainWindow(QMainWindow):
             self._play_mode_page.set_request_pending(True, cancellable=True)
         elif mode == "challenge":
             username = str(options.get("username") or "").strip()
-            if not username:
-                self._play_mode_page.set_status("Введите имя пользователя Lichess.")
+            if not re.fullmatch(r"[A-Za-z0-9_-]{2,30}", username):
+                self._play_mode_page.set_status(
+                    "Введите имя Lichess длиной 2–30 символов: латинские буквы, цифры, _ или -.")
                 self._render_play_pending(cancellable=False)
                 return
             self._awaiting_game_start = True
@@ -2888,9 +2930,12 @@ class MainWindow(QMainWindow):
             self, "Открыть PGN для временного разбора", "", "PGN (*.pgn);;Все файлы (*.*)")
         if not path:
             return
+        self.analysis_page.show_breakdown(1)
         self._start_external_study_load(file_path=path)
 
     def open_external_study_text(self, text: str) -> bool:
+        if isinstance(text, dict):
+            return self._open_external_study_candidate(text)
         value = str(text or "").strip()
         if not value:
             self.analysis_page.set_external_status("Вставьте одну PGN-партию или FEN.")
@@ -2903,12 +2948,20 @@ class MainWindow(QMainWindow):
 
     def _start_external_study_load(self, *, text: str | None = None,
                                    file_path: str | None = None) -> None:
+        if self.screen_stack.currentWidget() is not self.analysis_page:
+            self.analysis_page.show_breakdown(1 if text is not None or file_path else 2)
+            self.screen_stack.setCurrentWidget(self.analysis_page)
         self._external_study_generation += 1
         generation = self._external_study_generation
+        tab_index = self.analysis_page.tabs.currentIndex()
+        account = str(getattr(self.lichess, "username", "") or "").strip().casefold()
+        auth_generation = getattr(self.lichess, "auth_generation", None)
+        self._external_study_owner = (generation, tab_index, account, auth_generation)
         previous = getattr(self, "_external_study_handle", None)
         if previous is not None:
             previous.cancel("session_replaced")
         stop_event = threading.Event()
+        self.analysis_page.clear_candidates()
         self.analysis_page.set_external_status("Читаю и проверяю PGN/FEN в фоновой задаче…")
 
         def worker() -> None:
@@ -2940,11 +2993,14 @@ class MainWindow(QMainWindow):
 
     def _external_study_parse_finished(self, generation: int, parsed: object,
                                        error: object) -> None:
-        if generation != self._external_study_generation:
+        owner = getattr(self, "_external_study_owner", None)
+        if generation != self._external_study_generation or not owner or owner[0] != generation:
             return
-        if self.screen_stack.currentWidget() is not self.analysis_page:
-            self.analysis_page.set_external_status(
-                "Разбор отменён: вы перешли в другой раздел.")
+        account = str(getattr(self.lichess, "username", "") or "").strip().casefold()
+        if (self.screen_stack.currentWidget() is not self.analysis_page
+                or self.analysis_page.tabs.currentIndex() != owner[1]
+                or account != owner[2]
+                or getattr(self.lichess, "auth_generation", None) != owner[3]):
             return
         if error:
             self.analysis_page.set_external_status(f"Не удалось открыть PGN/FEN: {error}")
@@ -2954,20 +3010,30 @@ class MainWindow(QMainWindow):
             return
         games = parsed.get("games")
         if isinstance(games, list):
-            labels = []
-            for index, item in enumerate(games, 1):
-                headers = item.get("headers") or {}
-                players = f"{headers.get('White', 'Белые')} — {headers.get('Black', 'Чёрные')}"
-                date = str(headers.get("Date") or "дата не указана")
-                result = str(headers.get("Result") or "*")
-                preview = str(item.get("preview") or "без ходов")
-                labels.append(f"{index}. {players} · {date} · {result} · {preview}")
-            selected, accepted = QInputDialog.getItem(
-                self, "Выберите партию", "Партии в файле:", labels, 0, False)
-            if not accepted:
-                self.analysis_page.set_external_status("Выбор партии отменён.")
-                return
-            parsed = games[labels.index(selected)]
+            self.analysis_page.set_candidates(games)
+            return
+        self._open_external_study_candidate(parsed)
+
+    def _external_study_tool_changed(self, index: int) -> None:
+        owner = getattr(self, "_external_study_owner", None)
+        handle = getattr(self, "_external_study_handle", None)
+        if owner and owner[1] != index and handle is not None and handle.is_alive():
+            self._external_study_generation += 1
+            handle.cancel("nested_tool_changed")
+
+    def _open_external_study_candidate(self, parsed: dict) -> bool:
+        if not isinstance(parsed, dict) or "initial_fen" not in parsed:
+            self.analysis_page.set_external_status("Выбранная партия устарела. Загрузите её снова.")
+            return False
+        if self.screen_stack.currentWidget() is not self.analysis_page:
+            return False
+        owner = getattr(self, "_external_study_owner", None)
+        if owner and owner[1] != self.analysis_page.tabs.currentIndex():
+            return False
+        existing_worker = getattr(self, "_analysis_worker_context", None)
+        if (existing_worker and str(existing_worker[1]).startswith("external:")
+                and existing_worker[1] != str(parsed.get("game_id") or "")):
+            existing_worker[5].set()
         headers = dict(parsed.get("headers") or {})
         initial_fen = str(parsed["initial_fen"])
         moves = list(parsed.get("moves") or [])
@@ -2987,9 +3053,17 @@ class MainWindow(QMainWindow):
             "started_at": headers.get("Date"), "game_time_precision": "unknown",
             "eco": headers.get("ECO"), "opening_name": headers.get("Opening"),
         }
+        origin = {
+            "tab": self.analysis_page.tabs.currentIndex(),
+            "text": self.analysis_page.external_text.toPlainText(),
+            "candidates": list(self.analysis_page.candidates),
+            "selected": self.analysis_page.candidate_list.currentRow(),
+            "editor_fen": self.analysis_page.position_setup._board.fen(en_passant="fen"),
+        }
         self._ephemeral_study = True
         self.review_workspace.repository = EphemeralReviewRepository(
             game_id, initial_fen, record["moves"])
+        self.review_workspace.repository.bind_game(record)
         self.online_session = None
         self._review_session = None
         self.online_view_ply = None
@@ -3008,12 +3082,30 @@ class MainWindow(QMainWindow):
         self.screen_title.setText("Временный разбор")
         self.screen_stack.setCurrentWidget(self.review_workspace)
         self.analysis_page.set_external_status("Временная партия открыта; исходные данные не сохранены.")
+        self._external_review_origin = origin
+        if self.settings.value("analysis/auto_external_studies", True, type=bool):
+            if (existing_worker and str(existing_worker[1]).startswith("external:")
+                    and existing_worker[1] != game_id and existing_worker[5].is_set()):
+                self._pending_external_analysis_game_id = game_id
+            else:
+                self._start_external_study_analysis(game_id)
+        return True
 
     def _return_from_review(self) -> None:
         if self._ephemeral_study:
             self._ephemeral_study = False
             self.review_workspace.repository = self.game_repository
+            origin = getattr(self, "_external_review_origin", None) or {"tab": 1}
             self.show_analysis()
+            self.analysis_page.show_breakdown(int(origin.get("tab", 1)))
+            if "text" in origin:
+                self.analysis_page.external_text.setPlainText(origin["text"])
+            if origin.get("candidates"):
+                self.analysis_page.set_candidates(origin["candidates"])
+                selected = int(origin.get("selected", -1))
+                if 0 <= selected < self.analysis_page.candidate_list.count():
+                    self.analysis_page.candidate_list.setCurrentRow(selected)
+            self._external_review_origin = None
             return
         if self.workspace_navigator.can_go_back:
             self.navigate_back()
@@ -5285,7 +5377,7 @@ class MainWindow(QMainWindow):
         self._schedule_finalization_check(game_id)
 
     def _challenge_again(self) -> None:
-        """Start an explicit new challenge through the supported Lichess flow."""
+        """Prefill the shared Play form; network creation remains behind its Start CTA."""
         if not self._online_actions_allowed():
             self._notify_inline("Повторная партия доступна после готовности Lichess и окончания Retry-After.")
             return
@@ -5293,13 +5385,49 @@ class MainWindow(QMainWindow):
         if session is None:
             return
         if session.is_ai_opponent:
-            self.play_ai()
+            self.show_play()
+            self._play_mode_page.select_mode("ai")
+            color = ("white" if session.color == chess.WHITE else "black"
+                     if session.color == chess.BLACK else
+                     str(self.settings.value("workspace/ai_color", "random", type=str)))
+            color_index = self._play_mode_page.color.findData(color)
+            if color_index >= 0:
+                self._play_mode_page.color.setCurrentIndex(color_index)
+            initial_ms = int(getattr(session, "clock_initial", 0) or 0)
+            increment_ms = int(getattr(session, "white_inc", 0) or 0)
+            limit = (initial_ms // 1000 if initial_ms > 0 else
+                     self.settings.value("workspace/ai_clock_limit", 180, type=int))
+            increment = (increment_ms // 1000 if initial_ms > 0 else
+                         self.settings.value("workspace/ai_clock_increment", 2, type=int))
+            self._prefill_play_clock(limit, increment)
+            confirmed_level = (getattr(session, "opponent_info", None) or {}).get("ai")
+            level = int(confirmed_level if type(confirmed_level) is int and 1 <= confirmed_level <= 8
+                        else self.settings.value("workspace/ai_level", 3, type=int))
+            level_index = self._play_mode_page.level.findData(max(1, min(8, level)))
+            if level_index >= 0:
+                self._play_mode_page.level.setCurrentIndex(level_index)
             return
-        opponent = str(session.opponent or "").strip()
-        if opponent and opponent.casefold() not in {"?", "unknown", "lichess"}:
-            self.challenge_username(initial_username=opponent)
+        verified_opponent = str((getattr(session, "opponent_info", None) or {}).get(
+            "username") or "").strip()
+        if (re.fullmatch(r"[A-Za-z0-9_-]{2,30}", verified_opponent)
+                and verified_opponent.casefold() not in {"unknown", "lichess"}):
+            self.show_play()
+            self._play_mode_page.select_mode("challenge")
+            self._play_mode_page.username.setText(verified_opponent)
         else:
-            self.challenge_username()
+            self.show_play()
+            self._play_mode_page.select_mode("challenge")
+            self._play_mode_page.set_status(
+                "Введите проверенное имя соперника и подтвердите вызов кнопкой Play.")
+
+    def _prefill_play_clock(self, limit: int | None, increment: int = 0) -> None:
+        page = self._play_mode_page
+        target = (None if limit is None or int(limit) < 0 else int(limit), max(0, int(increment)))
+        index = page.clock.findData(target)
+        if index < 0:
+            index = page.clock.findData((180, 2))
+        if index >= 0:
+            page.clock.setCurrentIndex(index)
 
     def review_finished_game(self) -> None:
         session = self.online_session
@@ -8540,6 +8668,9 @@ class MainWindow(QMainWindow):
 
     def _request_saved_game_analysis(self, game_id: str) -> None:
         """Route the review CTA through the existing post-game safety preflight."""
+        if str(game_id).startswith("external:") and self._ephemeral_study:
+            self._start_external_study_analysis(str(game_id))
+            return
         review = self.review_workspace.review
         if (not review or str(review["game"].get("game_id")) != str(game_id)
                 or review["game"].get("status") in {"created", "started", "started_soon", "playing"}):
@@ -8598,6 +8729,36 @@ class MainWindow(QMainWindow):
                 self, "Stockfish не настроен",
                 "Укажите локальный Stockfish в настройках и проверьте его перед анализом.")
             return
+        self._start_game_analysis(str(game_id), engine_path)
+
+    def _start_external_study_analysis(self, game_id: str) -> None:
+        """Analyze an explicitly opened transient review with the normal Fair Play gate."""
+        if (not self._ephemeral_study or self.screen_stack.currentWidget() is not self.review_workspace
+                or not self.review_workspace.review
+                or str(self.review_workspace.review["game"].get("game_id")) != str(game_id)):
+            return
+        if self._analysis_safety_request_id is not None or (
+                self._analysis_thread is not None and self._analysis_thread.is_alive()):
+            return
+        engine_path = str(self.settings.value("stockfish_path", "", type=str)).strip()
+        verified_path = str(self.settings.value("stockfish_verified_path", "", type=str)).strip()
+        if not engine_path or engine_path != verified_path or not Path(engine_path).is_file():
+            self.review_workspace.set_external_analysis_status(
+                "NO_ENGINE · Укажите и проверьте Stockfish в настройках.")
+            return
+        if any(session.status in {"started", "playing"} and not session.is_ai_opponent
+               for session in self._sessions_for_safety()):
+            self.review_workspace.set_external_analysis_status(
+                "BLOCKED_FAIR_PLAY · У вас есть активная партия с человеком.")
+            return
+        if not self.offline_mode and (
+                not self.lichess or not self._lichess_connected
+                or not str(getattr(self.lichess, "username", "") or "").strip()
+                or not self._online_actions_allowed()):
+            self.review_workspace.set_external_analysis_status(
+                "BLOCKED_FAIR_PLAY · Подключите аккаунт и подтвердите отсутствие активной партии.")
+            return
+        self.review_workspace.set_external_analysis_status("Проверка Fair Play перед Stockfish…")
         self._start_game_analysis(str(game_id), engine_path)
 
     def _cancel_analysis_action(self, request_id: str) -> None:
@@ -8669,6 +8830,9 @@ class MainWindow(QMainWindow):
         active_human_ids = {session.game_id for session in self._sessions_for_safety()
                             if session.status in {"started", "playing"} and not session.is_ai_opponent}
         if any(self._active_game_blocks_engine(game) for game in games) or active_human_ids:
+            if str(context[1]).startswith("external:") and self._ephemeral_study:
+                self.review_workspace.set_external_analysis_status(
+                    "BLOCKED_FAIR_PLAY · У аккаунта есть активная партия с человеком.")
             self._dashboard_analysis_safety_allowed = False
             self._refresh_dashboard_analysis_visibility()
             stop.set()
@@ -8696,6 +8860,9 @@ class MainWindow(QMainWindow):
             if self._analysis_dialog is not None:
                 self._analysis_dialog.setLabelText(
                     "Проверка пройдена. Приостанавливаем фоновый анализ и освобождаем Stockfish…")
+            if str(game_id).startswith("external:") and self._ephemeral_study:
+                self.review_workspace.set_external_analysis_status(
+                    "QUEUED · Проверка пройдена; ждём освобождения Stockfish.")
             self._pause_batch_analysis(manual=False)
         elif self._analysis_dialog is not None:
             self._analysis_dialog.setLabelText("Проверка пройдена. Запускаем Stockfish…")
@@ -8715,6 +8882,11 @@ class MainWindow(QMainWindow):
             return
         if not self._analysis_safety_reply_is_current(request_id):
             return
+        context = self._analysis_safety_context
+        if (context and str(context[1]).startswith("external:") and self._ephemeral_study
+                and self.screen_stack.currentWidget() is self.review_workspace):
+            self.review_workspace.set_external_analysis_status(
+                "BLOCKED_FAIR_PLAY · Не удалось подтвердить отсутствие активной партии.")
         self._analysis_safety_request_id = None
         self._analysis_safety_context = None
         self._analysis_safety_phase = None
@@ -8790,10 +8962,14 @@ class MainWindow(QMainWindow):
                     and self._online_actions_allowed()),
                 active_human_session=bool(active_human_ids))
 
+        repository = (self.review_workspace.repository
+                      if str(game_id).startswith("external:") and self._ephemeral_study
+                      else self.game_repository)
+
         def work():
             try:
                 result = self.engine_analysis.analyze_completed_game(
-                    self.game_repository, game_id, engine_path, options, stop_event=stop,
+                    repository, game_id, engine_path, options, stop_event=stop,
                     active_human_game_ids=active_human_ids,
                     progress=lambda done, total: self.analysis_progress.emit(game_id, done, total),
                     safety_check=safety_check_after_engine_wait,
@@ -8837,6 +9013,10 @@ class MainWindow(QMainWindow):
             self._analysis_dialog.setLabelText(f"Анализ позиции {done} из {total}")
             self._analysis_dialog.setRange(0, total)
             self._analysis_dialog.setValue(done)
+        if (str(game_id).startswith("external:") and self._ephemeral_study
+                and self.screen_stack.currentWidget() is self.review_workspace):
+            self.review_workspace.set_external_analysis_status(
+                f"RUNNING · Позиция {done} из {total}.")
 
     def _analysis_finished(self, game_id: str, result: object) -> None:
         context = self._analysis_worker_context
@@ -8870,6 +9050,19 @@ class MainWindow(QMainWindow):
         if self._shutdown_requested:
             return
         if stale_or_cancelled:
+            if (str(game_id).startswith("external:") and self._ephemeral_study
+                    and self.screen_stack.currentWidget() is self.review_workspace
+                    and self.review_workspace.review
+                    and str(self.review_workspace.review["game"].get("game_id")) == str(game_id)):
+                self.review_workspace.set_external_analysis_status(
+                    "CANCELLED · Анализ остановлен; состояние безопасности или источник изменились.")
+            pending_external = getattr(self, "_pending_external_analysis_game_id", None)
+            if (pending_external and self._ephemeral_study and self.review_workspace.review
+                    and str(self.review_workspace.review["game"].get("game_id")) == pending_external
+                    and self.screen_stack.currentWidget() is self.review_workspace):
+                self._pending_external_analysis_game_id = None
+                QTimer.singleShot(0, lambda game_id=pending_external:
+                                  self._start_external_study_analysis(game_id))
             self.home_status.setText("Анализ остановлен: требуется новая проверка Fair Play.")
             self._notify_inline("Анализ остановлен: изменилось состояние безопасности Lichess.")
             # A user cancellation is not a safety revocation. Resume an opted-in
@@ -8887,6 +9080,28 @@ class MainWindow(QMainWindow):
                 self._batch_resume_timer.start(500)
             return
         self._analysis_user_cancelled_request_id = None
+        if str(game_id).startswith("external:"):
+            current = (self._ephemeral_study and self.review_workspace.review
+                       and str(self.review_workspace.review["game"].get("game_id")) == str(game_id)
+                       and self.screen_stack.currentWidget() is self.review_workspace)
+            if not current:
+                return
+            if isinstance(result, dict) and result.get("error"):
+                self.review_workspace.set_external_analysis_status(
+                    f"ERROR · Stockfish: {result['error']}")
+            elif isinstance(result, dict) and result.get("assessments"):
+                game = dict(self.review_workspace.review["game"])
+                self.review_workspace.load_game(
+                    game, training_allowed=True, training_block_reason="",
+                    ephemeral=True)
+                self.review_workspace.set_external_analysis_status(
+                    f"READY · Оценено {len(result['assessments'])} позиций. Результат временный.")
+            else:
+                self.review_workspace.set_external_analysis_status(
+                    "PARTIAL · Stockfish не вернул оценки для этой линии.")
+            if self._batch_resume_timer is not None:
+                self._batch_resume_timer.start(500)
+            return
         if isinstance(result, dict) and result.get("error"):
             self._notify_inline(f"Stockfish: {result['error']}")
         else:
