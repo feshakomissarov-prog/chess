@@ -390,6 +390,119 @@ def test_mg01_gamefull_only_human_revokes_inflight_position_evaluation(
     window.close()
 
 
+@pytest.mark.parametrize("snapshot_fault", [
+    "invalid_fen", "illegal_line", "game_state_illegal_line", "sqlite_save",
+])
+def test_gamefull_human_safety_revokes_before_snapshot_failure(
+        qtbot, tmp_path, monkeypatch, snapshot_fault):
+    """An active human game revokes engine access even if its snapshot is unusable."""
+    import sqlite3
+
+    window = MainWindow(QSettings(str(tmp_path / f"gamefull-fail-{snapshot_fault}.ini"),
+                                  QSettings.Format.IniFormat), offline_mode=True)
+    qtbot.addWidget(window)
+    window.lichess = type("Service", (), {"username": "Owner"})()
+    window._lichess_connected = True
+    window._current_lichess_generation = lambda generation: generation == 7
+    window._online_actions_allowed = lambda: True
+    window._sessions_for_safety = lambda: tuple(window.online_sessions.values())
+    window._position_eval_mode = True
+    window._position_eval_generation = 41
+    position_stop = threading.Event()
+    analysis_stop = threading.Event()
+    window._position_eval_stop = position_stop
+    window._analysis_stop = analysis_stop
+
+    class Worker:
+        joined = False
+        def join(self, timeout=None):
+            self.joined = True
+
+    worker = Worker()
+    window._position_eval_handle = {"worker_thread": worker}
+    window._position_eval_thread = worker
+    window.position_eval_label.show()
+    score_calls = []
+    heavy_pause_calls = []
+    safety_revoke_calls = []
+    revoke_review_safety = window._revoke_review_safety
+    monkeypatch.setattr(window.moves, "set_score",
+                        lambda *args, **kwargs: score_calls.append((args, kwargs)))
+    monkeypatch.setattr(window, "_pause_heavy_work_for_live_game",
+                        lambda: heavy_pause_calls.append(True))
+    def tracked_review_revoke(*args, **kwargs):
+        safety_revoke_calls.append(args)
+        return revoke_review_safety(*args, **kwargs)
+    monkeypatch.setattr(window, "_revoke_review_safety", tracked_review_revoke)
+    monkeypatch.setattr(window, "_refresh_dashboard_analysis_visibility", lambda: None)
+
+    event = {
+        "type": ("gameState" if snapshot_fault == "game_state_illegal_line" else "gameFull"),
+        "id": "active-human-with-bad-snapshot",
+        "source": "friend", "opponent": {"id": "friend", "username": "Friend"},
+        "initialFen": ("not a fen" if snapshot_fault == "invalid_fen" else "startpos"),
+        "white": {"name": "Owner", "id": "owner"},
+        "black": {"name": "Friend", "id": "friend"},
+        "state": {"moves": ("e2e5" if snapshot_fault in
+                                {"illegal_line", "game_state_illegal_line"} else ""),
+                   "status": "started"},
+    }
+    if snapshot_fault == "sqlite_save":
+        save_attempts = []
+
+        def fail_save(*args, **kwargs):
+            save_attempts.append(True)
+            raise sqlite3.OperationalError("synthetic write failure")
+
+        monkeypatch.setattr(window.game_repository, "save_snapshot", fail_save)
+
+    window._lichess_game_event("active-human-with-bad-snapshot", event, generation=7)
+
+    assert position_stop.is_set(), "position UCI must be stopped before persistence can fail"
+    assert analysis_stop.is_set()
+    assert window._position_eval_mode is False
+    assert window._dashboard_analysis_safety_allowed is False
+    assert window._position_eval_generation > 41
+    assert heavy_pause_calls == [True]
+    assert safety_revoke_calls
+    if snapshot_fault == "sqlite_save":
+        assert save_attempts, "the injected SQLite save failure must be exercised"
+    window._position_eval_finished(41, {
+        "score_white_cp": 325, "mate_white": None, "best_move": "e2e4", "depth": 20,
+    }, worker)
+    assert worker.joined
+    assert score_calls == [], "late UCI results must not update the move strip"
+    assert "лучший ход" not in window.position_eval_label.text()
+    window.game_repository.shutdown()
+    window.close()
+
+
+def test_gamefull_active_event_from_stale_auth_generation_does_not_revoke_new_session(
+        qtbot, tmp_path, monkeypatch):
+    window = MainWindow(QSettings(str(tmp_path / "gamefull-stale-generation.ini"),
+                                  QSettings.Format.IniFormat), offline_mode=True)
+    qtbot.addWidget(window)
+    window.lichess = type("Service", (), {"username": "Owner"})()
+    window._current_lichess_generation = lambda generation: generation == 8
+    window._position_eval_mode = True
+    window._position_eval_generation = 41
+    stop = threading.Event()
+    window._position_eval_stop = stop
+    calls = []
+    monkeypatch.setattr(window, "_pause_heavy_work_for_live_game",
+                        lambda: calls.append("pause"))
+    window._lichess_game_event("stale-human", {
+        "type": "gameFull", "id": "stale-human", "source": "friend",
+        "opponent": {"id": "friend"}, "state": {"status": "started", "moves": ""},
+    }, generation=7)
+    assert not stop.is_set()
+    assert window._position_eval_mode
+    assert window._position_eval_generation == 41
+    assert calls == []
+    window.game_repository.shutdown()
+    window.close()
+
+
 @pytest.mark.parametrize("cancel_kind", ["account_switch", "cancelled", "stale_line"])
 def test_mg02_stale_library_retry_does_not_write_after_blocked_link_read(
         qtbot, tmp_path, monkeypatch, cancel_kind):

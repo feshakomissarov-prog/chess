@@ -536,6 +536,7 @@ class MainWindow(QMainWindow):
         self._position_eval_preflight_id: str | None = None
         self._position_eval_preflight_context: tuple | None = None
         self._position_eval_safety_lease: tuple | None = None
+        self._live_human_safety_revocations: set[tuple[str, int | None]] = set()
         self._position_eval_timer = QTimer(self)
         self._position_eval_timer.setSingleShot(True)
         self._position_eval_timer.setInterval(300)
@@ -7094,6 +7095,33 @@ class MainWindow(QMainWindow):
             self._analysis_stop.set()
         self._disable_position_evaluation(message)
 
+    def _enforce_live_human_game_safety(self, session: LichessGameSession, *,
+                                        generation: int | None,
+                                        pause_heavy_work: bool = True) -> None:
+        """Fail closed once per authenticated human/unknown live game session."""
+        if generation is not None and not self._current_lichess_generation(generation):
+            return
+        key = (session.game_id, generation if generation is not None
+               else session.auth_generation)
+        if key in self._live_human_safety_revocations:
+            return
+        # Revoke engine capabilities before touching other UI/work lanes. These
+        # primitives must win even if a later queue cancellation or UI refresh
+        # encounters an independent error.
+        self._revoke_live_human_engine_assistance(
+            "Stockfish остановлен: активна человеческая или непроверенная онлайн-партия.")
+        self._live_human_safety_revocations.add(key)
+        self._dashboard_analysis_safety_allowed = False
+        try:
+            self._cancel_dashboard_safety_retry()
+            self._set_sidebar_safety_status("Аналитика скрыта · активная партия")
+            self._refresh_dashboard_analysis_visibility()
+            self._revoke_review_safety(
+                "Заблокировано: активная партия с человеком или неизвестным соперником.")
+        finally:
+            if pause_heavy_work:
+                self._pause_heavy_work_for_live_game()
+
     def _lichess_event(self, event: dict, *, generation: int | None = None) -> None:
         if generation is not None and not self._current_lichess_generation(generation):
             return
@@ -7123,18 +7151,13 @@ class MainWindow(QMainWindow):
             session.status = "started"
             session.set_server_game_identity(game)
             self.game_sessions.register(session)
-            self._pause_heavy_work_for_live_game()
             if not session.is_ai_opponent:
-                self._cancel_dashboard_safety_retry()
-                self._set_sidebar_safety_status("Аналитика скрыта · активная партия")
-                self._dashboard_analysis_safety_allowed = False
-                self._refresh_dashboard_analysis_visibility()
-                self._revoke_review_safety(
-                    "Заблокировано: началась человеческая/непроверенная онлайн-партия.")
+                self._enforce_live_human_game_safety(
+                    session, generation=generation)
+            else:
+                self._pause_heavy_work_for_live_game()
             self._refresh_batch_readiness()
             if not session.is_ai_opponent:
-                self._revoke_live_human_engine_assistance(
-                    "Stockfish остановлен: получено событие о человеческой онлайн-партии.")
                 self._sync_position_eval_controls(self._position_eval_context_available())
             pending_id = self._pending_play_game_id
             if self._pending_play_request_mode == "challenge" and not pending_id:
@@ -7156,6 +7179,8 @@ class MainWindow(QMainWindow):
                 status = game_status.get("name", "unknownFinish") if isinstance(game_status, dict) else str(game_status)
                 session = self.online_sessions[game_id]
                 was_active = session.status in {"started", "playing", "created"}
+                self._live_human_safety_revocations.discard(
+                    (session.game_id, session.auth_generation))
                 error = None
                 if session.status in {"started", "playing", "created"}:
                     try:
@@ -7277,6 +7302,17 @@ class MainWindow(QMainWindow):
                 session.configure_players(white, black, "black")
             elif event.get("color") in {"white", "black"}:
                 session.configure_players(white, black, event["color"])
+        # The stream status is authoritative for Fair Play even when its board
+        # snapshot cannot be parsed or persisted. Revoke before apply_event(),
+        # whose FEN/UCI/SQLite paths may raise and return early below. Unknown
+        # opponent identity remains human for safety; only the server-attested
+        # built-in AI classification may bypass this block.
+        event_state = event.get("state", event)
+        event_status = event_state.get("status") if isinstance(event_state, dict) else None
+        if (event.get("type") in {"gameFull", "gameState"}
+                and event_status in {"started", "playing"}
+                and not session.is_ai_opponent):
+            self._enforce_live_human_game_safety(session, generation=generation)
         if event.get("type") == "opponentGone":
             if (game_id == self._selected_live_game_id and self.online_session is session
                     and self._screen_mode == "online"):
@@ -7317,19 +7353,12 @@ class MainWindow(QMainWindow):
                     game_id, event, generation,
                     color="white" if session.color == chess.WHITE else "black")
         if (session.status in {"started", "playing"} and not session.is_ai_opponent):
-            if (previous_status not in {"started", "playing"}
-                    or event.get("type") == "gameFull"):
-                # A resumed human/unknown game may arrive without gameStart.
-                # Run the same stop-heavy-work safety path before any follow-up
-                # UI action, not just the narrower single-analysis revocation.
-                self._pause_heavy_work_for_live_game()
-            self._revoke_live_human_engine_assistance(
-                "Stockfish остановлен: активна человеческая или непроверенная онлайн-партия.")
-            self._dashboard_analysis_safety_allowed = False
-            self._refresh_dashboard_analysis_visibility()
-            self._revoke_review_safety(
-                "Заблокировано: активная партия с человеком или неизвестным соперником.")
+            # Covers snapshots that omit status but follow an accepted active
+            # session, and remains idempotent after the pre-apply fence above.
+            self._enforce_live_human_game_safety(session, generation=generation)
         if session.status not in {"started", "playing", "created"}:
+            self._live_human_safety_revocations.discard(
+                (session.game_id, session.auth_generation))
             # Observe durability after every authoritative terminal snapshot,
             # even when this game is not the currently visible route.
             self._track_game_finalization(session)
