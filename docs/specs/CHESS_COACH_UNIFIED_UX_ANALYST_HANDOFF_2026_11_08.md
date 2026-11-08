@@ -953,3 +953,329 @@ PR44 ui/pages/background.py::BackgroundOperationsPage уже имеет «При
 
 Старые изображения остаются у владельца как исторические примеры; новые canonical имена определены заранее, фактическая директория «Примеры» проверяется позже на Windows. Все незакрытые технические и будущие вопросы **включены прямо в этот MD**; не нужно восстанавливать их по памяти.
 
+## 25. ПОЛНЫЙ СВОДНЫЙ РЕЕСТР СТАРЫХ FEATURE-ID ДЛЯ АНАЛИТИЧЕСКОЙ СВЕРКИ
+
+**ЭТО ПРИЛОЖЕНИЕ СОДЕРЖИТ ИСТОРИЧЕСКИЕ, МЕСТАМИ УСТАРЕВШИЕ ФОРМУЛИРОВКИ.** Оно включено в единственный мастер-MD по просьбе владельца, чтобы технический аналитик мог **проверить каждую сохранённую функцию, кнопку, сценарий и исключение, не собирая вручную пять разных ledger**. Столбец «Legacy решение/состояние» отражает текст предшествующего документа, **НЕ является нормативным при конфликте** с действующими §00–24. В частности **MG-01 шестой пункт sidebar — ОТМЕНЁН; AL-01 прежний chooser — заменён тремя tabs; Batch из Анализа — в глобальный Фон.** До исполнения аналитик обязан проставить новый keep/move/hide/add/future/forbidden и конкретный source handler для всех ID.
+
+Если сохранившийся legacy пункт существует в коде, но переименован/спрятан в новом дизайне, его нельзя просто удалить без согласованного эквивалента или явного отказа владельца. Если строка legacy рекомендовали будущую функцию, это не делает её NOW. Первичные ссылки на каждую таблицу указаны в §24.
+
+
+### 25.1. Архив / Мои партии — docs/ux/MY_GAMES_FEATURE_LEDGER_2026_11_07.md
+
+| ID | Legacy функция/элемент | Legacy status и прежняя формулировка — НЕ НОРМАТИВНО | Действующий раздел / override |
+|---|---|---|---|
+| MG-01 | Sidebar 6 маршрутов | EXISTS · PRESERVE; «Мои партии» выделен, общий shell без новых вкладок · NOT TESTED | §02/§04/§21 — ОТМЕНЁН 6-й sidebar; 5 пунктов |
+| MG-02 | Global «← Назад» | EXISTS · PRESERVE; возврат к предыдущему workspace, не pager · NOT TESTED | §09–10 / §21 |
+| MG-03 | Общий «Фон» | EXISTS · PRESERVE; единственный обычный переход к Background · NOT TESTED | §09–10 / §21 |
+| MG-04 | Заголовок «Мои партии» | EXISTS · REDESIGN: оставить существующий уровень/типографику · NOT TESTED | §09–10 / §21 |
+| MG-05 | Краткая сводка архива + last sync | PARTIAL · ADD/REDESIGN: правдивый account-scoped N и confirmed timestamp; без выдуманных цифр · NOT TESTED | §09–10 / §21 |
+| MG-06 | Ручная синхронизация архива | EXISTS · MOVE: «Обновить архив» в компактный верхний ряд, retry/resume через существующий сервис · NOT TESTED | §09–10 / §21 |
+| MG-07 | Автоматическая синхронизация/429/resume | EXISTS · PRESERVE; никакого обхода квот/таймеров, не путать с локальным SF · NOT TESTED | §09–10 / §21 |
+| MG-08 | Search по архиву | EXISTS · PRESERVE; дебаунс, SQL paging и отмена старых workers · NOT TESTED | §09–10 / §21 |
+| MG-09 | Filter toggle | EXISTS · REDESIGN: «Фильтры (N)» рядом с поиском; реальный активный счётчик · NOT TESTED | §09–10 / §21 |
+| MG-10 | Фильтр период/дата | EXISTS · PRESERVE; не удалять, пользователь решил оставить · NOT TESTED | §09–10 / §21 |
+| MG-11 | Фильтр account | EXISTS · PRESERVE; owner/generation + all-account scope там, где доступно · NOT TESTED | §09–10 / §21 |
+| MG-12 | Фильтры цвет, результат, source, контроль | EXISTS · PRESERVE; всё в раскрываемом блоке · NOT TESTED | §09–10 / §21 |
+| MG-13 | Фильтры наличие анализа/источник | EXISTS · PRESERVE; официальное vs локальное, не смешивать · NOT TESTED | §09–10 / §21 |
+| MG-14 | Фильтры opponent, opening/ECO | EXISTS · PRESERVE; при очистке не сбросить выбранный account · NOT TESTED | §09–10 / §21 |
+| MG-15 | Сброс фильтров | если отсутствует — ADD · ADD: сброс только search/filter state, корректное page 1 · NOT TESTED | §09–10 / §21 |
+| MG-16 | Список завершённых партий | EXISTS · REDESIGN, сохранить QListWidget/delegate/paging, не делать тысячи QWidget · NOT TESTED | §09–10 / §21 |
+| MG-17 | Состояние результата win/loss/draw | EXISTS · PRESERVE; от перспективы игрока, текст+цвет · NOT TESTED | §09–10 / §21 |
+| MG-18 | Имя opponent / AI level | EXISTS, есть источник рассогласования (VID-02) · FIX display: единый подтверждённый opponent во всех поверхностях · NOT TESTED | §09–10 / §21 |
+| MG-19 | Дата, время, контроль, ECO/дебют | EXISTS · PRESERVE и компактизировать, не фабриковать при unknown · NOT TESTED | §09–10 / §21 |
+| MG-20 | **Мой цвет в строке** | в карточке не отражён достаточно ясно · ADD: «Белыми» / «Чёрными» или unknown · NOT TESTED | §09–10 / §21 |
+| MG-21 | **Моя accuracy в строке** | в row delegate отсутствует · ADD: source-aware own %, «Не оценено» и coverage, без массового N+1 SQL · NOT TESTED | §09–10 / §21 |
+| MG-22 | Неточности/ошибки/зевки в строке | не основная пользовательская цель списка · **НЕ ВЫВОДИТЬ В СТРОКЕ**; данные остаются в detail и Review · NOT TESTED | §09–10 / §21 |
+| MG-23 | Активные партии | EXISTS · CONTEXT: pinned отдельный список «В ИГРЕ», вернуть нужный game ID · NOT TESTED | §09–10 / §21 |
+| MG-24 | Предыдущая/следующая страница + номер | EXISTS · MOVE: **все ТРИ элемента вместе строго под левым списком** · NOT TESTED | §09–10 / §21 |
+| MG-25 | Selected item / scroll / filters restore | EXISTS в коде и тестах частично · PRESERVE/REGRESSION: A/B, stale, navigation, resize, PGN revision · NOT TESTED | §09–10 / §21 |
+| MG-26 | Правая панель выбранной игры | EXISTS · REDESIGN: компактная постоянно видимая панель с fixed footer на desktop · NOT TESTED | §09–10 / §21 |
+| MG-27 | Заголовок/score белые-чёрные | EXISTS · REDESIGN: verified opponent/score/my color; не повторять result 3 раза · NOT TESTED | §09–10 / §21 |
+| MG-28 | Реальная дата/контроль/источник | EXISTS · PRESERVE, уточнять после late final PGN без потери selection · NOT TESTED | §09–10 / §21 |
+| MG-29 | Две карточки «Моя/Соперник» accuracy | существующие values white/black общим текстом · REDESIGN: own side mapping, source per value, partial/unknown states · NOT TESTED | §09–10 / §21 |
+| MG-30 | Источники Lichess/Stockfish | EXISTS · PRESERVE: разные source/provenance, Lichess preferred для one-line official when valid · NOT TESTED | §09–10 / §21 |
+| MG-31 | «Неточности/Ошибки/Зевки» | EXISTS · REDESIGN: столбцы Я / Соперник; null ≠ 0; без дублированных значений · NOT TESTED | §09–10 / §21 |
+| MG-32 | Coverage X/Y | EXISTS · REDESIGN: правильные единицы и знаменатели, не присваивать обеим сторонам общий X/Y как их own · NOT TESTED | §09–10 / §21 |
+| MG-33 | Local phase accuracy | EXISTS в review.local_phase_accuracy, в UI под раскрытием · REDESIGN: три ячейки Дебют/Миттельшпиль/Эндшпиль, только real own data · NOT TESTED | §09–10 / §21 |
+| MG-34 | Compact ReviewGraph | EXISTS · REDESIGN: clear zero, white-above/dark-below fill, без per-move symbols · NOT TESTED | §09–10 / §21 |
+| MG-35 | Полный ReviewGraph CP/Δ/mate/markers | EXISTS, не в library · PRESERVE AS-IS в Review, compact не регрессирует main graph · NOT TESTED | §09–10 / §21 |
+| MG-36 | Клик по графику → selected ply Review | EXISTS · PRESERVE с account/revision/safety guard · NOT TESTED | §09–10 / §21 |
+| MG-37 | «Открыть разбор» | EXISTS · PRESERVE, главное действие; открывает выбранную PGN, **не** создаёт engine job · NOT TESTED | §09–10 / §21 |
+| MG-38 | «Анализ Stockfish» | EXISTS, но callback идет в show_batch_analysis() · **FIX ROUTE:** ручной analysis именно выбранной завершённой партии; мгновенный статус, SF job после safety · NOT TESTED | §09–10 / §21 |
+| MG-39 | «Экспорт PGN» | EXISTS · PRESERVE; вторичная кнопка в pinned action bar · NOT TESTED | §09–10 / §21 |
+| MG-40 | «Заметки» и сохранённые данные | EXISTS · MOVE: компактное вторичное действие в правой карточке / при узком окне в «Ещё»; note draft/revision не терять · NOT TESTED | §09–10 / §21 |
+| MG-41 | Полезное «...» | частично · CONTEXT: только существующие вторичные функции; не придумывать бесполезные пункты · NOT TESTED | §09–10 / §21 |
+| MG-42 | «Обновить эту партию из Lichess» | EXISTS, recovery hidden · CONTEXT: оставить только при диагностированном случае; не делать крупной кнопкой · NOT TESTED | §09–10 / §21 |
+| MG-43 | «Фоновые операции» в нижней строке | EXISTS, дублирует header · **HIDE duplicate** в library footer; header action остаётся · NOT TESTED | §09–10 / §21 |
+| MG-44 | «Настройки загрузки» внизу | EXISTS · MOVE в Settings → Lichess/загрузка; не удалить настройку · NOT TESTED | §09–10 / §21 |
+| MG-45 | Старый Library «Закрыть» | EXISTS hidden · HIDE; глобальный Back остаётся · NOT TESTED | §09–10 / §21 |
+| MG-46 | Fair Play mask/recheck | EXISTS · PRESERVE/TEST: no old engine hints, no graph, no accuracy while human live/unknown · NOT TESTED | §09–10 / §21 |
+| MG-47 | Пустые/загрузка/отмена/ошибка | PARTIAL · REDESIGN: каждый state честен, статус конкретной операции, никаких placeholder zero · NOT TESTED | §09–10 / §21 |
+| MG-48 | Account switch / async / late source update | EXISTS частично · PRESERVE/TEST A→B→A, source revision, no wrong metric/PGN/notes · NOT TESTED | §09–10 / §21 |
+| MG-49 | Responsive 100/125/150%, narrow window | PARTIAL, V-01/V-03 current problems · REDESIGN/TEST: 2 columns or master→detail, footer always reachable · NOT TESTED | §09–10 / §21 |
+| MG-50 | Lichess OAuth/PAT, Win Credential Manager | PRESERVE; никаких secret changes | §09–10 / §21 |
+| MG-51 | Глобальные настройки звуков и выбор sound cues | PRESERVE AS-IS, текущий UX scope не затрагивает | §09–10 / §21 |
+| MG-52 | Игровая доска/премувы/живые часы/концовка на той же доске | PRESERVE; MY-GAMES не переписывает game flow | §09–10 / §21 |
+| MG-53 | Mass Stockfish queue + local jobs | PRESERVE; single-game priority integration без потери batch | §09–10 / §21 |
+| MG-54 | SQLite PGN, line revisions, archive cursor/checkpoint/notes | PRESERVE; no migration without proven necessity | §09–10 / §21 |
+| MG-55 | Review navigation, events, study FEN/PGN, training from analyzed errors | PRESERVE; полный Review без графической деградации | §09–10 / §21 |
+| MG-56 | Source-aware Lichess ready analytics, API limits | PRESERVE; «Обновить архив» НЕ заказ server analysis | §09–10 / §21 |
+| MG-57 | Single-instance / window restore / keyboard accessibility | PRESERVE; новая страница не ломает рабочую оболочку | §09–10 / §21 |
+| MG-F01 | Поиск по тексту собственных заметок | PARKED, notes сохраняются · отдельное решение об индексации/полнотекстовом поиске | §12–17/§19 — future или явно запрещено |
+| MG-F02 | Диагностика причин ошибок по сериям партий | PARKED · Анализ / Прогресс | §12–17/§19 — future или явно запрещено |
+| MG-F03 | Рекомендация урока на основе ошибок выбранной партии | PARKED · Обучение, после компетентностной модели | §12–17/§19 — future или явно запрещено |
+| MG-F04 | Персональный репертуар дебютов и подготовка к сопернику | PARKED · Исследование дебютов / Анализ | §12–17/§19 — future или явно запрещено |
+| MG-F05 | Адаптивный учебный план / ИИ-тренер | PARKED · Обучение / Разбор, последние milestones | §12–17/§19 — future или явно запрещено |
+| MG-F06 | Запуск Lichess cloud analysis из приложения | НЕ ЗАКАЗЫВАТЬ и не показывать псевдокнопку · только после отдельного продукта и API/safety review | §12–17/§19 — future или явно запрещено |
+| MG-F07 | Альтернативные источники accuracy/metric reconciliation | PARKED, источники не смешивать · глубокая диагностика качества данных | §12–17/§19 — future или явно запрещено |
+
+
+### 25.2. Играть / выбор режима — docs/ux/PLAY_FEATURE_LEDGER_2026_11_07.md
+
+| ID | Legacy функция/элемент | Legacy status и прежняя формулировка — НЕ НОРМАТИВНО | Действующий раздел / override |
+|---|---|---|---|
+| PL-01 | PlayPage.mode_selector и пять _MODES cards, cards скрыты | 4 видимых mode tiles в 2×2, 1 выбран; старый combo не виден · REDESIGN / HIDE duplicate | §06 / §21 |
+| PL-02 | color combo: random/white/black | 3 переключателя, запоминать per mode · REDESIGN | §06 / §21 |
+| PL-03 | clock combo: unlimited, 3+2, 5+0, 10+0, 15+10, custom | компактные time chips · REDESIGN | §06 / §21 |
+| PL-04 | spinboxes custom_minutes 1–180, increment 0–180 | раскрывать только после «Свой…», per mode · KEEP / RELOCATE | §06 / §21 |
+| PL-05 | AI level combo 1–8 | 8 компактных кнопок, только AI · REDESIGN | §06 / §21 |
+| PL-06 | rated checkbox | «Обычная / Рейтинговая», только friend/challenge · REDESIGN | §06 / §21 |
+| PL-07 | username field / legacy QInputDialog | единый username input в challenge panel · KEEP / REMOVE DUPLICATE | §06 / §21 |
+| PL-08 | start_button + create_ai_game | AI CTA «Играть против Lichess AI» · KEEP BACKEND | §06 / §21 |
+| PL-09 | create friend open challenge | «Создать приглашение» только friend panel · KEEP BACKEND | §06 / §21 |
+| PL-10 | invitation_link + copy_invitation_button | после подтверждённого URL копировать + статус · KEEP / CONDITIONAL | §06 / §21 |
+| PL-11 | cancel_pending_button / cancel_invitation_button | одно правильное действие отмены в friend state; guard по ID · CONSOLIDATE PRESENTATION | §06 / §21 |
+| PL-12 | challenge_username | CTA «Отправить вызов» с ником, не QInputDialog · KEEP BACKEND | §06 / §21 |
+| PL-13 | cancel_username_challenge | CTA «Отменить вызов» только пока есть корректный pending · KEEP | §06 / §21 |
+| PL-14 | start_local_game | «Открыть свободную доску» без сетевых полей · KEEP | §06 / §21 |
+| PL-15 | open_active_game, resume_current_game | «Продолжить» в отдельной active strip · MOVE | §06 / §21 |
+| PL-16 | active_panel и пятая карточка режима «active» | active strip N>0 и «Все активные N» для нескольких · REDESIGN / HIDE fifth tile | §06 / §21 |
+| PL-17 | form_status / challenge statuses | inline loading/error/cancel/accepted/429/unknown · KEEP / REDESIGN | §06 / §21 |
+| PL-18 | shell Back/Фон/sidebar/account/auth | не менять глобальную оболочку и навигацию · KEEP AS-IS | §06 / §21 |
+| PL-19 | QSettings workspace/ai_* частично, friend/challenge state отсутствует | selected mode + per-mode parameters и migration · ADD | §06 / §21 |
+| PL-20 | legacy OnlineGameDialog, QInputDialog и Home shortcuts | одно безопасное создание, без новых модальных дубликатов · UNIFY ENTRYPOINT | §06 / §21 |
+| PL-21 | глобальный Return to game | сохранить возможность вернуться к живой доске · KEEP | §06 / §21 |
+| PL-22 | layout_modes, focus, Qt widgets | 2×2 adaptive, клавиатура, tooltip, размеры · REDESIGN / TEST | §06 / §21 |
+| PL-23 | отдельные «Играть против AI» кнопки скрытых cards | плитка **только выбирает**, единственная CTA в панели · HIDE DUPLICATES | §06 / §21 |
+| PL-24 | PlayPage._update_form меняет visibility | одна mode-dependent panel без потери значений · KEEP LOGIC / REDESIGN | §06 / §21 |
+| PL-25 | текущая партия сохраняется при show_play | не сбрасывать от tiles, resize, обычной навигации · KEEP / TEST | §06 / §21 |
+| PL-26 | online actions запрещены без готового Lichess/при 429; tiles всё равно можно выбрать | KEEP GATING | §06 / §21 |
+| PL-27 | pending guard: 1 пользовательское создание = максимум 1 POST; unknown result не повторять вслепую | KEEP / TEST | §06 / §21 |
+| PL-28 | existing MainWindow._create_play_request → service facade с реальными параметрами выбранного mode | KEEP | §06 / §21 |
+| PL-29 | миграция старых сохранённых AI color/clock/level, не сбрасывать default в 1 | ADD / PRESERVE | §06 / §21 |
+| PL-30 | selected mode и значения друг/вызов не смешиваются с AI при переключениях/перезапуске | ADD | §06 / §21 |
+| PL-31 | живую ссылку и pending серверный запрос не восстанавливать вслепую из QSettings | KEEP SERVER TRUTH | §06 / §21 |
+| PL-32 | account/generation guard и username per account: A не меняет UI B | KEEP / TEST | §06 / §21 |
+| PL-33 | для friend random color реальное назначение стороны / friendUrl проверяются в service | KEEP | §06 / §21 |
+| PL-34 | custom time 1..180 min, increment 0..180 sec, запрет invalid values | KEEP | §06 / §21 |
+| PL-35 | «Без часов» не выдаётся за correspondence, если API вернул другое | KEEP CORRECTNESS | §06 / §21 |
+| PL-36 | при старте новой local доски с несохранёнными ходами — понятное подтверждение при риске потери | ADD IF NEEDED | §06 / §21 |
+| PL-37 | fresh active snapshot при входе в Play / game events, TTL/debounce, учесть §15 VOICE-05 | KEEP §15 / TEST | §06 / §21 |
+| PL-38 | friend cancel до ID и после ID, cancel_too_late, без фиктивного success | KEEP / TEST | §06 / §21 |
+| PL-39 | username challenge cancel with late ID/rejection/server ACK | KEEP / TEST | §06 / §21 |
+| PL-40 | rated только друг и вызов, серверные ограничения, AI не rated | KEEP / TEST | §06 / §21 |
+| PL-41 | свободная доска доступна без сети | KEEP | §06 / §21 |
+| PL-42 | copy link через Qt clipboard, status, no sensitive URL log | KEEP | §06 / §21 |
+| PL-43 | active item конкретный verified game ID, корректный N>1 | KEEP / REDESIGN | §06 / §21 |
+| PL-44 | после confirmed start переход в имеющийся Game Workspace, не второе окно | KEEP | §06 / §21 |
+| PL-45 | никакой Stockfish eval/PV во время active human game | KEEP FAIR PLAY | §06 / §21 |
+| PL-G01 | Доска online AI/friend/challenge и сетевой stream | KEEP, отдельно проверять UI игровой доски | §06 / §21 |
+| PL-G02 | Часы/статусы, сдача, предложение ничьей, takeback, premove и отмена | KEEP НА ДОСКЕ | §06 / §21 |
+| PL-G03 | Локальная свободная доска (ходы за обе стороны, история PGN) | KEEP НА ДОСКЕ | §06 / §21 |
+| PL-G04 | Тренировка предходов, переворот, стрелки и настройки доски | KEEP НА ДОСКЕ/В SETTINGS | §06 / §21 |
+| PL-G05 | Завершение на последней позиции, «Разобрать»/«Вызвать снова» | KEEP approved game-flow | §06 / §21 |
+| PL-G06 | Разбор, Stockfish, статистика, PGN/FEN, тренировки | KEEP в Анализе/Моих партиях | §06 / §21 |
+| PL-G07 | Звуки, auth, OAuth/PAT, Credential Manager, account isolation | KEEP, НЕ рефакторить из-за Play | §06 / §21 |
+| PL-F01 | **Случайный соперник / instant matchmaking Lichess, casual/rated** | **PARKED**: это не вызов по нику и не friend link, отсутствует среди текущих 4 режимов | §12–17/§19 — future или явно запрещено |
+| PL-F02 | **Локальный Stockfish в качестве компьютерного противника** | **PARKED**: сейчас AI означает Lichess AI; free board — две стороны, не компьютер | §12–17/§19 — future или явно запрещено |
+| PL-F03 | Свой стартовый FEN прямо в Play | **PARKED**: в Анализе уже есть редактор позиции | §12–17/§19 — future или явно запрещено |
+| PL-F04 | Глобальная библиотека избранных пресетов (свыше запоминания последнего) | **PARKED** | §12–17/§19 — future или явно запрещено |
+| PL-F05 | Отдельный lobby/чат ожидания и push оповещения | **PARKED** | §12–17/§19 — future или явно запрещено |
+| PL-F06 | AI-советы/подсказки движка при активной человеческой партии | **NOT ALLOWED (FAIR PLAY)** | §12–17/§19 — future или явно запрещено |
+| PL-F07 | Подготовка к сопернику, дебютный репертуар, AI-тренер | **PARKED**: будущее Анализа/Обучения | §12–17/§19 — future или явно запрещено |
+
+
+### 25.3. Игровое пространство / Review / состояния — docs/ux/GAME_AND_REVIEW_FEATURE_LEDGER_2026_11_07.md
+
+| ID | Legacy функция/элемент | Legacy status и прежняя формулировка — НЕ НОРМАТИВНО | Действующий раздел / override |
+|---|---|---|---|
+| GB-01 | QStackedWidget game_page с тем же BoardView | Единственная active/finished/local доска, не плодить GameWindow · KEEP | §07, §11, §20 |
+| GB-02 | Шахматная доска 8×8, mouse move intent | Большой главный элемент; auto-fit по реальному viewport · KEEP + AUTO-FIT | §07, §11, §20 |
+| GB-03 | board_target_size: 400/480/560/720/auto | «Авто» нормальный старт; ручной размер вторично в настройках доски · MOVE/SHRINK | §07, §11, §20 |
+| GB-04 | opponent_label + you_label | Имена, настоящий цвет, над/под доской · KEEP/REDESIGN | §07, §11, §20 |
+| GB-05 | opponent_clock_label + you_clock_label | Чёткие реальные часы, только если есть; без выдуманного 00:00 · KEEP/CONDITIONAL | §07, §11, §20 |
+| GB-06 | «Без обычных часов» повторяется сверху/снизу | Предлагается единый «∞ Без контроля времени» в мета строке · SHRINK — OWNER DECISION | §07, §11, §20 |
+| GB-07 | статус «Ваш ход / Ход соперника» | В одной компактной строке, без дублированного огромного status card · SHRINK | §07, §11, §20 |
+| GB-08 | Lichess technical «started» | Перевести в человеческий «Игра идёт», подробности — tooltip · SHRINK | §07, §11, §20 |
+| GB-09 | MoveTable №/White/Black | В правой колонке постоянно, собственный вертикальный scroll · KEEP | §07, §11, §20 |
+| GB-10 | 4 history buttons " | < < > > · " · Одной строкой под ходами, доступные названия; latest крупнее по смыслу · KEEP/REDESIGN | §07, §11, §20 |
+| GB-11 | «Актуальная позиция / Просмотр хода N» | Виден возврат к latest; из истории нельзя делать online move · KEEP | §07, §11, §20 |
+| GB-12 | live move optimistic/pending_uci | Не отправлять второй реальный move POST до ACK, premove отдельно · KEEP | §07, §11, §20 |
+| GB-13 | premove_intent, board markings | Premove остаётся на доске, без подсказки движка · KEEP | §07, §11, §20 |
+| GB-14 | «ПРЕДХОД» и label | Только если queued: компактная строка состояния · CONDITIONAL/SHRINK | §07, §11, §20 |
+| GB-15 | «Отменить предход» / Esc | Маленькая кнопка рядом с queued premove · MOVE/KEEP | §07, §11, §20 |
+| GB-16 | «Сдаться» | Постоянно видимая live-команда, подтверждение обязательно · KEEP | §07, §11, §20 |
+| GB-17 | «Предложить ничью» | Всегда доступна, когда разрешена live state · KEEP | §07, §11, §20 |
+| GB-18 | «Принять/Отклонить ничью» | Inline при авторитетном входящем предложении · CONDITIONAL | §07, §11, §20 |
+| GB-19 | «Вернуть ход» (AI) / «Предложить возврат хода» (human) | Live-команда, только серверная; не undo local · KEEP | §07, §11, §20 |
+| GB-20 | «Принять/Отклонить возврат хода» | Inline на том же месте при входящем event · CONDITIONAL | §07, §11, §20 |
+| GB-21 | «Заявить ничью по правилу» | Только при can_claim_draw() и API-support · CONDITIONAL | §07, §11, §20 |
+| GB-22 | «Завершённые партии» справа | Уже есть «Мои партии» в sidebar; убрать дубликат из command block · MOVE/HIDE DUPLICATE | §07, §11, §20 |
+| GB-23 | «Новая партия» справа во время live | Не конкурирует с текущим game, перейти через Play; без reset по клику выбора режима · MOVE/HIDE WHEN LIVE | §07, §11, §20 |
+| GB-24 | «Перевернуть» | Маленькая видимая команда рядом с доской/нижними часами · MOVE/KEEP | §07, §11, §20 |
+| GB-25 | «Очистить пометки» | Сохраняет функцию, компактно в действиях доски · SHRINK | §07, §11, §20 |
+| GB-26 | «Режим фокуса» full-width | Маленький управляющий toggle, увеличение board измеримо · REDESIGN | §07, §11, §20 |
+| GB-27 | QSplitter right side hides in focus | Focus скрывает right+secondary, сохраняет session/clock, управление 1 клик · REDESIGN | §07, §11, §20 |
+| GB-28 | Sidebar + Back + Фон | Preserve existing shell; temporary collapse allowed in focus, restore · KEEP | §07, §11, §20 |
+| GB-29 | Internet reconnect/snapshot | Board stale safely held, no unsafe POST, clock unknown honest · KEEP | §07, §11, §20 |
+| GB-30 | Online status changed/gameFinished | After confirmed finish same board at last ply · KEEP approved | §07, §11, §20 |
+| GB-31 | finished_review_button «Разобрать» | One of exactly two main finished actions, only after confirmed PGN and safety · KEEP | §07, §11, §20 |
+| GB-32 | finished_challenge_button «Вызвать снова» | Second main action, contextual AI/human, new server request only explicit · KEEP | §07, §11, §20 |
+| GB-33 | old result_page compatibility object | Never navigate to separate ResultPage/overlay by automatic finish · KEEP HIDDEN | §07, §11, §20 |
+| GB-34 | finalization probe / SQLite confirmation | Disabled «Разобрать» until committed exact final line; display brief state · KEEP | §07, §11, §20 |
+| GB-35 | Export current PGN / finished_export_button | Secondary, preserve source, no new primary CTA · MOVE/KEEP | §07, §11, §20 |
+| GB-36 | return to live / resume_current_game | Preserve and reflect current account/game ID, no reset · KEEP | §07, §11, §20 |
+| GB-37 | multiple live online sessions | No automatic jump to other game, selection via Play/current session · KEEP | §07, §11, §20 |
+| GB-38 | sound moves/capture/notifications and settings | **AS-IS** events/defaults, no layout-induced duplicate sound · KEEP | §07, §11, §20 |
+| GB-39 | start_local_game/free board two-sided | Один GAME local layout без сетевых кнопок · KEEP | §07, §11, §20 |
+| GB-40 | «Отменить последний ход» (undo_local_last_move) | Главная локальная команда, не серверный takeback · KEEP | §07, §11, §20 |
+| GB-41 | Flip board, arrows, clear annotations | Локальные инструменты, по ситуации · KEEP | §07, §11, §20 |
+| GB-42 | «Новая партия» в локальном режиме | Создать новую чистую доску только по явному клику · KEEP + UNSAVED GUARD | §07, §11, §20 |
+| GB-43 | position_eval_button «Анализировать позицию» | Вторичный локальный учебный инструмент с fresh safety preflight · CONDITIONAL | §07, §11, §20 |
+| GB-44 | position_eval_label с результатом/PV | Только при safety разрешённом учебном запросе, без human live · CONDITIONAL | §07, §11, §20 |
+| GB-45 | local_mode_combo/«Тренировка предходов» hidden | НЕ делать новый режим на Play/Game, preserve test/internal only · KEEP HIDDEN | §07, §11, §20 |
+| GB-46 | local history navigate/back/forward | Доступно без engine and server · KEEP | §07, §11, §20 |
+| GB-47 | local PGN/revisions | Не перезаписывать исходные PGN/notes · KEEP | §07, §11, §20 |
+| GB-48 | global engine Fair Play mask | При неизвестном active human или настоящем human live скрыть ALL eval/score/PV/hints · KEEP SAFETY | §07, §11, §20 |
+| GB-49 | выбор карточки local в Play | Не сбрасывать online/current local game до явного start CTA · KEEP | §07, §11, §20 |
+| GB-50 | challenge cancellation and rematch from finished | Подтверждение серверного исхода, no repeated blind POST · KEEP | §07, §11, §20 |
+| RV-01 | GameReviewWorkspace QSplitter of 3 columns | 2 главные колонки board+moves; stats conditional/collapsible · REDESIGN | §07, §11, §20 |
+| RV-02 | review_board fixed size and alignment | Auto-fit square, не миниатюра из-за пустых metrics · REDESIGN | §07, §11, §20 |
+| RV-03 | header white/black/results+date/opening | Short, source backed, tooltip for full; no invented «Соперник» · KEEP/SHRINK | §07, §11, §20 |
+| RV-04 | «К партиям» | К игре/К партиям/К анализу по маршруту входа · ADD CONTEXT | §07, §11, §20 |
+| RV-05 | Global «← Назад» | Не дублировать логику без явного назначения · KEEP | §07, §11, §20 |
+| RV-06 | «Экспорт PGN» | Вторичная видимая команда, no PGN rewrite · KEEP | §07, §11, §20 |
+| RV-07 | 3-column metrics, always 360–370 px | Без анализа **не отнимать место** у board, с анализом foldout · COLLAPSE | §07, §11, §20 |
+| RV-08 | phase_selector all/opening/middle/end | Только когда реально есть фазовая метрика; иначе нейтрально · CONDITIONAL | §07, §11, §20 |
+| RV-09 | «Я / Соперник» side_metrics_summary | Сохранить per-side accuracy/source, errors, blunders, coverage; collapse · KEEP/MOVE | §07, §11, §20 |
+| RV-10 | official Lichess accuracy | Whole-game official only, no false local/phase mixing · KEEP | §07, §11, §20 |
+| RV-11 | local Stockfish accuracy | Explicit local provenance and completeness · KEEP | §07, §11, §20 |
+| RV-12 | phase_summary and local phase metrics | No fake percentage if phase not measured · KEEP/CONDITIONAL | §07, §11, §20 |
+| RV-13 | MoveTable SAN for finished game | Всегда виден, список с собственным scroll и selected ply · KEEP | §07, §11, §20 |
+| RV-14 | Graph click/ply and keyboard arrows/wheel | Выбор полухода синхронизирует позицию board/history · KEEP | §07, §11, §20 |
+| RV-15 | AdvantageBar vertical | Только при valid eval and safety, рядом с board · CONDITIONAL | §07, §11, §20 |
+| RV-16 | selected_move_summary and detailed events/PV | Показать when valid, под move table / expand · KEEP/SHRINK | §07, §11, §20 |
+| RV-17 | ReviewGraph across bottom | При data; no huge empty chart, resize/fold, compact default · REDESIGN | §07, §11, §20 |
+| RV-18 | graph_mode evaluation/Δ | Сохранить в расширенном Review, not compact library graph · KEEP | §07, §11, §20 |
+| RV-19 | error_markers_toggle | Optional per-move markers, не постоянная россыпь значков · KEEP/CONDITIONAL | §07, §11, §20 |
+| RV-20 | legend for each symbol | Only if markers on; otherwise hide huge explanatory row · REDESIGN | §07, §11, §20 |
+| RV-21 | «Проанализировать Stockfish» | Главная CTA когда no analysis and safe, manual job · KEEP/PRIORITIZE | §07, §11, §20 |
+| RV-22 | «Повторить анализ Stockfish» | Secondary when existing complete, no auto-run · KEEP/CONDITIONAL | §07, §11, §20 |
+| RV-23 | «Открыть на Lichess для запроса анализа» | Только проверенный Lichess URL и ясно внешний переход; не заявлять API-заказ · MOVE SECONDARY | §07, §11, §20 |
+| RV-24 | «Разобрать мои ошибки · 0» | Не primary если N=0; только candidates N>0 and fresh safe · CONDITIONAL | §07, §11, §20 |
+| RV-25 | «Предыдущая / Следующая ошибка» | Только при реально verified candidate list · CONDITIONAL | §07, §11, §20 |
+| RV-26 | «Дополнительные сведения» tabs | Сохранить Разбор/События/Заметки, по раскрытию; no duplication · KEEP COLLAPSED | §07, §11, §20 |
+| RV-27 | ephemeral controls undo/reset branch | Отдельное study state, оригинальный PGN не меняется · KEEP | §07, §11, §20 |
+| RV-28 | training exercise check/hint/skip/next | Только в учебном режиме и без premature spoilers · KEEP | §07, §11, §20 |
+| RV-29 | training repeat without hint | Только после завершённого упражнения · KEEP | §07, §11, §20 |
+| RV-30 | training «Вернуться к разбору» | Restore selected game+ply, no lost context · KEEP | §07, §11, §20 |
+| RV-31 | save notes/history | Existing notes non-destructively, no false cross-account · KEEP | §07, §11, §20 |
+| RV-32 | no analysis / invalid-only payload | Нет chart/обманчивых zero/empty 3rd column, CTA source aware · REDESIGN | §07, §11, §20 |
+| RV-33 | live human/unknown safety mask | ALL eval/accuracy/PV/hints hidden including accessibility/tooltips/cache · KEEP SAFETY | §07, §11, §20 |
+| RV-34 | source coverage and classification | Missing ≠ zero; classification is observation, not proven error cause · KEEP | §07, §11, §20 |
+| RV-35 | analysis job queued/running/complete/fail | Inline status, don't block Qt; no duplicate single-job · ADD PRESENTATION | §07, §11, §20 |
+| RV-36 | import PGN/FEN/ephemeral study | Respect active safety and origin route; no source hallucination · KEEP | §07, §11, §20 |
+| RV-37 | returns to game/library/analysis | Source-aware back with selected ply and scroll preservation · ADD ROUTE | §07, §11, §20 |
+| RV-38 | library mini-graph vs full ReviewGraph | Library graph always clean per owner; Review can keep optional markers/Δ · KEEP DISTINCT | §07, §11, §20 |
+| ST-01 | AI active, timed, few/many moves | доска максимум, оба часа, история и правильные доступные команды | §07, §11, §20 |
+| ST-02 | Human active, timed | ничья/возврат/сдаться видны, no engine hints | §07, §11, §20 |
+| ST-03 | Human/AI active without normal clock | no fake 00:00; компактная корректная подпись | §07, §11, §20 |
+| ST-04 | Focus on/off, sidebar open/closed | фактическое увеличение доски при доступном пространстве, restore | §07, §11, §20 |
+| ST-05 | Waiting position / pending move / server ACK | blocked unsafe, status honest | §07, §11, §20 |
+| ST-06 | Incoming draw/takeback / cancel premove | контекстные Принять/Отклонить/Отменить не спрятаны | §07, §11, §20 |
+| ST-07 | Live game while browsing history | one-click return to latest, no stale move POST | §07, §11, §20 |
+| ST-08 | Connection lost/429/auth A→B | last safe board, no stale foreign info/action | §07, §11, §20 |
+| ST-09 | Finished by mate/resign/draw/timeout | same board+freeze clocks+two CTA; no popup/auto SF | §07, §11, §20 |
+| ST-10 | Finish saved pending/failed | disable Review until committed exact PGN, brief accurate status | §07, §11, §20 |
+| ST-11 | AI/human rematch, local again | explicit action, new ID and validated game context | §07, §11, §20 |
+| ST-12 | Local free board with unsaved moves | undo/flip/marks, explicit new/reset confirmation | §07, §11, §20 |
+| ST-13 | Local explicit position evaluation with human active elsewhere | Fair Play fails closed and clears hints | §07, §11, §20 |
+| ST-14 | Review no data / no saved positions | large board+moves+manual analysis CTA, no blank graph/stats | §07, §11, §20 |
+| ST-15 | Review Lichess official accuracy only | accurate provenance; no fake per-position graph | §07, §11, §20 |
+| ST-16 | Review complete SF eval & classification | real metrics+graph+eligible exercises | §07, §11, §20 |
+| ST-17 | Review partial/invalid/mate/gaps | truthful N/A, no fake ±999; graph gaps preserved | §07, §11, §20 |
+| ST-18 | Review safety pending/blocked or A→B | metrics/PV/tooltips/accessibility all masked | §07, §11, §20 |
+| ST-19 | Review existing error exercise | check/hint/skip/next/repeat/navigation retained | §07, §11, §20 |
+| ST-20 | 1120×640/1280×720/1672×941 and DPI 100/125/150 | no clipped CTA, hit-test, readable board+clock, QSplitter geometry | §07, §11, §20 |
+
+
+### 25.4. Analysis landing и инфраструктурные действия — docs/ux/ANALYSIS_LANDING_FEATURE_LEDGER_2026_11_08.md
+
+| ID | Legacy функция/элемент | Legacy status и прежняя формулировка — НЕ НОРМАТИВНО | Действующий раздел / override |
+|---|---|---|---|
+| AL-01 | «Выбрать партию» на landing | **«Разбор партии» → «Выбрать материал» → единый Review** · REDESIGN | §08/§09/§21 — сразу вложенный Разбор + 3 tabs |
+| AL-02 | «Исследование дебютов → Открыть статистику» | верхняя правая карточка, существующая статистика Прогресса · KEEP + LABEL | §08–09, §17 |
+| AL-03 | нет Weakness landing | нижняя левая **«Диагностика слабостей»**, disabled «В разработке» · ADD DISABLED | §08–09, §17 |
+| AL-04 | нет Opponent landing | нижняя правая **«Подготовка к сопернику»**, disabled «В разработке» · ADD DISABLED | §08–09, §17 |
+| AL-05 | два заголовка «Анализ» | один существующий заголовок shell · HIDE DUPLICATE | §08–09, §17 |
+| AL-06 | три карточки 1×3 | четыре 2×2, одна primary action area на карточку · REDESIGN | §08–09, §17 |
+| AL-07 | archive game selection | внутри вложенного выбора, тот же saved-game Review · MOVE | §08–09, §17 |
+| AL-08 | вставка PGN/FEN, parse, validation | nested «Разбор партии», без постоянного поля landing · MOVE / KEEP | §08–09, §17 |
+| AL-09 | Windows «Выбрать файл PGN…» | nested PGN mode, тот же existing picker · MOVE / KEEP | §08–09, §17 |
+| AL-10 | PositionSetupWidget: ручная мышиная доска | nested редактор позиции (фигуры, turn, castling, EP, reset/clear/open), без overlay · MOVE / KEEP | §08–09, §17 |
+| AL-11 | BatchAnalysisDialog via «Массовый анализ» | один Batch control-plane в **глобальном «Фон»** · MOVE / KEEP | §08–09, §17 |
+| AL-12 | pause/resume/cancel/status/queue/retry | остались в общем Background Operations · KEEP | §08–09, §17 |
+| AL-13 | engine thresholds/depth/nodes/settings | «Настройки» — конфигурация, не duplicative queue · KEEP / ROUTE | §08–09, §17 |
+| AL-14 | progress/статистика собственных дебютов | существующая проверенная статистика, корректный return · KEEP | §08–09, §17 |
+| AL-15 | global shell Back/Фон/sidebar Lichess | без изменения маршрутов 6 разделов и current palette · KEEP | §08–09, §17 |
+| AL-16 | general background/sync state | два честных компактных header indicators, shared across pages · ADD PRESENTATION | §08–09, §17 |
+| AL-17 | Review/FEN/PGN/Study/AI/Stockfish | одна система и сохранённые source workflows, не переписывать · KEEP | §08–09, §17 |
+| AL-18 | external PGN/FEN ephemeral mode | не импортировать в личную SQLite автоматически · KEEP | §08–09, §17 |
+| AL-19 | редактор на скрине перекрывает элементы | вложенная Qt компоновка без пересечений 100/125/150% · REDESIGN | §08–09, §17 |
+| AL-20 | no Stockfish launch on opening Analysis | отсутствие автоматической работы, account/fairplay gating · KEEP | §08–09, §17 |
+| AL-H01 | Левый прогресс показывает конкретный понятный охват (например N партий с валидной оценкой из M завершённых импортированных по этому аккаунту), а не одновременно sync % и analysis % |  | §08–09, §17 |
+| AL-H02 | Правый прогресс показывает current Stockfish job X/Y лишь при доказанном знаменателе, иначе idle/unknown |  | §08–09, §17 |
+| AL-H03 | Кнопка «Фон» ведёт к существующей единой очереди, Lichess backfill и archive status, не запускает work автоматически |  | §08–09, §17 |
+| AL-H04 | При смене аккаунта A→B старая очередь/percent не отображается у B |  | §08–09, §17 |
+| AL-H05 | Header indicators реализованы в shared shell, не повторяются отдельными Analysis widgets |  | §08–09, §17 |
+| AL-V01 | Четыре карточки одного размера, четыре правильных icons/status, две enabled/two disabled, native Windows visual match |  | §08–09, §17 |
+| AL-V02 | На 1120×640 и DPI 150% нет clipped buttons/overlap/недоступных disabled-подсказок |  | §08–09, §17 |
+| AL-V03 | Клик по пустой части не вызывает другой handler; клавиатура и screen-reader только для настоящих действий |  | §08–09, §17 |
+| AL-F01 | Opening Explorer: ECO, дерево, транспозиции, варианты, sample-size и подтверждённые сравнения | внутри «Исследование дебютов» · PARKED | §12–17/§19 — future или явно запрещено |
+| AL-F02 | Глубокая диагностика слабостей: симптомы vs предполагаемые причины, конкретные партии, точечные упражнения | «Диагностика слабостей» · PARKED | §12–17/§19 — future или явно запрещено |
+| AL-F03 | Подготовка к человеку по публичному Lichess архиву: ник, фильтры, варианты, evidence | «Подготовка к сопернику» · PARKED | §12–17/§19 — future или явно запрещено |
+| AL-F04 | Дебютный репертуар с повторением и учебным планом | «Обучение» · PARKED | §12–17/§19 — future или явно запрещено |
+| AL-F05 | Интерактивный AI-тренер, диалог о собственных решениях, до/после движка | Разбор / Обучение · PARKED | §12–17/§19 — future или явно запрещено |
+| AL-F06 | Автоматический серверный cloud-анализ Lichess | только отдельный документированный API/safety этап · PARKED | §12–17/§19 — future или явно запрещено |
+| AL-F07 | Любые engine-подсказки в live human Lichess game | НИГДЕ · NOT ALLOWED | §12–17/§19 — future или явно запрещено |
+
+
+### 25.5. Полное legacy coverage PR45 — docs/ux/EXISTING_FEATURES_TO_UX_COVERAGE_AUDIT.md
+
+| ID | Legacy функция/элемент | Legacy status и прежняя формулировка — НЕ НОРМАТИВНО | Действующий раздел / override |
+|---|---|---|---|
+| UX-COV-01 | Единое sidebar, распознавание выбранного Lichess аккаунта, `connect_lichess`, disconnect, restore, `--offline`/`--manual-connect`; `window.py::_build_sidebar`, `service_auth.py` | Глобальная оболочка: логин, состояние, переподключение/отключение и ссылка в Настройки → Lichess. Offline/manual получают ясный отдельный индикатор; не открывать токен до user intent · **СОХРАНИТЬ** | §04–18 / §21 |
+| UX-COV-02 | Home быстрые карточки и последние завершённые партии, account/time-control selection; `ui/pages/home.py`, `window.py::_refresh_home_dashboard` | Главная: краткий прогресс и 3 последние партии; длинные фильтры аккаунта/контроля → Прогресс, короткий context фильтр на главной если важен. Кнопки «Вернуться к партии», «Все партии» · **СОХРАНИТЬ** | §04–18 / §21 |
+| UX-COV-03 | Игра: AI levels, друг по ссылке, вызов пользователя по нику, color/clock/rated flags, создание/отмена вызова; `OnlineGameDialog`, `window.py::open_friend_game/challenge_username/play_ai`, `service_games.py` | Играть → одна форма; при ожидании явный статус, link/copy, отмена. Сохранить **rated/casual там, где API поддерживает**, не потерять этот параметр за простотой формы · **СОХРАНИТЬ** | §04–18 / §21 |
+| UX-COV-04 | Активные игры Lichess: отдельный диалог списка, обновление, открытие выбранной, восстановление живой сессии; `ActiveGamesDialog`, `window.py::show_active_games/open_active_game` | Мои партии: закреплённая группа **всех активных партий** сверху + глобальное «Вернуться к партии»; поддержать выбор нескольких, ручное обновление списка, счётчик; клик ведёт на live board, не в review · **СОХРАНИТЬ** | §04–18 / §21 |
+| UX-COV-05 | Live move stream, clocks/time increment, history, client-side premove/cancel, draw request/accept/decline, claim draw, takeback request/accept/decline, resign, challenge cancel, flip; `window.py::_build_ui/_update_clock/request_takeback/handle_draw`, `service_games.py` | **Игровая страница: постоянно видимый боковой блок «Управление» рядом с ходами**: «Возврат хода», «Предложить ничью»/«Принять»/«Отклонить», «Сдаться» с подтверждением; «Заявить ничью по правилу» и другие применимые специальные команды тоже доступны здесь (в компактной группе по состоянию). Не прятать эти команды в «···». Недоступное объяснять или скрывать по правилам режима/API. Обычный premove + отмена полностью сохраняются; никаких подсказок движка в human live · **УТВЕРЖДЕНО: ВИДИМОЕ УПРАВЛЕНИЕ** | §04–18 / §21 |
+| UX-COV-06 | Локальная свободная доска **и отдельная «Тренировка предходов»**, тестовый ход соперника, undo local, выбор цвета, размер доски; `window.py::local_mode_combo`, `apply_opponent_move` | Играть → Свободная доска: оставить собственно локальную доску, выбор цвета, размеры и обычную локальную отмену хода по уместности. **Отдельный пользовательский режим «Тренировка предходов», кнопка тестового хода соперника и отдельное обучение premove НЕ НУЖНЫ** в новом UX. Не путать это с нормальным предходом во время онлайн-партии: он и отмена работают как сейчас. До отдельной реализации код/тесты не удалять автоматически · **ИСКЛЮЧЕНО ИЗ НОВОГО UX ПО РЕШЕНИЮ ВЛАДЕЛЬЦА** | §04–18 / §21 |
+| UX-COV-07 | История полуходов и навигация назад/вперёд, ручные стрелки/подсветка и очистка пометок, законные ходы, последний ход, promo selection; `board_view.py`, `window.py::navigate_*/flip_board` | На игровом и review workspace свои доступные actions и keyboard shortcuts; на live human history не раскрывает engine. Настройки → Доска/Управление; **сохранять ручные пометки** · **СОХРАНИТЬ** | §04–18 / §21 |
+| UX-COV-08 | Отдельный экран `ResultPage` после online finished, экспорт PGN, review/new/home; `ui/pages/result.py`, `window.py::_show_result` | **ИЗМЕНИТЬ по решению владельца**: никакого `screen_stack.setCurrentWidget(result_page)`; остаётся та же игровая доска и ходы, справа **ровно два добавляемых главных действия: «Разобрать» и «Вызвать снова»**; общие кнопки режима/PGN остаются доступными вторично, но не делать отдельную карточку/overlay результата. Серверный native rematch только если документирован; иначе новый challenge по нику. Определение finished по авторитетным статусам, не воображаемое завершение · **УТВЕРЖДЁННАЯ UX ЗАМЕНА** | §07 — результат на той же доске |
+| UX-COV-09 | Архив: pilot 5–10 игр, полная/инкрементальная sync с checkpoint, resumable, account scope, архивный статус и ошибки; `window.py::start_archive_sync/start_archive_pilot/show_archive_status`, `service_sync.py` | Мои партии → компактная сводка и управление **полной/инкрементальной синхронизацией**: статус, «Синхронизировать/Продолжить», checkpoint/ошибки — в раскрываемых подробностях или «Фоновых операциях». **Пробный импорт 5–10 партий НЕ ПОКАЗЫВАТЬ нигде**, включая Advanced/Диагностику. Внутренние тестовые сценарии могут оставаться в коде до отдельного решения · **СОХРАНИТЬ SYNC; PILOT UI ИСКЛЮЧИТЬ** | §04–18 / §21 |
+| UX-COV-10 | Фоновая дозагрузка только готовой official Lichess accuracy/evals JSON по завершённым играм: auto, pause/resume, manual retry, daily limit, 429/backoff, `no_server_data`, статус; `window.py::show_background_analytics`, `service_sync.py::refresh_lichess_analysis_background`, SQLite jobs | Мои партии → верхняя строка по **каждому источнику** + **«Фоновые операции» inspector**; Настройки → Фоновые операции: auto, пауза, daily quota, кнопка «Проверить сейчас», Retry-After и причина ошибки, сколько проверено. Глобальный индикатор в header; **не путать с массовым локальным анализом** · **СОХРАНИТЬ, ПОДКЛЮЧИТЬ К НЕСКОЛЬКИМ МАРШРУТАМ** | §04–18 / §21 |
+| UX-COV-11 | Просмотр сохранённых партий, поиск, pagination, **заметка к партии** и Save, выбор/просмотр, экспорт PGN, локальный Stockfish request, **«Обновить эту партию из Lichess»**; `ui/pages/library.py` | Мои партии → детали: заметки и «Сохранить» оставить тихим дополнительным полем (сейчас не приоритет), экспорт PGN и переход в общий разбор. **Ручное «Обновить эту партию из Lichess» не дублировать как обычное действие**, так как фоновая синхронизация должна работать сама; оставить лишь явный recovery/retry для единичной проблемной записи в диагностическом контексте при подтверждённой необходимости, без обхода лимитов и аккаунтных границ · **ЗАМЕТКИ СОХРАНИТЬ; SINGLE REFRESH — RECOVERY** | §04–18 / §21 |
+| UX-COV-12 | ReviewWorkspace: board+interactive `AdvantageBar` **уже существует**, `ReviewGraph` c CP/Δ и markers, tabs Ходы/Разбор/События/Заметки, phase and both sides, best saved line, saved PV, export/return, safety controls; `ui/game_review.py` | Анализ → Разбор PGN/партии: **не переписывать готовые график/vertical bar с нуля**; переиспользовать, сохранить переключение «Оценка»/«Δ», маркеры ошибок, события, заметки, фазовые таблицы, экспорт, локализацию; исправления отображения mate если нужны отдельно. Обязательный свежий Fair Play · **СОХРАНИТЬ** | §11 — сохранить AdvantageBar/ReviewGraph |
+| UX-COV-13 | Упражнения **«Разобрать мои ошибки»** в разборе: предыдущая/следующая, проверить, подсказка, пропустить, повтор без подсказки, возврат, fresh safety; `ui/game_review.py::start_training/check_training_move/show_hint` | Анализ → Обнаруженная подтверждённая ошибка → «Тренировать» deep link в **Обучение → Задачи → Мои ошибки** (то же упражнение, не второй решатель); пока этот внутренний экран не проектируется, **не терять существующий usable workflow**, оставить доступ и из разбора · **СОХРАНИТЬ, ПЕРЕИМЕНОВАТЬ МАРШРУТ, НЕ ПЕРЕПИСАТЬ ДВИЖОК** | §04–18 / §21 |
+| UX-COV-14 | Local Stockfish: UCI install official release, find/browse path, verify, budget nodes/depth/time, preset, Threads/Hash, batch nodes; manager with engine admission + cancel; `ui/dialogs.py::SettingsDialog`, `engine_manager.py` | Настройки → Stockfish и анализ: **все существующие опции**, включая собственное число узлов/пресеты, поиск/проверку/официальную установку; Анализ → массовый/одиночный разбор: только actions + параметры текущего job · **СОХРАНИТЬ** | §04–18 / §21 |
+| UX-COV-15 | Batch queue: последнее N, retry failed, selective deeper review, pause/cancel/resume and status, verified error/pause states, logs; `ui/dialogs.py::BatchAnalysisDialog`, `window.py::_start_batch_analysis` | Анализ → Массовый анализ: полный control plane, **выбор selective deeper review**, продолжение исходного бюджета, очередь/история/прогресс, exit without killing jobs. Сводка лишь в Моих партиях; отмена без потери готовых данных · **СОХРАНИТЬ** | §17 — Batch во Фон |
+| UX-COV-16 | UI `StatisticsDialog`: tabs Обзор / Партии / Дебюты/фазы / Критические моменты; filters account, period, clock, side, result, source, analyzed, analysis source; рейтинг-тренд, opening refresh/classify 25, event evidence, drill-down + account scope; `ui/analytics_dialogs.py` | Прогресс → вкладки и фильтры, **включая «Критические моменты», обновление локальной классификации и переход в исходную позицию**, рейтинг-тренд, анализ фаз; не выбросить только потому, что в предложенном UX-макете было мало KPI. Не объявлять Stockfish metrics официальной accuracy · **СОХРАНИТЬ, ДОПОЛНИТЬ PROGRESS NAV** | §04–18 / §21 |
+| UX-COV-17 | Lichess puzzle activity: pilot 5–10, full/background synchronization, account filtering, search, solved/failed, themes, puzzle rating trend; **replay, reveal solution, reset**; `ui/pages/puzzles.py`, `window.py::show_puzzle_history/start_puzzle_sync` | Обучение → Задачи: сохранить доступ к **существующей истории Lichess попыток**, повторному решению, просмотру решения, сбросу и фильтрам; меню самого решателя **спроектировать позже**, не обещая новые нерешённые задачи без источника. Статусы обычной фоновой синхронизации — в общем inspector. **Пробный импорт 5–10 попыток не выводить ни на какой пользовательский экран** · **СОХРАНИТЬ ПОВТОР; PILOT UI ИСКЛЮЧИТЬ** | §04–18 / §21 |
+| UX-COV-18 | UI sound library WAV catalog, default selections, user choices/cue preview start/move/capture, notifications and history toggle, master volume, classical preset, preference persistence, first game dedup; `ui/sounds.py`, `ui/dialogs.py::SettingsDialog` | **Настройки → Звуки — ПОЛНОСТЬЮ AS-IS**. Сохранить библиотеку/состав звуков, **те же дефолты**, QSettings keys, уже выбранные пользователем варианты, громкость, набор `Классический · 45%`, превью, отдельные переключатели, game start, move, capture, premove, notifications, history. **Не менять звуковые файлы, default IDs, громкость или алгоритм вызова без отдельного согласования.** · **УТВЕРЖДЕНО: НЕ МЕНЯТЬ** | §04–18 / §21 |
+| UX-COV-19 | Account auth: OAuth callback + PAT with separate credential slots, restore, disconnect, revoke, diagnostic HTTP status, callback port; `ui/dialogs.py::LichessConnectionDialog`, `service_auth.py` | Глобальный профиль: login/connection; Настройки → Lichess: OAuth / личный токен / выбор учётных данных / отзыв и отключение. Режим manual не читает секреты до user action, offline изолирован; никаких токенов в UI и логах · **СОХРАНИТЬ** | §04–18 / §21 |
+| UX-COV-20 | Logs/diagnostics: rotating privacy-safe logs, open folder, copy anonymized report, optional consent checkbox, engine failure UCI, SQLite path on explicit request; `diagnostics.py`, `ui/dialogs.py`, `window.py::show_archive_status` | Настройки → Система / Диагностика (Advanced): логи, обезличенный отчёт, права на передачу, архив/доступность базы, проверка engine; не auto-upload, не раскрывать token. **Сохранить доступ к техническим подробностям**, но не выводить путь к БД в Глобальную шапку · **СОХРАНИТЬ** | §04–18 / §21 |
+| UX-COV-21 | Workspace state: restore last review, current selection, home filters, sidebar collapsed, geometry, Qt theme and desktop single instance; `window.py::_restore_workspace_after_startup/resume_saved_review`, `single_instance.py` | Глобальная оболочка: **Продолжить разбор**/последняя открытая партия, restore filters/scroll, одно окно, responsive width/DPI. Не переносить сохранённые state под другие keys без миграции · **СОХРАНИТЬ** | §04–18 / §21 |
+| UX-COV-22 | Opening matcher Russian mapping, phases, critical events, player-side metrics and source coverage; `ui/display.py`, `lichess/opening_matcher.py`, `ui/analytics_dialogs.py` | В карточках партии — русское достоверное название/ECO, в Прогрессе — дебюты/фазы/critical; в анализе — phase+evidence. Не терять первичный источник при переходе в другие tabs · **СОХРАНИТЬ** | §04–18 / §21 |
+| UX-COV-23 | Multiple background task statuses and controls (`BackgroundWorkCoordinator`, archive/puzzle/analysis and queue) | **Один** глобальный инспектор «Фоновые операции»: вид операции и источник Lichess / Stockfish, X/Y, paused/running/429/error/next retry, explicit user controls; на странице «Мои партии» только нужный short summary, на «Обучении» puzzle related summary, в Анализе полный batch control plane · **ОБЪЕДИНИТЬ ПРЕДСТАВЛЕНИЕ, НЕ РЕАЛИЗАЦИИ** | §04–18 / §21 |
+| UX-COV-24 | Local position evaluation / FEN, review advanced chart CP & Δ, current score bar, existing working Stockfish preflight; `position_analysis.py`, `game_review.py`, `window.py` | Анализ → Разбор PGN → инструменты FEN/редактор (по UX-A2); шкала + график сохраняются; не превращать в обязательное фото/OCR и не показывать оценки на human live · **СОХРАНИТЬ** | §04–18 / §21 |
+
