@@ -7782,6 +7782,11 @@ class MainWindow(QMainWindow):
             return page.selected_game()
 
         def load_page(query: dict | str | None = None, page_number: int = 0):
+            # Widget signals can be queued while the window is closing. Never
+            # submit new Library work after closeEvent has started shutting down
+            # the runtime coordinator.
+            if self._shutdown_requested:
+                return
             filters = query if isinstance(query, dict) else {"query": query or ""}
             self.settings.setValue("workspace/library_filters",
                                    json.dumps(filters, ensure_ascii=False))

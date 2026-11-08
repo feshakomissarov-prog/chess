@@ -3889,6 +3889,31 @@ def test_library_sqlite_query_runs_off_ui_thread_and_ignores_stale_navigation(
     window.close()
 
 
+def test_library_query_signal_after_shutdown_does_not_start_new_work(qtbot, tmp_path):
+    window = MainWindow(QSettings(str(tmp_path / "library-shutdown.ini"),
+                                  QSettings.Format.IniFormat), offline_mode=True)
+    qtbot.addWidget(window)
+    window.game_repository.save_snapshot("shutdown-library-game", "startpos", "e2e4", "white",
+        "Synthetic", False, "300+0", "mate", "white")
+    window.show_saved_games()
+    qtbot.waitUntil(lambda: window.library_page.games.count() == 1, timeout=5000)
+    page = window.library_page
+
+    # Mirror closeEvent ordering: mark the shell as shutting down, then close its
+    # coordinator before a delayed widget signal can request another page load.
+    window._shutdown_requested = True
+    assert window.runtime.work_coordinator.close(timeout=1.0)
+    previous_handle = window._library_query_handle
+    page.search.setText("late query")
+    assert window._library_query_handle is previous_handle
+    assert window.runtime.work_coordinator.snapshots() == ()
+
+    # Complete repository/window cleanup without entering closeEvent's second
+    # coordinator-start path.
+    window.game_repository.shutdown()
+    window.close()
+
+
 def test_library_note_write_runs_off_ui_thread_and_remains_bound_during_selection_change(
     qtbot, tmp_path, monkeypatch
 ):
