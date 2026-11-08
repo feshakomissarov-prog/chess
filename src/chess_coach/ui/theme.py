@@ -77,9 +77,10 @@ def stylesheet(t: Theme = TOKENS) -> str:
     QPushButton:disabled, QToolButton:disabled {{ color: {t.muted}; background: {t.surface}; }}
     QPushButton#primaryAction {{ background: {t.accent}; color: {t.on_accent}; font-weight: 700; }}
     QPushButton#primaryAction:hover {{ background: {t.accent_hover}; }}
-    QPushButton#playModeCard {{ text-align: left; background: {t.surface}; padding: 8px; }}
-    QPushButton#playModeCard:hover {{ background: {t.hover}; }}
-    QPushButton#playModeCard:checked {{ background: {selected}; border: 2px solid {t.accent}; }}
+    QFrame#playModeCard {{ background: {t.surface}; border: 1px solid {t.border}; border-radius: {radius}px; }}
+    QFrame#playModeCard:hover {{ background: {t.hover}; }}
+    QFrame#playModeCard[selected="true"] {{ background: {selected}; border: 2px solid {t.accent}; }}
+    QFrame#playModeCard:focus {{ border: 2px solid {t.accent}; }}
     QFrame#disabledAnalysisCard {{ background: {t.sidebar}; border: 1px solid {t.border}; border-radius: {radius}px; }}
     QLabel#analysisCardIcon {{ background: {selected}; color: {t.accent}; border-radius: 10px; font-size: 23px; font-weight: 700; }}
     QLabel#analysisStatus, QLabel#breadcrumb {{ color: {t.accent}; }}

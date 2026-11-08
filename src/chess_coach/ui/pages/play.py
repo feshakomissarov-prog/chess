@@ -12,6 +12,58 @@ from PySide6.QtWidgets import (QCheckBox, QComboBox, QApplication, QFrame, QGrid
 from ...board_view import BoardView
 
 
+class _ModeCard(QFrame):
+    """A full-card button with a real child layout for title and description."""
+
+    clicked = Signal()
+
+    def __init__(self, parent=None) -> None:
+        super().__init__(parent)
+        self._checked = False
+        self._pressed = False
+        self.setObjectName("playModeCard")
+        self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.setProperty("playMode", "")
+
+    def setChecked(self, checked: bool) -> None:
+        self._checked = bool(checked)
+        self.setProperty("selected", self._checked)
+        self.style().unpolish(self)
+        self.style().polish(self)
+        self.update()
+
+    def isChecked(self) -> bool:
+        return self._checked
+
+    def click(self) -> None:
+        if self.isEnabled():
+            self.clicked.emit()
+
+    def mousePressEvent(self, event) -> None:  # noqa: N802 - Qt API
+        if event.button() == Qt.MouseButton.LeftButton and self.isEnabled():
+            self._pressed = True
+            event.accept()
+            return
+        super().mousePressEvent(event)
+
+    def mouseReleaseEvent(self, event) -> None:  # noqa: N802 - Qt API
+        if self._pressed:
+            self._pressed = False
+            if self.rect().contains(event.position().toPoint()):
+                self.click()
+            event.accept()
+            return
+        super().mouseReleaseEvent(event)
+
+    def keyPressEvent(self, event) -> None:  # noqa: N802 - Qt API
+        if event.key() in (Qt.Key.Key_Space, Qt.Key.Key_Return, Qt.Key.Key_Enter):
+            self.click()
+            event.accept()
+            return
+        super().keyPressEvent(event)
+
+
 class PlayPage(QWidget):
     """Embedded game setup form; networking and game-state ownership stay outside UI."""
 
@@ -201,13 +253,11 @@ class PlayPage(QWidget):
         self.grid = QGridLayout()
         self.grid.setHorizontalSpacing(12)
         self.grid.setVerticalSpacing(12)
-        self.buttons: dict[str, QPushButton] = {}
+        self.buttons: dict[str, _ModeCard] = {}
         self.cards: list[QFrame] = []
         for index, (heading, description, key) in enumerate(self._MODES):
-            card = QPushButton()
-            card.setObjectName("playModeCard")
+            card = _ModeCard()
             card.setProperty("playMode", key)
-            card.setCheckable(True)
             card.setAccessibleName(heading)
             card.setToolTip(description)
             card_layout = QVBoxLayout(card)
