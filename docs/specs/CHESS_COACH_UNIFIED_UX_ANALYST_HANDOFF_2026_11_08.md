@@ -669,3 +669,138 @@ PR44 ui/pages/background.py::BackgroundOperationsPage уже имеет «При
 
 Архивные fetches, PGN parse, Stockfish, аналитические агрегации и длительные jobs **не выполняются синхронно на Qt GUI thread**. Не допускать data loss при закрытии во время sync, не переписывать чужие note/line_revision, не создавать одну миграцию только ради UI-card. Соответствие commit источника и метрик должно проверяться перед отображением, а cancellation — кооперативной/подтверждённой по реальному manager contract.
 
+
+
+## 19. ОБЪЁМ БЛИЖАЙШЕГО ИСПОЛНЕНИЯ И ЭТАПЫ ДЛЯ ТЕХАНАЛИТИКА
+
+**Не превращать перепроектирование интерфейса в параллельную разработку пяти новых платформ.** Реальная цель ближайшего цикла — перенос и улучшение существующих возможностей и ровно те новые маршруты/действия, которые явно утверждены. Будущие сложные алгоритмы описаны для сохранения концепции и будущих визуальных эталонов.
+
+| Область | NOW: целевой ближайший UX | FUTURE: пока не объявлять работающим |
+|---|---|---|
+| Sidebar | Пять основных пунктов, Settings footer, Фон header | Шестой раздел «Мои партии» |
+| Главная | Существующие 4 зоны, реальные direct links | AI-наставник, синтетические достижения |
+| Играть | Четыре карточки, per-mode форма, отдельные pending status | Random matchmaking и локальный SF как соперник |
+| GAME | Big board, часы, история, visible live-команды, Focus, finish на доске | Второй ResultPage или подсказки человеку в live |
+| Разбор партии | Три tabs, полный архив, PGN/SAN/FEN/file/editor, разрешённый auto local SF | OCR/photo, автоматический облачный заказ Lichess |
+| Review | Без оценок / с оценками, bar, CP/Δ graph, notes/events, errors exercise | Второй review engine и новый чужой архив |
+| Analysis landing | 4 карточки 2×2, две нижние disabled | Запуск диагностики/подготовки без данных |
+| Opening research | Существующая статистика в Progress и статус «Частично доступно» | Полноценный O1/O2 Explorer/теория/ловушки |
+| Обучение | Текущая puzzle history/replay/reveal/reset и review training | Новый адаптивный учебный движок |
+| Прогресс | Текущие проверенные метрики | Измеритель пользы изученного дебюта без алгоритма |
+| Settings/Background | Реальные prefs, sound, engine, auth, archive, queues | Fake jobs opponent scouting и псевдоочередь |
+
+**Рекомендуемая последовательность технического ревью/исполнения:**
+- **A0:** заново получить актуальные PR44/PR45/main SHA, оценить уже сделанные изменения §15, выбрать допустимую code-base, согласовать release scope.
+- **A1:** снять текущие Windows screenshots и baseline functional inventory; сравнить со спецификацией, не считать новые PNG из §03 существующими.
+- **A2:** проверить базовые P0: Fair Play, account ownership, SQLite/PGN/notes, worker/admission/generation, Lichess 429, async UI.
+- **A3:** глобальная 5-пунктная оболочка, routes и быстрые Home→Review.
+- **A4:** Играть: 4 карточки, conditional panel, memory, online pending.
+- **A5:** GAME / Focus / Finished / Local с сохранением BoardView/handlers.
+- **A6:** Analysis landing 4 cards, будущие disabled, вынесение batch в Фон.
+- **A7:** Вложенный Разбор → 3 tabs/default full archive, Back states.
+- **A8:** Архив master-detail, pager, filters, graph, source labels.
+- **A9:** PGN/SAN/FEN/multiple-file chooser, Editor, local Stockfish auto only after explicit Open and safety.
+- **A10:** Review no-data/analyzed, bar/graph, exercise, source-aware navigation.
+- **A11:** сохранение работающих Education/Progress/Settings/Background функций, WIP честно disabled.
+- **A12:** регрессии, Windows hit tests/visual QA, source mapping, owner review; никаких самовольных merge.
+
+Не считать эти A0–A12 приказом немедленно открыть PR. Это dependency map для аналитика, который должен подготовить исполнимое задание Codex **после ревью и отдельного решения владельца**. Если NOW item требует значительной новой шахматной разработки или отсутствующего API — пометить BLOCKED и вынести scope decision, не скрывать факт.
+
+## 20. ПРИЁМОЧНЫЕ ТЕСТ-КЕЙСЫ — ВСЕ В СТАТУСЕ TO VERIFY
+
+### 20.1. Навигация / оболочка / визуал
+
+| ID | Действие | Expected |
+|---|---|---|
+| UX-T01 | Старт/рестарт | В sidebar ровно 5 разделов, Settings отдельно, Фон в шапке |
+| UX-T02 | Анализ landing | Ровно четыре карточки 2×2, верхние с реальным действием, нижние disabled |
+| UX-T03 | Анализ→Разбор | Отдельный workspace, три компактных tabs; полный архив показан сразу |
+| UX-T04 | Back Разбор→Анализ | Возврат к landing, не в случайный Home |
+| UX-T05 | Home→последняя партия | Прямой REVIEW(game_id) без промежуточных selection pages |
+| UX-T06 | Home→Все партии | Вложенный архив, не шестой sidebar |
+| UX-T07 | GAME finished→Разобрать | REVIEW exact сохранённой игры, без ненужных кликов |
+| UX-T08 | Back Review→Archive | Возвращаются selection/filter/page/scroll/selected ply |
+| UX-T09 | Sidebar responsive / collapse / restore | Выделен родительский route, кнопки/tooltip/accessible имена доступны |
+| UX-T10 | Новое имя PNG ещё без файла | QA честно пишет PLANNED; не заявляет pixel-match |
+| UX-T11 | Canonical PNG реально сохранён/утверждён | Исполнитель открывает его на Windows, сравнивает с native Qt screenshot |
+| UX-T12 | 1120×640,1280×720,1366×768,1672×941,1920×1080 × DPI 100/125/150 | Не обрезаны primary actions/часы, нет перекрытий, keyboard focus/hit test корректны |
+
+### 20.2. «Играть» и состояния партии
+
+| ID | Действие | Expected |
+|---|---|---|
+| UX-T13 | Клик плитки Lichess AI | Только выбран режим, без POST/автоигры |
+| UX-T14 | 4 плитки + форма | Одна контекстная панель снизу; duplicate Mode Combo скрыт |
+| UX-T15 | AI→Friend→Challenge→AI | Настройки каждого режима сохранены отдельно |
+| UX-T16 | Перезапуск | Настройки и выбранный mode восстановлены, никакой автозапуск новой игры |
+| UX-T17 | AI level 1–8/custom time | Все controls валидны и отвечают возможностям endpoint |
+| UX-T18 | Friend Create→confirmed URL | Реальная ссылка, Copy/Cancel, без второго Create |
+| UX-T19 | Friend POST unknown/429, двойной клик | Нет дубля invitation или ложного canceled |
+| UX-T20 | Challenge username accept/reject/cancel | Корректные pending/ACK/restore fields, серверный id |
+| UX-T21 | Offline | Network CTA disabled с объяснением, free board available |
+| UX-T22 | 0 / 1 / N active sessions | Верхняя полоса отсутствует / Продолжить / выбор точного id |
+| UX-T23 | Human online live | Доска, настоящие часы/цвета и история; draw/takeback/resign справа |
+| UX-T24 | Без часов | Одна нейтральная «Без контроля времени», никаких выдуманных 00:00 |
+| UX-T25 | Просмотр старого хода live | Нельзя отправить server move со старой позиции; «К текущей» работает |
+| UX-T26 | Queued premove / отмена | Compact status, no permanently empty premove panel |
+| UX-T27 | Incoming draw/takeback | Принять/Отклонить в доступном игровом блоке, без «Ещё» |
+| UX-T28 | Focus on/off | Board реально больше при свободной площади, имена/часы/Управление доступны и возвращаются |
+| UX-T29 | Завершение, save pending | Последняя доска остаётся; Review ещё недоступен до committed PGN |
+| UX-T30 | Finished confirmed | Ровно два главных CTA, PGN/export secondary, нет ResultPage |
+| UX-T31 | Rematch/AI/local | Только явное новое действие, без повторного неизвестного POST |
+| UX-T32 | Local free board | Ходы за обе стороны/undo/flip/marks, нет human resign/draw/editor palette |
+
+### 20.3. Архив / разбор / Stockfish
+
+| ID | Действие | Expected |
+|---|---|---|
+| UX-T33 | Archive search/date/filter/clear | Все прежние критерии существуют и реально работают, правый detail не исчез |
+| UX-T34 | Первая/последняя страница | Pager под левым списком: обе стрелки+номер рядом, границы disabled |
+| UX-T35 | Owner color unknown | Нет false white ownership/false opponent/false score |
+| UX-T36 | No evaluation | «Не оценено», нет фиктивного графика/0 ошибок |
+| UX-T37 | Official+local accuracy | Источники, coverage и обе стороны верно обозначены, не усреднены |
+| UX-T38 | Graph positive/negative/mate/gap | Perspective белых, две честные заливки, виден ноль, нет ±999 CP, нет ложных сплошных gaps |
+| UX-T39 | Выбор сохранённой строки | Правые детали без запуска движка и без сброса filters |
+| UX-T40 | «Анализ Stockfish» из архива | Только selected game job после fresh safety, не Batch all |
+| UX-T41 | «Экспорт PGN»/«Заметки» | Точная saved line, persistent notes, сохранились revision/source |
+| UX-T42 | Вставить простую SAN без tags | Legal temporary line открывается в Review |
+| UX-T43 | Вставить valid FEN | Correct position, нет fictitious game result |
+| UX-T44 | .pgn с двумя играми | Явный выбор одной, не silently first, не импорт всех |
+| UX-T45 | PGN invalid/encoding/>4 MiB | Понятная ошибка у input, draft retained, no partial DB write |
+| UX-T46 | Старый parse callback после нового generation | Stale result ignored |
+| UX-T47 | Editor фигуры/eraser/turn/castling/EP | Корректный legal FEN либо понятная invalid error |
+| UX-T48 | Editor start/clear/copy/open | Все четыре действия рабочие, нет неверной записи партии |
+| UX-T49 | Внешний material Open безопасно | Один guarded LOCAL Stockfish job, очередь/running/ready status |
+| UX-T50 | Tab switch/hover/empty Open | Ни одного engine job |
+| UX-T51 | No engine / busy queue / auto-run disabled | Честные статусы, нет дубля UCI, manual option если разрешено |
+| UX-T52 | Active human / unknown Fair Play + импорт | НЕТ engine/PV/graph/cached hints, fail closed |
+| UX-T53 | Review no-data | Большая доска+история, без пустой третьей колонки, одно корректное CTA |
+| UX-T54 | Review with data | AdvantageBar, CP/Δ graph, markers/critical moments, phase/notes обе стороны |
+| UX-T55 | Ошибок N=0/N>0 | Корректная доступность «Разобрать мои ошибки (N)», нет фиктивных candidates |
+| UX-T56 | Existing error exercise | Проверить/Подсказка/Пропустить/Следующая/Повторить/Back все сохранены |
+| UX-T57 | Ephemeral Review branch | Undo/reset без записи в original PGN/notes/revisions |
+
+### 20.4. Долгие операции / аккаунты / существующие сервисы
+
+| ID | Действие | Expected |
+|---|---|---|
+| UX-T58 | Lichess account A→B во время async | Ни одни stale A данные не показываются у B |
+| UX-T59 | Archive sync/backfill offline/429 | Сохранён checkpoint, реальный Retry-After и статусы во Фон |
+| UX-T60 | Batch Analysis through Фон | Все прежние queue/retry/pause/cancel/limits по реальным capabilities, нет пятой Analysis tile |
+| UX-T61 | Settings Stockfish | Path/find/verify/official install/nodes/depth/Threads/Hash persistent |
+| UX-T62 | Settings Sound | WAV/cues/preview/volume/«Классический 45%» AS-IS после restart |
+| UX-T63 | Education PuzzleHistory | Filter/pager/replay/reveal/reset, account scope, локальная история без удалённых попыток |
+| UX-T64 | Progress | Existing charts/phase/ratings/puzzle stats/opening stats и safe position links не потеряны |
+| UX-T65 | Opening landing до нового Explorer | «Частично доступно» → настоящая статистика, без фальшивого дерева |
+| UX-T66 | Weakness / Opponent | Полностью disabled и без пустых рабочих окон/сетевых jobs |
+| UX-T67 | Lichess link / settings auth | No leaked token, account-safe restore/revoke, logs anonymized |
+| UX-T68 | Fair Play cached data | Ни score, ни hint, ни tooltip, ни accessibility text не обходит active-human gate |
+
+**Ни один тест из этой таблицы не помечать PASS без исполняемых доказательств на актуальном SHA.**
+
+### 20.5. Existing test suite и evidence
+
+Проверить и дополнить исходные PR44 tests: tests/test_window.py, test_ui_pages.py, test_game_review.py, test_board_view.py, test_lichess.py, test_application_fair_play.py, test_application_state.py, test_background_work.py, test_engine_manager.py, test_lichess_background_lanes.py, test_accuracy.py, test_m45_batch.py, test_m45_openings.py, test_m46_lichess_analytics_backfill.py, test_visual_master_final_regressions.py, tests/visual. Текущие названия проверены по дереву PR44, но содержимое и актуальность надо читать перед написанием новых тестов.
+
+**Отчёт исполнителя должен включать:** exact new code SHA+diff, TOC реально изменённых files, результат автоматических тестов, карту сохранности legacy IDs, Windows screenshots по утверждённым canonical PNG где они есть, реальные Qt geometry/hit test Focus/малого экрана, video/manual checks сетевых ACK и Fair Play, account swap/SQLite/notes/PGN проверку, честный список blocked/open issues. Если эталон ещё не создан — указать «визуальное сравнение с canonical image пока невозможно», не выдавать старый ART за обновлённый.
+
