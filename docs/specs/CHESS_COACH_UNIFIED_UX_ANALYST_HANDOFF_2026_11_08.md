@@ -170,11 +170,11 @@
 4. Desktop исполнитель **открывает реальные файлы** на Windows и сравнивает с запущенным Qt интерфейсом. Если папка недоступна, проверить существующий путь/возможный mounted workspace, но **не выдавать недоступные картинки за визуальную приёмку**. Это blocker только для доказательства visual signoff; самостоятельно исполнять остальную часть работы и указать конкретный missing path в отчёте.
 5. Скриншоты не должны содержать настоящие персональные данные, ключи Lichess, реальные токены и экспорт чужих приватных игр. Рендер не равен доказательству backend или математической точности.
 
-**Канонический суффикс:** PNG. Размер-пример исходных предыдущих рендеров **1672×941 (16:9 приблизительно)**; масштаб **не** фиксирован для layout. Для всех скриншотов один узнаваемый текущий тёмно-синий/лавандовый shell и **пять** пунктов sidebar.
+**Формат референсов:** PNG. Фактические размеры каждого UX-01…UX-13 узнать при открытии файла; старый ориентир **1672×941** не является фиксированной нормой, нельзя вписывать размер по памяти. Масштаб Qt UI адаптивен. Для всех скриншотов один узнаваемый текущий тёмно-синий/лавандовый shell и **пять** пунктов sidebar.
 
 ### 03.2. Имена кадров — ОДНОЗНАЧНОЕ соответствие нужным состояниям
 
-| ID | Каноническое будущее имя PNG в «Примеры» | Какое состояние зафиксировать | Статус/очерёдность |
+| ID | Утверждённое имя PNG (UX-01…13) или будущее плановое (остальные) | Какое состояние зафиксировать | Статус/очерёдность |
 |---|---|---|---|
 | UX-00 | **CHESSCOACH_UX_00_HOME_OVERVIEW_v1.png** | Главная: реальные зоны прогресс/занятие/три игры | Целевая сверка; существующий HOME-референс PR45 |
 | UX-01 | **UX-01_play_lichess_ai.png** | Играть: выбран AI, цвет/время/уровень/старт | **OWNER-APPROVED · NOW; открыть локальный PNG** |
@@ -1025,7 +1025,7 @@ PR44 ui/pages/background.py::BackgroundOperationsPage уже имеет «При
 - **GAME/REVIEW:** [GAME_AND_REVIEW_TARGET_UX_V1_2026_11_07.md](../ux/GAME_AND_REVIEW_TARGET_UX_V1_2026_11_07.md), [feature ledger](../ux/GAME_AND_REVIEW_FEATURE_LEDGER_2026_11_07.md).
 - **Analysis landing:** [ANALYSIS_LANDING_OWNER_DECISIONS_2026_11_08.md](../ux/ANALYSIS_LANDING_OWNER_DECISIONS_2026_11_08.md), [бывший spec](ANALYSIS_LANDING_UI_REWORK_CODEX_SPEC_2026_11_08.md), [ledger](../ux/ANALYSIS_LANDING_FEATURE_LEDGER_2026_11_08.md).
 - **PR45 исторические:** [UX_APPROVED_BASELINE_V1.md](https://github.com/feshakomissarov-prog/chess/blob/chatgpt/ux-information-architecture-2026-11-04/docs/ux/UX_APPROVED_BASELINE_V1.md), [UX_ANALYSIS_APPROVED_V2.md](https://github.com/feshakomissarov-prog/chess/blob/chatgpt/ux-information-architecture-2026-11-04/docs/ux/UX_ANALYSIS_APPROVED_V2.md), [GAME_WORKSPACE_AND_FINISH_STATES_V1.md](https://github.com/feshakomissarov-prog/chess/blob/chatgpt/ux-information-architecture-2026-11-04/docs/ux/GAME_WORKSPACE_AND_FINISH_STATES_V1.md), [EXISTING_FEATURES_TO_UX_COVERAGE_AUDIT.md](https://github.com/feshakomissarov-prog/chess/blob/chatgpt/ux-information-architecture-2026-11-04/docs/ux/EXISTING_FEATURES_TO_UX_COVERAGE_AUDIT.md), [ARCH_UX_01_UNIFIED_EXECUTION_SPEC.md](https://github.com/feshakomissarov-prog/chess/blob/chatgpt/ux-information-architecture-2026-11-04/docs/specs/ARCH_UX_01_UNIFIED_EXECUTION_SPEC.md). **Не переписывать старую реализацию** и не возвращать прежние UX-решения из этих файлов.
-- **Реальная source code база:** PR [#44](https://github.com/feshakomissarov-prog/chess/pull/44), проверенный head 77013b734cde042165f0a006600922f8bfabf724; docs PR [#45](https://github.com/feshakomissarov-prog/chess/pull/45), проверенный head 0abf73b5e6ae2fc476330f5bed9d44b0ed3413e1. Перед исполнением head перечитать.
+- **Реальная кодовая база:** PR [#44](https://github.com/feshakomissarov-prog/chess/pull/44) **уже смержен в main**; перед началом работы получить свежий main SHA. PR [#45](https://github.com/feshakomissarov-prog/chess/pull/45) — отдельная историческая UX-документация, не база для кодовой ветки. Не работать на старых head SHA, не переписывать PR.
 
 ### 24.2. Как восстановить контекст через год или в новом ChatGPT
 
