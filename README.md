@@ -1,5 +1,9 @@
 # Chess Coach
 
+> **07.11.2026 · ТЕКУЩАЯ ТОЧКА ВХОДА:** [ГИД ДЛЯ НОВОГО ЧАТА / ПРИЁМКИ](docs/handoffs/NEW_CHAT_START_HERE_2026_11_07.md) · [карта действующих и исторических ТЗ](docs/specs/INDEX.md). [Кодовый draft PR #44](https://github.com/feshakomissarov-prog/chess/pull/44) HEAD `5c375b070e6644dbded5fca62d960fc09c90651e`, [Windows CI #368](https://github.com/feshakomissarov-prog/chess/actions/runs/42318755878): **837 PASS**. [Документы в draft PR #45](https://github.com/feshakomissarov-prog/chess/pull/45). Оба PR открыты, не слиты; `main` — `3e7f2cd` от 03.11.2026. **Не путать успешный synthetic Qt CI с пользовательской приёмкой или утверждённой визуальной точностью.** Открытые замечания VIS6 обсуждаются с владельцем, **новое исполняемое ТЗ Codex не опубликовано**.
+
+> **07.11.2026 · ЕДИНОЕ ТЗ НА ОБСУЖДЕНИИ:** [VISUAL MASTER §15 — ВИЗУАЛЬНЫЙ + ТЕХНИЧЕСКИЙ аудит одним пакетом](docs/specs/ARCH_UX_01_VISUAL_MASTER_EXECUTION_2026_11_06.md) на code draft PR #44 SHA `5c375b07`. Гид для следующих чатов — [NEW_CHAT_START_HERE](docs/handoffs/NEW_CHAT_START_HERE_2026_11_07.md), [индекс ТЗ](docs/specs/INDEX.md). Это **не новое утверждённое задание Codex**: owner сначала согласует общий пул. Ревью выявило source-confirmed defects OAuth credential CAS, untagged archive/puzzle background signals при смене профиля, `partial` ready Lichess counts, dashboard worker handle race, shutdown backfill, timestamp semantics; performance/leases/SQLite/liveness в status RISK+test. Добавлена адаптивность Qt 125/150% и approved 3-art fidelity. CI #368 837 PASS от старого кода, новые исправления НЕ сделаны; PR #44/#45 draft, main не менять.
+
 **Персональный шахматный тренер: от непонятной позиции — к пониманию и навыку.**
 
 Chess Coach — разрабатываемое настольное приложение для Windows. Цель проекта — **помогать человеку разобраться в любом шахматном вопросе**, а не только находить неудачные ходы: тактика, дебюты и ловушки, стратегические планы и структуры, типы позиций, эндшпили, расчёт вариантов, ошибки оценки и принятия решений.
@@ -8,7 +12,15 @@ Chess Coach — разрабатываемое настольное прилож
 
 [**Продуктовая цель и образовательные принципы**](docs/PRODUCT_VISION.md) · [**Дорожная карта**](docs/ROADMAP.md) · [**Текущее состояние / handoff**](docs/PROJECT_STATUS.md)
 
-**Актуально на 03.11.2026:** M4.6 [PR #41](https://github.com/feshakomissarov-prog/chess/pull/41) объединён в `main` после Windows CI 553 PASS и ручной проверки владельца; утверждённая модель компетенций — [PR #42](https://github.com/feshakomissarov-prog/chess/pull/42). **Следующий отдельный этап — архитектурный рефакторинг без изменения функций:** [целевая архитектура](docs/architecture/CHESS_COACH_TARGET_ARCHITECTURE.md) · [подробное ТЗ ARCH-01](docs/architecture/ARCHITECTURE_REFACTOR_EXECUTION_SPEC.md) · [ADR](docs/architecture/ADR-0001-MODULAR-MONOLITH.md). Таблица ниже сохраняет исторический срез на 01.11.2026.
+> Исторические RF1…RF9, MASTER и VIS1…VIS6 сохранены в [карте ТЗ](docs/specs/INDEX.md) и [журнале проекта](docs/PROJECT_STATUS.md); старые обозначения «текущее» в архивных документах не являются новыми командами Codex.
+
+**Утверждено 04.11.2026:** [Анализ UX-A2 (три направления, вертикальная шкала и прежний переключаемый график)](docs/ux/UX_ANALYSIS_APPROVED_V2.md) · [Игра после завершения без панели результата — UX-GAME-01](docs/ux/GAME_WORKSPACE_AND_FINISH_STATES_V1.md). [Дальняя идея: подготовка к сопернику](docs/research/OPPONENT_PREPARATION_LONG_TERM_FEATURE.md). **Это пока дизайн, не новый код.**
+
+**Сохранение функциональности при новом дизайне:** [аудит 24 работающих групп и их мест в меню](docs/ux/EXISTING_FEATURES_TO_UX_COVERAGE_AUDIT.md). **После партии остаётся прежняя доска, справа только «Разобрать» / «Вызвать снова», без экрана итога.** Встроенную библиотеку звуков и настройки сохраняем целиком. Внутренний экран обучения пока подробно не проектируем.
+
+**Утверждённые UX-макеты:** [UX-B1](docs/ux/UX_APPROVED_BASELINE_V1.md), [рабочая детализация](docs/ux/CHESS_COACH_FULL_INTERFACE_WORKING_DRAFT.md). **Единое кодовое ТЗ уже подготовлено**: [ARCH-UX-01 v1.1](docs/specs/ARCH_UX_01_UNIFIED_EXECUTION_SPEC.md); оно объединяет новую оболочку с готовой основой PR #44, без изменения main до принятия.
+
+**Архитектура:** [целевая модель модульного монолита](docs/architecture/CHESS_COACH_TARGET_ARCHITECTURE.md) · [исторический ARCH-01](docs/architecture/ARCHITECTURE_REFACTOR_EXECUTION_SPEC.md) · [единое ARCH-UX-01](docs/specs/ARCH_UX_01_UNIFIED_EXECUTION_SPEC.md). Утверждённая модель шахматных компетенций — [PR #42](https://github.com/feshakomissarov-prog/chess/pull/42).
 
 
 ## Какого тренера мы строим
@@ -25,23 +37,17 @@ Chess Coach — разрабатываемое настольное прилож
 
 **Важное разграничение:** это *целевая функциональность*, а не список уже готовых возможностей программы. Тренер, способный надёжно объяснять всё перечисленное, ещё **не создан**. Мы начинаем с проверяемого хранилища партий, корректного шахматного анализа и понятного интерфейса.
 
-## Что работает, а что разрабатывается
+## Что работает и что проверяем — 07.11.2026
 
-
-| Статус на 1 ноября 2026 | Функциональность |
+| Где | Состояние |
 | --- | --- |
-| **В `main` (M0–M4)** | Windows/PySide6/Lichess, библиотека партий и история задач, SQLite v9, одиночный Stockfish UCI, импорт готовых Lichess-оценок, общая статистика, предходы, превращение и навигация по истории; PR #26 слит |
-| **Проверено** | [Интеграционный PR #26](https://github.com/feshakomissarov-prog/chess/pull/26): Windows CI 212 PASS. Пользователь ранее подтвердил 6/6 первоначальных ручных GUI smoke и импорт реальных партий/задач; новые UX-пункты и реальный UCI ещё требуют отдельного пилота |
-| **Текущий блок: M4.5 и M4.5.1 (PR #30)** | Массовый приоритетный анализ новых→старых партий, паспорт каждой партии, средняя точность и ошибки в списке, широкий каталог событий, дебюты/фазы, текущий профиль и история; [большое ТЗ](docs/specs/M4_5_BATCH_ANALYSIS_PERSONAL_DIAGNOSTICS.md) · [журнал](docs/handoffs/M4_5_EXECUTION_LOG.md) |
-| **Долг** | Ручная регрессия UX PR #26, пилот реального Stockfish, проверенная копия SQLite перед миграциями на личных данных — [Issue #5](https://github.com/feshakomissarov-prog/chess/issues/5) |
-| **После приёмки M4.5.1: M4.6** | [Детальное ТЗ Chess Coach Desktop Experience](docs/specs/M4_6_DESKTOP_EXPERIENCE.md): тёмный интерфейс, sidebar, содержательные карточки партий, звуки, запуск двойным кликом и сохранение рабочего места; реализация ещё не начата |
-| **Позднее** | M5 — голос/визуальные мысли; M6 — ИИ-тренер; персональные упражнения и глубокие объяснения ошибок |
+| **`main`** | Фундамент M0–M4.6, утверждённая модель компетенций и ARCH-01. Последний merge PR #43 — 03.11.2026; **текущий ARCH-UX-01 не слит**. |
+| **[draft PR #44](https://github.com/feshakomissarov-prog/chess/pull/44)** | Действующая оболочка из 6 разделов, игра, архив/Review, Stockfish/Lichess, фоновые задачи, анализ и новая тёмно-фиолетовая палитра. Текущий SHA `5c375b0`, exact-head [Windows CI #368](https://github.com/feshakomissarov-prog/chess/actions/runs/42318755878): **837 PASS**, synthetic native screenshots. **Не принято окончательно по UI и физическому пилоту**. |
+| **[draft PR #45](https://github.com/feshakomissarov-prog/chess/pull/45)** | Утверждённые UX-решения, VISUAL MASTER, полный source audit, карта ТЗ и [новый handoff](docs/handoffs/NEW_CHAT_START_HERE_2026_11_07.md). **Только документы**, не код приложения. |
+| **Пока обсуждаем** | После VIS6: компактная геометрия Qt 125/150%, визуальная близость к 3 артам, точность `partial` Lichess, race быстрого Home preview, нагрузка аналитической SQLite. **Не новое Codex-ТЗ**. |
+| **Дальний продукт** | Глубокая аналитика, поиск слабых мест, соперники, обучение на своих партиях; изменение приоритетов roadmap ещё **не утверждено**. |
 
-### Текущий технический этап
-
-M0–M4 интегрированы в main ([PR #26](https://github.com/feshakomissarov-prog/chess/pull/26)). **Следующее большое задание для десктопного Codex — [M4.5 v2.0](docs/specs/M4_5_BATCH_ANALYSIS_PERSONAL_DIAGNOSTICS.md)**, этапы 0–I, [журнал исполнения](docs/handoffs/M4_5_EXECUTION_LOG.md), [эпик #28](https://github.com/feshakomissarov-prog/chess/issues/28). Codex работает в отдельной feature-ветке, ведёт checkpoints в GitHub и не сливает main самостоятельно.
-
-Ключевые продуктовые решения: полный архив рассчитывается с приоритетом свежих партий, локальный Stockfish ограничен быстрым бюджетом, углублённый анализ выборочен, классификация расширяема, историческая и текущая статистика раздельны; общие показатели включают **среднюю точность партии с источником и N, ошибки/партию и на 100 оценённых собственных ходов, покрытие, дебюты и фазы**. Это план, не готовая новая функциональность. Ручной долг в [Issue #5](https://github.com/feshakomissarov-prog/chess/issues/5).
+**Проверки:** independent source review + Windows CI на точном SHA + сравнение настоящих скриншотов с утверждёнными эталонами. **Подключённый Lichess** — основной режим для владельца; offline/synthetic тесты не заменяют его физическую Windows-проверку. Никаких merge/main без разрешения владельца.
 
 ## Как устроена работа тренера
 
@@ -65,7 +71,7 @@ M0–M4 интегрированы в main ([PR #26](https://github.com/feshakom
 
 ## Запуск на Windows
 
-**Текущий исходный код `main` (M0–M4):** используйте существующее окружение проекта. Если локально есть несохранённые изменения, **не переключайте ветку принудительно**.
+**Исходный код main (M0–M4.6, без ещё не реализованного ARCH-UX UX):** используйте существующее окружение проекта. Если локально есть несохранённые изменения, **не переключайте ветку принудительно**.
 
 ```powershell
 cd G:\project\chess
@@ -110,7 +116,7 @@ git pull --ff-only
 | --- | --- |
 | [PRODUCT_VISION](docs/PRODUCT_VISION.md) | Миссия полноценного тренера и цикл снятия непонимания |
 | [PCD](docs/PCD.md) / [PRD](docs/PRD.md) | Концепция, функциональные требования, сценарии |
-| [ROADMAP](docs/ROADMAP.md) | Порядок M0–M6, текущий большой блок M4.5 |
+| [ROADMAP](docs/ROADMAP.md) | Актуальный ARCH-UX-01 и исторические M0–M6 |
 | [ТЗ M4.5 v2.0](docs/specs/M4_5_BATCH_ANALYSIS_PERSONAL_DIAGNOSTICS.md) | Исполняемая спецификация для автономной разработки Codex |
 | [Журнал M4.5](docs/handoffs/M4_5_EXECUTION_LOG.md) | Checkpoints, SHA/PR и восстановление работы после обрыва |
 | [PROJECT_STATUS](docs/PROJECT_STATUS.md) | Актуальный handoff и проверенные результаты |
