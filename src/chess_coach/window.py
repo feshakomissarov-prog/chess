@@ -2954,9 +2954,11 @@ class MainWindow(QMainWindow):
         self._external_study_generation += 1
         generation = self._external_study_generation
         tab_index = self.analysis_page.tabs.currentIndex()
+        source = ("file" if file_path is not None else
+                  "editor" if tab_index == 2 else "paste")
         account = str(getattr(self.lichess, "username", "") or "").strip().casefold()
         auth_generation = getattr(self.lichess, "auth_generation", None)
-        self._external_study_owner = (generation, tab_index, account, auth_generation)
+        self._external_study_owner = (generation, source, tab_index, account, auth_generation)
         previous = getattr(self, "_external_study_handle", None)
         if previous is not None:
             previous.cancel("session_replaced")
@@ -2998,9 +3000,9 @@ class MainWindow(QMainWindow):
             return
         account = str(getattr(self.lichess, "username", "") or "").strip().casefold()
         if (self.screen_stack.currentWidget() is not self.analysis_page
-                or self.analysis_page.tabs.currentIndex() != owner[1]
-                or account != owner[2]
-                or getattr(self.lichess, "auth_generation", None) != owner[3]):
+                or self.analysis_page.tabs.currentIndex() != owner[2]
+                or account != owner[3]
+                or getattr(self.lichess, "auth_generation", None) != owner[4]):
             return
         if error:
             self.analysis_page.set_external_status(f"Не удалось открыть PGN/FEN: {error}")
@@ -3017,7 +3019,7 @@ class MainWindow(QMainWindow):
     def _external_study_tool_changed(self, index: int) -> None:
         owner = getattr(self, "_external_study_owner", None)
         handle = getattr(self, "_external_study_handle", None)
-        if owner and owner[1] != index and handle is not None and handle.is_alive():
+        if owner and owner[2] != index and handle is not None and handle.is_alive():
             self._external_study_generation += 1
             handle.cancel("nested_tool_changed")
 
@@ -3028,7 +3030,7 @@ class MainWindow(QMainWindow):
         if self.screen_stack.currentWidget() is not self.analysis_page:
             return False
         owner = getattr(self, "_external_study_owner", None)
-        if owner and owner[1] != self.analysis_page.tabs.currentIndex():
+        if owner and owner[2] != self.analysis_page.tabs.currentIndex():
             return False
         existing_worker = getattr(self, "_analysis_worker_context", None)
         if (existing_worker and str(existing_worker[1]).startswith("external:")
@@ -3054,6 +3056,8 @@ class MainWindow(QMainWindow):
             "eco": headers.get("ECO"), "opening_name": headers.get("Opening"),
         }
         origin = {
+            "source": (owner[1] if owner else
+                       "editor" if self.analysis_page.tabs.currentIndex() == 2 else "paste"),
             "tab": self.analysis_page.tabs.currentIndex(),
             "text": self.analysis_page.external_text.toPlainText(),
             "candidates": list(self.analysis_page.candidates),

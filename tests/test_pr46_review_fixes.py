@@ -50,7 +50,7 @@ def test_multi_game_parse_uses_inline_chooser_without_modal(qtbot, tmp_path, mon
     monkeypatch.setattr(QInputDialog, "getItem", lambda *_args, **_kwargs:
                         (_ for _ in ()).throw(AssertionError("modal chooser used")))
     window._external_study_generation = 4
-    window._external_study_owner = (4, 1, "", None)
+    window._external_study_owner = (4, "paste", 1, "", None)
     window_module_parsed = {"games": [
         {"headers": {}, "moves": ["e2e4"], "initial_fen": "startpos"},
         {"headers": {}, "moves": ["d2d4"], "initial_fen": "startpos"},
@@ -77,6 +77,7 @@ def test_external_review_back_restores_import_tab_and_text(qtbot, tmp_path):
     assert window.screen_stack.currentWidget() is window.analysis_page
     assert window.analysis_page.workspace.currentWidget() is window.analysis_page.breakdown_page
     assert window.analysis_page.tabs.currentIndex() == 1
+    assert window._external_review_origin is None
     assert window.analysis_page.external_text.toPlainText() == draft
     window.close()
 
@@ -90,6 +91,7 @@ def test_editor_review_back_restores_editor_source_tab(qtbot, tmp_path):
     assert window._open_external_study_candidate({
         "initial_fen": chess.STARTING_FEN, "moves": [], "headers": {},
     })
+    assert window._external_review_origin["source"] == "editor"
     window._return_from_review()
     assert window.analysis_page.tabs.currentIndex() == 2
     assert window.screen_stack.currentWidget() is window.analysis_page
@@ -111,6 +113,7 @@ def test_external_parser_callback_is_invalidated_on_nested_tab_change(qtbot, tmp
         entered.set(), release.wait(3),
         {"initial_fen": "startpos", "moves": ["e2e4"], "headers": {}})[-1])
     assert window.open_external_study_text("1. e4")
+    assert window._external_study_owner[1] == "paste"
     assert entered.wait(2)
     window.analysis_page.tabs.setCurrentIndex(2)
     release.set()
@@ -152,7 +155,7 @@ def test_older_external_parse_generation_cannot_replace_new_candidate_set(qtbot,
     window.show_analysis()
     window.analysis_page.show_breakdown(1)
     window._external_study_generation = 2
-    window._external_study_owner = (2, 1, "", None)
+    window._external_study_owner = (2, "paste", 1, "", None)
     window._external_study_parse_finished(
         1, {"initial_fen": "startpos", "moves": ["e2e4"], "headers": {}}, None)
     assert window.analysis_page.candidate_list.count() == 0
