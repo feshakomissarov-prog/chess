@@ -6,6 +6,8 @@ from dataclasses import dataclass
 from typing import Any
 
 import chess
+from ..domain.accuracy import calculate_saved_game_accuracy
+from .phases import PHASE_FALLBACK_VERSION, infer_phase_boundaries, phase_at_ply
 
 ACCEPTANCE_POLICY_VERSION = "saved-stockfish-pv-improvement-v1"
 MIN_VERIFIED_DEPTH = 15
@@ -31,6 +33,8 @@ class ReviewMove:
     mate_white: int | None
     depth: int | None
     nodes: int | None
+    local_accuracy: float | None = None
+    local_accuracy_formula_id: str | None = None
 
 
 def _score(row: dict[str, Any] | None) -> int | None:
@@ -58,7 +62,8 @@ def _pv(row: dict[str, Any] | None) -> list[str]:
     return list(value) if isinstance(value, (list, tuple)) else str(value).split()
 
 
-def load_game_review(repository, game: dict[str, Any]) -> dict[str, Any]:
+def load_game_review(repository, game: dict[str, Any], *,
+                     analysis_source: str | None = None) -> dict[str, Any]:
     """Read current line, saved analysis, source-aware metrics and notes, without UCI."""
     game_id = str(game["game_id"])
     line = repository.current_line(game_id)
@@ -68,7 +73,8 @@ def load_game_review(repository, game: dict[str, Any]) -> dict[str, Any]:
     account_id = game.get("account_id")
     owner_color = game.get("account_color") or game.get("color")
     analysis = repository.latest_analysis_detail(
-        game_id, revision, account_id=account_id, user_color=owner_color)
+        game_id, revision, account_id=account_id, user_color=owner_color,
+        analysis_source=analysis_source)
 
     fen = chess.STARTING_FEN if line["initial_fen"] == "startpos" else line["initial_fen"]
     board = chess.Board(fen)
@@ -94,7 +100,12 @@ def load_game_review(repository, game: dict[str, Any]) -> dict[str, Any]:
             cp_loss=(int(metric["cp_loss"]) if metric.get("cp_loss") is not None else None),
             source=str(metric.get("source") or (analysis or {}).get("source") or "unknown"),
             white_cp=assessment.get("white_cp"), mate_white=assessment.get("mate_white"),
-            depth=assessment.get("depth"), nodes=assessment.get("nodes")))
+            depth=assessment.get("depth"), nodes=assessment.get("nodes"),
+            local_accuracy=(float(metric["accuracy"]) if metric.get("accuracy") is not None
+                            and str(metric.get("accuracy_source") or "").startswith(
+                                "stockfish-local-lichess-method")
+                            else None),
+            local_accuracy_formula_id=metric.get("accuracy_formula_id")))
 
     source_is_lichess = bool(game.get("source") in {"lichess", "lichess_archive"}
                              or game.get("source_game_id"))
@@ -123,6 +134,8 @@ def load_game_review(repository, game: dict[str, Any]) -> dict[str, Any]:
                 best_matches += int(best == chess.Move.from_uci(move.uci))
         per_side[color] = {
             "total": len(side_moves), "assessed": len(assessed),
+            "classified": sum(move.severity in {"good", "inaccuracy", "mistake", "blunder"}
+                              for move in side_moves),
             "best_known": best_known, "best_matches": best_matches,
             "good": sum(move.severity == "good" for move in assessed),
             "inaccuracy": sum(move.severity == "inaccuracy" for move in assessed),
@@ -136,8 +149,35 @@ def load_game_review(repository, game: dict[str, Any]) -> dict[str, Any]:
     }
     server_backfill = (repository.lichess_analysis_backfill_state(
         str(account_id), game_id) if account_id and source_is_lichess else None)
+    read_phases = getattr(repository, "phase_boundaries", None)
+    boundaries = read_phases(game_id, revision) if analysis and read_phases else None
+    if analysis and boundaries is None:
+        middle, end = infer_phase_boundaries(positions)
+        boundaries = {"middle_start_ply": middle, "end_start_ply": end,
+                      "source": PHASE_FALLBACK_VERSION}
+    phase_by_ply = {
+        move.ply: phase_at_ply(boundaries.get("middle_start_ply"),
+                               boundaries.get("end_start_ply"), move.ply)
+        for move in moves
+    } if boundaries else {}
+    local_accuracy = calculate_saved_game_accuracy(
+        game, line, analysis, positions, phase_by_ply=phase_by_ply)
+    if analysis is not None:
+        analysis["local_game_accuracy"] = dict(local_accuracy.values)
+        analysis["local_game_accuracy_formula_id"] = local_accuracy.formula_id
+        analysis["local_accuracy_status"] = {
+            "status": local_accuracy.status, "reason": local_accuracy.reason,
+            "source": local_accuracy.source, "formula_id": local_accuracy.formula_id,
+            "coverage": {"scored": local_accuracy.coverage[0],
+                         "total": local_accuracy.coverage[1]},
+            "depth_range": local_accuracy.depth_range,
+            "terminal_positions_derived": local_accuracy.terminal_positions_derived,
+            "official": False,
+        }
     coverage = (analysis or {}).get("coverage") or {}
+    sources = getattr(repository, "game_analysis_sources", None)
     return {
+        "available_sources": sources(game_id, revision, line["line_hash"]) if sources else set(),
         "game": dict(game), "line": dict(line), "revision": revision, "moves": moves,
         "positions": positions, "analysis": analysis, "analysis_source":
             (analysis or {}).get("source"), "analysis_status": (analysis or {}).get("status"),
@@ -145,6 +185,15 @@ def load_game_review(repository, game: dict[str, Any]) -> dict[str, Any]:
                      "total": int(coverage.get("total_positions") or (len(moves) + 1))},
         "owner_color": owner_color if owner_color in {"white", "black"} else None,
         "per_side": per_side, "official_accuracy": official_accuracy,
+        "local_game_accuracy": dict(local_accuracy.values),
+        "local_phase_accuracy": local_accuracy.phase_values,
+        "phase_by_ply": phase_by_ply,
+        "phase_source": boundaries.get("source") if boundaries else None,
+        "local_accuracy_status": analysis.get("local_accuracy_status") if analysis else {
+            "status": local_accuracy.status, "reason": local_accuracy.reason,
+            "coverage": {"scored": local_accuracy.coverage[0],
+                         "total": local_accuracy.coverage[1]},
+            "formula_id": local_accuracy.formula_id, "official": False},
         "lichess_backfill_state": server_backfill,
         "notes": repository.list_notes(game_id, line_revision=revision),
     }

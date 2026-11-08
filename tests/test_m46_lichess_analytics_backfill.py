@@ -1,5 +1,6 @@
 import json
 import threading
+from datetime import datetime, timedelta, timezone
 from urllib.parse import parse_qs, urlparse
 
 import pytest
@@ -115,7 +116,6 @@ def test_old_games_auto_queue_in_small_pages_merge_server_data_and_resume_after_
         if cursor in before:
             assert after_first[cursor] == before[cursor]
     repository.shutdown()
-
     repository = GameRepository(path)  # A real SQLite reopen, not an in-memory fake.
     assert repository.get_game(first_game_id)["lichess_accuracy_black"] == 87
     fake2 = FakeJSONClient({game_id: _export(game_id) for game_id in ids})
@@ -133,6 +133,92 @@ def test_old_games_auto_queue_in_small_pages_merge_server_data_and_resume_after_
     repository.shutdown()
 
 
+def test_concurrent_backfill_read_does_not_duplicate_a_live_export(tmp_path):
+    path = tmp_path / "single-live-export.sqlite3"
+    repository = GameRepository(path)
+    game_id = _import_games(repository, 1)[0]
+    entered = threading.Event()
+    release = threading.Event()
+
+    class BlockingFake(FakeJSONClient):
+        def export_game_json(self, token, requested_game_id):
+            self.calls.append((token, requested_game_id))
+            entered.set()
+            assert release.wait(3)
+            return self.responses[requested_game_id]
+
+    fake = BlockingFake({game_id: _export(game_id)})
+    result = []
+    errors = []
+
+    def first_worker():
+        try:
+            result.append(ArchiveSync(fake, repository).refresh_ready_analytics(
+                "Me", "synthetic-token", threading.Event(), limit=1))
+        except Exception as exc:
+            errors.append(exc)
+
+    worker = threading.Thread(target=first_worker, daemon=True)
+    worker.start()
+    try:
+        assert entered.wait(2)
+        account_id = repository.ensure_archive_account("Me")
+        state = repository.lichess_analysis_backfill_state(account_id, game_id)
+        assert state["lease_owner"]
+        assert repository.heartbeat_lichess_analysis_backfill(
+            account_id, game_id, lease_owner=state["lease_owner"])
+        with repository._connection() as db:
+            stale = (datetime.now(timezone.utc) - timedelta(minutes=11)).isoformat()
+            db.execute("UPDATE lichess_analysis_backfill SET updated_at=? "
+                       "WHERE account_id=? AND game_id=?", (stale, account_id, game_id))
+        repository.enqueue_lichess_analysis_backfill(account_id)
+        state = repository.lichess_analysis_backfill_state(account_id, game_id)
+        assert state["accuracy_status"] == "running"
+        assert state["lease_owner"]
+        duplicate = ArchiveSync(fake, repository).refresh_ready_analytics(
+            "Me", "synthetic-token", threading.Event(), limit=1)
+        assert duplicate["selected"] == 0
+        assert len(fake.calls) == 1
+    finally:
+        release.set()
+        worker.join(timeout=3)
+        assert not worker.is_alive()
+        assert not errors
+        assert len(fake.calls) == 1
+        repository.shutdown()
+
+
+def test_expired_worker_response_cannot_merge_after_new_owner_claims_line(tmp_path):
+    repository = GameRepository(tmp_path / "stale-lease-response.sqlite3")
+    game_id = _import_games(repository, 1)[0]
+    account_id = repository.ensure_archive_account("Me")
+    repository.enqueue_lichess_analysis_backfill(account_id)
+    item = repository.list_lichess_analysis_backfill(account_id, limit=1)[0]
+    try:
+        assert repository.claim_lichess_analysis_backfill(
+            account_id, item["game_id"], lease_owner="old-worker",
+            line_revision=item["line_revision"], line_hash=item["line_hash"])
+        with repository._connection() as db:
+            expired = (datetime.now(timezone.utc) - timedelta(minutes=11)).isoformat()
+            db.execute("UPDATE lichess_analysis_backfill SET lease_heartbeat_at=?,updated_at=? "
+                       "WHERE account_id=? AND game_id=?",
+                       (expired, expired, account_id, game_id))
+        repository.enqueue_lichess_analysis_backfill(account_id)
+        assert repository.claim_lichess_analysis_backfill(
+            account_id, item["game_id"], lease_owner="new-worker",
+            line_revision=item["line_revision"], line_hash=item["line_hash"])
+        with pytest.raises(StaleGameLineError, match="stale_lease"):
+            repository.merge_lichess_ready_analysis(
+                "Me", game_id, source_game_id=game_id, account_id=account_id,
+                expected_line_revision=item["line_revision"],
+                expected_line_hash=item["line_hash"], expected_moves=item["moves"],
+                accuracy={"white": 99.0, "black": 99.0}, player_analysis={},
+                assessments=[], move_annotations=[], validation_issues=[],
+                lease_owner="old-worker")
+        assert repository.get_game(game_id)["lichess_accuracy_white"] is None
+    finally:
+        repository.shutdown()
+
 def test_no_server_data_is_not_repolled_before_seven_day_ttl(tmp_path):
     repository = GameRepository(tmp_path / "no-data.sqlite3")
     game_id = _import_games(repository, 1)[0]
@@ -143,9 +229,168 @@ def test_no_server_data_is_not_repolled_before_seven_day_ttl(tmp_path):
     second = sync.refresh_ready_analytics("Me", "fake", threading.Event(), limit=10)
     assert second["selected"] == 0 and second["checked"] == 0
     assert len(fake.calls) == 1
-    manual = sync.refresh_ready_analytics(
+    global_check = sync.refresh_ready_analytics(
         "Me", "fake", threading.Event(), limit=10, force_retry=True)
+    assert global_check["selected"] == 0 and global_check["checked"] == 0
+    assert len(fake.calls) == 1
+    state = repository.lichess_analysis_backfill_state("lichess:me", game_id)
+    assert not repository.retry_lichess_analysis_game(
+        "lichess:me", game_id, line_revision=state["line_revision"],
+        source_game_id=game_id)
+    not_due = sync.refresh_ready_analytics(
+        "Me", "fake", threading.Event(), limit=10, selected_game_id=game_id,
+        expected_line_revision=int(state["line_revision"]),
+        expected_source_game_id=game_id)
+    assert not_due["selected"] == 0 and len(fake.calls) == 1
+    with repository._connection() as db:
+        db.execute("UPDATE lichess_analysis_backfill SET accuracy_next_retry_at=?,"
+                   "evals_next_retry_at=? WHERE account_id=? AND game_id=?",
+                   ("2025-01-01T00:00:00+00:00", "2025-01-01T00:00:00+00:00",
+                    "lichess:me", game_id))
+    assert repository.retry_lichess_analysis_game(
+        "lichess:me", game_id, line_revision=state["line_revision"],
+        source_game_id=game_id)
+    manual = sync.refresh_ready_analytics(
+        "Me", "fake", threading.Event(), limit=10, selected_game_id=game_id,
+        expected_line_revision=int(state["line_revision"]),
+        expected_source_game_id=game_id)
     assert manual["checked"] == 1 and len(fake.calls) == 2
+    with repository._connection() as db:
+        db.execute("UPDATE lichess_analysis_backfill SET accuracy_next_retry_at=?,"
+                   "evals_next_retry_at=? WHERE account_id=? AND game_id=?",
+                   ("2025-01-01T00:00:00+00:00", "2025-01-01T00:00:00+00:00",
+                    "lichess:me", game_id))
+    fake.responses[game_id] = _export(game_id)
+    delayed = sync.refresh_ready_analytics("Me", "fake", threading.Event(), limit=10)
+    assert delayed["checked"] == delayed["accuracy"] == delayed["evals"] == 1
+    assert repository.get_game(game_id)["lichess_accuracy_white"] == 91
+    assert len(fake.calls) == 3
+    assert sync.refresh_ready_analytics("Me", "fake", threading.Event(), limit=10)["selected"] == 0
+    repository.shutdown()
+
+
+def test_backfill_due_facets_are_independent_and_cooldown_is_preserved(tmp_path):
+    from datetime import datetime, timedelta, timezone
+
+    repository = GameRepository(tmp_path / "independent-due.sqlite3")
+    game_id = _import_games(repository, 1)[0]
+    future = (datetime.now(timezone.utc) + timedelta(days=2)).isoformat()
+    repository.enqueue_lichess_analysis_backfill("lichess:me")
+    with repository._connection() as db:
+        db.execute("UPDATE lichess_analysis_backfill SET accuracy_status='queued',"
+                   "evals_status='no_server_data',evals_next_retry_at=? "
+                   "WHERE account_id='lichess:me' AND game_id=?", (future, game_id))
+    accuracy_only = repository.list_lichess_analysis_backfill("lichess:me", limit=1)[0]
+    assert accuracy_only["check_accuracy"] == 1
+    assert accuracy_only["check_evals"] == 0
+    repository.mark_lichess_analysis_backfill_running(
+        "lichess:me", game_id, check_accuracy=True, check_evals=False)
+    repository.record_lichess_analysis_backfill(
+        "lichess:me", game_id, accuracy_status="has_data", evals_status="queued",
+        check_accuracy=True, check_evals=False)
+    state = repository.lichess_analysis_backfill_state("lichess:me", game_id)
+    assert state["accuracy_status"] == "has_data"
+    assert state["evals_status"] == "no_server_data"
+    assert state["evals_next_retry_at"] == future
+
+    with repository._connection() as db:
+        db.execute("UPDATE lichess_analysis_backfill SET accuracy_status='no_server_data',"
+                   "accuracy_next_retry_at=?,evals_status='queued',evals_next_retry_at=NULL "
+                   "WHERE account_id='lichess:me' AND game_id=?", (future, game_id))
+    evals_only = repository.list_lichess_analysis_backfill("lichess:me", limit=1)[0]
+    assert evals_only["check_accuracy"] == 0
+    assert evals_only["check_evals"] == 1
+    repository.shutdown()
+
+
+def test_backfill_summary_exposes_attempt_success_retry_and_daily_budget(tmp_path):
+    from datetime import datetime, timedelta, timezone
+
+    repository = GameRepository(tmp_path / "backfill-visible-status.sqlite3")
+    game_id = _import_games(repository, 1)[0]
+    repository.enqueue_lichess_analysis_backfill("lichess:me")
+    row = repository.list_lichess_analysis_backfill("lichess:me", limit=1)[0]
+    repository.mark_lichess_analysis_backfill_running(
+        "lichess:me", game_id, line_revision=row["line_revision"],
+        line_hash=row["line_hash"])
+    assert repository.reserve_lichess_analysis_request("lichess:me", daily_limit=4)
+    repository.record_lichess_analysis_backfill(
+        "lichess:me", game_id, accuracy_status="has_data", evals_status="partial",
+        retry_after_seconds=1800, line_revision=row["line_revision"], line_hash=row["line_hash"])
+    with repository._connection() as db:
+        db.execute("UPDATE games SET lichess_accuracy_white=91 "
+                   "WHERE game_id=?", (game_id,))
+    summary = repository.lichess_analysis_backfill_summary("lichess:me")
+    assert summary["last_attempt_at"]
+    assert summary["last_success_at"]
+    assert summary["checked"] == 1
+    assert summary["accuracy"] == 1
+    # A partial status alone is not proof that any server evaluations were saved.
+    assert summary["evals"] == 0
+    assert summary["retry_waiting"] == 1
+    assert summary["requests_today"] == 1
+    assert summary["retry_at"]
+    due = repository.lichess_analysis_backfill_next_eligible_at(
+        "lichess:me", daily_limit=4, enqueue=False)
+    assert due and datetime.fromisoformat(due) > datetime.now(timezone.utc)
+    last_attempt = summary["last_attempt_at"]
+    repository.set_lichess_analysis_backfill_paused("lichess:me", True)
+    paused_summary = repository.lichess_analysis_backfill_summary("lichess:me")
+    assert paused_summary["last_attempt_at"] == last_attempt
+    assert paused_summary["paused"] is True
+    repository.shutdown()
+
+
+def test_backfill_next_eligibility_tracks_due_queue_retry_after_and_daily_reset(tmp_path):
+    from datetime import datetime, timedelta, timezone
+
+    repository = GameRepository(tmp_path / "durable-next-eligibility.sqlite3")
+    game_id = _import_games(repository, 1)[0]
+    repository.enqueue_lichess_analysis_backfill("lichess:me")
+    now = datetime.now(timezone.utc)
+    due = repository.lichess_analysis_backfill_next_eligible_at("lichess:me")
+    assert due is not None and datetime.fromisoformat(due) <= now + timedelta(seconds=1)
+
+    retry_at = (now + timedelta(hours=3)).isoformat()
+    with repository._connection() as db:
+        db.execute("UPDATE lichess_analysis_backfill SET accuracy_status='no_server_data',"
+                   "accuracy_next_retry_at=?,evals_status='has_data',evals_next_retry_at=NULL "
+                   "WHERE account_id='lichess:me' AND game_id=?", (retry_at, game_id))
+    assert repository.lichess_analysis_backfill_next_eligible_at("lichess:me") == retry_at
+    repository.shutdown()
+
+    # Retry eligibility survives closing and reopening the real SQLite file.
+    repository = GameRepository(tmp_path / "durable-next-eligibility.sqlite3")
+    assert repository.lichess_analysis_backfill_next_eligible_at("lichess:me") == retry_at
+    repository.shutdown()
+
+
+def test_backfill_daily_limit_persists_midnight_wakeup_at_last_allowed_request(tmp_path):
+    from datetime import datetime, timezone
+
+    repository = GameRepository(tmp_path / "daily-wakeup.sqlite3")
+    _import_games(repository, 1)
+    repository.enqueue_lichess_analysis_backfill("lichess:me")
+    assert repository.reserve_lichess_analysis_request("lichess:me", daily_limit=1)
+    next_at = repository.lichess_analysis_backfill_next_eligible_at(
+        "lichess:me", daily_limit=1)
+    assert next_at is not None
+    next_dt = datetime.fromisoformat(next_at)
+    assert next_dt.hour == next_dt.minute == next_dt.second == 0
+    assert next_dt.date() > datetime.now(timezone.utc).date()
+    assert not repository.lichess_analysis_backfill_has_due_work(
+        "lichess:me", daily_limit=1)
+    assert repository.lichess_analysis_retry_after("lichess:me") == next_at
+    repository.shutdown()
+
+
+def test_backfill_scheduler_has_no_wakeup_for_empty_or_paused_queue(tmp_path):
+    repository = GameRepository(tmp_path / "empty-pause-wakeup.sqlite3")
+    assert repository.lichess_analysis_backfill_next_eligible_at("lichess:me") is None
+    _import_games(repository, 1)
+    repository.enqueue_lichess_analysis_backfill("lichess:me")
+    repository.set_lichess_analysis_backfill_paused("lichess:me", True)
+    assert repository.lichess_analysis_backfill_next_eligible_at("lichess:me") is None
     repository.shutdown()
 
 
@@ -164,6 +409,40 @@ def test_preexisting_partial_pgn_evaluations_still_get_metadata_backfill(tmp_pat
     rows = repository.list_lichess_analysis_backfill("lichess:me", limit=10)
     assert len(rows) == 1 and rows[0]["evals_status"] == "partial"
     repository.shutdown()
+
+
+def test_ready_analytics_queue_prioritizes_recent_games_without_starving_old_backlog(tmp_path):
+    repository = GameRepository(tmp_path / "ready-priority-fairness.sqlite3")
+    game_ids = _import_games(repository, 25)
+    repository.enqueue_lichess_analysis_backfill("lichess:me")
+    recent = datetime.now(timezone.utc).isoformat()
+    old = (datetime.now(timezone.utc) - timedelta(days=90)).isoformat()
+    with repository._connection() as db:
+        for index, game_id in enumerate(game_ids):
+            db.execute("UPDATE games SET started_at=? WHERE game_id=?",
+                       (recent if index >= 10 else old, game_id))
+    try:
+        first = repository.list_lichess_analysis_backfill("lichess:me", limit=10)
+        first_ids = {row["game_id"] for row in first}
+        assert len(first) == 10
+        assert len(first_ids.intersection(game_ids[10:])) == 8
+        assert len(first_ids.intersection(game_ids[:10])) == 2
+
+        # Mark just the first page as temporarily deferred, as happens after a
+        # no-data/partial response. The next page must continue selecting the
+        # remaining durable backlog rather than requiring a full-archive scan.
+        with repository._connection() as db:
+            for game_id in first_ids:
+                db.execute("UPDATE lichess_analysis_backfill SET accuracy_status='no_server_data',"
+                           "evals_status='no_server_data',accuracy_next_retry_at=?,"
+                           "evals_next_retry_at=? WHERE account_id='lichess:me' AND game_id=?",
+                           ("2999-01-01T00:00:00+00:00", "2999-01-01T00:00:00+00:00", game_id))
+        second = repository.list_lichess_analysis_backfill("lichess:me", limit=10)
+        assert len(second) == 10
+        assert not first_ids.intersection(row["game_id"] for row in second)
+        assert len({row["game_id"] for row in second}) == 10
+    finally:
+        repository.shutdown()
 
 
 def test_official_game_json_accuracy_and_move_analysis_are_saved_without_pgn_eval_comments(tmp_path):
@@ -314,7 +593,10 @@ def test_v18_queue_migration_preserves_rows_and_allows_stale_line_status(tmp_pat
             evals_next_retry_at TEXT,attempts INTEGER NOT NULL DEFAULT 0,last_error TEXT,
             updated_at TEXT NOT NULL,PRIMARY KEY(account_id,game_id))""")
         now = "2026-11-03T00:00:00+00:00"
-        db.execute("INSERT INTO lichess_analysis_backfill VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        db.execute("INSERT INTO lichess_analysis_backfill(account_id,game_id,line_revision,line_hash,"
+                   "accuracy_status,evals_status,accuracy_checked_at,evals_checked_at,"
+                   "accuracy_next_retry_at,evals_next_retry_at,attempts,last_error,updated_at) "
+                   "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
                    (account_id, game_id, queued["line_revision"], queued["line_hash"],
                     "partial", "partial", None, None, now, now, 1, "previous", now))
         db.execute("CREATE INDEX idx_lichess_analysis_backfill_due ON "
@@ -471,6 +753,9 @@ def test_stale_account_generation_and_mismatched_line_do_not_merge(tmp_path):
     assert repository.get_game(game_id)["lichess_accuracy_white"] is None
     assert repository.lichess_eval_score_count(game_id, 1) == 0
     # Interrupted `running` rows are recovered by the next process/queue scan.
+    with repository._connection() as db:
+        db.execute("UPDATE lichess_analysis_backfill SET updated_at=? WHERE game_id=?",
+                   ((datetime.now(timezone.utc) - timedelta(minutes=11)).isoformat(), game_id))
     repository.enqueue_lichess_analysis_backfill("lichess:me")
     assert repository.list_lichess_analysis_backfill("lichess:me", limit=1)[0]["accuracy_status"] == "queued"
     repository.shutdown()

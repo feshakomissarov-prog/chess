@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 import json
 import threading
@@ -60,6 +61,7 @@ class BatchAnalysisRunner:
                  *, options: FastPassOptions = FastPassOptions(),
                  analyzer: CompletedGameAnalyzer | None = None,
                  engine_factory: Callable[[str], chess.engine.SimpleEngine] | None = None,
+                 engine_manager=None,
                  lease_seconds: int = 300,
                  safety_refresh_seconds: float = 10.0) -> None:
         self.repository = repository
@@ -74,18 +76,22 @@ class BatchAnalysisRunner:
         self.review_engine_key = "stockfish-review-sha256:" + self.binary_sha256
         self.lease_seconds = max(30, min(3600, int(lease_seconds)))
         self.safety_refresh_seconds = max(0.01, min(60.0, float(safety_refresh_seconds)))
-        self.analyzer = analyzer or CompletedGameAnalyzer(repository, engine_factory)
+        self.engine_manager = engine_manager
+        self.analyzer = analyzer or CompletedGameAnalyzer(
+            repository, engine_factory, engine_manager=engine_manager)
         self.worker_id = uuid.uuid4().hex
 
     def enqueue_missing(self, *, account_id: str | None = None,
-                        limit: int = 1000, retry_failed: bool = False) -> dict[str, int]:
+                        limit: int = 1000, retry_failed: bool = False,
+                        retry_failed_before: str | None = None) -> dict[str, int]:
         candidates = self.repository.list_games_needing_fast_analysis(
             account_id=account_id, limit=max(1, min(10_000, int(limit))),
             engine_version=self.engine_key, parameters=self.parameters,
-            retry_failed=retry_failed)
+            retry_failed=retry_failed, retry_failed_before=retry_failed_before)
         return self.repository.enqueue_analysis_jobs(
             candidates, analysis_pass="fast", engine_version=self.engine_key,
-            parameters=self.parameters, retry_failed=retry_failed)
+            parameters=self.parameters, retry_failed=retry_failed,
+            retry_failed_before=retry_failed_before)
 
     def run(self, *, stop_event: threading.Event, safety_check: Callable[[dict], bool | None],
             pause_event: threading.Event | None = None,
@@ -93,6 +99,8 @@ class BatchAnalysisRunner:
             include_selective_review: bool = False,
             account_id: str | None = None,
             max_fast_jobs: int | None = None,
+            fill_backlog: bool = False,
+            retry_failed: bool = False,
             review_budget_per_game: int = 12,
             review_budget_total: int = 100) -> dict[str, int | bool | str | None]:
         if safety_check is None:
@@ -112,6 +120,12 @@ class BatchAnalysisRunner:
         safety_lost = threading.Event()
         safety_failure: list[str] = []
         analysis_pass = "fast"
+        # Retry only failures that predate this explicit user run. Jobs failing
+        # during this run get a newer updated_at and cannot cycle back through
+        # the refill query.
+        retry_failed_before = (datetime.now(timezone.utc).isoformat()
+                               if retry_failed and fill_backlog else None)
+        retry_failures_enabled = bool(retry_failed)
         review_scheduled = False
         review_queued = 0
         run_id = uuid.uuid4().hex
@@ -175,7 +189,14 @@ class BatchAnalysisRunner:
                     job = self.repository.claim_next_analysis_job(
                         self.worker_id, engine_version=self.engine_key,
                         analysis_pass="fast", parameters=self.parameters,
-                        lease_seconds=self.lease_seconds)
+                        lease_seconds=self.lease_seconds, account_id=account_id)
+                    if job is None and fill_backlog:
+                        added = self.enqueue_missing(
+                            account_id=account_id, limit=64,
+                            retry_failed=retry_failures_enabled,
+                            retry_failed_before=retry_failed_before)
+                        if added["queued"]:
+                            continue
                     if job is None and include_selective_review and not review_scheduled:
                         review_queued = self.enqueue_selected_reviews(
                             account_id=account_id, budget_per_game=review_budget_per_game,
@@ -187,9 +208,15 @@ class BatchAnalysisRunner:
                     job = self.repository.claim_next_analysis_job(
                         self.worker_id, engine_version=self.review_engine_key,
                         analysis_pass="review", parameters=None,
-                        lease_seconds=self.lease_seconds)
+                        lease_seconds=self.lease_seconds, account_id=account_id)
                 if job is None:
                     break
+                if analysis_pass == "fast" and self.repository.has_complete_server_analysis(
+                        job["game_id"], job["line_revision"], job["line_hash"]):
+                    self.repository.finish_analysis_job(
+                        job["job_id"], self.worker_id, status="stale",
+                        error="Compatible server analysis became available.")
+                    continue
                 log_event("batch_job_claimed", "batch_analysis", run_id=run_id,
                           job_id=job.get("job_id"), mode=(fast_mode if analysis_pass == "fast"
                                                           else "review"))
@@ -232,7 +259,12 @@ class BatchAnalysisRunner:
 
                 try:
                     if engine is None:
-                        engine = self.analyzer.engine_factory(str(self.engine_path))
+                        if self.engine_manager is not None:
+                            engine = self.engine_manager.open_engine(
+                                str(self.engine_path), stop_event=analysis_stop,
+                                safety_check=lambda: check_active_safety(job))
+                        else:
+                            engine = self.analyzer.engine_factory(str(self.engine_path))
                         log_event("uci_engine_opened", "batch_analysis", run_id=run_id)
                     if job["analysis_pass"] == "fast":
                         result = self.analyzer.analyze(
@@ -306,8 +338,9 @@ class BatchAnalysisRunner:
                 engine.quit()
             if cancelled:
                 self.repository.cancel_queued_analysis_jobs(
-                    engine_version=self.engine_key, parameters=self.parameters)
-                self.repository.cancel_queued_analysis_jobs(engine_version=self.review_engine_key)
+                    engine_version=self.engine_key, parameters=self.parameters, account_id=account_id)
+                self.repository.cancel_queued_analysis_jobs(
+                    engine_version=self.review_engine_key, account_id=account_id)
             reset_context(run_context)
         log_event("batch_run_finished", "batch_analysis", run_id=run_id,
                   duration_ms=(time.monotonic() - run_started) * 1000,
@@ -319,9 +352,9 @@ class BatchAnalysisRunner:
                 "last_failure": last_failure,
                 "attempted_fast": attempted_fast,
                 "queue": self.repository.analysis_job_counts(engine_version=self.engine_key,
-                                                               parameters=self.parameters),
+                                                           parameters=self.parameters, account_id=account_id),
                 "review_queue": self.repository.analysis_job_counts(
-                    engine_version=self.review_engine_key),
+                    engine_version=self.review_engine_key, account_id=account_id),
                 "review_queued": review_queued}
 
     def enqueue_selected_reviews(self, *, account_id: str | None = None,

@@ -7,6 +7,7 @@ import inspect
 import io
 import threading
 import time
+import uuid
 from typing import Callable
 
 from .api import LichessClient, RateLimitError
@@ -39,6 +40,9 @@ class ArchiveSync:
              full: bool, page_size: int,
              progress: Callable[[int, str], None] | None) -> int:
         """Import/resume a backfill, then incrementally update only newer/changed games."""
+        # Keep a finite NDJSON response short enough that other finite work can
+        # receive the next slot. The caller still resumes at durable page cursors.
+        page_size = min(max(1, int(page_size)), LichessClient.MAX_FINITE_STREAM_PAGE)
         account_id = self.repository.ensure_archive_account(username)
         state = self.repository.archive_sync_state(account_id)
         if full or not state.get("backfill_complete"):
@@ -113,6 +117,12 @@ class ArchiveSync:
             if count == 0 and boundary_count == 0:
                 raise RuntimeError("Lichess archive incremental page made no progress; cursor unchanged.")
             since = max_seen + 1
+            if not stop_event.is_set():
+                checkpoint = self.repository.finish_archive_incremental
+                if len(inspect.signature(checkpoint).parameters) >= 3:
+                    checkpoint(account_id, since, imported)
+                else:  # Compatibility with repository test doubles and older callers.
+                    checkpoint(account_id, since)
         if not stop_event.is_set():
             finish_incremental = self.repository.finish_archive_incremental
             if len(inspect.signature(finish_incremental).parameters) >= 3:
@@ -227,6 +237,10 @@ class ArchiveSync:
                                 stop_event: threading.Event, *, limit: int = 10,
                                 daily_limit: int = 25,
                                 force_retry: bool = False,
+                                preferred_game_id: str | None = None,
+                                selected_game_id: str | None = None,
+                                expected_line_revision: int | None = None,
+                                expected_source_game_id: str | None = None,
                                 generation_is_current: Callable[[], bool] | None = None,
                                 progress: Callable[[int, int, dict], None] | None = None
                                 ) -> dict[str, int | bool | str | None]:
@@ -234,7 +248,10 @@ class ArchiveSync:
         if not 1 <= int(limit) <= 10:
             raise ValueError("Одна фоновая порция ограничена десятью партиями.")
         account_id = self.repository.ensure_archive_account(username)
-        self.repository.enqueue_lichess_analysis_backfill(account_id)
+        self.repository.enqueue_lichess_analysis_backfill(
+            account_id, game_id=selected_game_id,
+            expected_line_revision=expected_line_revision,
+            expected_source_game_id=expected_source_game_id)
         if self.repository.lichess_analysis_backfill_paused(account_id):
             return {"selected": 0, "checked": 0, "accuracy": 0, "evals": 0,
                     "no_data": 0, "errors": 0, "paused": True, "limited": False}
@@ -244,7 +261,10 @@ class ArchiveSync:
                     "no_data": 0, "errors": 0, "paused": False, "limited": True,
                     "retry_after_at": retry_after_at}
         candidates = self.repository.list_lichess_analysis_backfill(
-            account_id, limit=limit, force_retry=force_retry)
+            account_id, limit=limit, force_retry=force_retry,
+            preferred_game_id=preferred_game_id, selected_game_id=selected_game_id,
+            expected_line_revision=expected_line_revision,
+            expected_source_game_id=expected_source_game_id)
         checked = accuracy_count = eval_count = no_data = errors = 0
         limited = False
         fatal_status: int | None = None
@@ -260,14 +280,45 @@ class ArchiveSync:
                 limited = True
                 break
             game_id = str(item["game_id"])
+            check_accuracy = bool(item.get("check_accuracy", 1))
+            check_evals = bool(item.get("check_evals", 1))
+            lease_owner = uuid.uuid4().hex
+            claimed = self.repository.claim_lichess_analysis_backfill(
+                account_id, game_id, lease_owner=lease_owner,
+                line_revision=int(item["line_revision"]), line_hash=str(item["line_hash"]),
+                check_accuracy=check_accuracy, check_evals=check_evals)
+            if not claimed:
+                continue
             if not self.repository.reserve_lichess_analysis_request(
                     account_id, daily_limit=daily_limit):
+                self.repository.release_lichess_analysis_backfill(
+                    account_id, game_id, lease_owner=lease_owner,
+                    check_accuracy=check_accuracy, check_evals=check_evals)
                 limited = True
                 break
-            self.repository.mark_lichess_analysis_backfill_running(
-                account_id, game_id, line_revision=int(item["line_revision"]),
-                line_hash=str(item["line_hash"]))
+            heartbeat_stop = threading.Event()
+            recorded = False
+
+            def keep_lease_alive() -> None:
+                while not heartbeat_stop.wait(30.0):
+                    try:
+                        if not self.repository.heartbeat_lichess_analysis_backfill(
+                                account_id, game_id, lease_owner=lease_owner):
+                            return
+                    except Exception:
+                        return
+
+            heartbeat_thread = threading.Thread(
+                target=keep_lease_alive, name="cc-lichess-backfill-lease", daemon=True)
+            heartbeat_thread.start()
             try:
+                # Auth/account generation may have changed while a lease/budget
+                # reservation was being obtained. Do not start a stale request.
+                if not current():
+                    self.repository.release_lichess_analysis_backfill(
+                        account_id, game_id, lease_owner=lease_owner,
+                        check_accuracy=check_accuracy, check_evals=check_evals)
+                    break
                 payload = self.client.export_game_json(token, str(item["source_game_id"]))
                 if not current():
                     # The response belongs to a previous auth/session generation.
@@ -304,6 +355,7 @@ class ArchiveSync:
                     move_annotations=list(normalized.move_annotations),
                     validation_issues=list(normalized.issues), opening=opening_metadata,
                     division=payload.get("division"),
+                    lease_owner=lease_owner,
                     generation_is_current=current)
                 eval_positions = self.repository.lichess_eval_score_count(game_id, previous_revision)
                 # Every completed decision has one post-move position. A position
@@ -315,21 +367,33 @@ class ArchiveSync:
                 has_evals = eval_positions > 0
                 invalid_accuracy = any(issue in {"invalid_white_accuracy", "invalid_black_accuracy"}
                                        for issue in normalized.issues)
-                accuracy_status = ("has_data" if complete_accuracy else
-                                   "partial" if has_accuracy or invalid_accuracy else "no_server_data")
+                fetched_accuracy_status = ("has_data" if complete_accuracy else
+                                           "partial" if has_accuracy or invalid_accuracy
+                                           else "no_server_data")
                 malformed_array = any(issue.startswith(("analysis_", "invalid_analysis_",
                                                         "conflicting_score_", "invalid_eval_",
                                                         "invalid_mate_")) for issue in normalized.issues)
-                evals_status = ("has_data" if eval_positions >= position_count and not malformed_array else
-                                "partial" if has_evals or (normalized.array_present and
-                                                          not normalized.array_complete)
-                                else "no_server_data")
-                retry_seconds = (7 * 24 * 60 * 60 if "no_server_data" in
-                                 {accuracy_status, evals_status} or "partial" in
-                                 {accuracy_status, evals_status} else 0)
+                fetched_evals_status = (
+                    "has_data" if eval_positions >= position_count and not malformed_array else
+                    "partial" if has_evals or (normalized.array_present and
+                                               not normalized.array_complete)
+                    else "no_server_data")
+                accuracy_status = fetched_accuracy_status if check_accuracy else str(
+                    item["accuracy_status"])
+                evals_status = fetched_evals_status if check_evals else str(item["evals_status"])
+                considered_statuses = set()
+                if check_accuracy:
+                    considered_statuses.add(fetched_accuracy_status)
+                if check_evals:
+                    considered_statuses.add(fetched_evals_status)
+                retry_seconds = (7 * 24 * 60 * 60 if considered_statuses.intersection(
+                    {"no_server_data", "partial"}) else 0)
                 self.repository.record_lichess_analysis_backfill(
                     account_id, game_id, accuracy_status=accuracy_status,
-                    evals_status=evals_status, retry_after_seconds=retry_seconds)
+                    evals_status=evals_status, retry_after_seconds=retry_seconds,
+                    lease_owner=lease_owner,
+                    check_accuracy=check_accuracy, check_evals=check_evals)
+                recorded = True
                 checked += 1
                 accuracy_count += int(has_accuracy)
                 eval_count += int(has_evals)
@@ -346,12 +410,22 @@ class ArchiveSync:
                     account_id, game_id, accuracy_status=status, evals_status=status,
                     retry_after_seconds=(max(60, retry_after) if status == "stale_line" else backoff),
                     error=f"{type(exc).__name__}" + (f" HTTP {http_status}" if http_status else ""),
-                    line_revision=int(item["line_revision"]), line_hash=str(item["line_hash"]))
+                    line_revision=int(item["line_revision"]), line_hash=str(item["line_hash"]),
+                    lease_owner=lease_owner,
+                    check_accuracy=check_accuracy, check_evals=check_evals)
+                recorded = True
                 if http_status in {401, 403, 429}:
                     fatal_status = int(http_status)
                     if http_status == 429:
                         self.repository.set_lichess_analysis_retry_after(account_id, backoff)
                     break
+            finally:
+                heartbeat_stop.set()
+                heartbeat_thread.join(timeout=1.0)
+                if not recorded:
+                    self.repository.release_lichess_analysis_backfill(
+                        account_id, game_id, lease_owner=lease_owner,
+                        check_accuracy=check_accuracy, check_evals=check_evals)
             if progress:
                 progress(checked + errors, len(candidates), item)
         return {"selected": len(candidates), "checked": checked,

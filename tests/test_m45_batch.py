@@ -85,6 +85,79 @@ def _runner(repository, tmp_path, engines, *, options=FastPassOptions()):
                                analyzer=CompletedGameAnalyzer(repository, factory))
 
 
+def test_server_coverage_checks_exact_plies_and_rechecks_queued_jobs(tmp_path):
+    repository = GameRepository(tmp_path / "server-coverage.sqlite3")
+    engines = []
+    try:
+        runner = _runner(repository, tmp_path, engines)
+        for game_id in ("missing-baseline", "gap", "full", "late"):
+            repository.save_snapshot(game_id, "startpos", "e2e4 e7e5 g1f3 b8c6",
+                                     "white", "Fixture", False, "blitz", "finished", "white")
+
+        def save_run(game_id, plies, source):
+            line = repository.current_line(game_id)
+            repository.save_analysis(
+                game_id, line_revision=line["line_revision"], line_hash=line["line_hash"],
+                source=source, engine_name="Synthetic", engine_version=None,
+                parameters={}, assessments=[{"ply": ply, "white_cp": 12, "depth": 16}
+                                            for ply in plies], classifications=[])
+
+        save_run("missing-baseline", (1, 2, 3, 4), "lichess-json")
+        save_run("gap", (0, 1, 3, 4), "lichess-pgn")
+        save_run("full", range(5), "lichess-pgn")
+        repository.save_snapshot("terminal", "startpos", "f2f3 e7e5 g2g4 d8h4",
+                                 "white", "Fixture", False, "blitz", "mate", "black")
+        save_run("terminal", range(4), "lichess-json")
+        assert {game["game_id"] for game in repository.list_games_needing_fast_analysis()} == {
+            "missing-baseline", "gap", "late"}
+        assert runner.enqueue_missing()["queued"] == 3
+        save_run("late", range(5), "lichess-json")
+        result = runner.run(stop_event=threading.Event(), safety_check=lambda _: True)
+        assert result["processed"] == 2
+        assert result["queue"] == {"complete": 2, "stale": 1}
+        assert len(engines) == 1
+        repository.save_snapshot("full", "startpos", "d2d4 d7d5 c2c4 e7e6",
+                                 "white", "Fixture", False, "blitz", "finished", "white")
+        assert "full" in {game["game_id"] for game in repository.list_games_needing_fast_analysis()}
+    finally:
+        repository.shutdown()
+
+
+def test_full_backlog_refills_bounded_pages_until_exhausted(tmp_path, monkeypatch):
+    repository = GameRepository(tmp_path / "full-backlog.sqlite3")
+    engines = []
+    try:
+        _save_game(repository, "fixture", "2026-10-01T00:00:00+00:00")
+        repository.wait_for_writes()
+        with repository._connection() as db:
+            for i in range(1002):
+                game_id = f"fixture-{i:04d}"
+                for table in ("games", "game_revisions", "game_moves"):
+                    columns = [row[1] for row in db.execute(f"PRAGMA table_info({table})")]
+                    projection = ",".join("?" if name == "game_id" else name for name in columns)
+                    db.execute(f"INSERT INTO {table} SELECT {projection} FROM {table} WHERE game_id='fixture'",
+                               (game_id,))
+        runner = _runner(repository, tmp_path, engines)
+        sizes = []
+        original = runner.enqueue_missing
+
+        def enqueue(**kwargs):
+            result = original(**kwargs)
+            sizes.append(result["queued"])
+            return result
+
+        monkeypatch.setattr(runner, "enqueue_missing", enqueue)
+        monkeypatch.setattr(runner, "_job_has_eligible_legal_line", lambda job: True)
+        monkeypatch.setattr(runner.analyzer, "analyze", lambda *a, **k: {"run_id": None})
+        result = runner.run(stop_event=threading.Event(), safety_check=lambda _: True,
+                            fill_backlog=True)
+        assert result["processed"] == 1003
+        assert sum(sizes) == 1003 and max(sizes) <= 64 and sizes[-1] == 0
+        assert len(engines) == 1
+    finally:
+        repository.shutdown()
+
+
 def test_batch_queue_is_idempotent_recent_first_and_reuses_one_fake_engine(tmp_path):
     repository = GameRepository(tmp_path / "batch.sqlite3")
     engines = []
@@ -175,6 +248,61 @@ def test_batch_queue_pages_past_existing_jobs_and_retries_only_explicitly(tmp_pa
         assert runner.enqueue_missing(limit=10)["queued"] == 0
         assert runner.enqueue_missing(limit=10, retry_failed=True)["queued"] == 1
         assert repository.analysis_job_counts(engine_version=runner.engine_key)["queued"] == 3
+    finally:
+        repository.shutdown()
+
+
+def test_all_missing_retry_requeues_old_failures_once_per_account_and_run(tmp_path, monkeypatch):
+    repository = GameRepository(tmp_path / "all-missing-retry.sqlite3")
+    engines = []
+    try:
+        accounts = {name: repository.ensure_archive_account(name) for name in ("Account A", "Account B")}
+        runner = _runner(repository, tmp_path, engines)
+        for account_name, prefix in (("Account A", "a"), ("Account B", "b")):
+            account_id = accounts[account_name]
+            for state in ("complete", "failed", "cancelled", "stale"):
+                game_id = f"{prefix}-{state}"
+                _save_game(repository, game_id, f"2026-10-0{len(game_id)%8+1}T00:00:00+00:00")
+                line = repository.current_line(game_id)
+                with repository._connection() as db:
+                    db.execute("INSERT INTO account_games(account_id,game_id,remote_id,imported_at) "
+                               "VALUES(?,?,?,?)", (account_id, game_id, game_id, "2026-10-01T00:00:00+00:00"))
+                repository.enqueue_analysis_jobs(
+                    [{"game_id": game_id, "line_revision": line["line_revision"],
+                      "line_hash": line["line_hash"]}], analysis_pass="fast",
+                    engine_version=runner.engine_key, parameters=runner.parameters)
+                job = repository.claim_next_analysis_job(
+                    f"seed-{account_name}", engine_version=runner.engine_key,
+                    analysis_pass="fast", parameters=runner.parameters,
+                    account_id=account_id)
+                repository.finish_analysis_job(job["job_id"], f"seed-{account_name}", status=state)
+
+        # Routine all-missing scans preserve all terminal jobs.
+        untouched = runner.run(stop_event=threading.Event(), safety_check=lambda _job: True,
+                               account_id=accounts["Account A"], fill_backlog=True)
+        assert untouched["processed"] == 0
+        assert repository.analysis_job_counts(engine_version=runner.engine_key,
+                                              account_id=accounts["Account A"]) == {
+            "cancelled": 1, "complete": 1, "failed": 1, "stale": 1}
+
+        monkeypatch.setattr(runner, "_job_has_eligible_legal_line", lambda _job: True)
+        monkeypatch.setattr(runner.analyzer, "analyze", lambda *_args, **_kwargs: {"run_id": None})
+        retried = runner.run(stop_event=threading.Event(), safety_check=lambda _job: True,
+                             account_id=accounts["Account A"], fill_backlog=True,
+                             retry_failed=True)
+        assert retried["processed"] == 3
+        assert retried["failed"] == 0
+        assert repository.analysis_job_counts(engine_version=runner.engine_key,
+                                              account_id=accounts["Account A"]) == {"complete": 4}
+        # The same explicit opt-in does not reprocess failures created after this run's cutoff.
+        followup = runner.run(stop_event=threading.Event(), safety_check=lambda _job: True,
+                              account_id=accounts["Account A"], fill_backlog=True,
+                              retry_failed=True)
+        assert followup["processed"] == 0
+        assert repository.analysis_job_counts(engine_version=runner.engine_key,
+                                              account_id=accounts["Account B"]) == {
+            "cancelled": 1, "complete": 1, "failed": 1, "stale": 1}
+        assert len(engines) == 1
     finally:
         repository.shutdown()
 
@@ -781,6 +909,36 @@ def test_pause_event_interrupts_current_search_and_resume_keeps_remaining_jobs(t
         assert repository.list_analyses("first") == []
         assert repository.resume_paused_analysis_jobs(engine_version=runner.engine_key) == 1
         assert repository.analysis_job_counts(engine_version=runner.engine_key) == {"queued": 2}
+    finally:
+        repository.shutdown()
+
+
+def test_saved_queue_is_claimed_resumed_and_cancelled_only_for_selected_account(tmp_path):
+    repository = GameRepository(tmp_path / "account-scoped-queue.sqlite3")
+    try:
+        timestamp = "2026-10-02T00:00:00+00:00"
+        for name in ("first", "second"):
+            _save_game(repository, name, timestamp)
+            account = repository.ensure_archive_account(name)
+            with repository._connection() as db:
+                db.execute(
+                    "INSERT INTO account_games(account_id,game_id,remote_id,imported_at) "
+                    "VALUES (?,?,?,?)", (account, name, name, timestamp))
+            candidates = repository.list_games_needing_fast_analysis(account_id=account)
+            repository.enqueue_analysis_jobs(candidates, analysis_pass="fast",
+                                             engine_version="synthetic", parameters={"nodes": 20})
+        scoped = {"engine_version": "synthetic", "account_id": "lichess:first"}
+        job = repository.claim_next_analysis_job("worker", analysis_pass="fast", **scoped)
+        assert job["game_id"] == "first"
+        repository.finish_analysis_job(job["job_id"], "worker", status="paused")
+        assert repository.pending_fast_analysis_parameters(**scoped) == {"nodes": 20}
+        assert repository.claim_next_analysis_job("worker", analysis_pass="fast", **scoped) is None
+        assert repository.resume_paused_analysis_jobs(**scoped) == 1
+        assert repository.cancel_queued_analysis_jobs(**scoped) == 1
+        assert repository.analysis_job_counts(**scoped) == {"cancelled": 1}
+        assert repository.latest_analysis_job_event(account_id="lichess:first")["status"] == "cancelled"
+        assert repository.analysis_job_counts(account_id="lichess:second") == {"queued": 1}
+        assert repository.latest_analysis_job_event(account_id="lichess:second") is None
     finally:
         repository.shutdown()
 

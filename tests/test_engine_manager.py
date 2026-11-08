@@ -246,6 +246,190 @@ def test_uci_launch_options_hide_console_on_windows():
         assert options == {}
 
 
+def test_stockfish_manager_owns_engine_release_and_refuses_creation_after_shutdown(tmp_path):
+    import chess_coach.engine_manager as manager_module
+    executable = tmp_path / "stockfish.exe"
+    executable.write_bytes(b"synthetic executable")
+    calls = []
+
+    class FakeEngine:
+        id = {"name": "Synthetic UCI"}
+        def quit(self):
+            calls.append("quit")
+
+    manager = manager_module.StockfishManager(
+        engine_factory=lambda command, **kwargs: (
+            calls.append((command, kwargs["timeout"], kwargs["cwd"])) or FakeEngine()))
+    engine = manager.open_engine(executable)
+    assert engine.id["name"] == "Synthetic UCI"
+    assert manager.active_process_count == 1
+    engine.quit()
+    engine.quit()
+    assert calls.count("quit") == 1
+    assert manager.active_process_count == 0
+    manager.close_all()
+    with pytest.raises(RuntimeError, match="shutting down"):
+        manager.open_engine(executable)
+
+
+def test_stockfish_manager_reuses_position_engine_and_closes_it_on_shutdown(tmp_path):
+    import chess_coach.engine_manager as manager_module
+    executable = tmp_path / "stockfish.exe"
+    executable.write_bytes(b"synthetic executable")
+    started, stopped = [], []
+
+    class FakeEngine:
+        def quit(self):
+            stopped.append(True)
+
+    manager = manager_module.StockfishManager(
+        engine_factory=lambda command, **_kwargs: (started.append(command) or FakeEngine()))
+    first = manager.position_engine(executable)
+    first.quit()
+    second = manager.position_engine(executable)
+    assert len(started) == manager.active_process_count == 1
+    second.quit()
+    manager.close_all()
+    assert stopped == [True]
+    assert manager.active_process_count == 0
+
+
+def test_stockfish_manager_bounds_all_analysis_modes_and_rechecks_safety_after_wait(tmp_path):
+    import time
+    executable = tmp_path / "stockfish.exe"
+    executable.write_bytes(b"synthetic")
+    started, stopped = [], []
+    lock = threading.Lock()
+    active = maximum = 0
+    first_ready, release_first, second_done = threading.Event(), threading.Event(), threading.Event()
+    denied = []
+
+    class FakeEngine:
+        id = {"name": "Synthetic"}
+        def __init__(self, index): self.index = index
+        def quit(self):
+            nonlocal active
+            with lock:
+                active -= 1
+            stopped.append(self.index)
+
+    def factory(*_args, **_kwargs):
+        nonlocal active, maximum
+        with lock:
+            active += 1
+            maximum = max(maximum, active)
+            index = len(started)
+            started.append(index)
+        return FakeEngine(index)
+
+    manager = em.StockfishManager(factory, max_concurrent=1)
+    first = manager.open_engine(executable)
+
+    def queued_open():
+        try:
+            manager.open_engine(executable, safety_check=lambda: False)
+        except Exception as exc:
+            denied.append(exc)
+        finally:
+            second_done.set()
+
+    thread = threading.Thread(target=queued_open)
+    thread.start()
+    deadline = time.monotonic() + 1
+    while manager.active_analysis_count != 1 and time.monotonic() < deadline:
+        time.sleep(.005)
+    first_ready.set()
+    first.quit()
+    thread.join(1)
+    assert not thread.is_alive()
+    assert second_done.is_set()
+    assert any(isinstance(error, InterruptedError) for error in denied)
+    assert started == [0], "unsafe waiter must be rejected before engine creation"
+    assert maximum == 1 and manager.active_analysis_count == 0
+    assert stopped == [0]
+    manager.close_all()
+
+
+def test_stockfish_manager_cancelled_waiter_never_creates_engine_and_position_shares_gate(tmp_path):
+    import time
+    executable = tmp_path / "stockfish.exe"
+    executable.write_bytes(b"synthetic")
+    starts, quits = [], []
+
+    class FakeEngine:
+        def quit(self): quits.append(True)
+
+    manager = em.StockfishManager(
+        lambda *_args, **_kwargs: (starts.append(True) or FakeEngine()))
+    lease = manager.position_engine(executable)
+    stop = threading.Event()
+    errors = []
+
+    def waiting_position():
+        try:
+            manager.position_engine(executable, stop_event=stop)
+        except Exception as exc:
+            errors.append(exc)
+
+    thread = threading.Thread(target=waiting_position)
+    thread.start()
+    deadline = time.monotonic() + 1
+    while manager.active_analysis_count != 1 and time.monotonic() < deadline:
+        time.sleep(.005)
+    stop.set()
+    thread.join(1)
+    assert not thread.is_alive()
+    assert any(isinstance(error, InterruptedError) for error in errors)
+    assert starts == [True]
+    lease.quit()
+    position = manager.position_engine(executable)
+    assert starts == [True], "position evaluation should reuse its cached process"
+    assert manager.active_analysis_count == 1
+    position.quit()
+    assert manager.active_analysis_count == 0
+    manager.close_all()
+    assert len(quits) == 1
+
+
+def test_stockfish_pre_cancelled_jobs_and_safety_denial_do_not_create_engine(tmp_path):
+    executable = tmp_path / "stockfish.exe"
+    executable.write_bytes(b"synthetic")
+    starts = []
+    manager = em.StockfishManager(
+        lambda *_args, **_kwargs: (starts.append(True) or object()))
+    stop = threading.Event()
+    stop.set()
+    with pytest.raises(InterruptedError):
+        manager.open_engine(executable, stop_event=stop)
+    with pytest.raises(InterruptedError):
+        manager.open_engine(executable, safety_check=lambda: None)
+    assert starts == []
+    assert manager.active_analysis_count == 0
+
+
+def test_stockfish_manager_reuses_the_position_process_for_review_and_batch(tmp_path):
+    executable = tmp_path / "stockfish.exe"
+    executable.write_bytes(b"synthetic")
+    starts, quits = [], []
+
+    class FakeEngine:
+        def quit(self): quits.append(True)
+
+    manager = em.StockfishManager(
+        lambda *_args, **_kwargs: (starts.append(True) or FakeEngine()))
+    position = manager.position_engine(executable)
+    position.quit()
+    review = manager.open_engine(executable)
+    assert len(starts) == 1
+    assert manager.active_process_count == 1
+    review.quit()  # cached process remains available for the next sequential use
+    next_position = manager.position_engine(executable)
+    assert len(starts) == 1
+    next_position.quit()
+    manager.close_all()
+    assert quits == [True]
+
+
 def test_position_evaluator_reuses_one_engine_for_a_local_session(monkeypatch, tmp_path):
     import chess_coach.position_analysis as position_module
     position_module.close_position_engines()
@@ -276,3 +460,27 @@ def test_position_evaluator_reuses_one_engine_for_a_local_session(monkeypatch, t
     assert len(starts) == 1
     position_module.close_position_engines()
     assert quits == ["quit"]
+
+
+def test_position_evaluator_never_serializes_mate_as_synthetic_cp(monkeypatch, tmp_path):
+    import chess_coach.position_analysis as position_module
+    position_module.close_position_engines()
+
+    class Analysis:
+        info = {"score": chess.engine.PovScore(chess.engine.Mate(3), chess.WHITE),
+                "pv": [chess.Move.from_uci("e2e4")], "depth": 22}
+        def __iter__(self): return iter([self.info])
+        def wait(self): return type("Best", (), {"move": chess.Move.from_uci("e2e4")})()
+        def stop(self): pass
+
+    class Engine:
+        def analysis(self, *_args, **_kwargs): return Analysis()
+        def quit(self): pass
+
+    monkeypatch.setattr(position_module, "popen_uci_hidden",
+                        lambda *_args, **_kwargs: Engine())
+    result = position_module.evaluate_position(
+        str(tmp_path / "synthetic-fish.exe"), chess.Board(), threading.Event(), {})
+    assert result["score_white_cp"] is None
+    assert result["mate_white"] == 3
+    assert result["depth"] == 22

@@ -3,12 +3,13 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+import math
 import re
 from typing import Any
 
 
 def format_game_date(value: Any, *, precision: str | None = None) -> str:
-    """Format exact timestamps in local time; preserve date-only precision."""
+    """Format only provenance-confirmed timestamps; never infer time from legacy rows."""
     if value is None or value == "":
         return "Дата неизвестна"
     if precision == "date_only":
@@ -33,6 +34,8 @@ def format_game_date(value: Any, *, precision: str | None = None) -> str:
             return datetime.fromisoformat(raw).strftime("%d.%m.%Y")
         except ValueError:
             return "Дата неизвестна"
+    if precision != "timestamp":
+        return "Время неизвестно"
     try:
         parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
         if parsed.tzinfo is None:
@@ -40,6 +43,51 @@ def format_game_date(value: Any, *, precision: str | None = None) -> str:
         return parsed.astimezone().strftime("%d.%m.%Y · %H:%M")
     except (TypeError, ValueError, OverflowError):
         return "Дата неизвестна"
+
+
+def format_game_activity_time(game: dict[str, Any]) -> str:
+    """Show the same confirmed event timestamp used to order recent games."""
+    last_move = game.get("last_move_at")
+    last_move_ms = _valid_last_move_ms(last_move)
+    if last_move_ms is not None:
+        try:
+            stamp = datetime.fromtimestamp(last_move_ms / 1000, tz=timezone.utc)
+            label = "Последний ход" if game.get("status") in {
+                "created", "started", "started_soon", "playing"} else "Завершена"
+            return f"{label}: {stamp.astimezone().strftime('%d.%m.%Y · %H:%M')}"
+        except (OverflowError, OSError, ValueError):
+            pass
+    precision = game.get("game_time_precision")
+    value = format_game_date(game.get("started_at"), precision=precision)
+    if value.startswith("Дата неизвестна"):
+        return "Дата начала неизвестна"
+    if value.startswith("Время неизвестно"):
+        return "Время начала неизвестно"
+    label = "Начата" if precision == "timestamp" and " · " in value else "Дата начала"
+    return f"{label}: {value}"
+
+
+def format_game_timeline(game: dict[str, Any]) -> str:
+    """Show ordering event and, when known, the distinct start time."""
+    activity = format_game_activity_time(game)
+    if _valid_last_move_ms(game.get("last_move_at")) is None:
+        return activity
+    started = format_game_date(game.get("started_at"), precision=game.get("game_time_precision"))
+    if started.startswith(("Дата неизвестна", "Время неизвестно")):
+        return activity
+    start_label = ("Начата" if game.get("game_time_precision") == "timestamp"
+                   and " · " in started else "Дата начала")
+    return f"{activity} · {start_label}: {started}"
+
+
+def _valid_last_move_ms(value: Any) -> float | None:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    try:
+        numeric = float(value)
+        return numeric if math.isfinite(numeric) and numeric > 0 else None
+    except (OverflowError, ValueError):
+        return None
 
 
 def _seconds(value: int) -> str:
@@ -82,7 +130,11 @@ def format_remaining_clock(milliseconds: int, *, elapsed_ms: int = 0,
     elif remaining >= 3_600_000:
         hours, rest = divmod(remaining // 1000, 3600)
         minutes, seconds = divmod(rest, 60)
-        value = f"{hours}:{minutes:02}:{seconds:02}"
+        if hours >= 24:
+            days, hours = divmod(hours, 24)
+            value = f"{days}д {hours:02}:{minutes:02}:{seconds:02}"
+        else:
+            value = f"{hours}:{minutes:02}:{seconds:02}"
     else:
         value = f"{remaining // 60_000:02}:{remaining // 1000 % 60:02}"
     return value, warning
@@ -224,6 +276,19 @@ def russian_opening_name(eco: Any, name: Any) -> str:
     return "Дебют не определён" if not raw else "Дебют не классифицирован"
 
 
+def game_opening_name(game: dict[str, Any] | Any) -> str:
+    """Return the canonical opening label for a persisted game row.
+
+    Lichess imports store the ECO in ``opening_eco`` while older/local rows may
+    use ``eco``. Prefer the imported canonical value so every screen presents
+    the same opening for the same game.
+    """
+    if not hasattr(game, "get"):
+        return russian_opening_name(None, None)
+    return russian_opening_name(game.get("opening_eco") or game.get("eco"),
+                                game.get("opening_name"))
+
+
 def opening_tooltip(name: Any) -> str:
     """Keep the catalog's exact English name available as secondary detail."""
     value = str(name or "").strip()
@@ -235,7 +300,7 @@ def source_short(source: Any) -> tuple[str, str]:
     if raw in {"stockfish", "local", "chess_coach"} or "stockfish" in raw:
         return "S", "Stockfish · локальная оценка"
     if raw in {"lichess", "lichess_analysis", "official_lichess", "lichess-pgn",
-               "lichess pgn"}:
+               "lichess pgn", "lichess-json", "lichess json"}:
         return "L", "Lichess · официальный импортированный анализ"
     return "—", "Оценка отсутствует"
 

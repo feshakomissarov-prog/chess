@@ -57,9 +57,11 @@ class AnalysisOptions:
 
 class CompletedGameAnalyzer:
     def __init__(self, repository: GameRepository,
-                 engine_factory: Callable[[str], chess.engine.SimpleEngine] | None = None) -> None:
+                 engine_factory: Callable[[str], chess.engine.SimpleEngine] | None = None,
+                 engine_manager=None) -> None:
         self.repository = repository
         self.engine_factory = engine_factory or popen_uci_hidden
+        self.engine_manager = engine_manager
 
     def analyze(self, game_id: str, engine_path: str | Path,
                 options: AnalysisOptions = AnalysisOptions(), *,
@@ -67,7 +69,8 @@ class CompletedGameAnalyzer:
                 progress: Callable[[int, int], None] | None = None,
                 stop_event: threading.Event | None = None,
                 analysis_pass: str = "standard",
-                engine: chess.engine.SimpleEngine | None = None) -> dict:
+                engine: chess.engine.SimpleEngine | None = None,
+                safety_check=None) -> dict:
         if stop_event is not None and stop_event.is_set():
             raise InterruptedError("Анализ отменён до запуска движка.")
         if analysis_pass not in {"standard", "fast", "review"}:
@@ -103,7 +106,11 @@ class CompletedGameAnalyzer:
         if engine_instance is None:
             if stop_event is not None and stop_event.is_set():
                 raise InterruptedError("Анализ отменён до создания процесса движка.")
-            engine_instance = self.engine_factory(str(path))
+            if self.engine_manager is not None:
+                engine_instance = self.engine_manager.open_engine(
+                    str(path), stop_event=stop_event, safety_check=safety_check)
+            else:
+                engine_instance = self.engine_factory(str(path))
         try:
             if stop_event is not None and stop_event.is_set():
                 raise InterruptedError("Анализ отменён.")

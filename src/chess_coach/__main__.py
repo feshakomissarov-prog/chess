@@ -9,6 +9,7 @@ from PySide6.QtGui import QIcon
 from PySide6.QtWidgets import QApplication, QMessageBox
 
 from .diagnostics import configure_logging, log_event
+from .bootstrap import create_runtime
 from .single_instance import acquire_single_instance
 
 from .window import MainWindow
@@ -68,8 +69,10 @@ def main(argv: list[str] | None = None) -> int:
         if instance_guard is None:
             log_event("second_launch_activated", "application")
             return 0
-    window = MainWindow(asynchronous_storage=True, offline_mode=args.offline,
-                        manual_connect_mode=args.manual_connect)
+    runtime = create_runtime(offline_mode=args.offline,
+                             manual_connect_mode=args.manual_connect,
+                             asynchronous_storage=True)
+    window = MainWindow(runtime=runtime)
     if instance_guard is not None:
         instance_guard.set_activation_callback(lambda: _activate_window(window))
     window.show()

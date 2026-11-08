@@ -72,6 +72,8 @@ class PuzzleActivitySync:
     def _run(self, username: str, token: str, stop_event: threading.Event, *,
              page_size: int, progress: Callable[[int], None] | None,
              scanned: Callable[[int], None] | None = None) -> int:
+        # Finite NDJSON pages yield admission between requests and checkpoints.
+        page_size = min(max(1, int(page_size)), LichessClient.MAX_FINITE_STREAM_PAGE)
         account_id = self.repository.ensure_archive_account(username)
         state = self.repository.puzzle_sync_state(account_id)
         count = 0

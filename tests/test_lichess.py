@@ -20,6 +20,24 @@ from chess_coach.lichess.service import LichessService
 LICHESS_MIN_MS = 1_356_998_400_070
 
 
+def test_live_game_snapshot_persists_account_ownership_for_safe_final_sync_resume(tmp_path):
+    repository = GameRepository(tmp_path / "session-owner.sqlite3")
+    session = LichessGameSession("owned-finish", repository)
+    session.bind_owner("AccountA", 7)
+    session.apply_event({"type": "gameFull", "initialFen": "startpos",
+                         "state": {"moves": "e2e4", "status": "started"}})
+    session.final_sync_pending = True
+    session.status = "mate"
+    session._save()
+
+    account_a = repository.ensure_archive_account("AccountA")
+    account_b = repository.ensure_archive_account("AccountB")
+    assert [row["game_id"] for row in repository.list_pending_final_sync(account_id=account_a)] == [
+        "owned-finish"]
+    assert repository.list_pending_final_sync(account_id=account_b) == []
+    repository.shutdown()
+
+
 class FakeTransport:
     def __init__(self, responses=None, lines=None, stream_error=None):
         self.responses = list(responses or [])
@@ -58,6 +76,22 @@ class FakeChallengeClient:
 
 def response(status, data):
     return HttpResponse(status, {}, json.dumps(data).encode())
+
+
+def test_player_rating_uses_only_official_puzzle_series_and_shared_cooldown():
+    transport = FakeTransport(responses=[
+        response(200, [{"name": "blitz", "points": [[2026, 9, 1, 2500]]},
+                       {"name": "puzzle", "points": [[2026, 9, 1, 1812]]}]),
+        HttpResponse(429, {"Retry-After": "60"}, b""),
+    ])
+    client = LichessClient(transport=transport)
+    assert client.get_puzzle_rating_history("fixture", "synthetic") == [[2026, 9, 1, 1812]]
+    assert transport.calls[0][0:2] == ("GET", "https://lichess.org/api/user/fixture/rating-history")
+    with pytest.raises(RateLimitError):
+        client.get_puzzle_rating_history("fixture", "synthetic")
+    with pytest.raises(RateLimitError):
+        client.get_puzzle_rating_history("fixture", "synthetic")
+    assert len(transport.calls) == 2
 
 
 def test_pkce_request_uses_s256_and_minimal_scopes():
@@ -110,23 +144,26 @@ def test_unlimited_open_challenge_omits_clock_and_premoves_never_change_server_s
     assert b"clock.limit" not in (fake.calls[0][3] or b"")
 
 
-def test_open_link_is_accepted_only_after_server_confirms_unlimited_and_color_url():
+def test_open_link_is_accepted_only_after_server_confirms_unlimited_and_color_url(qtbot):
     service = LichessService(client=FakeChallengeClient({
         "id": "invite", "timeControl": {"type": "unlimited"},
         "whiteUrl": "https://lichess.org/white", "blackUrl": "https://lichess.org/black",
         "rated": False,
-    }), token_store=object())
-    result = service._create_open("token", "white", None, 0, False)
+    }), token_store=type("Store", (), {"get": lambda self: "token"})())
+    with qtbot.waitSignal(service.session_challenge_ready) as ready:
+        service.open_friend_game("white", None)
+    result = ready.args[2]
     assert result["friendUrl"] == "https://lichess.org/black"
     assert [call[0] for call in service.client.calls] == ["create", "accept"]
 
 
-def test_open_link_cancels_instead_of_silently_creating_correspondence():
+def test_open_link_cancels_instead_of_silently_creating_correspondence(qtbot):
     service = LichessService(client=FakeChallengeClient({
         "id": "invite", "timeControl": {"type": "correspondence"},
-    }), token_store=object())
-    with __import__("pytest").raises(LichessError, match="часов"):
-        service._create_open("token", "white", None, 0, False)
+    }), token_store=type("Store", (), {"get": lambda self: "token"})())
+    with qtbot.waitSignal(service.session_challenge_ready) as ready:
+        service.open_friend_game("white", None)
+    assert ready.args[2]["cancelled"]
     assert [call[0] for call in service.client.calls] == ["create", "cancel"]
 
 
@@ -137,6 +174,133 @@ def test_username_challenge_uses_keepalive_ndjson_stream():
         "rated": "false", "keepAliveStream": "true", "color": "white"
     }, threading.Event()))
     assert [event["type"] for event in events] == ["challenge", "challengeDeclined"]
+
+
+@pytest.mark.parametrize("cancel_before_id", [True, False])
+def test_username_challenge_cancel_is_sent_for_pending_and_known_server_id(cancel_before_id):
+    entered = threading.Event()
+    release = threading.Event()
+    id_available = threading.Event()
+
+    class Store:
+        def get(self):
+            return "synthetic-token"
+
+    class Client:
+        def __init__(self):
+            self.cancelled = []
+
+        def username_challenge_events(self, token, username, form, stop):
+            entered.set()
+            if cancel_before_id:
+                release.wait(2)
+            yield {"type": "challenge", "challenge": {"id": "synthetic-challenge"}}
+            id_available.set()
+            release.wait(2)
+
+        def cancel_challenge(self, token, challenge_id):
+            self.cancelled.append((token, challenge_id))
+
+    client = Client()
+    service = LichessService(client=client, token_store=Store(),
+                             personal_token_store=Store())
+    service.username = "SyntheticAccount"
+    service.challenge_username("SyntheticOpponent", "white", 300)
+    assert entered.wait(2)
+    if not cancel_before_id:
+        assert id_available.wait(2)
+    deadline = time.monotonic() + 2
+    while (not cancel_before_id and service._username_challenge_id is None
+           and time.monotonic() < deadline):
+        time.sleep(0.005)
+    if not cancel_before_id:
+        assert service._username_challenge_id == "synthetic-challenge"
+
+    service.cancel_username_challenge()
+    if cancel_before_id:
+        assert client.cancelled == []
+        release.set()
+    deadline = time.monotonic() + 2
+    while not client.cancelled and time.monotonic() < deadline:
+        time.sleep(0.005)
+    assert client.cancelled == [("synthetic-token", "synthetic-challenge")]
+    deadline = time.monotonic() + 2
+    while (service._username_challenge_stop is not None
+           and not service._username_challenge_stop.is_set()
+           and time.monotonic() < deadline):
+        time.sleep(0.005)
+    assert (service._username_challenge_stop is None
+            or service._username_challenge_stop.is_set())
+    release.set()
+    assert service.close(timeout=2)
+
+
+@pytest.mark.parametrize("cancel_before_id", [True, False])
+def test_username_challenge_cancel_429_keeps_pending_stream_retryable(qtbot, cancel_before_id):
+    entered = threading.Event()
+    release_id = threading.Event()
+    challenge_id_available = threading.Event()
+    release_stream = threading.Event()
+    statuses = []
+
+    class Store:
+        def get(self):
+            return "synthetic-token"
+
+    class Client:
+        def __init__(self):
+            self.cancel_attempts = 0
+
+        def username_challenge_events(self, token, username, form, stop):
+            entered.set()
+            if cancel_before_id:
+                release_id.wait(2)
+            yield {"type": "challenge", "challenge": {"id": "synthetic-challenge"}}
+            challenge_id_available.set()
+            release_stream.wait(2)
+            yield {"type": "challengeDeclined"}
+
+        def cancel_challenge(self, token, challenge_id):
+            self.cancel_attempts += 1
+            if self.cancel_attempts == 1:
+                raise RateLimitError(90)
+
+    client = Client()
+    service = LichessService(client=client, token_store=Store(),
+                             personal_token_store=Store())
+    service.username = "SyntheticAccount"
+    service.challenge_status_changed.connect(lambda message, retryable:
+        statuses.append((str(message), bool(retryable))))
+    service.challenge_username("SyntheticOpponent", "white", 300)
+    assert entered.wait(2)
+    if cancel_before_id:
+        assert service.cancel_username_challenge()
+        release_id.set()
+    else:
+        assert challenge_id_available.wait(2)
+        assert service.cancel_username_challenge()
+
+    qtbot.waitUntil(lambda: any("Не удалось отменить вызов" in message
+                                for message, _ in statuses), timeout=2000)
+    assert any("90 с" in message and retryable
+               for message, retryable in statuses
+               if "Не удалось отменить вызов" in message)
+    stop = service._username_challenge_stop
+    assert stop is not None and not stop.is_set()
+    assert client.cancel_attempts == 1
+
+    assert service.cancel_username_challenge()
+    deadline = time.monotonic() + 2
+    while client.cancel_attempts < 2 and time.monotonic() < deadline:
+        time.sleep(0.005)
+    assert client.cancel_attempts == 2
+    qtbot.waitUntil(lambda: any(message == "Вызов отменён." and not retryable
+                                for message, retryable in statuses), timeout=2000)
+    assert any(message == "Вызов отменён." and not retryable
+               for message, retryable in statuses)
+    assert stop.is_set()
+    release_stream.set()
+    assert service.close(timeout=2)
 
 
 def test_move_draw_resign_and_abort_use_documented_board_api_routes():
@@ -320,7 +484,8 @@ def test_ready_analytics_worker_does_not_poll_playing_when_durable_queue_has_no_
 
     service.refresh_lichess_analysis_background(generation=1)
 
-    assert results and results[0][-1] == "очередь готовой аналитики пуста"
+    assert results and results[0][-2] == "очередь готовой аналитики пуста"
+    assert results[0][-1] == ""
     repository.shutdown()
 
 
@@ -879,6 +1044,53 @@ def test_m3_paginated_search_and_note_crud(tmp_path):
     assert repo.list_notes("g01")[0]["body"] == "Updated thought"
     repo.delete_note(note)
     assert repo.list_notes("g01") == []
+
+
+def test_library_search_filters_result_color_and_analysis_in_sql(tmp_path):
+    repo = GameRepository(tmp_path / "library-filters.sqlite3")
+    repo.save_snapshot("won", "startpos", "e2e4", "white", "Friend", False,
+                       "300+3", "mate", "white")
+    repo.save_snapshot("lost", "startpos", "e2e4", "black", "Friend", False,
+                       "300+3", "mate", "white")
+    repo.save_snapshot("drawn", "startpos", "e2e4", "white", "Friend", False,
+                       "600+0", "draw", None)
+
+    assert repo.search_games(outcome="win")["items"][0]["game_id"] == "won"
+    assert repo.search_games(outcome="loss")["items"][0]["game_id"] == "lost"
+    assert repo.search_games(outcome="draw")["items"][0]["game_id"] == "drawn"
+    assert repo.search_games(color="black")["items"][0]["game_id"] == "lost"
+    assert repo.search_games(clock="600+0")["items"][0]["game_id"] == "drawn"
+    assert repo.search_games(analysis="no")["total"] == 3
+    assert repo.search_games(analysis="yes")["total"] == 0
+    assert repo.search_games(analysis_source="stockfish")["total"] == 0
+    repo.shutdown()
+
+
+def test_caro_kann_is_searchable_by_russian_english_alias_and_eco(tmp_path):
+    repo = GameRepository(tmp_path / "opening-aliases.sqlite3")
+    try:
+        repo.save_snapshot("caro", "startpos", "e2e4 c7c6 d2d4 d7d5", "white", "Friend",
+                           False, "600+0", "mate", "white")
+        with repo._connection() as db:
+            db.execute("UPDATE games SET opening_eco='B12',opening_name='Caro-Kann Defense' "
+                       "WHERE game_id='caro'")
+        for term in ("Каро-Канн", "Caro-Kann", "B12"):
+            result = repo.search_games(opening=term)
+            assert result["total"] == 1, term
+            assert result["items"][0]["game_id"] == "caro"
+    finally:
+        repo.shutdown()
+
+
+def test_library_period_filter_uses_game_date_not_metadata_update_time(tmp_path):
+    repo = GameRepository(tmp_path / "library-period.sqlite3")
+    repo.save_snapshot("old-game", "startpos", "e2e4", "white", "Friend", False,
+                       "600+0", "mate", "white", started_at="2020.01.01")
+    repo.save_snapshot("new-game", "startpos", "d2d4", "white", "Friend", False,
+                       "600+0", "mate", "white", started_at="2026.01.01")
+    assert repo.search_games(updated_after="2025-01-01")["total"] == 1
+    assert repo.search_games(updated_after="2025-01-01")["items"][0]["game_id"] == "new-game"
+    repo.shutdown()
 
 
 def test_m3_migration_rolls_back_schema_and_version_on_backfill_failure(tmp_path, monkeypatch):
@@ -1443,7 +1655,7 @@ def test_statistics_use_move_denominators_partial_coverage_and_keep_accuracy_sep
     line = repo.current_line("w")
     repo.save_analysis("w", line_revision=1, line_hash=line["line_hash"],
         source="stockfish", engine_name="Fake", engine_version="1", parameters={"nodes": 1},
-        assessments=[{"ply": i, "white_cp": i * 10} for i in range(3)],
+        assessments=[{"ply": i, "white_cp": i * 10, "depth": 16} for i in range(3)],
         classifications=[
             {"ply": 1, "mover": "white", "eval_loss_cp": 100, "label": "mistake",
              "phase": "opening", "algorithm_version": "test"},
@@ -1467,6 +1679,10 @@ def test_statistics_use_move_denominators_partial_coverage_and_keep_accuracy_sep
     assert summary["avg_cpl_cp"] == 0.0
     assert summary["swings_200cp"] == 0
     assert summary["lichess_accuracy"] == {"white": 90.0, "black": 80.0}
+    assert summary["local_move_accuracy_n"] == 1
+    assert summary["local_move_accuracy"] is not None
+    assert summary["local_move_accuracy_formula_id"].startswith(
+        "lichess-accuracy-a46b4e6d")
     assert summary["rating_trend"] == [{"date": repo.get_game("w")["started_at"],
                                          "game_time_precision": "timestamp",
                                          "rating": 1500, "game_id": "w"}]
@@ -2088,7 +2304,7 @@ def test_puzzle_incremental_imports_1501_records_in_durable_pages(tmp_path):
         "PageAccount", "fake", threading.Event(), page_size=1000)
     assert count == 1501
     assert repo.puzzle_statistics(account_id)["attempts"] == 1502
-    assert len([call for call in client.calls if call[2] == 1000]) == 2
+    assert len([call for call in client.calls if call[2] == 250]) == 7
     client.calls.clear()
     assert PuzzleActivitySync(client, repo).run(
         "PageAccount", "fake", threading.Event(), page_size=1000) == 0
@@ -2161,7 +2377,7 @@ def test_archive_2501_games_paginates_three_pages_and_keeps_raw_pgn(tmp_path):
                                               full=True, page_size=1000)
     assert imported == total
     assert len(repo.list_games(completed_only=False)) == total
-    assert len([p for p in client.page_sizes if p[2] == 1000 and p[1] is not None]) == 3
+    assert len([p for p in client.page_sizes if p[2] == 250 and p[1] is not None]) == 11
     assert repo.export_pgn("g1").find("[%clk 0:05:00]") >= 0
     assert repo.export_pgn("g1").find("[%eval 0.25]") >= 0
     assert len(repo.items) == total
@@ -2297,7 +2513,7 @@ def test_puzzle_sync_handles_2501_descending_attempts_and_restarts_after_page_tw
         def __init__(self): self.full_pages = 0; self.cancel_page_two = True
         def stream_puzzle_activity(self, token, stop, *, since=None, before=None, max_items=1000):
             if before is None: return iter(())
-            if max_items == 1000:
+            if max_items == 250:
                 self.full_pages += 1
                 if self.cancel_page_two and self.full_pages == 2:
                     stop.set()
@@ -2336,12 +2552,12 @@ def test_puzzle_sync_handles_2501_descending_attempts_and_restarts_after_page_tw
     client = Client()
     sync = PuzzleActivitySync(client, repo)
     stop = threading.Event()
-    assert sync.run("Me", "fake", stop, page_size=1000) == 1000
+    assert sync.run("Me", "fake", stop, page_size=1000) == 250
     account = repo.ensure_archive_account("Me")
     assert repo.puzzle_sync_state(account)["backfill_complete"] == 0
-    assert repo.puzzle_statistics(account)["attempts"] == 1000
+    assert repo.puzzle_statistics(account)["attempts"] == 250
     stop.clear(); client.cancel_page_two = False
-    assert sync.run("Me", "fake", stop, page_size=1000) == 1501
+    assert sync.run("Me", "fake", stop, page_size=1000) == 2251
     assert repo.puzzle_statistics(account)["attempts"] == 2501
     assert len(repo.puzzle_history(account, limit=500)) == 500
     assert repo.puzzle_sync_state(account)["backfill_complete"] == 1
@@ -2979,6 +3195,122 @@ def test_clock_only_duplicate_does_not_reserialize_or_resave_full_pgn(tmp_path, 
     assert len(saves) == 1
 
 
+def test_server_clock_accepts_correspondence_units_and_rejects_corruption(tmp_path):
+    repo = GameRepository(tmp_path / "clock-plausibility.sqlite3")
+    session = LichessGameSession("long-correspondence", repo)
+    day = 24 * 60 * 60 * 1000
+    session.apply_event({
+        "type": "gameFull", "initialFen": "startpos",
+        "clock": {"initial": 30 * day, "increment": 0},
+        "state": {"moves": "", "status": "started", "wtime": 596 * 60 * 60 * 1000,
+                  "btime": 29 * day, "winc": 0, "binc": 0},
+    })
+    assert session.clock_state_valid is True
+    assert session.white_ms == 596 * 60 * 60 * 1000
+
+    session.apply_event({"type": "gameState", "moves": "", "status": "started",
+                         "wtime": 31 * day, "btime": 29 * day, "winc": 0, "binc": 0})
+    assert session.clock_state_valid is False
+    # Invalid server units/data do not replace the last confirmed values.
+    assert session.white_ms == 596 * 60 * 60 * 1000
+
+    session.apply_event({"type": "gameFull", "initialFen": "startpos",
+                         "clock": {"initial": 30 * day, "increment": 0},
+                         "state": {"moves": "", "status": "started"}})
+    assert session.white_ms is None and session.black_ms is None
+    assert session.clock_state_valid is None
+
+
+def test_live_clock_budget_accumulates_each_confirmed_increment_and_keeps_latest_frame(
+        tmp_path, monkeypatch):
+    now = [100.0]
+    monkeypatch.setattr("chess_coach.lichess.session.time.monotonic", lambda: now[0])
+    session = LichessGameSession("increment-bank", GameRepository(tmp_path / "increment-bank.sqlite3"))
+    session.apply_event({
+        "type": "gameFull", "initialFen": "startpos",
+        "clock": {"initial": 180_000, "increment": 2_000},
+        "state": {"moves": "", "status": "started", "wtime": 180_000,
+                  "btime": 180_000, "winc": 2_000, "binc": 2_000},
+    })
+    six_plies = "e2e4 d7d5 g1f3 g8f6 d2d4 e7e6"
+    session.apply_event({"type": "gameState", "moves": six_plies, "status": "started",
+                         "wtime": 186_000, "btime": 186_000,
+                         "winc": 2_000, "binc": 2_000})
+    assert session.clock_state_valid is True
+    assert (session.white_ms, session.black_ms) == (186_000, 186_000)
+
+    eight_plies = six_plies + " b1c3 c7c5"
+    session.apply_event({"type": "gameState", "moves": eight_plies, "status": "started",
+                         "wtime": 188_000, "btime": 188_000,
+                         "winc": 2_000, "binc": 2_000})
+    assert session.clock_state_valid is True
+    assert (session.white_ms, session.black_ms) == (188_000, 188_000)
+    assert session._last_clock_at == 100.0
+    now[0] = 110.0
+
+    # A delayed shorter line cannot roll back either the board or clock display.
+    session.apply_event({"type": "gameState", "moves": six_plies, "status": "started",
+                         "wtime": 184_000, "btime": 184_000,
+                         "winc": 2_000, "binc": 2_000})
+    assert len(session.moves.split()) == 8
+    assert (session.white_ms, session.black_ms) == (188_000, 188_000)
+    # A duplicate snapshot is idempotent.
+    session.apply_event({"type": "gameState", "moves": eight_plies, "status": "started",
+                         "wtime": 188_000, "btime": 188_000,
+                         "winc": 2_000, "binc": 2_000})
+    assert session.clock_state_valid is True
+    assert session._last_clock_at == 100.0
+    session.apply_event({
+        "type": "gameFull", "initialFen": "startpos",
+        "clock": {"initial": 180_000, "increment": 2_000},
+        "state": {"moves": eight_plies, "status": "started", "wtime": 187_000,
+                  "btime": 188_000, "winc": 2_000, "binc": 2_000},
+    })
+    assert session._last_clock_at == 110.0
+    assert (session.white_ms, session.black_ms) == (187_000, 188_000)
+
+
+def test_live_clock_increment_bounds_cover_both_colors_and_reject_bad_payloads(tmp_path):
+    repo = GameRepository(tmp_path / "clock-bounds.sqlite3")
+    session = LichessGameSession("clock-bounds", repo)
+    session.apply_event({
+        "type": "gameFull", "initialFen": "startpos",
+        "clock": {"initial": 900_000, "increment": 10_000},
+        "state": {"moves": "", "status": "started", "wtime": 900_000,
+                  "btime": 900_000, "winc": 10_000, "binc": 10_000},
+    })
+    session.apply_event({"type": "gameState", "moves": "e2e4 d7d5 g1f3", "status": "started",
+                         "wtime": 920_000, "btime": 910_000,
+                         "winc": 10_000, "binc": 10_000})
+    assert session.clock_state_valid is True
+    assert (session.white_ms, session.black_ms) == (920_000, 910_000)
+
+    no_increment = LichessGameSession("ten-zero", repo)
+    no_increment.apply_event({"type": "gameFull", "initialFen": "startpos",
+                              "clock": {"initial": 600_000, "increment": 0},
+                              "state": {"moves": "", "status": "started",
+                                        "wtime": 600_000, "btime": 600_000,
+                                        "winc": 0, "binc": 0}})
+    no_increment.apply_event({"type": "gameState", "moves": "e2e4 d7d5", "status": "started",
+                              "wtime": 590_000, "btime": 590_000, "winc": 0, "binc": 0})
+    assert no_increment.clock_state_valid is True
+    no_increment.apply_event({"type": "gameState", "moves": "e2e4 d7d5 g1f3", "status": "started",
+                              "wtime": 604_000, "btime": 580_000, "winc": 0, "binc": 0})
+    assert no_increment.clock_state_valid is False
+    assert no_increment.white_ms == 590_000
+
+    # Missing initial control is conservative and does not guess units.
+    unknown = LichessGameSession("unknown-control", repo)
+    unknown.apply_event({"type": "gameFull", "initialFen": "startpos",
+                         "state": {"moves": "", "status": "started", "wtime": 60_000,
+                                   "btime": 60_000, "winc": 0, "binc": 0}})
+    assert unknown.clock_control == "-" and unknown.clock_state_valid is True
+    unknown.apply_event({"type": "gameState", "moves": "", "status": "started",
+                         "wtime": "60000", "btime": 59_000, "winc": 0, "binc": 0})
+    assert unknown.clock_state_valid is False
+    assert unknown.white_ms == 60_000
+
+
 def test_disconnect_cancels_archive_and_puzzle_background_workers(monkeypatch):
     service = LichessService(client=object(), token_store=object())
     service._archive_stop = threading.Event()
@@ -2992,8 +3324,6 @@ def test_disconnect_cancels_archive_and_puzzle_background_workers(monkeypatch):
 
 
 def test_automatic_puzzle_sync_never_opens_oauth_without_saved_token(monkeypatch):
-    import chess_coach.lichess.service as service_module
-
     class EmptyCredentialStore:
         def __init__(self, **kwargs):
             pass
@@ -3005,7 +3335,8 @@ def test_automatic_puzzle_sync_never_opens_oauth_without_saved_token(monkeypatch
         def get_account(self, token):
             raise AssertionError("No account requests without an existing puzzle token")
 
-    monkeypatch.setattr(service_module, "WindowsCredentialStore", EmptyCredentialStore)
+    monkeypatch.setattr("chess_coach.lichess.service_sync.WindowsCredentialStore",
+                        EmptyCredentialStore)
     service = LichessService(client=NoNetworkClient(), token_store=object())
     service.username = "Owner"
     monkeypatch.setattr(service, "_thread", lambda target, name: target())

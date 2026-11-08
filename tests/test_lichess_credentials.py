@@ -409,6 +409,64 @@ def test_disconnect_is_local_and_generation_switch_cannot_stop_new_same_name_ses
     service.close()
 
 
+def test_stale_send_move_401_cannot_delete_or_stop_replacement_auth_session():
+    entered = threading.Event()
+    release = threading.Event()
+
+    class DelayedMoveClient(AccountClient):
+        def send_move(self, token, game_id, uci):
+            self.calls.append((token, game_id, uci))
+            entered.set()
+            assert release.wait(2)
+            raise LichessError("old credential rejected", 401, "json")
+
+    oauth = MemoryStore("old-oauth")
+    personal = MemoryStore("new-pat")
+    client = DelayedMoveClient()
+    service = LichessService(client=client, token_store=oauth,
+                             personal_token_store=personal, auth_method="oauth")
+    service.username = "AccountA"
+    service.send_move("game-a", "e2e4", "move-request-a")
+    old_worker = service._threads[-1]
+    assert entered.wait(1)
+
+    service.set_auth_method("personal_token")
+    service.username = "AccountB"
+    replacement_stop = service._connection_stop
+    release.set()
+    old_worker.join(timeout=2)
+    assert not old_worker.is_alive()
+
+    assert oauth.value == "old-oauth"
+    assert personal.value == "new-pat"
+    assert not replacement_stop.is_set()
+    service.close()
+
+
+def test_queued_game_action_does_not_read_replacement_account_token():
+    queued = []
+    calls = []
+
+    class Client(AccountClient):
+        def abort(self, token, game_id):
+            calls.append((token, game_id))
+
+    oauth = MemoryStore("account-a-token")
+    personal = MemoryStore("account-b-token")
+    service = LichessService(client=Client(), token_store=oauth,
+                             personal_token_store=personal, auth_method="oauth")
+    service.username = "AccountA"
+    service._thread = lambda target, _name: queued.append(target)
+    service.abort("game-a")
+    service.set_auth_method("personal_token")
+    service.username = "AccountB"
+
+    queued.pop()()
+
+    assert calls == []
+    service.close()
+
+
 @pytest.mark.parametrize("status", [403, 429])
 def test_old_stream_error_after_switch_cannot_replace_new_connected_status(qtbot, status):
     entered = threading.Event()
@@ -532,6 +590,244 @@ def test_old_game_full_event_after_account_switch_is_discarded(qtbot):
     service.close()
 
 
+def test_duplicate_game_action_is_posted_once_while_first_request_is_pending(qtbot):
+    entered = threading.Event()
+    release = threading.Event()
+
+    class Client(AccountClient):
+        def abort(self, token, game_id):
+            self.calls.append((token, game_id))
+            entered.set()
+            assert release.wait(2)
+            return {}
+
+    client = Client()
+    service = LichessService(client=client, token_store=MemoryStore("token"),
+                             personal_token_store=MemoryStore("pat"))
+    started = []
+    completed = []
+    service.session_action_started.connect(lambda *args: started.append(args))
+    service.session_action_completed.connect(lambda *args: completed.append(args))
+    first_id = service.abort("game-1")
+    second_id = service.abort("game-1")
+    assert second_id == first_id
+    assert entered.wait(1)
+    assert client.calls == [("token", "game-1")]
+    release.set()
+    qtbot.waitUntil(lambda: len(completed) == 1, timeout=1000)
+    assert len(started) == 1
+    assert completed[0][2:] == ("abort", "game-1", 0)
+    service.close(timeout=1.0)
+
+
+def test_successful_game_action_stays_one_shot_until_authoritative_reconciliation(qtbot):
+    class Client(AccountClient):
+        def abort(self, token, game_id):
+            self.calls.append((token, game_id))
+            return {}
+
+    client = Client()
+    service = LichessService(client=client, token_store=MemoryStore("token"),
+                             personal_token_store=MemoryStore("pat"))
+    completed = []
+    service.session_action_completed.connect(lambda *args: completed.append(args))
+    first_id = service.abort("game-uncertain")
+    qtbot.waitUntil(lambda: bool(completed), timeout=1000)
+    second_id = service.abort("game-uncertain")
+    qtbot.wait(40)
+    assert second_id == first_id
+    assert client.calls == [("token", "game-uncertain")]
+    assert len(completed) == 1
+    assert service.has_pending_action("game-uncertain", "abort")
+    service.reconcile_game_actions("game-uncertain", {
+        "type": "gameState", "status": "started", "moves": "e2e4"})
+    assert service.has_pending_action("game-uncertain", "abort")
+    service.reconcile_game_actions("game-uncertain", {
+        "type": "gameState", "status": "aborted", "moves": ""})
+    assert not service.has_pending_action("game-uncertain", "abort")
+    service.close(timeout=1.0)
+
+
+def test_friend_invitation_cancel_before_post_response_cancels_exact_server_id(qtbot):
+    entered = threading.Event()
+    release = threading.Event()
+
+    class Client(AccountClient):
+        def __init__(self):
+            super().__init__()
+            self.cancelled = []
+            self.accepted = []
+        def create_open_challenge(self, token, color, rated, limit, increment):
+            entered.set()
+            assert release.wait(2)
+            return {"id": "challenge-1", "timeControl": {
+                "type": "clock", "limit": limit, "increment": increment},
+                "rated": rated, "blackUrl": "https://lichess.org/join/challenge-1"}
+        def cancel_challenge(self, token, challenge_id):
+            self.cancelled.append((token, challenge_id))
+        def accept_open_challenge(self, token, challenge_id, color):
+            self.accepted.append((token, challenge_id, color))
+            return {}
+
+    client = Client()
+    service = LichessService(client=client, token_store=MemoryStore("token"),
+                             personal_token_store=MemoryStore("pat"))
+    ready = []
+    service.session_challenge_ready.connect(lambda *args: ready.append(args))
+    request_id = service.open_friend_game("white", 300, 2, False)
+    assert entered.wait(1)
+    assert service.cancel_pending_friend_challenge(request_id)
+    release.set()
+    qtbot.waitUntil(lambda: bool(ready), timeout=1500)
+    assert ready[0][2] == {"id": "challenge-1", "cancelled": True}
+    assert client.cancelled == [("token", "challenge-1")]
+    assert client.accepted == []
+    service.close(timeout=1.0)
+
+
+def test_friend_invitation_cancel_during_accept_never_cancels_accepted_game(qtbot):
+    accept_entered = threading.Event()
+    release_accept = threading.Event()
+
+    class Client(AccountClient):
+        def __init__(self):
+            super().__init__()
+            self.cancelled = []
+        def create_open_challenge(self, token, color, rated, limit, increment):
+            return {"id": "challenge-accepted", "timeControl": {
+                "type": "clock", "limit": limit, "increment": increment},
+                "rated": rated, "blackUrl": "https://lichess.org/join/challenge-accepted"}
+        def accept_open_challenge(self, token, challenge_id, color):
+            accept_entered.set()
+            assert release_accept.wait(2)
+            return {"id": "game-accepted"}
+        def cancel_challenge(self, token, challenge_id):
+            self.cancelled.append((token, challenge_id))
+
+    client = Client()
+    service = LichessService(client=client, token_store=MemoryStore("token"),
+                             personal_token_store=MemoryStore("pat"))
+    ready = []
+    service.session_challenge_ready.connect(lambda *args: ready.append(args))
+    request_id = service.open_friend_game("white", 300, 2, False)
+    assert accept_entered.wait(1)
+    assert service.cancel_pending_friend_challenge(request_id)
+    release_accept.set()
+    qtbot.waitUntil(lambda: bool(ready), timeout=1500)
+    assert ready[0][2]["cancel_too_late"] is True
+    assert client.cancelled == []
+    service.close(timeout=1.0)
+
+
+def test_friend_pending_cancel_429_is_retryable_and_never_claimed_success(qtbot):
+    from chess_coach.lichess.api import RateLimitError
+    create_entered, release_create = threading.Event(), threading.Event()
+
+    class Client(AccountClient):
+        def __init__(self):
+            super().__init__()
+            self.create_count = 0
+            self.cancel_count = 0
+        def create_open_challenge(self, token, color, rated, limit, increment):
+            self.create_count += 1
+            create_entered.set()
+            assert release_create.wait(2)
+            return {"id": "challenge-429", "timeControl": {
+                "type": "clock", "limit": limit, "increment": increment},
+                "rated": rated, "blackUrl": "https://lichess.org/join/challenge-429"}
+        def cancel_challenge(self, token, challenge_id):
+            self.cancel_count += 1
+            if self.cancel_count == 1:
+                raise RateLimitError(60)
+
+    client = Client()
+    service = LichessService(client=client, token_store=MemoryStore("token"),
+                             personal_token_store=MemoryStore("pat"))
+    failures, statuses = [], []
+    service.session_operation_failed.connect(lambda *args: failures.append(args))
+    service.session_challenge_status_changed.connect(lambda *args: statuses.append(args))
+    request_id = service.open_friend_game("white", 300, 2, False)
+    assert create_entered.wait(1)
+    assert service.cancel_pending_friend_challenge(request_id)
+    release_create.set()
+    qtbot.waitUntil(lambda: bool(failures), timeout=1000)
+    assert failures[0][4] == 429
+    assert client.create_count == 1 and client.cancel_count == 1
+    assert service.cancel_pending_friend_challenge(request_id)
+    qtbot.waitUntil(lambda: any("отменено Lichess" in row[2] for row in statuses), timeout=1000)
+    assert client.create_count == 1 and client.cancel_count == 2
+    service.close(timeout=1.0)
+
+
+def test_429_game_action_is_not_reposted_until_authoritative_effect(qtbot):
+    from chess_coach.lichess.api import RateLimitError
+
+    class Client(AccountClient):
+        def __init__(self): super().__init__(); self.post_count = 0
+        def resign(self, token, game_id):
+            self.post_count += 1
+            raise RateLimitError(60)
+
+    client = Client()
+    service = LichessService(client=client, token_store=MemoryStore("token"),
+                             personal_token_store=MemoryStore("pat"))
+    completed = []
+    reconciled = []
+    service.session_action_completed.connect(lambda *args: completed.append(args))
+    service.session_action_reconciled.connect(lambda *args: reconciled.append(args))
+    first_id = service.resign("game-429")
+    qtbot.waitUntil(lambda: bool(completed), timeout=1000)
+    for _ in range(3):
+        assert service.resign("game-429") == first_id
+    qtbot.wait(30)
+    assert client.post_count == 1
+    assert service.has_pending_action("game-429", "resign")
+    service.reconcile_game_actions("game-429", {
+        "type": "gameState", "status": "started", "moves": "e2e4"})
+    assert service.has_pending_action("game-429", "resign")
+    service.reconcile_game_actions("game-429", {
+        "type": "gameState", "status": "resign", "moves": "e2e4"})
+    assert not service.has_pending_action("game-429", "resign")
+    qtbot.waitUntil(lambda: bool(reconciled), timeout=1000)
+    service.close(timeout=1.0)
+
+
+def test_draw_offer_and_acceptance_have_distinct_authoritative_effects(qtbot):
+    class Client(AccountClient):
+        def __init__(self):
+            super().__init__()
+            self.draw_posts = []
+        def handle_draw(self, token, game_id, accept):
+            self.draw_posts.append((token, game_id, accept))
+            return {}
+
+    client = Client()
+    service = LichessService(client=client, token_store=MemoryStore("token"),
+                             personal_token_store=MemoryStore("pat"))
+    completed = []
+    service.session_action_completed.connect(lambda *args: completed.append(args))
+
+    offer_id = service.draw("draw-game", True)
+    qtbot.waitUntil(lambda: len(completed) == 1, timeout=1000)
+    assert client.draw_posts == [("token", "draw-game", True)]
+    assert service.has_pending_action("draw-game", "offer_draw")
+    service.reconcile_game_actions("draw-game", {
+        "type": "gameState", "status": "started", "moves": "e2e4", "wdraw": True,
+        "bdraw": False})
+    assert not service.has_pending_action("draw-game", "offer_draw")
+
+    accept_id = service.draw("draw-game", True, accepting_offer=True)
+    qtbot.waitUntil(lambda: len(completed) == 2, timeout=1000)
+    assert accept_id != offer_id
+    assert client.draw_posts == [("token", "draw-game", True), ("token", "draw-game", True)]
+    assert service.has_pending_action("draw-game", "accept_draw")
+    service.reconcile_game_actions("draw-game", {
+        "type": "gameState", "status": "draw", "moves": "e2e4", "wdraw": True,
+        "bdraw": True})
+    assert not service.has_pending_action("draw-game", "accept_draw")
+    service.close(timeout=1.0)
+
+
 def test_late_old_game_start_is_not_delivered_or_started(qtbot):
     entered = threading.Event()
     release = threading.Event()
@@ -631,3 +927,212 @@ def test_account_denial_logs_no_token_body_or_account_data(tmp_path, monkeypatch
     assert "example.test" not in contents
     diagnostics._LOGGER.handlers.clear()
     diagnostics._HANDLER = None
+
+
+def test_rv2_transport_event_cannot_reconcile_unvalidated_position(qtbot):
+    class Client(AccountClient):
+        def resign(self, token, game_id):
+            self.calls.append(game_id)
+
+    client = Client()
+    service = LichessService(client=client, token_store=MemoryStore("fake"))
+    done = []
+    service.session_action_completed.connect(lambda *args: done.append(args))
+    try:
+        service.resign("game")
+        qtbot.waitUntil(lambda: bool(done))
+        service._emit_session_game_event(service.auth_generation, "game", {
+            "type": "gameState", "status": "resign", "moves": "e2e5"})
+        assert service.has_pending_action("game", "resign")
+    finally:
+        service.close(timeout=1)
+
+
+def test_rv2_successful_friend_request_does_not_retain_credentials(qtbot):
+    class Client(AccountClient):
+        def create_open_challenge(self, *args):
+            return {"id": "invite", "blackUrl": "https://lichess.org/invite",
+                    "timeControl": {"type": "unlimited"}}
+        def accept_open_challenge(self, *args):
+            return {}
+
+    service = LichessService(client=Client(), token_store=MemoryStore("fake"))
+    ready = []
+    service.session_challenge_ready.connect(lambda *args: ready.append(args))
+    try:
+        service.open_friend_game("white", None)
+        qtbot.waitUntil(lambda: bool(ready))
+        assert not service._pending_friend_challenges
+        service._thread = lambda work, _name: work()
+        for _ in range(100):
+            service.open_friend_game("white", None)
+        assert len(ready) == 101
+        assert not service._pending_friend_challenges
+    finally:
+        service.close(timeout=1)
+
+
+def test_rv2_stream_and_cancel_finish_when_both_threads_cross_barrier(qtbot):
+    from concurrent.futures import ThreadPoolExecutor
+    service = LichessService(client=AccountClient(), token_store=MemoryStore("fake"))
+    context = service.capture_operation_context(command="create_friend_game")
+    key = (context.generation, context.request_id)
+    service._pending_friend_challenges[key] = {
+        "context": context, "phase": "creating", "cancel_event": threading.Event(),
+    }
+    barrier = threading.Barrier(2)
+
+    class BoundedLock:
+        def __init__(self, lock, first_thread):
+            self.lock = lock
+            self.first_thread = first_thread
+
+        def __enter__(self):
+            if not self.lock.acquire(timeout=1):
+                raise TimeoutError("auth/pending lock inversion")
+            if threading.current_thread().name == self.first_thread:
+                self.first_thread = None
+                try:
+                    barrier.wait(2)
+                except BaseException:
+                    self.lock.release()
+                    raise
+            return self
+
+        def __exit__(self, *_):
+            self.lock.release()
+
+    service._auth_lock = BoundedLock(threading.RLock(), "rv2-stream")
+    service._pending_action_lock = BoundedLock(threading.Lock(), "rv2-cancel")
+
+    def stream():
+        threading.current_thread().name = "rv2-stream"
+        return service._emit_session_game_event(
+            context.generation, "synthetic",
+            {"type": "gameState", "status": "started", "moves": ""})
+
+    def cancel_pending():
+        threading.current_thread().name = "rv2-cancel"
+        return service.cancel_pending_friend_challenge(context.request_id, context.generation)
+
+    heartbeat = []
+    from PySide6.QtCore import QTimer
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        QTimer.singleShot(0, lambda: heartbeat.append(True))
+        cancel = pool.submit(cancel_pending)
+        event = pool.submit(stream)
+        qtbot.waitUntil(lambda: bool(heartbeat) and cancel.done() and event.done(), timeout=2500)
+        assert cancel.result() and event.result()
+    service.close(timeout=1)
+
+
+def test_rv2_partial_friend_accept_429_does_not_repeat_create_or_cancel(qtbot):
+    from chess_coach.lichess.api import RateLimitError
+    class Client(AccountClient):
+        def create_open_challenge(self, *args):
+            self.calls.append("create")
+            return {"id": "invite", "blackUrl": "https://lichess.org/invite",
+                    "timeControl": {"type": "unlimited"}}
+        def accept_open_challenge(self, *args):
+            self.calls.append("accept")
+            raise RateLimitError(60)
+        def cancel_challenge(self, *args):
+            self.calls.append("cancel")
+
+    client = Client()
+    service = LichessService(client=client, token_store=MemoryStore("fake"))
+    try:
+        with qtbot.waitSignal(service.session_operation_failed):
+            request_id = service.open_friend_game("white", None)
+        generation = service.auth_generation
+        assert service.open_friend_game("white", None) == request_id
+        assert service.friend_request_phase(request_id, generation) == "accept_unknown"
+        assert not service.cancel_pending_friend_challenge(request_id, generation)
+        assert client.calls == ["create", "accept"]
+        service._cancel_active_session()
+        assert not service._pending_friend_challenges
+    finally:
+        service.close(timeout=1)
+
+
+def test_rv2_pre_id_unknown_is_retained_until_explicit_session_reset(qtbot):
+    from chess_coach.lichess.api import RateLimitError
+    class Client(AccountClient):
+        def create_open_challenge(self, *args):
+            self.calls.append("create")
+            raise RateLimitError(60)
+
+    client = Client()
+    service = LichessService(client=client, token_store=MemoryStore("fake"))
+    try:
+        with qtbot.waitSignal(service.session_operation_failed):
+            request_id = service.open_friend_game("white", None)
+        assert service.open_friend_game("white", None) == request_id
+        assert service.friend_request_phase(request_id, service.auth_generation) == "unknown"
+        assert not service.cancel_pending_friend_challenge(request_id)
+        assert client.calls == ["create"]
+        service._cancel_active_session()
+        assert not service._pending_friend_challenges
+    finally:
+        service.close(timeout=1)
+
+
+def test_rv2_friend_partial_success_rolls_back_only_after_definitive_rejection(qtbot):
+    from chess_coach.lichess.api import LichessError, RateLimitError
+
+    class Client(AccountClient):
+        def create_open_challenge(self, *args):
+            self.calls.append("create")
+            return {"id": "exact-id", "blackUrl": "https://lichess.org/invite",
+                    "timeControl": {"type": "unlimited"}}
+        def accept_open_challenge(self, *args):
+            self.calls.append("accept")
+            raise LichessError("synthetic forbidden", status=403)
+        def cancel_challenge(self, token, challenge_id):
+            self.calls.append(("cancel", challenge_id))
+            if self.calls.count(("cancel", challenge_id)) == 1:
+                raise RateLimitError(60)
+
+    client = Client()
+    service = LichessService(client=client, token_store=MemoryStore("fake"))
+    try:
+        with qtbot.waitSignal(service.session_operation_failed) as failure:
+            request_id = service.open_friend_game("white", None)
+        assert failure.args[4] == 429
+        assert service.open_friend_game("white", None) == request_id
+        with qtbot.waitSignal(service.session_challenge_status_changed) as status:
+            assert service.cancel_pending_friend_challenge(request_id)
+        assert status.args[3] is False
+        assert client.calls == ["create", "accept", ("cancel", "exact-id"), ("cancel", "exact-id")]
+        assert not service._pending_friend_challenges
+    finally:
+        service.close(timeout=1)
+
+
+def test_rv2_authoritative_offer_during_http_is_retained_until_completion(qtbot):
+    entered, release = threading.Event(), threading.Event()
+
+    class Client(AccountClient):
+        def handle_draw(self, token, game_id, accept):
+            self.calls.append(game_id)
+            entered.set()
+            assert release.wait(3)
+
+    client = Client()
+    service = LichessService(client=client, token_store=MemoryStore("fake"))
+    try:
+        request_id = service.draw("draw", True)
+        assert entered.wait(1)
+        service.reconcile_game_actions("draw", {
+            "type": "gameState", "status": "started", "moves": "", "bdraw": True},
+            color="black")
+        service.reconcile_game_actions("draw", {
+            "type": "gameState", "status": "started", "moves": "e2e4"}, color="black")
+        assert service.draw("draw", True) == request_id
+        with qtbot.waitSignal(service.session_action_reconciled):
+            release.set()
+        assert client.calls == ["draw"]
+        assert not service.has_pending_action("draw", "offer_draw")
+    finally:
+        release.set()
+        service.close(timeout=1)

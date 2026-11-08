@@ -7,6 +7,7 @@ import os
 from pathlib import Path, PurePosixPath
 import shutil
 import tempfile
+import threading
 import time
 import urllib.request
 from urllib.parse import urlparse
@@ -28,6 +29,185 @@ STOCKFISH_SIZE = 81_431_614
 MAX_ARCHIVE_SIZE = 100_000_000
 MAX_UNPACKED_SIZE = 150_000_000
 MAX_ARCHIVE_FILES = 1000
+
+
+class _ManagedEngine:
+    """Transparent python-chess engine proxy whose quit returns ownership to manager."""
+
+    def __init__(self, manager: "StockfishManager", engine, *, release_process: bool = True) -> None:
+        self._manager = manager
+        self._engine = engine
+        self._release_process = release_process
+        self._closed = False
+        self._close_lock = threading.Lock()
+
+    def __getattr__(self, name):
+        return getattr(self._engine, name)
+
+    def quit(self) -> None:
+        with self._close_lock:
+            if self._closed:
+                return
+            self._closed = True
+        self._manager.release(self._engine, release_process=self._release_process)
+
+
+class StockfishManager:
+    """Own UCI process creation, reuse, cancellation-safe release, and shutdown.
+
+    Callers still control the search and stop it through python-chess Analysis.stop;
+    the manager centralizes process ownership and refuses creation during shutdown.
+    """
+
+    def __init__(self, engine_factory=None, *, max_concurrent: int = 1) -> None:
+        self._engine_factory = engine_factory or popen_uci_hidden
+        self._lock = threading.Condition(threading.RLock())
+        self._max_concurrent = max(1, int(max_concurrent))
+        self._active_leases = 0
+        self._engines: dict[int, object] = {}
+        self._position_engines: dict[str, object] = {}
+        self._closing = False
+
+    def _admit(self, stop_event: threading.Event | None, safety_check) -> None:
+        if stop_event is not None and stop_event.is_set():
+            raise InterruptedError("Stockfish отменён до допуска к общему ресурсу.")
+        with self._lock:
+            while self._active_leases >= self._max_concurrent:
+                if self._closing:
+                    raise RuntimeError("Stockfish manager is shutting down")
+                if stop_event is not None and stop_event.is_set():
+                    raise InterruptedError("Stockfish отменён во время ожидания ресурса.")
+                self._lock.wait(timeout=0.05)
+            if self._closing:
+                raise RuntimeError("Stockfish manager is shutting down")
+            if stop_event is not None and stop_event.is_set():
+                raise InterruptedError("Stockfish отменён до допуска к общему ресурсу.")
+            self._active_leases += 1
+        try:
+            # This is deliberately after admission: a permission snapshot taken
+            # before waiting for the shared engine is not sufficient.
+            if safety_check is not None and safety_check() is not True:
+                raise InterruptedError("Fair Play check failed after waiting for Stockfish.")
+            if stop_event is not None and stop_event.is_set():
+                raise InterruptedError("Stockfish отменён до создания процесса.")
+        except BaseException:
+            with self._lock:
+                self._active_leases -= 1
+                self._lock.notify_all()
+            raise
+
+    def _release_lease(self) -> None:
+        with self._lock:
+            self._active_leases = max(0, self._active_leases - 1)
+            self._lock.notify_all()
+
+    def open_engine(self, path: str | os.PathLike[str], *, timeout: float = 10.0,
+                    stop_event: threading.Event | None = None, safety_check=None):
+        self._admit(stop_event, safety_check)
+        try:
+            executable = Path(path).expanduser().resolve(strict=True)
+            if not executable.is_file():
+                raise FileNotFoundError("Укажите существующий локальный Stockfish executable.")
+            with self._lock:
+                if self._closing:
+                    raise RuntimeError("Stockfish manager is shutting down")
+                if stop_event is not None and stop_event.is_set():
+                    raise InterruptedError("Stockfish отменён до создания процесса.")
+                cached = self._position_engines.get(str(executable))
+                if cached is not None:
+                    return _ManagedEngine(self, cached, release_process=False)
+                stale = tuple(self._position_engines.values())
+                self._position_engines.clear()
+                for cached_engine in stale:
+                    self._engines.pop(id(cached_engine), None)
+                    try:
+                        cached_engine.quit()
+                    except Exception:
+                        pass
+                engine = self._engine_factory(
+                    str(executable), timeout=timeout, cwd=str(executable.parent))
+                managed = _ManagedEngine(self, engine)
+                self._engines[id(engine)] = engine
+                return managed
+        except BaseException:
+            self._release_lease()
+            raise
+
+    def engine_factory(self, path: str, **kwargs) -> _ManagedEngine:
+        return self.open_engine(path, **kwargs)
+
+    def position_engine(self, path: str, *, stop_event=None, safety_check=None) -> _ManagedEngine:
+        self._admit(stop_event, safety_check)
+        try:
+            executable = str(Path(path).expanduser().resolve(strict=True))
+            with self._lock:
+                if self._closing:
+                    raise RuntimeError("Stockfish manager is shutting down")
+                if stop_event is not None and stop_event.is_set():
+                    raise InterruptedError("Stockfish отменён до создания процесса.")
+                stale = tuple(engine for key, engine in self._position_engines.items()
+                              if key != executable)
+                for old_engine in stale:
+                    self._position_engines = {
+                        key: value for key, value in self._position_engines.items()
+                        if value is not old_engine
+                    }
+                    self._engines.pop(id(old_engine), None)
+                    try:
+                        old_engine.quit()
+                    except Exception:
+                        pass
+                engine = self._position_engines.get(executable)
+                if engine is None:
+                    engine = self._engine_factory(
+                        executable, timeout=5.0, cwd=str(Path(executable).parent))
+                    self._engines[id(engine)] = engine
+                    self._position_engines[executable] = engine
+                return _ManagedEngine(self, engine, release_process=False)
+        except BaseException:
+            with self._lock:
+                self._active_leases -= 1
+                self._lock.notify_all()
+            raise
+
+    def release(self, engine, *, release_process: bool = True) -> None:
+        should_quit = False
+        with self._lock:
+            if release_process:
+                owned = self._engines.pop(id(engine), None)
+                if owned is not None:
+                    should_quit = True
+                    self._position_engines = {
+                        path: value for path, value in self._position_engines.items()
+                        if value is not engine
+                    }
+            self._active_leases = max(0, self._active_leases - 1)
+            self._lock.notify_all()
+        if should_quit:
+            engine.quit()
+
+    def close_all(self) -> None:
+        with self._lock:
+            self._closing = True
+            self._lock.notify_all()
+            engines = tuple(self._engines.values())
+            self._engines.clear()
+            self._position_engines.clear()
+        for engine in engines:
+            try:
+                engine.quit()
+            except Exception:
+                pass
+
+    @property
+    def active_process_count(self) -> int:
+        with self._lock:
+            return len(self._engines)
+
+    @property
+    def active_analysis_count(self) -> int:
+        with self._lock:
+            return self._active_leases
 
 
 def discover_stockfish(configured: str = "", *, environ: dict | None = None) -> str | None:

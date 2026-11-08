@@ -14,6 +14,8 @@ jobs:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
       - uses: actions/setup-python@v7.1.0
         with:
           python-version: "3.12"
@@ -26,7 +28,7 @@ jobs:
       - name: Run offscreen tests
         env:
           QT_QPA_PLATFORM: offscreen
-        run: python -X faulthandler -m pytest -o addopts= -q
+        run: python -X faulthandler -m pytest -o addopts= -q -W error::pytest.PytestUnhandledThreadExceptionWarning
       - name: Compile application and tests
         run: python -m compileall -q src tests
       - name: Initialize the isolated offline window
@@ -34,3 +36,46 @@ jobs:
           QT_QPA_PLATFORM: offscreen
         run: >-
           python -X faulthandler -c "from PySide6.QtWidgets import QApplication; from chess_coach.window import MainWindow; app = QApplication([]); window = MainWindow(offline_mode=True); assert window.lichess is None; window.close()"
+  visual-evidence:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+      - uses: actions/setup-python@v7.1.0
+        with:
+          python-version: "3.12"
+          cache: pip
+      - run: python -m pip install -e .
+      - name: Configure runner display for approved reference sizes
+        shell: pwsh
+        run: |
+          Set-DisplayResolution -Width 1920 -Height 1080 -Force
+          Add-Type -AssemblyName System.Windows.Forms
+          $bounds = [System.Windows.Forms.Screen]::PrimaryScreen.Bounds
+          Write-Host "Primary display: $($bounds.Width)x$($bounds.Height)"
+          if ($bounds.Width -lt 1672 -or $bounds.Height -lt 941) {
+            throw "Runner display cannot fit the approved 1672x941 capture."
+          }
+      - name: Capture native Windows Qt screens
+        env:
+          CC_VISUAL_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: |
+          foreach ($scale in @("1", "1.25", "1.5")) {
+            $env:QT_SCALE_FACTOR = $scale
+            $env:CC_VISUAL_OUTPUT = "visual-evidence/scale-$scale"
+            if ($scale -eq "1") {
+              Remove-Item Env:CC_VISUAL_TARGET_SIZES -ErrorAction SilentlyContinue
+            } elseif ($scale -eq "1.25") {
+              $env:CC_VISUAL_TARGET_SIZES = "1280x720"
+            } else {
+              $env:CC_VISUAL_TARGET_SIZES = "1120x640"
+            }
+            python -X faulthandler scripts/capture_visual_master.py
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          }
+      - uses: actions/upload-artifact@v4
+        with:
+          name: visual-master-${{ github.event.pull_request.head.sha || github.sha }}
+          path: visual-evidence/
+          if-no-files-found: error

@@ -1,7 +1,7 @@
 import chess
 import pytest
 
-from chess_coach.ui.game_review import GameReviewWorkspace, ReviewGraph
+from chess_coach.ui.game_review import AdvantageBar, GameReviewWorkspace, ReviewGraph
 from chess_coach.lichess.game_review import (
     ACCEPTANCE_POLICY_VERSION, eligible_error_moves, load_game_review,
     verified_improved_moves,
@@ -60,6 +60,11 @@ def test_read_model_is_current_revision_source_aware_and_contains_two_sided_coun
         assert view["per_side"]["white"]["assessed"] == 2
         assert view["official_accuracy"]["source"] is None
         assert view["coverage"]["total"] >= 4
+        assert view["local_accuracy_status"]["status"] == "complete"
+        assert view["local_accuracy_status"]["official"] is False
+        assert view["local_game_accuracy"]["white"] is not None
+        assert view["local_game_accuracy"]["black"] is not None
+        assert "lichess-accuracy-a46b4e6d9d80a100-v2" == view["local_accuracy_status"]["formula_id"]
     finally:
         repo.shutdown()
 
@@ -137,6 +142,9 @@ def test_review_moves_graph_and_training_share_position_without_mutating_saved_p
         workspace = GameReviewWorkspace(repo, training_allowed=True)
         qtbot.addWidget(workspace)
         workspace.load_game(game)
+        assert "Точность Lichess · сервер:" in workspace.metrics_label.text()
+        assert "Расчёт Chess Coach (методика Lichess" in workspace.metrics_label.text()
+        assert "неофициально" in workspace.metrics_label.text()
         assert "1–0" in workspace.title.text()
         assert "Stockfish" not in workspace.subtitle.text()
         workspace.moves_list.setCurrentRow(2)
@@ -172,6 +180,35 @@ def test_review_moves_graph_and_training_share_position_without_mutating_saved_p
         repo.shutdown()
 
 
+def test_ephemeral_study_can_explore_legal_branch_undo_and_reset_without_persistence(qtbot):
+    from chess_coach.window import EphemeralReviewRepository
+
+    repository = EphemeralReviewRepository("external:synthetic", "startpos", "e2e4 e7e5")
+    game = {"game_id": "external:synthetic", "initial_fen": "startpos",
+            "moves": "e2e4 e7e5", "line_revision": 1, "line_hash": "ephemeral",
+            "color": "white", "opponent": "External", "rated": False, "clock": "-",
+            "status": "unknownFinish", "winner": None, "source": "external",
+            "source_game_id": None, "variant": "standard", "white_player": "A",
+            "black_player": "B", "started_at": None, "game_time_precision": "unknown"}
+    workspace = GameReviewWorkspace(repository, training_allowed=False)
+    qtbot.addWidget(workspace)
+    workspace.load_game(game, training_allowed=False, ephemeral=True)
+    assert not workspace.ephemeral_controls.isHidden()
+    assert workspace.review_board._interaction_enabled
+    assert workspace.analysis_button.isHidden()
+    workspace.review_board.move_intent.emit(chess.Move.from_uci("d2d4"))
+    assert workspace._ephemeral_board.piece_at(chess.D4) == chess.Piece(chess.PAWN, chess.WHITE)
+    assert workspace._ephemeral_branch == [chess.Move.from_uci("d2d4")]
+    assert repository.current_line(game["game_id"])["moves"] == "e2e4 e7e5"
+    workspace.undo_ephemeral_move()
+    assert workspace._ephemeral_board.fen() == workspace.review["positions"][0].fen()
+    workspace.review_board.move_intent.emit(chess.Move.from_uci("d2d4"))
+    workspace.reset_ephemeral_branch()
+    assert workspace._ephemeral_branch == []
+    assert workspace._ephemeral_board.fen() == workspace.review["positions"][0].fen()
+    assert repository.current_line(game["game_id"])["moves"] == "e2e4 e7e5"
+
+
 def test_move_table_groups_white_and_black_in_fullmove_rows_and_keeps_ply(qtbot):
     from types import SimpleNamespace
     table = MoveTable()
@@ -192,10 +229,10 @@ def test_move_table_groups_white_and_black_in_fullmove_rows_and_keeps_ply(qtbot)
     table.set_rows(moves, scores={1: {"white_cp": 25}, 2: {"white_cp": 10}})
     assert table.table.rowCount() == 2
     assert table.table.item(0, 1).text().endswith("+0.3")
-    assert table.table.item(0, 2).text().startswith("? e5 +0.1")
+    assert table.table.item(0, 2).text() == "e5 +0.1"
+    assert table.table.item(0, 2).toolTip().startswith("Не оценено")
     assert table.table.item(0, 1).foreground().color().name() == "#58a978"
-    assert table.table.item(0, 2).foreground().color().name() == "#858b93"
-    assert table.table.item(1, 1).text().startswith("?? ")
+    assert table.table.item(1, 1).text().startswith("‼ ")
     selected = []
     table.ply_selected.connect(selected.append)
     table._cell_clicked(0, 2)
@@ -221,7 +258,8 @@ def test_move_table_black_to_move_fen_uses_fullmove_number_and_handles_empty_sid
     assert table.table.rowCount() == 1
     assert table.table.item(0, 0).text() == "25"
     assert table.table.item(0, 1).text() == ""
-    assert table.table.item(0, 2).text() == "? Kd7"
+    assert table.table.item(0, 2).text() == "Kd7"
+    assert table.table.item(0, 2).toolTip() == "Не оценено"
 
 
 def test_move_table_keeps_both_san_columns_visible_without_horizontal_scroll(qtbot):
@@ -249,12 +287,13 @@ def test_move_table_keeps_both_san_columns_visible_without_horizontal_scroll(qtb
     assert table.table.horizontalScrollBar().maximum() == 0
     assert table.table.horizontalHeader().sectionResizeMode(1) == QHeaderView.ResizeMode.Stretch
     assert table.table.horizontalHeader().sectionResizeMode(2) == QHeaderView.ResizeMode.Stretch
-    assert table.item_by_ply(1).text() == "? e4 +0.3"
-    assert table.item_by_ply(2).text() == "? e5 -0.2"
-    assert table.item_by_ply(3).text() == "? Nf3 +15.0"
+    assert table.item_by_ply(1).text() == "e4 +0.3"
+    assert table.item_by_ply(2).text() == "e5 -0.2"
+    assert table.item_by_ply(3).text() == "Nf3 +15.0"
     for ply in (1, 2, 3):
         item = table.item_by_ply(ply)
         assert item is not None and item.text()
+        assert item.toolTip().startswith("Не оценено")
         column = 1 if ply in (1, 3) else 2
         assert table.table.columnWidth(column) > 80
         assert table.table.fontMetrics().horizontalAdvance(item.text()) <= table.table.columnWidth(column)
@@ -376,7 +415,8 @@ def test_phase_summary_shows_both_sides_coverage_and_never_fabricates_accuracy(q
         workspace.load_game(game)
         assert workspace.side_metrics_summary.rowCount() == 7
         assert [workspace.side_metrics_summary.horizontalHeaderItem(i).text()
-                for i in range(3)] == ["Показатель", "Я", "Соперник"]
+                for i in range(3)] == ["Показатель", "Я", "Сопер."]
+        assert workspace.side_metrics_summary.horizontalHeaderItem(2).toolTip() == "Соперник"
         assert "Зевки" in _metrics_text(workspace.side_metrics_summary)
         assert "н/д" in _metrics_text(workspace.side_metrics_summary)
         assert "S · 4/4" in workspace.phase_summary.text()
@@ -385,7 +425,7 @@ def test_phase_summary_shows_both_sides_coverage_and_never_fabricates_accuracy(q
         assert workspace.phase_selector.currentData() == "opening"
         assert "Зевки" in _metrics_text(workspace.side_metrics_summary)
         assert "1" in _metrics_text(workspace.side_metrics_summary)
-        assert workspace.side_metrics_summary.item(0, 1).text() == "н/д"
+        assert workspace.side_metrics_summary.item(0, 1).text() == "—"
         assert "дебют" in workspace.phase_summary.toolTip()
     finally:
         repo.shutdown()
@@ -449,7 +489,7 @@ def test_fair_play_revocation_masks_every_rendered_analysis_surface(
         visible_strings.extend((workspace.graph.toolTip(), workspace.graph.accessibleName(),
                                 workspace.graph.accessibleDescription(), QToolTip.text()))
         rendered = "\n".join(value for value in visible_strings if value)
-        for secret in ("+2.5", "ошибок 1", "зевков 1", "неточн. 0",
+        for secret in ("+2.5", "95.0%", "90.0%", "ошибок 1", "зевков 1", "неточн. 0",
                        "Сохранённое продолжение", "Сохранённые варианты", "Зевок",
                        "охват 1/", "Stockfish", "phase coverage"):
             assert secret.casefold() not in rendered.casefold(), (transition, secret, rendered)
@@ -475,6 +515,30 @@ def test_fair_play_revocation_masks_every_rendered_analysis_surface(
             QCoreApplication.processEvents()
             assert "1" in _metrics_text(workspace.side_metrics_summary)
             assert workspace.graph._values()
+    finally:
+        repo.shutdown()
+
+
+def test_ephemeral_review_keeps_identity_and_selected_ply_across_safety_changes(qtbot, tmp_path):
+    repo, game = _review_repo(tmp_path / "ephemeral-safety.sqlite3")
+    try:
+        before = repo.get_game(game["game_id"])
+        workspace = GameReviewWorkspace(repo, training_allowed=False)
+        qtbot.addWidget(workspace)
+        workspace.load_game(game, ephemeral=True)
+        workspace.select_ply(2)
+        workspace.set_safety_pending("Перепроверка")
+        workspace.set_training_safety_result(False, "Доступ не разрешён")
+        assert workspace._ephemeral_study
+        assert workspace.selected_ply == 2
+        assert not workspace.analysis_button.isVisible()
+        assert not workspace.training_button.isVisible()
+        workspace.set_training_safety_result(True)
+        assert workspace._ephemeral_study
+        assert workspace.selected_ply == 2
+        assert not workspace.analysis_button.isVisible()
+        assert not workspace.training_button.isVisible()
+        assert repo.get_game(game["game_id"])["pgn"] == before["pgn"]
     finally:
         repo.shutdown()
 
@@ -521,6 +585,36 @@ def test_review_layout_has_no_outer_scroll_and_renders_at_desktop_sizes(qtbot, t
                         assert workspace.moves_list.table.fontMetrics().horizontalAdvance(
                             item.text()) <= workspace.moves_list.table.columnWidth(column)
         assert workspace.workspace_splitter.orientation().name == "Horizontal"
+    finally:
+        repo.shutdown()
+
+
+def test_compact_review_keeps_selected_move_clickable_at_640px_window_height(qtbot, tmp_path):
+    from PySide6.QtCore import Qt
+    from PySide6.QtTest import QTest
+
+    repo, game = _review_repo(tmp_path / "review-compact-640.sqlite3")
+    try:
+        workspace = GameReviewWorkspace(repo, training_allowed=True)
+        qtbot.addWidget(workspace)
+        workspace.load_game(game)
+        workspace.resize(996, 550)  # MainWindow content area of a 1120x640 window.
+        workspace.show()
+        qtbot.wait(30)
+
+        assert workspace.graph.height() <= 74
+        assert workspace.graph.compact
+        assert workspace.graph.plot_rect().height() >= 40
+        assert workspace.moves_list.table.viewport().height() >= 29
+        workspace.select_ply(3)
+        item = workspace.moves_list.item_by_ply(3)
+        assert item is not None
+        rect = workspace.moves_list.table.visualItemRect(item)
+        assert rect.isValid()
+        assert workspace.moves_list.table.viewport().rect().contains(rect)
+        QTest.mouseClick(workspace.moves_list.table.viewport(), Qt.MouseButton.LeftButton,
+                         pos=rect.center())
+        assert workspace.selected_ply == 3
     finally:
         repo.shutdown()
 
@@ -631,12 +725,88 @@ def test_review_advantage_bar_uses_mate_status_without_centipawn_fill(qtbot, tmp
         workspace = GameReviewWorkspace(repo, training_allowed=True)
         qtbot.addWidget(workspace)
         workspace.load_game(game)
+        workspace.show()
+        qtbot.wait(10)
         assessment = next(row for row in workspace.review["analysis"]["assessments"]
                           if int(row["ply"]) == 3)
         assessment["white_cp"] = 180
         assessment["mate_white"] = 3
         workspace.select_ply(3)
         assert workspace.advantage_bar.white_cp is None
-        assert "белые ставят мат через 3" in workspace.advantage_label.text()
+        assert workspace.advantage_bar.mate_white == 3
+        assert "\u0431\u0435\u043b\u044b\u0435 \u0441\u0442\u0430\u0432\u044f\u0442 \u043c\u0430\u0442 \u0447\u0435\u0440\u0435\u0437 3 \u00b7 \u043f\u0435\u0440\u0441\u043f\u0435\u043a\u0442\u0438\u0432\u0430 \u0431\u0435\u043b\u044b\u0445" == workspace.advantage_label.text()
+        assert "не фиктивную оценку" in workspace.advantage_bar.toolTip()
+        # The negative side is painted from the typed mate sign as well; it
+        # must not compare an absent CP value with zero.
+        assessment["mate_white"] = -3
+        workspace.select_ply(3)
+        assert workspace.advantage_bar.white_cp is None
+        assert workspace.advantage_bar.mate_white == -3
+        assert "чёрные ставят мат через 3" in workspace.advantage_label.text()
+
+        bar = AdvantageBar()
+        qtbot.addWidget(bar)
+        bar.resize(30, 220)
+        bar.set_evaluation(None, allowed=True, mate_white=-3)
+        bar.show()
+        qtbot.wait(10)
+        assert not bar.grab().isNull()
     finally:
         repo.shutdown()
+
+
+def test_checkmate_review_shows_mate_bar_accuracy_and_terminal_event_without_fake_cp(
+        qtbot, tmp_path):
+    import chess
+
+    repo = GameRepository(tmp_path / "review-terminal-mate.sqlite3")
+    try:
+        moves = "f2f3 e7e5 g2g4 d8h4"
+        repo.save_snapshot("terminal-mate", "startpos", moves, "black", "Synthetic",
+                           False, "300+0", "mate", "black", started_at="2026-11-05T12:00:00Z")
+        line = repo.current_line("terminal-mate")
+        repo.save_analysis(
+            "terminal-mate", line_revision=line["line_revision"], line_hash=line["line_hash"],
+            source="stockfish", engine_name="SyntheticFish", engine_version="test",
+            parameters={"depth": 20}, assessments=[
+                {"ply": 0, "white_cp": 0, "depth": 20},
+                {"ply": 1, "white_cp": 0, "depth": 20},
+                {"ply": 2, "mate_white": 5, "depth": 20},
+                {"ply": 3, "mate_white": 3, "depth": 20},
+                {"ply": 4, "mate_white": 0, "depth": 20},
+            ], classifications=[])
+        view = load_game_review(repo, repo.get_game("terminal-mate"))
+        assert view["moves"][-1].local_accuracy == pytest.approx(100.0)
+        assert view["moves"][-1].cp_loss is None
+        workspace = GameReviewWorkspace(repo, training_allowed=True)
+        qtbot.addWidget(workspace)
+        workspace.load_game(repo.get_game("terminal-mate"))
+        workspace.show()
+        workspace.select_ply(4)
+        image = workspace.grab()
+        assert not image.isNull()
+        graph_image = workspace.graph.grab()
+        assert not graph_image.isNull()
+        graph_rect = workspace.graph._last_plot_rect
+        terminal_point = next(point for point in workspace.graph._last_rendered_points
+                              if point[0] == 4)
+        assert terminal_point[2] == graph_rect.bottom()  # Black mate plots at black's end.
+        assert workspace.advantage_bar.mate_white == 0
+        assert workspace.advantage_bar.terminal_checkmate
+        assert "Win%" in workspace.advantage_bar.toolTip()
+        assert "100.0%" in workspace.move_detail.text()
+        assert "\u041c\u0430\u0442 \u00b7 \u0447\u0451\u0440\u043d\u044b\u0435 \u043f\u043e\u0431\u0435\u0434\u0438\u043b\u0438" == workspace.advantage_label.text()
+        workspace.select_ply(3)
+        assert "Динамика мата" in workspace.selected_move_summary.text()
+        assert "Δх" not in workspace.selected_move_summary.text()
+    finally:
+        repo.shutdown()
+
+
+def test_safety_refresh_before_any_game_is_loaded_is_safe(qtbot, tmp_path):
+    workspace = GameReviewWorkspace(GameRepository(tmp_path / "empty-review.sqlite3"))
+    qtbot.addWidget(workspace)
+    workspace.set_safety_pending("Проверяем безопасность.")
+    workspace.set_training_safety_result(False, "Аналитика скрыта.")
+    assert workspace.review is None
+    assert workspace.training_block_reason == "Аналитика скрыта."

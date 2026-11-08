@@ -20,6 +20,13 @@ LICHESS_PLAYER_TITLES = frozenset({
     "GM", "WGM", "IM", "WIM", "FM", "WFM", "NM", "CM", "WCM", "WNM", "LM",
 })
 
+# Lichess reports all live clock values in milliseconds. These bounds reject
+# unit mixups/corrupt payloads without discarding legitimate correspondence games.
+_MAX_CLOCK_MS = 365 * 24 * 60 * 60 * 1000
+_MAX_INCREMENT_MS = 3 * 60 * 60 * 1000
+_UNKNOWN_CONTROL_SAFE_MS = 24 * 60 * 60 * 1000
+_CLOCK_EVENT_TOLERANCE_MS = 2_000
+
 
 def classify_lichess_opponent(game: Any) -> str:
     """Classify a server game conservatively for fair-play decisions.
@@ -86,6 +93,14 @@ class LichessGameSession:
     def __init__(self, game_id: str, repository: GameRepository) -> None:
         self.game_id = game_id
         self.repository = repository
+        # Cached sessions survive reconnects, but remain bound to the account
+        # that created them. A session without an owner is never eligible for
+        # online actions or Fair Play decisions.
+        self.owner_username: str | None = None
+        self.auth_generation: int | None = None
+        # Unowned is unknown, not detached: safety consumers treat active
+        # unknown sessions conservatively while presentation stays account-scoped.
+        self.detached = False
         self.initial_fen = "startpos"
         self.moves = ""
         self.color = chess.WHITE
@@ -101,6 +116,11 @@ class LichessGameSession:
         self.white_inc = self.black_inc = 0
         self.clock_initial = 0
         self.clock_control = "-"
+        self.clock_state_valid: bool | None = None
+        self.clock_metadata_invalid = False
+        self.speed: str | None = None
+        self.days_per_turn: int | None = None
+        self._clock_ply_seen: int | None = None
         self.rated = False
         self.winner = None
         self.final_sync_pending = False
@@ -125,6 +145,31 @@ class LichessGameSession:
         self._last_persisted_signature: tuple | None = None
         self._last_clock_at = time.monotonic()
 
+    def bind_owner(self, username: str, generation: int) -> None:
+        username = str(username or "").strip().casefold()
+        if not username:
+            raise ValueError("session owner username is required")
+        if self.owner_username not in (None, username):
+            raise ValueError("session cannot be reassigned to a different Lichess account")
+        self.owner_username = username
+        self.auth_generation = int(generation)
+        self.detached = False
+
+    def detach(self) -> None:
+        self.detached = True
+        self.awaiting_authoritative_snapshot = True
+        self.pending_uci = None
+        self.pending_request_id = None
+        self._pending_ply = None
+        self._pending_prefix = ()
+        self.premove = None
+
+    def belongs_to(self, username: str | None, *, generation: int | None = None) -> bool:
+        account = str(username or "").strip().casefold()
+        if not account or self.detached or self.owner_username != account:
+            return False
+        return generation is None or self.auth_generation == int(generation)
+
     @property
     def is_my_turn(self) -> bool:
         return (not self.awaiting_authoritative_snapshot
@@ -140,6 +185,11 @@ class LichessGameSession:
 
     def set_server_game_identity(self, game: dict) -> None:
         """Store the immutable opponent identity from gameStart/account-playing."""
+        speed = game.get("speed")
+        if isinstance(speed, str):
+            self.speed = speed
+        days = game.get("daysPerTurn")
+        self.days_per_turn = days if type(days) is int and 1 <= days <= 14 else None
         source = game.get("source")
         self.game_source = source if isinstance(source, str) else None
         opponent = game.get("opponent")
@@ -149,9 +199,13 @@ class LichessGameSession:
         if self.opponent_info:
             username = self.opponent_info.get("username")
             opponent_id = self.opponent_info.get("id")
-            self.opponent = (username if isinstance(username, str) and username else
-                             opponent_id if isinstance(opponent_id, str) and opponent_id else
-                             "Соперник")
+            ai_level = self.opponent_info.get("ai")
+            official_ai_name = (f"Lichess AI · уровень {ai_level}"
+                                if self.is_ai_opponent else None)
+            self.opponent = (official_ai_name
+                             or (username if isinstance(username, str) and username else None)
+                             or (opponent_id if isinstance(opponent_id, str) and opponent_id else None)
+                             or "Неизвестный соперник")
             title = self.opponent_info.get("title")
             self.opponent_title = title if isinstance(title, str) else None
 
@@ -187,6 +241,8 @@ class LichessGameSession:
                 pass
         return shown
 
+    accepted_snapshot_sequence = 0
+
     def apply_event(self, event: dict) -> GameSnapshot:
         kind = event.get("type")
         if kind not in {"gameState", "gameFull"}:
@@ -202,7 +258,9 @@ class LichessGameSession:
         if self.moves and incoming_fen != self.initial_fen:
             return self.snapshot()
         state = event.get("state", event)
-        incoming_moves = tuple(state.get("moves", self.moves).split())
+        if not isinstance(state, dict) or not isinstance(state.get("moves"), str):
+            raise ValueError("Lichess не прислал список ходов.")
+        incoming_moves = tuple(state["moves"].split())
         confirmed_moves = tuple(self.moves.split())
         if self.final_sync_pending:
             return self._apply_final_sync_event(event, kind, state, incoming_fen,
@@ -235,19 +293,31 @@ class LichessGameSession:
                 # retain the confirmed line until this client explicitly accepts.
                 if opponent_takeback_flag:
                     self.takeback_requested_by_opponent = True
-                    self._last_clock_at = time.monotonic()
                 return self.snapshot()
         elif confirmed_moves and not is_extension:
             return self.snapshot()
+        if incoming_fen == self.initial_fen and not is_shorter and is_extension:
+            board = self.board.copy(stack=True)
+            remaining = incoming_moves[len(confirmed_moves):]
+        else:
+            board = chess.Board() if incoming_fen == "startpos" else chess.Board(incoming_fen)
+            remaining = incoming_moves
+        for uci in remaining:
+            board.push_uci(uci)
         if kind == "gameFull":
             self._apply_game_full_metadata(event, incoming_fen)
         if kind in {"gameState", "gameFull"}:
             self.status = state.get("status", self.status)
             self.moves = " ".join(incoming_moves)
-            self.white_ms = state.get("wtime", self.white_ms)
-            self.black_ms = state.get("btime", self.black_ms)
-            self.white_inc = state.get("winc", self.white_inc)
-            self.black_inc = state.get("binc", self.black_inc)
+            if kind == "gameFull" and not any(key in state for key in ("wtime", "btime")):
+                self.white_ms = self.black_ms = None
+                self.clock_state_valid = None
+                self._clock_ply_seen = None
+            if is_shorter:
+                # A server-confirmed takeback starts a new clock-line baseline.
+                self._clock_ply_seen = None
+                self.clock_state_valid = None
+            self._apply_clock_state(state, reanchor=kind == "gameFull")
             self.winner = state.get("winner", self.winner)
             own_draw_flag = "bdraw" if self.color == chess.WHITE else "wdraw"
             self.draw_offered_by_opponent = bool(state.get(own_draw_flag, False))
@@ -287,7 +357,7 @@ class LichessGameSession:
                 self.takeback_accept_pending = False
                 self.takeback_request_id = None
                 self._takeback_anchor = ()
-            self._rebuild_board()
+            self.board = board
             if kind == "gameFull":
                 self.awaiting_authoritative_snapshot = False
             if self.pending_uci and self._pending_ply is not None:
@@ -308,8 +378,8 @@ class LichessGameSession:
                     self.premove = None
                 elif self.status not in {"started", "created", "playing"}:
                     self._clear_pending()
+            self.accepted_snapshot_sequence += 1
             self._save()
-        self._last_clock_at = time.monotonic()
         return self.snapshot()
 
     def configure_players(self, white: dict, black: dict, my_color: str) -> None:
@@ -327,6 +397,15 @@ class LichessGameSession:
     def _apply_game_full_metadata(self, event: dict, incoming_fen: str) -> None:
         self.initial_fen = incoming_fen
         self.rated = bool(event.get("rated", False))
+        # A reconnect may start with gameFull and never repeat gameStart. Preserve
+        # the server's time-control classification from either authoritative event.
+        speed = event.get("speed")
+        if isinstance(speed, str) and speed in {
+                "bullet", "blitz", "rapid", "classical", "correspondence", "unlimited"}:
+            self.speed = speed
+        days = event.get("daysPerTurn")
+        if type(days) is int and 1 <= days <= 14:
+            self.days_per_turn = days
         created_at = event.get("createdAt") or event.get("created_at")
         if created_at and not self.started_at:
             try:
@@ -334,11 +413,101 @@ class LichessGameSession:
             except (TypeError, ValueError, OverflowError):
                 self.started_at = str(created_at)[:10].replace("-", ".")
         clock = event.get("clock") or {}
-        self.clock_initial = int(clock.get("initial", 0) or 0)
-        self.white_inc = int(clock.get("increment", 0) or 0)
+        initial = clock.get("initial") if isinstance(clock, dict) else None
+        increment = clock.get("increment") if isinstance(clock, dict) else None
+        valid_initial = (type(initial) is int and 0 < initial <= _MAX_CLOCK_MS)
+        valid_increment = (type(increment) is int and 0 <= increment <= _MAX_INCREMENT_MS)
+        self.clock_initial = initial if valid_initial else 0
+        self.white_inc = increment if valid_increment else 0
         self.black_inc = self.white_inc
-        self.clock_control = (f"{self.clock_initial // 1000}+{self.white_inc // 1000}"
-                              if self.clock_initial else "-")
+        if valid_initial and valid_increment:
+            self.clock_control = f"{initial // 1000}+{increment // 1000}"
+            self.clock_metadata_invalid = False
+        elif initial is None and increment is None:
+            self.clock_control = "-"
+            self.white_ms = self.black_ms = None
+            self.clock_state_valid = None
+            self.clock_metadata_invalid = False
+        else:
+            self.clock_control = "-"
+            self.white_ms = self.black_ms = None
+            self.clock_state_valid = False
+            self.clock_metadata_invalid = True
+
+    def can_interpolate_clock(self) -> bool:
+        """Extrapolate only once the opening timer has started."""
+        if self.clock_state_valid is not True or self._clock_ply_seen != len(self.moves.split()):
+            return False
+        # Lichess starts ordinary games' clocks after the second ply. An
+        # authoritative deduction can also establish an earlier forced start.
+        active_ms = self.white_ms if self.board.turn == chess.WHITE else self.black_ms
+        return self._clock_ply_seen >= 2 or (
+            self.clock_initial > 0 and active_ms is not None and active_ms < self.clock_initial
+        )
+
+    def _apply_clock_state(self, state: dict, *, reanchor: bool = False) -> None:
+        """Validate live millisecond snapshots against the confirmed line and increments."""
+        supplied = {"wtime": state.get("wtime", self.white_ms),
+                    "btime": state.get("btime", self.black_ms),
+                    "winc": state.get("winc", self.white_inc),
+                    "binc": state.get("binc", self.black_inc)}
+        times = (supplied["wtime"], supplied["btime"])
+        increments = (supplied["winc"], supplied["binc"])
+        has_times = any(name in state for name in ("wtime", "btime"))
+        if not has_times:
+            return
+        if any(type(value) is not int or value < 0 or value > _MAX_CLOCK_MS
+               for value in times):
+            self.clock_state_valid = False
+            self.clock_metadata_invalid = True
+            return
+        if any(type(value) is not int or value < 0 or value > _MAX_INCREMENT_MS
+               for value in increments):
+            self.clock_state_valid = False
+            self.clock_metadata_invalid = True
+            return
+        plies = len(self.moves.split())
+        white_moves = (plies + 1) // 2
+        black_moves = plies // 2
+        if self.clock_initial:
+            white_upper = min(_MAX_CLOCK_MS, self.clock_initial
+                              + self.white_inc * white_moves + _CLOCK_EVENT_TOLERANCE_MS)
+            black_upper = min(_MAX_CLOCK_MS, self.clock_initial
+                              + self.black_inc * black_moves + _CLOCK_EVENT_TOLERANCE_MS)
+        else:
+            white_upper = black_upper = _UNKNOWN_CONTROL_SAFE_MS
+        if times[0] > white_upper or times[1] > black_upper:
+            self.clock_state_valid = False
+            self.clock_metadata_invalid = True
+            return
+
+        # Repeated / delayed stream frames may carry an older clock snapshot for
+        # the same line. Keep the latest accepted values; do not mark a valid game
+        # as corrupt just because a stale frame arrived after it.
+        previous_ply = self._clock_ply_seen
+        if (self.clock_state_valid is True and previous_ply is not None
+                and self.white_ms is not None and self.black_ms is not None):
+            if plies < previous_ply:
+                return
+            if plies == previous_ply and not reanchor:
+                if times[0] > self.white_ms or times[1] > self.black_ms:
+                    return
+                if times == (self.white_ms, self.black_ms):
+                    return
+            elif plies > previous_ply:
+                white_advanced = (plies + 1) // 2 - (previous_ply + 1) // 2
+                black_advanced = plies // 2 - previous_ply // 2
+                white_gain = self.white_inc * white_advanced
+                black_gain = self.black_inc * black_advanced
+                if (times[0] > self.white_ms + white_gain + _CLOCK_EVENT_TOLERANCE_MS
+                        or times[1] > self.black_ms + black_gain + _CLOCK_EVENT_TOLERANCE_MS):
+                    return
+        self.white_ms, self.black_ms = times
+        self.white_inc, self.black_inc = increments
+        self.clock_state_valid = True
+        self.clock_metadata_invalid = False
+        self._clock_ply_seen = plies
+        self._last_clock_at = time.monotonic()
 
     def _apply_final_sync_event(self, event: dict, kind: str, state: dict,
                                 incoming_fen: str, incoming_moves: tuple[str, ...],
@@ -360,17 +529,14 @@ class LichessGameSession:
         self.status = str(incoming_status)
         if "winner" in state:
             self.winner = state.get("winner")
-        self.white_ms = state.get("wtime", self.white_ms)
-        self.black_ms = state.get("btime", self.black_ms)
-        self.white_inc = state.get("winc", self.white_inc)
-        self.black_inc = state.get("binc", self.black_inc)
+        self._apply_clock_state(state, reanchor=kind == "gameFull")
         self.board = board
         if kind == "gameFull":
             self.awaiting_authoritative_snapshot = False
         self.final_sync_pending = False
         self._clear_pending()
         self.premove = None
-        self._last_clock_at = time.monotonic()
+        self.accepted_snapshot_sequence += 1
         self._save()
         return self.snapshot()
 
@@ -501,5 +667,6 @@ class LichessGameSession:
             "white" if self.color == chess.WHITE else "black", self.opponent,
             self.rated, self.clock_control, self.status, self.winner,
             white_player=self.white_player, black_player=self.black_player,
-            started_at=self.started_at, final_sync_pending=self.final_sync_pending)
+            started_at=self.started_at, final_sync_pending=self.final_sync_pending,
+            account_username=self.owner_username)
         self._last_persisted_signature = signature
