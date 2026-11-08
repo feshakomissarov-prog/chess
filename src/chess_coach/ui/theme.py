@@ -71,6 +71,7 @@ def stylesheet(t: Theme = TOKENS) -> str:
         border-radius: 8px; padding: 9px 14px; min-height: 22px;
     }}
     QPushButton:hover, QToolButton:hover {{ background: {t.hover}; }}
+    QToolButton#positionPiece:checked {{ background: {t.accent}; border-color: {t.accent}; }}
     QWidget#appHeader QPushButton {{ padding-top: 2px; padding-bottom: 2px; }}
     QPushButton:pressed, QToolButton:pressed {{ background: {t.accent_pressed}; color: {t.on_accent}; }}
     QPushButton:focus, QToolButton:focus {{ border: 2px solid {t.accent}; }}

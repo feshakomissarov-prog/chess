@@ -37,7 +37,8 @@ def test_analysis_landing_has_four_cards_and_one_three_tab_breakdown(qtbot):
     assert page.workspace.currentIndex() == 0
     page.show_breakdown(2)
     page.show()
-    assert page.position_setup.piece_selector.isVisible()
+    assert page.position_setup.piece_buttons[0].isVisible()
+    assert page.position_setup.remove_piece_button.isVisible()
     assert page.position_setup.board_view.isVisible()
     assert page.position_setup.open_button.isVisible()
 
@@ -512,6 +513,13 @@ def test_position_setup_uses_shared_board_and_emits_ephemeral_fen(qtbot):
     assert chess.Board(positions[-1]).turn == chess.BLACK
     assert chess.Board(positions[-1]).has_kingside_castling_rights(chess.WHITE)
     assert chess.Board(positions[-1]).has_kingside_castling_rights(chess.BLACK)
+    page.turn_selector.setCurrentIndex(page.turn_selector.findData(chess.WHITE))
+    page.piece_buttons[1].click()
+    assert page.piece_selector.currentData() == "Q"
+    assert not page.piece_buttons[1].icon().isNull()
+    page.copy_fen_button.click()
+    assert chess.Board(QApplication.clipboard().text()).is_valid()
+    page.turn_selector.setCurrentIndex(page.turn_selector.findData(chess.BLACK))
     page.ep_selector.setCurrentIndex(page.ep_selector.findData(chess.E3))
     page.open_button.click()
     assert chess.Board(positions[-1]).ep_square == chess.E3

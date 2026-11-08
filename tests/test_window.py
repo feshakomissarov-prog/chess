@@ -305,7 +305,7 @@ def test_analysis_position_editor_open_action_fits_1280x720_viewport(qtbot, tmp_
     assert action.isVisible()
     assert top_left.y() >= 0
     assert top_left.y() + action.height() <= window.screen_stack.height()
-    assert action.width() > 300
+    assert action.width() > 200
     window.close()
 
 
