@@ -61,6 +61,30 @@ def test_multi_game_parse_uses_inline_chooser_without_modal(qtbot, tmp_path, mon
     window.close()
 
 
+@pytest.mark.parametrize("source", ["paste", "file"])
+def test_multiple_pgn_from_paste_and_file_share_inline_chooser(qtbot, tmp_path, source):
+    window = MainWindow(QSettings(str(tmp_path / f"multi-{source}.ini"),
+                                  QSettings.Format.IniFormat), offline_mode=True)
+    qtbot.addWidget(window)
+    window.show_analysis()
+    window.analysis_page.show_breakdown(1)
+    pgn = ('[Event "First"]\n[Result "*"]\n\n1. e4 e5 *\n\n'
+           '[Event "Second"]\n[Result "*"]\n\n1. d4 d5 *')
+    draft = "preserved paste draft"
+    window.analysis_page.external_text.setPlainText(draft)
+    if source == "paste":
+        assert window.open_external_study_text(pgn)
+    else:
+        path = tmp_path / "two-games.pgn"
+        path.write_text(pgn, encoding="utf-8")
+        window._start_external_study_load(file_path=str(path))
+    qtbot.waitUntil(lambda: window.analysis_page.candidate_list.count() == 2, timeout=5000)
+    assert window._external_study_owner[1] == source
+    assert window.analysis_page.external_text.toPlainText() == draft
+    assert window.review_workspace.review is None
+    window.close()
+
+
 def test_external_review_back_restores_import_tab_and_text(qtbot, tmp_path):
     window = MainWindow(QSettings(str(tmp_path / "external-back.ini"),
                                   QSettings.Format.IniFormat), offline_mode=True)
