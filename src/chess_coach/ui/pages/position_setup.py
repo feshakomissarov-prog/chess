@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import chess
 from PySide6.QtCore import Qt, Signal
+from PySide6.QtGui import QResizeEvent
 from PySide6.QtWidgets import (QCheckBox, QComboBox, QGridLayout, QGroupBox, QHBoxLayout,
                                QLabel, QPushButton, QVBoxLayout)
 
@@ -119,6 +120,16 @@ class PositionSetupWidget(QGroupBox):
         self.setCheckable(False)
         self.setTitle("")
         self._set_content_visible(True)
+
+    def resizeEvent(self, event: QResizeEvent) -> None:  # noqa: N802 - Qt API
+        super().resizeEvent(event)
+        if not self.isCheckable():
+            # The editor shares a tab with a fixed shell header. Give the
+            # position controls room at 720p instead of letting the board
+            # push the final action below the visible tab viewport.
+            available = max(180, self.height() - 250)
+            board_size = min(320, available)
+            self.board_view.setFixedSize(board_size, board_size)
 
     def _place_selected_piece(self, square: int) -> None:
         symbol = str(self.piece_selector.currentData() or "")

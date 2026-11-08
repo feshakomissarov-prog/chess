@@ -258,7 +258,7 @@ def test_analysis_landing_describes_existing_opening_statistics_honestly(qtbot, 
     window.show_analysis()
     text = "\n".join(label.text() for label in window.analysis_page.findChildren(QLabel))
     assert "Исследование дебютов" in text
-    assert "полноценного explorer ещё нет" in text
+    assert "Сохранённая статистика дебютов и фаз" in text
     assert "Дебюты и фазы" not in text
     window.close()
 

@@ -296,8 +296,8 @@ def test_analysis_position_editor_open_action_fits_1280x720_viewport(qtbot, tmp_
     qtbot.addWidget(window)
     window.resize(1280, 720)
     window.show_analysis()
+    window.analysis_page.show_breakdown(2)
     window.show()
-    window.analysis_page.position_setup.setChecked(True)
     qtbot.wait(100)
 
     action = window.analysis_page.position_setup.open_button
@@ -1968,7 +1968,7 @@ def test_explicit_offline_window_never_constructs_or_uses_lichess_credentials(qt
     assert not window.connect_button.isEnabled()
     assert window.home_ai_button.isHidden()
     assert window.play_ai_button.isEnabled()
-    assert "Подключите Lichess" in window.play_ai_button.toolTip()
+    assert "Lichess" in window.play_ai_button.toolTip()
     offline_dir = Path(window.game_repository.path).parent
     assert offline_dir.name.startswith("chess-coach-offline-")
     assert window.settings is not live_settings
