@@ -122,6 +122,7 @@ class LichessGameSession:
         self.days_per_turn: int | None = None
         self._clock_ply_seen: int | None = None
         self.rated = False
+        self.rated_metadata_valid = False
         self.winner = None
         self.final_sync_pending = False
         # A newly opened game is not playable until its stream supplies and we
@@ -396,7 +397,10 @@ class LichessGameSession:
 
     def _apply_game_full_metadata(self, event: dict, incoming_fen: str) -> None:
         self.initial_fen = incoming_fen
-        self.rated = bool(event.get("rated", False))
+        rated = event.get("rated")
+        self.rated_metadata_valid = type(rated) is bool
+        if self.rated_metadata_valid:
+            self.rated = rated
         # A reconnect may start with gameFull and never repeat gameStart. Preserve
         # the server's time-control classification from either authoritative event.
         speed = event.get("speed")

@@ -2495,10 +2495,7 @@ class MainWindow(QMainWindow):
                 and self.screen_stack.currentWidget() is not self.review_workspace):
             worker_context[5].set()
         if self.screen_stack.currentWidget() is not self.analysis_page:
-            handle = getattr(self, "_external_study_handle", None)
-            if handle is not None and handle.is_alive():
-                self._external_study_generation += 1
-                handle.cancel("session_replaced")
+            self._invalidate_external_study_parse("session_replaced")
         in_nested_archive = (
             self.screen_stack.currentWidget() is getattr(self, "analysis_page", None)
             and hasattr(self, "analysis_page")
@@ -2951,6 +2948,8 @@ class MainWindow(QMainWindow):
         if self.screen_stack.currentWidget() is not self.analysis_page:
             self.analysis_page.show_breakdown(1 if text is not None or file_path else 2)
             self.screen_stack.setCurrentWidget(self.analysis_page)
+        elif self.analysis_page.workspace.currentWidget() is not self.analysis_page.breakdown_page:
+            self.analysis_page.show_breakdown(1 if text is not None or file_path else 2)
         self._external_study_generation += 1
         generation = self._external_study_generation
         tab_index = self.analysis_page.tabs.currentIndex()
@@ -2958,7 +2957,9 @@ class MainWindow(QMainWindow):
                   "editor" if tab_index == 2 else "paste")
         account = str(getattr(self.lichess, "username", "") or "").strip().casefold()
         auth_generation = getattr(self.lichess, "auth_generation", None)
-        self._external_study_owner = (generation, source, tab_index, account, auth_generation)
+        self._external_study_owner = (
+            generation, source, tab_index, account, auth_generation,
+            self.analysis_page.breakdown_page)
         previous = getattr(self, "_external_study_handle", None)
         if previous is not None:
             previous.cancel("session_replaced")
@@ -2999,7 +3000,9 @@ class MainWindow(QMainWindow):
         if generation != self._external_study_generation or not owner or owner[0] != generation:
             return
         account = str(getattr(self.lichess, "username", "") or "").strip().casefold()
-        if (self.screen_stack.currentWidget() is not self.analysis_page
+        if (len(owner) < 6 or owner[5] is not self.analysis_page.breakdown_page
+                or self.screen_stack.currentWidget() is not self.analysis_page
+                or self.analysis_page.workspace.currentWidget() is not self.analysis_page.breakdown_page
                 or self.analysis_page.tabs.currentIndex() != owner[2]
                 or account != owner[3]
                 or getattr(self.lichess, "auth_generation", None) != owner[4]):
@@ -3018,16 +3021,26 @@ class MainWindow(QMainWindow):
 
     def _external_study_tool_changed(self, index: int) -> None:
         owner = getattr(self, "_external_study_owner", None)
+        if owner and owner[2] != index:
+            self._invalidate_external_study_parse("nested_tool_changed")
+
+    def _invalidate_external_study_parse(self, reason: str) -> None:
+        """Fence queued parser callbacks when their source route is no longer visible."""
+        owner = getattr(self, "_external_study_owner", None)
+        if not owner or owner[0] != self._external_study_generation:
+            return
+        self._external_study_generation += 1
+        self._external_study_owner = None
         handle = getattr(self, "_external_study_handle", None)
-        if owner and owner[2] != index and handle is not None and handle.is_alive():
-            self._external_study_generation += 1
-            handle.cancel("nested_tool_changed")
+        if handle is not None and handle.is_alive():
+            handle.cancel(reason)
 
     def _open_external_study_candidate(self, parsed: dict) -> bool:
         if not isinstance(parsed, dict) or "initial_fen" not in parsed:
             self.analysis_page.set_external_status("Выбранная партия устарела. Загрузите её снова.")
             return False
-        if self.screen_stack.currentWidget() is not self.analysis_page:
+        if (self.screen_stack.currentWidget() is not self.analysis_page
+                or self.analysis_page.workspace.currentWidget() is not self.analysis_page.breakdown_page):
             return False
         owner = getattr(self, "_external_study_owner", None)
         if owner and owner[2] != self.analysis_page.tabs.currentIndex():
@@ -5388,50 +5401,113 @@ class MainWindow(QMainWindow):
         session = self.online_session
         if session is None:
             return
-        if session.is_ai_opponent:
-            self.show_play()
-            self._play_mode_page.select_mode("ai")
-            color = ("white" if session.color == chess.WHITE else "black"
-                     if session.color == chess.BLACK else
-                     str(self.settings.value("workspace/ai_color", "random", type=str)))
-            color_index = self._play_mode_page.color.findData(color)
-            if color_index >= 0:
-                self._play_mode_page.color.setCurrentIndex(color_index)
-            initial_ms = int(getattr(session, "clock_initial", 0) or 0)
-            increment_ms = int(getattr(session, "white_inc", 0) or 0)
-            limit = (initial_ms // 1000 if initial_ms > 0 else
-                     self.settings.value("workspace/ai_clock_limit", 180, type=int))
-            increment = (increment_ms // 1000 if initial_ms > 0 else
-                         self.settings.value("workspace/ai_clock_increment", 2, type=int))
-            self._prefill_play_clock(limit, increment)
-            confirmed_level = (getattr(session, "opponent_info", None) or {}).get("ai")
-            level = int(confirmed_level if type(confirmed_level) is int and 1 <= confirmed_level <= 8
-                        else self.settings.value("workspace/ai_level", 3, type=int))
-            level_index = self._play_mode_page.level.findData(max(1, min(8, level)))
-            if level_index >= 0:
-                self._play_mode_page.level.setCurrentIndex(level_index)
-            return
+        is_ai = session.is_ai_opponent
+        mode = "ai" if is_ai else "challenge"
+        self.show_play()
+        page = self._play_mode_page
+        page.select_mode(mode)
+        status_messages = []
         verified_opponent = str((getattr(session, "opponent_info", None) or {}).get(
             "username") or "").strip()
-        if (re.fullmatch(r"[A-Za-z0-9_-]{2,30}", verified_opponent)
-                and verified_opponent.casefold() not in {"unknown", "lichess"}):
-            self.show_play()
-            self._play_mode_page.select_mode("challenge")
-            self._play_mode_page.username.setText(verified_opponent)
-        else:
-            self.show_play()
-            self._play_mode_page.select_mode("challenge")
-            self._play_mode_page.set_status(
-                "Введите проверенное имя соперника и подтвердите вызов кнопкой Play.")
+        verified_opponent = (verified_opponent if
+                             re.fullmatch(r"[A-Za-z0-9_-]{2,30}", verified_opponent)
+                             and verified_opponent.casefold() not in {"unknown", "lichess"}
+                             else "")
+        if not is_ai:
+            if verified_opponent:
+                page.username.setText(verified_opponent)
+            else:
+                page.username.clear()
+                status_messages.append(
+                    "Введите проверенное имя соперника и подтвердите вызов кнопкой Play.")
 
-    def _prefill_play_clock(self, limit: int | None, increment: int = 0) -> None:
+        if not getattr(session, "awaiting_authoritative_snapshot", True):
+            if session.color in (chess.WHITE, chess.BLACK):
+                color_index = page.color.findData(
+                    "white" if session.color == chess.WHITE else "black")
+                if color_index >= 0:
+                    page.color.setCurrentIndex(color_index)
+        else:
+            status_messages.append("Цвет прошлой партии не подтверждён; оставлены сохранённые настройки.")
+            if is_ai:
+                saved_color = str(self.settings.value("workspace/ai_color", "random", type=str))
+                saved_color_index = page.color.findData(saved_color)
+                if saved_color_index >= 0:
+                    page.color.setCurrentIndex(saved_color_index)
+
+        clock_initial_ms = getattr(session, "clock_initial", None)
+        increment_ms = getattr(session, "white_inc", None)
+        clock_valid = (
+            not getattr(session, "clock_metadata_invalid", True)
+            and type(clock_initial_ms) is int and 0 < clock_initial_ms <= 10_800_000
+            and clock_initial_ms % 1000 == 0
+            and type(increment_ms) is int and 0 <= increment_ms <= 180_000
+            and increment_ms % 1000 == 0
+        )
+        if clock_valid:
+            limit = clock_initial_ms // 1000
+            increment = increment_ms // 1000
+            prefilled = self._prefill_play_clock(limit, increment)
+            if not prefilled:
+                status_messages.append(
+                    f"В прошлой партии был контроль {limit // 60}:{limit % 60:02d} + "
+                    f"{increment} сек. Его нельзя точно выставить этой формой; "
+                    "проверьте и измените контроль вручную.")
+        else:
+            status_messages.append(
+                "Время прошлой партии не подтверждено; оставлены сохранённые настройки.")
+            if is_ai:
+                saved_limit = self.settings.value("workspace/ai_clock_limit", 180, type=int)
+                saved_limit = None if saved_limit < 0 else saved_limit
+                saved_increment = self.settings.value("workspace/ai_clock_increment", 2, type=int)
+                self._prefill_play_clock(saved_limit, saved_increment)
+
+        if not is_ai and getattr(session, "rated_metadata_valid", False):
+            page.rated.setChecked(bool(session.rated))
+
+        if is_ai:
+            confirmed_level = (getattr(session, "opponent_info", None) or {}).get("ai")
+            if type(confirmed_level) is int and 1 <= confirmed_level <= 8:
+                level_index = page.level.findData(confirmed_level)
+                if level_index >= 0:
+                    page.level.setCurrentIndex(level_index)
+            else:
+                status_messages.append("Уровень Lichess AI прошлой партии не подтверждён.")
+                saved_level = self.settings.value("workspace/ai_level", 3, type=int)
+                if type(saved_level) is int and 1 <= saved_level <= 8:
+                    level_index = page.level.findData(saved_level)
+                    if level_index >= 0:
+                        page.level.setCurrentIndex(level_index)
+        if status_messages:
+            page.set_status(" ".join(status_messages))
+
+    def _prefill_play_clock(self, limit: int | None, increment: int = 0) -> bool:
         page = self._play_mode_page
-        target = (None if limit is None or int(limit) < 0 else int(limit), max(0, int(increment)))
-        index = page.clock.findData(target)
+        if limit is None:
+            target_limit = None
+        elif type(limit) is int and 0 < limit <= 10_800:
+            target_limit = limit
+        else:
+            return False
+        if type(increment) is not int or not 0 <= increment <= 180:
+            return False
+        target = (target_limit, increment)
+        index = next((i for i in range(page.clock.count())
+                      if page.clock.itemData(i) == target), -1)
         if index < 0:
-            index = page.clock.findData((180, 2))
-        if index >= 0:
-            page.clock.setCurrentIndex(index)
+            if target_limit is None or target_limit % 60 != 0:
+                return False
+            custom_data = ("custom", None)
+            custom_index = next((i for i in range(page.clock.count())
+                                 if page.clock.itemData(i) == custom_data), -1)
+            minutes = target_limit // 60
+            if custom_index < 0 or not 1 <= minutes <= 180:
+                return False
+            page.custom_minutes.setValue(minutes)
+            page.custom_increment.setValue(increment)
+            index = custom_index
+        page.clock.setCurrentIndex(index)
+        return True
 
     def review_finished_game(self) -> None:
         session = self.online_session

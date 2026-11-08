@@ -50,7 +50,8 @@ def test_multi_game_parse_uses_inline_chooser_without_modal(qtbot, tmp_path, mon
     monkeypatch.setattr(QInputDialog, "getItem", lambda *_args, **_kwargs:
                         (_ for _ in ()).throw(AssertionError("modal chooser used")))
     window._external_study_generation = 4
-    window._external_study_owner = (4, "paste", 1, "", None)
+    window._external_study_owner = (4, "paste", 1, "", None,
+                                    window.analysis_page.breakdown_page)
     window_module_parsed = {"games": [
         {"headers": {}, "moves": ["e2e4"], "initial_fen": "startpos"},
         {"headers": {}, "moves": ["d2d4"], "initial_fen": "startpos"},
@@ -147,6 +148,59 @@ def test_external_parser_callback_is_invalidated_on_nested_tab_change(qtbot, tmp
     window.close()
 
 
+@pytest.mark.parametrize("return_to_landing", ["breadcrumb", "show_analysis"])
+def test_external_parser_callback_cannot_steal_analysis_landing_route(
+    qtbot, tmp_path, monkeypatch, return_to_landing
+):
+    import threading
+    import chess_coach.window as window_module
+
+    window = MainWindow(QSettings(str(tmp_path / f"external-landing-{return_to_landing}.ini"),
+                                  QSettings.Format.IniFormat), offline_mode=True)
+    qtbot.addWidget(window)
+    window.show_analysis()
+    window.analysis_page.show_breakdown(1)
+    entered, release = threading.Event(), threading.Event()
+    parsed = {"games": [
+        {"initial_fen": "startpos", "moves": ["e2e4"], "headers": {}},
+        {"initial_fen": "startpos", "moves": ["d2d4"], "headers": {}},
+    ]}
+    monkeypatch.setattr(window_module, "_parse_external_study_text", lambda _text: (
+        entered.set(), release.wait(3), parsed)[-1])
+    engine_calls = []
+    monkeypatch.setattr(window.engine_analysis, "analyze_completed_game",
+                        lambda *args, **kwargs: engine_calls.append((args, kwargs)))
+    window.analysis_page.external_text.setPlainText("draft preserved")
+    assert window.open_external_study_text("1. e4")
+    assert entered.wait(2)
+    old_generation = window._external_study_generation
+
+    if return_to_landing == "breadcrumb":
+        window.analysis_page.back_button.click()
+    else:
+        # This route is important when the shell is already on Analysis: the
+        # outer QStackedWidget emits no currentChanged signal.
+        window.show_analysis()
+    assert window.analysis_page.workspace.currentIndex() == 0
+    assert window.analysis_page.external_text.toPlainText() == "draft preserved"
+    release.set()
+    qtbot.waitUntil(lambda: not window._external_study_handle.is_alive(), timeout=5000)
+    qtbot.wait(30)
+    assert window.screen_stack.currentWidget() is window.analysis_page
+    assert window.analysis_page.workspace.currentIndex() == 0
+    assert window.analysis_page.candidate_list.count() == 0
+    assert window.review_workspace.review is None
+    assert engine_calls == []
+
+    # Simulate completion already queued in Qt before the user reopens tab 1.
+    window.analysis_page.show_breakdown(1)
+    window._external_study_parse_finished(old_generation, parsed, None)
+    assert window.analysis_page.candidate_list.count() == 0
+    assert window.review_workspace.review is None
+    assert engine_calls == []
+    window.close()
+
+
 def test_external_parser_callback_is_invalidated_on_auth_generation_change(qtbot, tmp_path,
                                                                             monkeypatch):
     import threading
@@ -179,7 +233,8 @@ def test_older_external_parse_generation_cannot_replace_new_candidate_set(qtbot,
     window.show_analysis()
     window.analysis_page.show_breakdown(1)
     window._external_study_generation = 2
-    window._external_study_owner = (2, "paste", 1, "", None)
+    window._external_study_owner = (2, "paste", 1, "", None,
+                                    window.analysis_page.breakdown_page)
     window._external_study_parse_finished(
         1, {"initial_fen": "startpos", "moves": ["e2e4"], "headers": {}}, None)
     assert window.analysis_page.candidate_list.count() == 0
@@ -415,6 +470,159 @@ def test_human_rematch_start_sends_exactly_one_explicit_challenge(qtbot, tmp_pat
     window._play_mode_page.start_button.click()
     assert len(service.calls) == 1
     assert service.calls[0][0] == "OpponentName"
+    window.close()
+
+
+def test_human_rematch_prefills_confirmed_custom_clock_color_and_rated(qtbot, tmp_path,
+                                                                       monkeypatch):
+    window = MainWindow(QSettings(str(tmp_path / "play-human-confirmed-rematch.ini"),
+                                  QSettings.Format.IniFormat), offline_mode=True)
+    qtbot.addWidget(window)
+    monkeypatch.setattr(window, "_online_actions_allowed", lambda: True)
+    monkeypatch.setattr(window, "_refresh_active_games_for_play", lambda **_kwargs: None)
+
+    class FakeService:
+        auth_generation = 2
+        username = "owner"
+        def __init__(self):
+            self.calls = []
+        def challenge_username(self, *args):
+            self.calls.append(args)
+            return "request-custom-human"
+
+    service = FakeService()
+    window.lichess = service
+    session = LichessGameSession("rematch-human-confirmed", window.game_repository)
+    session.opponent_info = {"id": "opponent", "username": "VerifiedOpponent"}
+    session.game_source = "lobby"
+    session.status = "mate"
+    session.awaiting_authoritative_snapshot = False
+    session.color = chess.BLACK
+    session.clock_initial = 7 * 60 * 1000
+    session.white_inc = session.black_inc = 3 * 1000
+    session.clock_metadata_invalid = False
+    session.rated = True
+    session.rated_metadata_valid = True
+    window.online_session = session
+
+    window._challenge_again()
+    page = window._play_mode_page
+    assert page.mode_selector.currentData() == "challenge"
+    assert page.username.text() == "VerifiedOpponent"
+    assert page.color.currentData() == "black"
+    assert page.clock.currentData() == ("custom", None)
+    assert page.custom_minutes.value() == 7
+    assert page.custom_increment.value() == 3
+    assert page.rated.isChecked()
+    assert service.calls == []
+
+    page.start_button.click()
+    assert service.calls == [("VerifiedOpponent", "black", 420, 3, True)]
+    window.close()
+
+
+def test_ai_rematch_prefills_confirmed_custom_clock_and_sends_exact_values(qtbot, tmp_path,
+                                                                           monkeypatch):
+    window = MainWindow(QSettings(str(tmp_path / "play-ai-custom-rematch.ini"),
+                                  QSettings.Format.IniFormat), offline_mode=True)
+    qtbot.addWidget(window)
+    monkeypatch.setattr(window, "_online_actions_allowed", lambda: True)
+    monkeypatch.setattr(window, "_refresh_active_games_for_play", lambda **_kwargs: None)
+
+    class FakeService:
+        auth_generation = 2
+        username = "owner"
+        def __init__(self):
+            self.calls = []
+        def create_ai_game(self, *args):
+            self.calls.append(args)
+            return "request-custom-ai"
+
+    service = FakeService()
+    window.lichess = service
+    session = LichessGameSession("rematch-ai-custom", window.game_repository)
+    session.game_source = "ai"
+    session.opponent_info = {"id": None, "ai": 7}
+    session.status = "mate"
+    session.awaiting_authoritative_snapshot = False
+    session.color = chess.WHITE
+    session.clock_initial = 11 * 60 * 1000
+    session.white_inc = session.black_inc = 5 * 1000
+    session.clock_metadata_invalid = False
+    window.online_session = session
+
+    window._challenge_again()
+    page = window._play_mode_page
+    assert page.level.currentData() == 7
+    assert page.color.currentData() == "white"
+    assert page.clock.currentData() == ("custom", None)
+    assert page.custom_minutes.value() == 11
+    assert page.custom_increment.value() == 5
+    assert service.calls == []
+
+    page.start_button.click()
+    assert service.calls == [(7, "white", 660, 5)]
+    window.close()
+
+
+def test_rematch_preserves_preferences_for_unconfirmed_or_unrepresentable_clock(
+    qtbot, tmp_path, monkeypatch
+):
+    settings = QSettings(str(tmp_path / "play-unknown-clock.ini"), QSettings.Format.IniFormat)
+    window = MainWindow(settings, offline_mode=True)
+    qtbot.addWidget(window)
+    monkeypatch.setattr(window, "_online_actions_allowed", lambda: True)
+    monkeypatch.setattr(window, "_refresh_active_games_for_play", lambda **_kwargs: None)
+    page = window._play_mode_page
+    saved_5_0_index = next(i for i in range(page.clock.count())
+                           if page.clock.itemData(i) == (300, 0))
+    page.select_mode("challenge")
+    page.clock.setCurrentIndex(saved_5_0_index)
+    page.rated.setChecked(True)
+    page.select_mode("ai")
+
+    session = LichessGameSession("rematch-human-unknown-clock", window.game_repository)
+    session.opponent_info = {"id": "opponent", "username": "VerifiedOpponent"}
+    session.game_source = "lobby"
+    session.status = "mate"
+    session.awaiting_authoritative_snapshot = False
+    session.clock_initial = 0
+    session.clock_metadata_invalid = False
+    window.online_session = session
+    window._challenge_again()
+    assert page.clock.currentData() == (300, 0)
+    assert page.rated.isChecked()  # unknown rated flag keeps the saved preference
+    assert "не подтверждено" in page.form_status.text()
+
+    # A valid server clock that this minute-only custom control cannot encode
+    # is stated truthfully; it must not silently become 3+2 or another preset.
+    session.clock_initial = 7 * 60 * 1000 + 30 * 1000
+    session.white_inc = 2 * 1000
+    session.clock_metadata_invalid = False
+    window._challenge_again()
+    assert page.clock.currentData() == (300, 0)
+    assert "7:30 + 2 сек" in page.form_status.text()
+    window.close()
+
+
+def test_rematch_keeps_exact_confirmed_preset_clock(qtbot, tmp_path, monkeypatch):
+    window = MainWindow(QSettings(str(tmp_path / "play-preset-rematch.ini"),
+                                  QSettings.Format.IniFormat), offline_mode=True)
+    qtbot.addWidget(window)
+    monkeypatch.setattr(window, "_online_actions_allowed", lambda: True)
+    monkeypatch.setattr(window, "_refresh_active_games_for_play", lambda **_kwargs: None)
+    session = LichessGameSession("rematch-human-preset", window.game_repository)
+    session.opponent_info = {"id": "opponent", "username": "VerifiedOpponent"}
+    session.game_source = "lobby"
+    session.status = "mate"
+    session.awaiting_authoritative_snapshot = False
+    session.clock_initial = 5 * 60 * 1000
+    session.white_inc = 0
+    session.clock_metadata_invalid = False
+    window.online_session = session
+    window._challenge_again()
+    assert window._play_mode_page.clock.currentData() == (300, 0)
+    assert window._play_mode_page.clock.currentText() == "5 + 0"
     window.close()
 
 
