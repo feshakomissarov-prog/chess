@@ -531,6 +531,26 @@ def test_board_fit_uses_available_window_area_and_focus_hides_inspector(
     window.close()
 
 
+def test_board_focus_grows_past_selected_preset_and_restores_it(qtbot, tmp_path):
+    settings = QSettings(str(tmp_path / "board-focus-fit.ini"), QSettings.Format.IniFormat)
+    window = MainWindow(settings, offline_mode=True)
+    qtbot.addWidget(window)
+    window.resize(1920, 1080)
+    window.board_size_combo.setCurrentIndex(window.board_size_combo.findData(480))
+    window.screen_stack.setCurrentWidget(window.game_page)
+    window.show()
+    qtbot.wait(20)
+    window._apply_board_size()
+    assert window.board.width() == 480
+    window.focus_mode_button.setChecked(True)
+    focused_size = window.board.width()
+    assert window.game_splitter.widget(1).isHidden()
+    assert focused_size > 480
+    window.focus_mode_button.setChecked(False)
+    assert window.board.width() == 480
+    window.close()
+
+
 @pytest.mark.parametrize(("width", "height"), [(1120, 640), (1280, 720), (1366, 768), (1920, 1080)])
 def test_game_workspace_has_no_page_wide_scroll_and_keeps_live_controls_visible(
         qtbot, tmp_path, width, height):
@@ -3817,11 +3837,13 @@ def test_external_study_invalid_input_and_stale_response_do_not_open_review(
     window.close()
 
 
-def test_external_study_parser_accepts_custom_fen_and_rejects_multiple_games():
+def test_external_study_parser_accepts_custom_fen_and_multiple_games():
     fen = "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1"
     assert _parse_external_study_text(fen)["initial_fen"] == chess.STARTING_FEN
-    with pytest.raises(ValueError, match="одна партия"):
-        _parse_external_study_text("1. e4 e5\n\n1. d4 d5")
+    parsed = _parse_external_study_text("1. e4 e5\n\n1. d4 d5")
+    assert len(parsed["games"]) == 2
+    assert parsed["games"][0]["moves"] == ["e2e4", "e7e5"]
+    assert parsed["games"][1]["moves"] == ["d2d4", "d7d5"]
 
 
 def test_library_pins_active_games_and_resumes_only_selected_session(qtbot, tmp_path):
@@ -4078,6 +4100,21 @@ def test_failed_ai_create_releases_only_its_pending_play_request(qtbot, tmp_path
         generation, "ai-request", "create_challenge", "", 403, "forbidden")
     assert not window._awaiting_game_start
     assert page.start_button.isEnabled()
+    window.close()
+
+
+def test_offline_play_mode_selection_enables_free_board_action(qtbot, tmp_path):
+    window = MainWindow(QSettings(str(tmp_path / "offline-local-mode.ini"),
+                                  QSettings.Format.IniFormat), offline_mode=True)
+    qtbot.addWidget(window)
+    window.show_play()
+    page = window._play_mode_page
+    assert not page.start_button.isEnabled()  # Network AI remains unavailable offline.
+    page.buttons["local"].click()
+    assert page.start_button.isEnabled()
+    page.start_button.click()
+    assert window._screen_mode == "local"
+    assert window.screen_stack.currentWidget() is window.game_page
     window.close()
 
 

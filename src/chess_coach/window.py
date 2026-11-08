@@ -189,7 +189,7 @@ _MAX_EXTERNAL_STUDY_BYTES = 4 * 1024 * 1024
 
 
 def _parse_external_study_text(value: str) -> dict:
-    """Parse one standard PGN or a FEN away from the Qt thread."""
+    """Parse standard PGN game(s) or a FEN away from the Qt thread."""
     value = str(value or "").strip()
     if not value:
         raise ValueError("Пустой ввод.")
@@ -204,33 +204,33 @@ def _parse_external_study_text(value: str) -> dict:
         return {"initial_fen": fen_board.fen(), "moves": [], "headers": {}}
 
     stream = io.StringIO(value)
-    game = chess.pgn.read_game(stream)
-    if game is None:
-        raise ValueError("Введите одну корректную стандартную PGN-партию или FEN.")
-    if game.errors:
-        raise ValueError("PGN содержит некорректные ходы или заголовки.")
-    if chess.pgn.read_game(stream) is not None:
-        raise ValueError("Пока принимается одна партия за раз.")
-    headers = dict(game.headers)
-    if str(headers.get("Variant", "Standard")).casefold() not in {"standard", "chess"}:
-        raise ValueError("Поддерживается только стандартный шахматный PGN.")
-    board = game.board()
-    if not isinstance(board, chess.Board) or not board.is_valid():
-        raise ValueError("Начальная позиция PGN некорректна.")
-    initial_fen = board.fen()
-    moves: list[str] = []
-    for move in game.mainline_moves():
-        if move not in board.legal_moves:
-            raise ValueError("PGN содержит нелегальный ход.")
-        moves.append(move.uci())
-        board.push(move)
-    if not moves:
-        raise ValueError("PGN не содержит ходов.")
-    return {
-        "initial_fen": "startpos" if initial_fen == chess.STARTING_FEN else initial_fen,
-        "moves": moves,
-        "headers": headers,
-    }
+    parsed_games: list[dict] = []
+    while game := chess.pgn.read_game(stream):
+        if game.errors:
+            raise ValueError("PGN содержит некорректные ходы или заголовки.")
+        headers = dict(game.headers)
+        if str(headers.get("Variant", "Standard")).casefold() not in {"standard", "chess"}:
+            raise ValueError("Поддерживается только стандартный шахматный PGN.")
+        board = game.board()
+        if not isinstance(board, chess.Board) or not board.is_valid():
+            raise ValueError("Начальная позиция PGN некорректна.")
+        initial_fen = board.fen()
+        moves: list[str] = []
+        for move in game.mainline_moves():
+            if move not in board.legal_moves:
+                raise ValueError("PGN содержит нелегальный ход.")
+            moves.append(move.uci())
+            board.push(move)
+        if not moves:
+            raise ValueError("PGN содержит партию без ходов.")
+        parsed_games.append({
+            "initial_fen": "startpos" if initial_fen == chess.STARTING_FEN else initial_fen,
+            "moves": moves,
+            "headers": headers,
+        })
+    if not parsed_games:
+        raise ValueError("Введите корректную стандартную PGN-партию или FEN.")
+    return parsed_games[0] if len(parsed_games) == 1 else {"games": parsed_games}
 
 
 def _puzzle_attempt_summary(attempts: list[dict]) -> str:
@@ -2181,7 +2181,9 @@ class MainWindow(QMainWindow):
         available_width = max(160, contents.width() - margins.left() - margins.right())
         available_height = max(
             160, column.height() - margins.top() - margins.bottom() - occupied_height)
-        requested = min(available_width, available_height) if target <= 0 else target
+        focus = bool(getattr(self, "_board_focus_mode", False))
+        requested = (min(available_width, available_height)
+                     if target <= 0 or focus else target)
         actual = max(160, min(requested, available_width, available_height))
         if self.board.width() != actual or self.board.height() != actual:
             self.board.setFixedSize(actual, actual)
@@ -2716,6 +2718,8 @@ class MainWindow(QMainWindow):
         page.create_requested.connect(self._create_play_request)
         page.cancel_requested.connect(self._cancel_play_challenge_wait)
         page.cancel_invitation_requested.connect(self.cancel_friend_invitation)
+        page.mode_selector.currentIndexChanged.connect(
+            lambda *_args: self._update_play_mode_availability())
         self._play_mode_page = page
         self._play_mode_columns = page._columns
         self.play_local_button = page.buttons["local"]
@@ -2940,6 +2944,21 @@ class MainWindow(QMainWindow):
         if not isinstance(parsed, dict):
             self.analysis_page.set_external_status("Не удалось прочитать результат разбора.")
             return
+        games = parsed.get("games")
+        if isinstance(games, list):
+            labels = []
+            for index, item in enumerate(games, 1):
+                headers = item.get("headers") or {}
+                players = f"{headers.get('White', 'Белые')} — {headers.get('Black', 'Чёрные')}"
+                date = str(headers.get("Date") or "дата не указана")
+                result = str(headers.get("Result") or "*")
+                labels.append(f"{index}. {players} · {date} · {result}")
+            selected, accepted = QInputDialog.getItem(
+                self, "Выберите партию", "Партии в файле:", labels, 0, False)
+            if not accepted:
+                self.analysis_page.set_external_status("Выбор партии отменён.")
+                return
+            parsed = games[labels.index(selected)]
         headers = dict(parsed.get("headers") or {})
         initial_fen = str(parsed["initial_fen"])
         moves = list(parsed.get("moves") or [])
@@ -2949,7 +2968,8 @@ class MainWindow(QMainWindow):
         status = "finished" if result in {"1-0", "0-1", "1/2-1/2"} else "unknownFinish"
         record = {
             "game_id": game_id, "initial_fen": initial_fen, "moves": " ".join(moves),
-            "line_revision": 1, "line_hash": "ephemeral", "color": "white",
+            "line_revision": 1, "line_hash": "ephemeral", "color": None,
+            "account_color": None,
             "opponent": "Внешняя партия", "rated": False, "clock": "-",
             "status": status, "winner": winner, "source": "external",
             "source_game_id": None, "variant": "standard", "import_error": None,
@@ -5094,6 +5114,8 @@ class MainWindow(QMainWindow):
             self._show_result(session, not session.final_sync_pending)
 
     def _show_result(self, session: LichessGameSession, saved: bool, detail: str | None = None) -> None:
+        if self._board_focus_mode:
+            self.focus_mode_button.setChecked(False)
         self._screen_mode = "result"
         self.screen_title.setText("Партия завершена")
         outcome = _result_label(session.color, session.winner, session.status)
