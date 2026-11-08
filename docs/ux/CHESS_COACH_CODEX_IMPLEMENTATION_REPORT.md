@@ -17,7 +17,7 @@
 | CC46-P2-04 · source-aware Back | DONE | Временный Review возвращается в исходную вкладку, сохраняя текст, список кандидатов и выбранную строку; позиционный редактор остаётся на вкладке редактора. Проверены PGN и editor.
 | CC46-P2-05 · «Вызвать снова» через Play | DONE | AI и подтверждённый nickname соперника открывают общий Play с предзаполненными параметрами. Уровень/цвет AI берутся из подтверждённой сессии; поля формы не создают игру до Start. Username валидируется до запроса. Fake-service тесты проверяют 0 запросов до Start и ровно 1 после него, включая отказ некорректного имени.
 
-Текущая локальная проверка на Windows для кода `f558da5…` и актуального тестового дерева: `QT_QPA_PLATFORM=offscreen; .venv312\Scripts\python.exe -m pytest -q` — **959 тестов, exit code 0**; `python -m compileall -q src tests` — exit code 0; `git diff --check` — exit code 0. Windows Actions run `42514668486` на SHA `6dd79a9…`: `test` и `visual-evidence` оба завершились SUCCESS. После отправки финальных тестов и отчёта будет проверен ещё один exact-head Windows run. Нативный GUI/реальный Stockfish smoke для этих новых маршрутов не запускался. Сравнение всех 13 утверждённых эталонов остаётся отдельным следующим этапом.
+Текущая локальная проверка на Windows для кода `f558da5…` и актуального тестового дерева: `QT_QPA_PLATFORM=offscreen; .venv312\Scripts\python.exe -m pytest -q` — **959 тестов, exit code 0**; `python -m compileall -q src tests` — exit code 0; `git diff --check` — exit code 0. Windows Actions run `42515985850` для SHA `aaa30ab83ed21136f952d8966eb97a955cfce9ff`: `test` и `visual-evidence` оба завершились SUCCESS. Этот run подтвердил полное тестирование и native capture на Windows. Нативный GUI smoke новых маршрутов и реальный Stockfish smoke не запускались. Сравнение всех 13 утверждённых эталонов остаётся отдельным следующим этапом.
 
 PR #46 был создан на SHA `95361e95e641b4ae6ce7974d7e4ff116f21b5e2d`; после этой строки отчёт обновляется отдельным docs-only коммитом.
 
@@ -86,11 +86,11 @@ PR #46 был создан на SHA `95361e95e641b4ae6ce7974d7e4ff116f21b5e2d`; 
 - **Путь к изображениям:** заданная папка `Примеры` отсутствовала; найдена папка `Пример` с совпадающими точными именами UX-01…UX-13. Все 13 эталонов использовались только для чтения.
 - **Fair Play / online:** UX-04 и живые серверные ACK-состояния не тестировались против настоящего Lichess. Это исключено из offline smoke и автотестов; сетевые сценарии покрываются fake transport.
 - **Полная visual QA 13/13:** не завершена. Нет 13 сохранённых side-by-side сравнений. UX-03/04/06/12/13 не просмотрены в итоговом живом GUI; остальные экраны вошли в capture-сценарий, но не каждый кадр был вручную сопоставлен с нужным из 13 эталонов.
-- **Windows CI exact-head:** `test` и `visual-evidence` прошли как на `32bdcbde77dbba2e9bcb0cf1dea2c1e50e1411d2` ([Actions run](https://github.com/feshakomissarov-prog/chess/actions/runs/42466750868)), так и на следующем report-only SHA `ccbfa25235dbd2fde9c20b173081223912954991` ([повторный Actions run](https://github.com/feshakomissarov-prog/chess/actions/runs/42467386449)).
+- **Windows CI exact-head:** `test` и `visual-evidence` прошли на исправленном SHA `aaa30ab83ed21136f952d8966eb97a955cfce9ff` ([Actions run](https://github.com/feshakomissarov-prog/chess/actions/runs/42515985850)); до него также прошли run `42514668486` на SHA `6dd79a9…`.
 - **PR:** draft [#46](https://github.com/feshakomissarov-prog/chess/pull/46), база `main`; ветка на 18 коммитов впереди `origin/main`. Пользовательские незатреканные `.venv312/`, `visual-evidence/`, `vlc-help.txt` оставлены вне Git.
 
 Никаких изменений в `main`, force-push, слияния PR, SQLite-файлов пользователя, токенов или реальных PGN не выполнялось.
 
 ## Следующий шаг приёмки
 
-Нужны завершение нативной визуальной проверки и сохранение актуальных кадров/сравнений для всех 13 эталонов, затем exact-head Windows CI. До этих проверок ветка и PR должны оставаться draft; финальная визуальная приёмка не объявляется пройденной.
+Нужны завершение нативной визуальной проверки и сохранение актуальных кадров/сравнений для всех 13 эталонов. До неё ветка и PR должны оставаться draft; финальная визуальная приёмка не объявляется пройденной.
