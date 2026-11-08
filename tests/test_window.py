@@ -477,7 +477,8 @@ def test_m46_shell_uses_expanded_sidebar_at_wide_home_and_compact_board(qtbot, t
     window._shell_screen_changed(window.screen_stack.currentIndex())
     assert window.sidebar.width() == 212
     window.start_local_game()
-    assert window.sidebar.width() == 60
+    # The approved live-game workspace keeps all five navigation routes open.
+    assert window.sidebar.width() == 212
 
 
 def test_visual_sidebar_recovers_after_wide_resize_and_routes_but_respects_explicit_choice(
