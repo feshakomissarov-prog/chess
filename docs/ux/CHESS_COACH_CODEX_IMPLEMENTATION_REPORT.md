@@ -71,7 +71,7 @@ PR #46 был создан на SHA `95361e95e641b4ae6ce7974d7e4ff116f21b5e2d`; 
 - **Путь к изображениям:** заданная папка `Примеры` отсутствовала; найдена папка `Пример` с совпадающими точными именами UX-01…UX-13. Все 13 эталонов использовались только для чтения.
 - **Fair Play / online:** UX-04 и живые серверные ACK-состояния не тестировались против настоящего Lichess. Это исключено из offline smoke и автотестов; сетевые сценарии покрываются fake transport.
 - **Полная visual QA 13/13:** не завершена. Нет 13 сохранённых side-by-side сравнений. UX-03/04/06/12/13 не просмотрены в итоговом живом GUI; остальные экраны вошли в capture-сценарий, но не каждый кадр был вручную сопоставлен с нужным из 13 эталонов.
-- **Windows CI exact-head:** локальный Windows набор и 25-state visual capture пройдены; GitHub Actions запускается на актуальном PR SHA, результат будет проверен по завершении.
+- **Windows CI exact-head:** `test` и `visual-evidence` прошли на SHA `32bdcbde77dbba2e9bcb0cf1dea2c1e50e1411d2` ([Actions run](https://github.com/feshakomissarov-prog/chess/actions/runs/42466750868)). Следующий коммит содержит только это обновление отчёта; после него Actions запускается повторно на новом HEAD.
 - **PR:** draft [#46](https://github.com/feshakomissarov-prog/chess/pull/46), база `main`; ветка на 18 коммитов впереди `origin/main`. Пользовательские незатреканные `.venv312/`, `visual-evidence/`, `vlc-help.txt` оставлены вне Git.
 
 Никаких изменений в `main`, force-push, слияния PR, SQLite-файлов пользователя, токенов или реальных PGN не выполнялось.
