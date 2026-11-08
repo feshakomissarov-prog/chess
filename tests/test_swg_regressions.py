@@ -312,6 +312,9 @@ def test_swg05_gamefull_official_ai_identity_does_not_pause_human_only_work(
     monkeypatch.setattr(window, "_cancel_legacy_metrics_batch", lambda reason: effects.append(reason))
     monkeypatch.setattr(window, "_pause_batch_analysis",
                         lambda manual=False: effects.append("batch"))
+    window._position_eval_mode = True
+    position_stop = threading.Event()
+    window._position_eval_stop = position_stop
     window.lichess = type("Service", (), {
         "username": "Owner",
         "cancel_archive_sync": lambda self: effects.append("archive"),
@@ -326,8 +329,209 @@ def test_swg05_gamefull_official_ai_identity_does_not_pause_human_only_work(
         "state": {"moves": "", "status": "started"},
     })
     assert effects == []
+    assert not position_stop.is_set()
+    assert window._position_eval_mode
     window.game_repository.shutdown()
     window.close()
+
+
+@pytest.mark.parametrize("identity", [
+    {"source": "friend", "opponent": {"id": "friend", "username": "Friend"}},
+    {"source": "correspondence", "opponent": {"id": "correspondent"}},
+    {"source": None, "opponent": None},
+])
+def test_mg01_gamefull_only_human_revokes_inflight_position_evaluation(
+        qtbot, tmp_path, monkeypatch, identity):
+    """A resumed human game without gameStart must invalidate a late UCI result."""
+    window = MainWindow(QSettings(str(tmp_path / "mg01-position.ini"),
+                                  QSettings.Format.IniFormat), offline_mode=True)
+    qtbot.addWidget(window)
+    service = type("Service", (), {"username": "Owner"})()
+    window.lichess = service
+    window._lichess_connected = True
+    window._current_lichess_generation = lambda _generation: True
+    window._online_actions_allowed = lambda: True
+    window._sessions_for_safety = lambda: tuple(window.online_sessions.values())
+    window._position_eval_mode = True
+    window._position_eval_generation = 41
+    stop = threading.Event()
+    window._position_eval_stop = stop
+
+    class Worker:
+        joined = False
+        def join(self, timeout=None): self.joined = True
+
+    worker = Worker()
+    window._position_eval_handle = {"worker_thread": worker}
+    window._position_eval_thread = worker
+    window.position_eval_label.show()
+    score_calls = []
+    monkeypatch.setattr(window.moves, "set_score", lambda *a, **kw: score_calls.append((a, kw)))
+    monkeypatch.setattr(window, "_pause_heavy_work_for_live_game", lambda: None)
+
+    window._lichess_game_event("resumed-human", {
+        "type": "gameFull", "id": "resumed-human", **identity,
+        "initialFen": "startpos",
+        "white": {"name": "Owner", "id": "owner"},
+        "black": {"name": "Friend", "id": "friend"},
+        "state": {"moves": "", "status": "started"},
+    }, generation=1)
+
+    assert stop.is_set(), "gameFull-only human state must stop the running position evaluator"
+    assert window._position_eval_mode is False
+    assert window._position_eval_generation > 41
+    window._position_eval_finished(41, {
+        "score_white_cp": 325, "mate_white": None, "best_move": "e2e4", "depth": 20,
+    }, worker)
+    assert worker.joined
+    assert score_calls == [], "late engine success must not be committed or shown"
+    assert "лучший ход" not in window.position_eval_label.text()
+    window.game_repository.shutdown()
+    window.close()
+
+
+@pytest.mark.parametrize("cancel_kind", ["account_switch", "cancelled", "stale_line"])
+def test_mg02_stale_library_retry_does_not_write_after_blocked_link_read(
+        qtbot, tmp_path, monkeypatch, cancel_kind):
+    """Fence SQLite side effects after a link read blocked across a session change."""
+    window = MainWindow(QSettings(str(tmp_path / f"mg02-{cancel_kind}.ini"),
+                                  QSettings.Format.IniFormat), offline_mode=True)
+    qtbot.addWidget(window)
+    window.offline_mode = False
+    repository = window.game_repository
+    game_id = _archive(repository, "AccountA", f"blocked-link-{cancel_kind}")
+    account_id = "lichess:accounta"
+
+    class Service:
+        username = "AccountA"
+        auth_generation = 23
+        def is_auth_generation_current(self, generation):
+            return generation == self.auth_generation
+        def refresh_lichess_analysis_background(self, **_kwargs):
+            pytest.fail("stale selected request must never reach Lichess")
+
+    service = Service()
+    window.lichess = service
+    window._lichess_connected = True
+    window._lichess_stream_ready_generation = service.auth_generation
+    window._online_actions_allowed = lambda: True
+    window._sessions_for_safety = lambda: []
+    window.show_saved_games()
+    page = window.library_page
+    window.show()
+    entered = threading.Event()
+    release = threading.Event()
+    validate = repository.validate_lichess_game_link
+
+    def blocked_validate(*args, **kwargs):
+        entered.set()
+        assert release.wait(5), "test barrier was not released"
+        return validate(*args, **kwargs)
+
+    monkeypatch.setattr(repository, "validate_lichess_game_link", blocked_validate)
+    try:
+        qtbot.waitUntil(lambda: page.games.count() > 0, timeout=5000)
+        qtbot.waitUntil(lambda: page.retry_analysis_button.isEnabled(), timeout=5000)
+        selected = page.games.item(0).data(Qt.ItemDataRole.UserRole)
+        assert selected["game_id"] == game_id
+        assert repository.lichess_analysis_backfill_state(account_id, game_id) is None
+        QTest.mouseClick(page.retry_analysis_button, Qt.MouseButton.LeftButton)
+        qtbot.waitUntil(entered.is_set, timeout=3000)
+        if cancel_kind == "account_switch":
+            # LichessService keeps object identity while replacing the session.
+            service.username = "AccountB"
+            service.auth_generation += 1
+        elif cancel_kind == "cancelled":
+            handles = tuple(window.runtime.work_coordinator._operations.values())
+            handle = next(item for item in handles
+                          if item.snapshot.context.kind == "selected_lichess_analysis_retry")
+            assert handle.cancel("account_switched")
+        else:
+            repository.save_snapshot(game_id, "startpos", "e2e4 e7e5", "white",
+                                     "Opponent", False, "5+0", "mate", "white")
+        release.set()
+        qtbot.waitUntil(
+            lambda: not any(item.snapshot.context.kind == "selected_lichess_analysis_retry"
+                            for item in window.runtime.work_coordinator._operations.values()),
+            timeout=5000)
+        assert repository.lichess_analysis_backfill_state(account_id, game_id) is None, (
+            "stale/cancelled worker must not enqueue or mutate the previous account's retry state")
+        assert repository.lichess_analysis_retry_after(account_id) is None
+    finally:
+        release.set()
+        window.game_repository.shutdown()
+        window.close()
+
+
+def test_mg02_repository_rechecks_session_after_blocked_sqlite_write_lock(tmp_path):
+    """Session invalidation while BEGIN IMMEDIATE waits causes no durable mutation."""
+    import sqlite3
+
+    repository = GameRepository(tmp_path / "mg02-write-fence.sqlite3")
+    try:
+        game_id = _archive(repository, "Owner", "write-fence-game")
+        account_id = repository.ensure_archive_account("Owner")
+        line = repository.current_line(game_id)
+        assert line is not None
+        owner = sqlite3.connect(repository.path, timeout=0)
+        owner.execute("BEGIN IMMEDIATE")
+        current = threading.Event()
+        current.set()
+        started = threading.Event()
+        result = []
+
+        def enqueue():
+            started.set()
+            result.append(repository.enqueue_lichess_analysis_backfill(
+                account_id, game_id=game_id,
+                expected_line_revision=line["line_revision"],
+                expected_source_game_id="write-fence-game",
+                generation_is_current=current.is_set))
+
+        worker = threading.Thread(target=enqueue)
+        worker.start()
+        assert started.wait(2)
+        time.sleep(0.05)  # writer lock is held while the operation is at BEGIN IMMEDIATE
+        current.clear()
+        owner.rollback()
+        owner.close()
+        worker.join(3)
+        assert not worker.is_alive()
+        assert result == [0]
+        assert repository.lichess_analysis_backfill_state(account_id, game_id) is None
+
+        assert repository.enqueue_lichess_analysis_backfill(
+            account_id, game_id=game_id,
+            expected_line_revision=line["line_revision"],
+            expected_source_game_id="write-fence-game") == 1
+        before = repository.lichess_analysis_backfill_state(account_id, game_id)
+        assert before is not None and before["manual_retry_at"] is None
+        owner = sqlite3.connect(repository.path, timeout=0)
+        owner.execute("BEGIN IMMEDIATE")
+        current.set()
+        started.clear()
+        result.clear()
+
+        def retry():
+            started.set()
+            result.append(repository.retry_lichess_analysis_game(
+                account_id, game_id, line_revision=line["line_revision"],
+                source_game_id="write-fence-game", manual=True,
+                generation_is_current=current.is_set))
+
+        worker = threading.Thread(target=retry)
+        worker.start()
+        assert started.wait(2)
+        time.sleep(0.05)
+        current.clear()
+        owner.rollback()
+        owner.close()
+        worker.join(3)
+        assert not worker.is_alive()
+        assert result == [False]
+        assert repository.lichess_analysis_backfill_state(account_id, game_id) == before
+    finally:
+        repository.shutdown()
 
 
 def test_swg02_selected_request_waits_for_busy_batch_then_runs_once(tmp_path, qtbot):

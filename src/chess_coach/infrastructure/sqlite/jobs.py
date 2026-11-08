@@ -5,6 +5,7 @@ from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 import json
 import uuid
+from typing import Callable
 import chess
 
 from .constants import MAX_PAGE_SIZE
@@ -45,12 +46,18 @@ def _is_checkmate(fen: str) -> int:
     except ValueError:
         return 0
 
+
+class _StaleSessionWrite(RuntimeError):
+    """Roll back a selected retry when its owner session changes mid-transaction."""
+
+
 class AnalysisJobsStoreMixin:
 
     def enqueue_lichess_analysis_backfill(self, account_id: str, *, limit: int = 10_000,
                                           game_id: str | None = None,
                                           expected_line_revision: int | None = None,
-                                          expected_source_game_id: str | None = None) -> int:
+                                          expected_source_game_id: str | None = None,
+                                          generation_is_current: Callable[[], bool] | None = None) -> int:
         """Queue all finished games or one explicitly scoped game, without touching lines."""
         now = datetime.now(timezone.utc).isoformat()
         # A running row belongs to an in-flight request. Ordinary status reads
@@ -58,15 +65,29 @@ class AnalysisJobsStoreMixin:
         # have been orphaned by a process exit before this request began.
         stale_running_before = (datetime.now(timezone.utc) - timedelta(minutes=10)).isoformat()
         limit = max(1, min(50_000, int(limit)))
-        with self._connection() as db:
-            if game_id is None:
-                db.execute("UPDATE lichess_analysis_backfill SET accuracy_status='queued',"
-                           "evals_status='queued',lease_owner=NULL,lease_heartbeat_at=NULL,"
-                           "updated_at=? WHERE account_id=? "
-                           "AND (accuracy_status='running' OR evals_status='running') "
-                           "AND COALESCE(lease_heartbeat_at,updated_at)<?",
-                           (now, account_id, stale_running_before))
-            db.execute("""
+        def session_current() -> bool:
+            try:
+                return generation_is_current is None or bool(generation_is_current())
+            except Exception:
+                return False
+        try:
+            with self._connection() as db:
+                if generation_is_current is not None:
+                    # Acquire SQLite's write reservation before rechecking the session;
+                    # the predicate must not be checked before a potentially blocked lock.
+                    db.execute("BEGIN IMMEDIATE")
+                    if not session_current():
+                        return 0
+                if game_id is None:
+                    db.execute("UPDATE lichess_analysis_backfill SET accuracy_status='queued',"
+                               "evals_status='queued',lease_owner=NULL,lease_heartbeat_at=NULL,"
+                               "updated_at=? WHERE account_id=? "
+                               "AND (accuracy_status='running' OR evals_status='running') "
+                               "AND COALESCE(lease_heartbeat_at,updated_at)<?",
+                               (now, account_id, stale_running_before))
+                if not session_current():
+                    raise _StaleSessionWrite
+                db.execute("""
                 INSERT INTO lichess_analysis_backfill(
                   account_id,game_id,line_revision,line_hash,accuracy_status,evals_status,updated_at)
                 SELECT ag.account_id,g.game_id,gr.line_revision,gr.line_hash,
@@ -108,10 +129,15 @@ class AnalysisJobsStoreMixin:
                   last_error=NULL,updated_at=excluded.updated_at
                 WHERE lichess_analysis_backfill.line_revision<>excluded.line_revision
                    OR lichess_analysis_backfill.line_hash<>excluded.line_hash
-            """, (now, account_id, game_id, game_id, expected_line_revision,
-                  expected_line_revision, expected_source_game_id,
-                  expected_source_game_id, limit))
-            return int(db.execute("SELECT changes()").fetchone()[0])
+                """, (now, account_id, game_id, game_id, expected_line_revision,
+                      expected_line_revision, expected_source_game_id,
+                      expected_source_game_id, limit))
+                changes = int(db.execute("SELECT changes()").fetchone()[0])
+                if not session_current():
+                    raise _StaleSessionWrite
+                return changes
+        except _StaleSessionWrite:
+            return 0
 
     def list_lichess_analysis_backfill(self, account_id: str, *, limit: int = 10,
                                        force_retry: bool = False,
@@ -214,7 +240,8 @@ class AnalysisJobsStoreMixin:
     def retry_lichess_analysis_game(self, account_id: str, game_id: str, *,
                                     line_revision: int,
                                     source_game_id: str | None = None,
-                                    manual: bool = False) -> bool:
+                                    manual: bool = False,
+                                    generation_is_current: Callable[[], bool] | None = None) -> bool:
         """Queue one selected game; manual no-data retries use a five-minute debounce.
 
         The manual exception applies only to the application's no-data cache TTL.
@@ -223,9 +250,17 @@ class AnalysisJobsStoreMixin:
         now_dt = datetime.now(timezone.utc)
         now = now_dt.isoformat()
         manual_cooldown = (now_dt - timedelta(minutes=5)).isoformat()
-        with self._connection() as db:
-            db.execute("BEGIN IMMEDIATE")
-            current = db.execute(
+        def session_current() -> bool:
+            try:
+                return generation_is_current is None or bool(generation_is_current())
+            except Exception:
+                return False
+        try:
+            with self._connection() as db:
+                db.execute("BEGIN IMMEDIATE")
+                if not session_current():
+                    return False
+                current_game = db.execute(
                 "SELECT 1 FROM games g JOIN game_revisions gr ON gr.game_id=g.game_id "
                 "AND gr.is_current=1 AND gr.line_revision=? "
                 "JOIN account_games ag ON ag.game_id=g.game_id AND ag.account_id=? "
@@ -234,43 +269,45 @@ class AnalysisJobsStoreMixin:
                 "('created','started','started_soon','playing') AND g.source_game_id IS NOT NULL",
                 (int(line_revision), str(account_id), str(game_id), source_game_id,
                  source_game_id, source_game_id, source_game_id)).fetchone()
-            if not current:
-                return False
-            queue = db.execute(
+                if not current_game:
+                    return False
+                queue = db.execute(
                 "SELECT * FROM lichess_analysis_backfill WHERE account_id=? AND game_id=? "
                 "AND line_revision=?", (str(account_id), str(game_id),
                 int(line_revision))).fetchone()
-            if not queue:
-                return False
-            if manual:
-                budget = db.execute(
+                if not queue:
+                    return False
+                if manual:
+                    budget = db.execute(
                     "SELECT retry_after_at FROM lichess_analysis_backfill_budget WHERE account_id=?",
                     (str(account_id),)).fetchone()
-                if budget and budget["retry_after_at"] and budget["retry_after_at"] > now:
-                    return False
-                if queue["manual_retry_at"] and queue["manual_retry_at"] > manual_cooldown:
-                    return False
-                if any(queue[f"{facet}_status"] == "rate_limited" and
+                    if budget and budget["retry_after_at"] and budget["retry_after_at"] > now:
+                        return False
+                    if queue["manual_retry_at"] and queue["manual_retry_at"] > manual_cooldown:
+                        return False
+                    if any(queue[f"{facet}_status"] == "rate_limited" and
                        queue[f"{facet}_next_retry_at"] and
                        queue[f"{facet}_next_retry_at"] > now
-                       for facet in ("accuracy", "evals")):
-                    return False
+                           for facet in ("accuracy", "evals")):
+                        return False
                 # Do not turn a recent/no-data or a fresh queued click into an
                 # API hammer. Aged internal no-data/partial TTL can be bypassed
                 # once by an explicit selected-game request.
-                has_expired_cache_entry = any(
+                    has_expired_cache_entry = any(
                     queue[f"{facet}_status"] in {"no_server_data", "partial"}
                     and queue[f"{facet}_next_retry_at"] and
                     queue[f"{facet}_next_retry_at"] > now
                     for facet in ("accuracy", "evals"))
-                if has_expired_cache_entry:
-                    checked = [queue[f"{facet}_checked_at"] for facet in ("accuracy", "evals")
+                    if has_expired_cache_entry:
+                        checked = [queue[f"{facet}_checked_at"] for facet in ("accuracy", "evals")
                                if queue[f"{facet}_status"] in {"no_server_data", "partial"}
                                and queue[f"{facet}_checked_at"]]
-                    if checked and max(checked) > manual_cooldown:
-                        return False
-            override_no_data = int(bool(manual))
-            changed = db.execute(
+                        if checked and max(checked) > manual_cooldown:
+                            return False
+                if not session_current():
+                    return False
+                override_no_data = int(bool(manual))
+                changed = db.execute(
                 "UPDATE lichess_analysis_backfill SET "
                 "accuracy_status=CASE WHEN accuracy_status IN "
                 "('no_server_data','partial','error','stale_line') AND "
@@ -304,24 +341,32 @@ class AnalysisJobsStoreMixin:
                  now, override_no_data, now, override_no_data,
                  int(manual), now, now, str(account_id), str(game_id),
                  int(line_revision), now, override_no_data, now, override_no_data)).rowcount
-            if changed:
-                return True
+                if changed:
+                    if not session_current():
+                        raise _StaleSessionWrite
+                    return True
             # Already-due queued work is eligible. Record a manual cooldown so
             # repeated clicks cannot enqueue repeated requests before dispatch.
-            queued = db.execute(
+                queued = db.execute(
                 "SELECT 1 FROM lichess_analysis_backfill WHERE account_id=? AND game_id=? "
                 "AND line_revision=? AND ((accuracy_status='queued' AND "
                 "(accuracy_next_retry_at IS NULL OR accuracy_next_retry_at<=?)) OR "
                 "(evals_status='queued' AND "
                 "(evals_next_retry_at IS NULL OR evals_next_retry_at<=?)))",
                 (str(account_id), str(game_id), int(line_revision), now, now)).fetchone()
-            if not queued:
-                return False
-            if manual:
-                db.execute("UPDATE lichess_analysis_backfill SET manual_retry_at=?,updated_at=? "
+                if not queued:
+                    return False
+                if manual:
+                    if not session_current():
+                        return False
+                    db.execute("UPDATE lichess_analysis_backfill SET manual_retry_at=?,updated_at=? "
                            "WHERE account_id=? AND game_id=? AND line_revision=?",
                            (now, now, str(account_id), str(game_id), int(line_revision)))
-            return True
+                    if not session_current():
+                        raise _StaleSessionWrite
+                return True
+        except _StaleSessionWrite:
+            return False
 
     def lichess_analysis_backfill_has_due_work(self, account_id: str, *,
                                                 daily_limit: int = 25,

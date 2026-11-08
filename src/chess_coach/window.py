@@ -7088,6 +7088,12 @@ class MainWindow(QMainWindow):
             if callable(cancel):
                 cancel()
 
+    def _revoke_live_human_engine_assistance(self, message: str) -> None:
+        """Stop every live engine lane when a human/unknown Lichess game is active."""
+        if getattr(self, "_analysis_stop", None) is not None:
+            self._analysis_stop.set()
+        self._disable_position_evaluation(message)
+
     def _lichess_event(self, event: dict, *, generation: int | None = None) -> None:
         if generation is not None and not self._current_lichess_generation(generation):
             return
@@ -7126,11 +7132,8 @@ class MainWindow(QMainWindow):
                 self._revoke_review_safety(
                     "Заблокировано: началась человеческая/непроверенная онлайн-партия.")
             self._refresh_batch_readiness()
-            if (not session.is_ai_opponent
-                    and getattr(self, "_analysis_stop", None) is not None):
-                self._analysis_stop.set()
             if not session.is_ai_opponent:
-                self._disable_position_evaluation(
+                self._revoke_live_human_engine_assistance(
                     "Stockfish остановлен: получено событие о человеческой онлайн-партии.")
                 self._sync_position_eval_controls(self._position_eval_context_available())
             pending_id = self._pending_play_game_id
@@ -7320,6 +7323,8 @@ class MainWindow(QMainWindow):
                 # Run the same stop-heavy-work safety path before any follow-up
                 # UI action, not just the narrower single-analysis revocation.
                 self._pause_heavy_work_for_live_game()
+            self._revoke_live_human_engine_assistance(
+                "Stockfish остановлен: активна человеческая или непроверенная онлайн-партия.")
             self._dashboard_analysis_safety_allowed = False
             self._refresh_dashboard_analysis_visibility()
             self._revoke_review_safety(
@@ -7329,9 +7334,6 @@ class MainWindow(QMainWindow):
             # even when this game is not the currently visible route.
             self._track_game_finalization(session)
         self._update_library_active_games()
-        if (session.status in {"started", "playing"} and not session.is_ai_opponent
-                and getattr(self, "_analysis_stop", None) is not None):
-            self._analysis_stop.set()
         had_premove = session.premove is not None
         current_moves = tuple(session.moves.split())
         takeback_confirmed = (len(current_moves) < len(previous_moves)
@@ -7913,6 +7915,7 @@ class MainWindow(QMainWindow):
             selected_game_id = str(game.get("game_id") or "")
             source_game_id = str(game.get("source_game_id") or "")
             line_revision = game.get("line_revision")
+            analysis_generation = self._analysis_session_generation
             if line_revision is None or not selected_game_id:
                 self._notify_inline("У выбранной партии нет текущей версии линии; обновите список.")
                 return
@@ -7931,51 +7934,82 @@ class MainWindow(QMainWindow):
             service = self.lichess
             stop_event = threading.Event()
 
+            def selected_retry_session_is_current() -> bool:
+                try:
+                    return bool(
+                        not stop_event.is_set()
+                        and service is self.lichess
+                        and analysis_generation == self._analysis_session_generation
+                        and service.is_auth_generation_current(generation)
+                        and f"lichess:{str(service.username or '').strip().casefold()}"
+                            == account_id
+                        and str(source_game_id).strip()
+                        and int(line_revision) > 0
+                    )
+                except Exception:
+                    return False
+
             def worker() -> None:
                 result = {"key": retry_key, "account_id": account_id,
                           "game_id": selected_game_id, "revision": int(line_revision),
                           "source_game_id": source_game_id, "generation": generation}
                 try:
-                    if stop_event.is_set() or service is not self.lichess:
+                    if not selected_retry_session_is_current():
                         result["state"] = "cancelled"
-                    elif (not service.is_auth_generation_current(generation)
-                          or f"lichess:{str(service.username or '').strip().casefold()}" != account_id):
-                        result["state"] = "stale_account"
                     else:
                         identity = self.game_repository.validate_lichess_game_link(
                             account_id, selected_game_id, line_revision=int(line_revision),
                             source_game_id=source_game_id)
-                        if identity is None:
+                        # SQLite reads may block behind an independent writer. Revalidate
+                        # session ownership after the read, before the first durable write.
+                        if not selected_retry_session_is_current():
+                            result["state"] = "cancelled"
+                        elif identity is None:
                             result["state"] = "stale_game"
+                        elif not selected_retry_session_is_current():
+                            result["state"] = "cancelled"
                         else:
                             self.game_repository.enqueue_lichess_analysis_backfill(
                                 account_id, game_id=selected_game_id,
                                 expected_line_revision=int(line_revision),
-                                expected_source_game_id=source_game_id)
-                            result["accepted"] = self.game_repository.retry_lichess_analysis_game(
-                                account_id, selected_game_id, line_revision=int(line_revision),
-                                source_game_id=source_game_id, manual=True)
-                            result["queue_state"] = self.game_repository.lichess_analysis_backfill_state(
-                                account_id, selected_game_id) or {}
-                            result["state"] = "accepted" if result["accepted"] else "deferred"
-                            if not result["accepted"]:
-                                retry_after = self.game_repository.lichess_analysis_retry_after(account_id)
-                                state = result["queue_state"]
-                                deadlines = [retry_after] if retry_after else []
-                                if state.get("manual_retry_at"):
-                                    deadlines.append((datetime.fromisoformat(
-                                        state["manual_retry_at"]) + timedelta(minutes=5)).isoformat())
-                                for facet in ("accuracy", "evals"):
-                                    status = state.get(f"{facet}_status")
-                                    checked = state.get(f"{facet}_checked_at")
-                                    if status in {"no_server_data", "partial"} and checked:
-                                        deadlines.append((datetime.fromisoformat(checked)
-                                                          + timedelta(minutes=5)).isoformat())
-                                    elif status in {"rate_limited", "error", "stale_line"}:
-                                        deadline = state.get(f"{facet}_next_retry_at")
-                                        if deadline:
-                                            deadlines.append(deadline)
-                                result["next_eligible_at"] = max(deadlines) if deadlines else None
+                                expected_source_game_id=source_game_id,
+                                generation_is_current=selected_retry_session_is_current)
+                            if not selected_retry_session_is_current():
+                                result["state"] = "cancelled"
+                            else:
+                                result["accepted"] = self.game_repository.retry_lichess_analysis_game(
+                                    account_id, selected_game_id, line_revision=int(line_revision),
+                                    source_game_id=source_game_id, manual=True,
+                                    generation_is_current=selected_retry_session_is_current)
+                                if not selected_retry_session_is_current():
+                                    result["state"] = "cancelled"
+                                else:
+                                    result["queue_state"] = (
+                                        self.game_repository.lichess_analysis_backfill_state(
+                                            account_id, selected_game_id) or {})
+                                    result["state"] = (
+                                        "accepted" if result["accepted"] else "deferred")
+                                    if not result["accepted"]:
+                                        retry_after = self.game_repository.lichess_analysis_retry_after(
+                                            account_id)
+                                        state = result["queue_state"]
+                                        deadlines = [retry_after] if retry_after else []
+                                        if state.get("manual_retry_at"):
+                                            deadlines.append((datetime.fromisoformat(
+                                                state["manual_retry_at"])
+                                                + timedelta(minutes=5)).isoformat())
+                                        for facet in ("accuracy", "evals"):
+                                            status = state.get(f"{facet}_status")
+                                            checked = state.get(f"{facet}_checked_at")
+                                            if status in {"no_server_data", "partial"} and checked:
+                                                deadlines.append((datetime.fromisoformat(checked)
+                                                                  + timedelta(minutes=5)).isoformat())
+                                            elif status in {"rate_limited", "error", "stale_line"}:
+                                                deadline = state.get(f"{facet}_next_retry_at")
+                                                if deadline:
+                                                    deadlines.append(deadline)
+                                        result["next_eligible_at"] = (
+                                            max(deadlines) if deadlines else None)
                 except Exception as exc:
                     result["state"] = "error"
                     result["error_type"] = type(exc).__name__
