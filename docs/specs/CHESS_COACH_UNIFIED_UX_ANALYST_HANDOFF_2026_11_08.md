@@ -804,3 +804,152 @@ PR44 ui/pages/background.py::BackgroundOperationsPage уже имеет «При
 
 **Отчёт исполнителя должен включать:** exact new code SHA+diff, TOC реально изменённых files, результат автоматических тестов, карту сохранности legacy IDs, Windows screenshots по утверждённым canonical PNG где они есть, реальные Qt geometry/hit test Focus/малого экрана, video/manual checks сетевых ACK и Fair Play, account swap/SQLite/notes/PGN проверку, честный список blocked/open issues. Если эталон ещё не создан — указать «визуальное сравнение с canonical image пока невозможно», не выдавать старый ART за обновлённый.
 
+
+
+## 21. ПРИОРИТЕТНАЯ ТАБЛИЦА КОЛЛИЗИЙ С РАННИМИ ТЗ
+
+**Эта таблица обязательна при техническом ревью.** Не нужно механически объединять старые тексты «сохранять шесть разделов» и новое «сохранять пять», иначе получим взаимоисключающее задание.
+
+| Историческое требование | Последнее действующее решение | Раздел этого файла |
+|---|---|---|
+| UX-B1 / MY-GAMES spec: шесть основных sidebar items | **Пять** основных; полный «Мои партии» вложен в Анализ/Разбор | §02, §04, §09–10 |
+| Ранняя библиотека: постоянно отдельная правая колонка фильтров | Утверждённый **master-detail**, фильтры в левом каталоге, детали справа | §10 |
+| UX-A2: три landing карточки и Batch | **Четыре** 2×2 cards; Batch доступен из глобального «Фон» | §08, §17 |
+| На Analysis landing постоянно PGN/FEN textarea и position editor | Оба инструмента во вложенной page с тремя компактными tabs | §09 |
+| Прежнее «после импорта только просмотр, нет auto Stockfish» | **Auto LOCAL Stockfish после явного Open** внешнего материала при проверенном safety/config | §09, §11 |
+| Current parser принимает одну PGN, reject second game | Целевой UI должен дать выбрать **одну из нескольких**; до реализации это **gap** | §09 |
+| Разбор открывает дополнительный «Выбрать материал» из четырёх плиток | **Нет второго chooser**: archive по умолчанию, PGN/editor tabs над ним | §09 |
+| Открытие сохранённой игры запускает SF | **Нет**: выбор/обычный Review cached, только явный Analyse; авто только external Open | §09–11 |
+| GAME finished с ResultPage | **Та же доска**, «Разобрать» / «Вызвать снова», current PR44 частично уже соответствует | §07 |
+| Упрощённый архивный график удаляет CP/Δ/error markers вообще | Упрощён **только маленький график библиотеки**; полный ReviewGraph/AdvantageBar сохраняются | §10–11 |
+| Третья вкладка «Проверить себя» в дебютном Explorer | Полноценная практика должна быть в **общем «Обучении»**, не внутри исследования | §12, §15 |
+| В общем рейтинге дебютов показывать отдельную проблемную ветку | Рейтинг **целых дебютов**, ветка и ловушка внутри его лаборатории | §12 |
+| Два верхних независимых каталога «Мои дебюты» и «Дебютная лаборатория» | Один обзор+каталог, по клику отдельная лаборатория **выбранного** дебюта | §12 |
+| Слабости сразу как готовые 0–100 «skill rating» | Только **future** доказательная карта, current landing disabled | §13 |
+| Сразу online pregame opponent analytics | Только future с явным Lichess nickname, периодом, ограниченной очередью, ныне disabled | §14 |
+| Старое представление Home «Все партии» → шестой nav | → вложенный архив Analysis/Разбор, home last game → direct REVIEW | §05, §09 |
+| Ранние Learning/Progress концепты уже содержат все будущие lessons | **Не притворяться**, сохранить только реально существующие tasks/stats, остальное WIP | §15–16 |
+| Раньше каталог изображений Windows «Пример» | Новые имена и заявленная владельцем папка **«Примеры»**, path проверить | §03 |
+| Пользовательские Pilot импорт 5–10 игр/задач в Settings/Advanced | **НЕ выводить** в новом пользовательском UX, внутренние тесты допустимы | §17 |
+| «Настройки» показывают вторую полноценную очередь | «Настройки» — постоянные options; «Фон» — real operational jobs | §17 |
+
+**Общее правило:** если старая спецификация содержит ценную уникальную существующую функцию, которой не назвали в новом кратком варианте, аналитик **должен сохранить её в уместном контексте** или явно зафиксировать решение владельца убрать именно из UI. Приоритет нового меню и новых маршрутов при этом не отменяется. Нельзя утратить старые PGN, notes, SQLite, QSettings, звуковые cues, worker state или настоящие backend возможности ради чистого mockup.
+
+## 22. БЛОКЕРЫ, ОТКРЫТЫЕ ВОПРОСЫ И ПОРЯДОК ТЕХНИЧЕСКОГО РЕВЬЮ
+
+### 22.1. Вопросы, которые аналитику нужно ДОПРОВЕРИТЬ В КОДЕ, а не задавать владельцу без необходимости
+
+| Код | Тема | Что конкретно исследовать / желаемый ответ |
+|---|---|---|
+| TA-01 | PR baseline | Актуальный head SHA #44/#45/main, какие текущие изменения §15 уже реализованы, нужен ли rebase, есть ли конфликтующие UX PR |
+| TA-02 | Router | Как перенести видимый Library route под Analysis, сохранить глубокие ссылки из Home, Review/Progress и нормальный Back без новой системы nav |
+| TA-03 | HOME | Рабочие shortcuts, статус архивной sync, реальные кнопки «Другие разделы», где убрать дубли без потери возможности |
+| TA-04 | PLAY persistence | Существующие workspace/ai settings и пути сохранения; перенос per-mode без account leak или повторного submit |
+| TA-05 | Lichess server capabilities | Допустимые time controls/rated/AI levels, friend/challenge cancel ID, ACK/unknown outcome semantics |
+| TA-06 | Focus geometry | Почему текущий board target size ограничивает размер; способ adaptive Qt fit и сравнение QRect на 3 DPI |
+| TA-07 | GAME current finish | Проверить, что в latest PR44 уже тот же game_page; не дублировать Result/PGN save logic |
+| TA-08 | Library queries | Полный набор существующих фильтров/SQL pagination; account scope, dates, source status, active games |
+| TA-09 | Source accuracy | Как выбрать valid official Lichess vs local Stockfish для двух игроков, какие phase metrics реально рассчитаны |
+| TA-10 | Graph | Есть ли gap/mate masking, CP/Δ invariants, white perspective, hover safety; какие части уже source-backed |
+| TA-11 | PGN single/multiple | Проверить python-chess SAN parsing of simple sequence, file BOM/encoding, chooser multiple games, big-file limit and background parse generation |
+| TA-12 | PositionSetup | Как безопасно перенести существующий widget и добавить «Скопировать FEN», draft restore, invalid position UX |
+| TA-13 | Auto Stockfish external | Fresh Fair Play, user toggle, transient analysis storage, scheduler admission/cancel/retry/status; не путать with saved-game batch |
+| TA-14 | Review workspace | Точная сохранность AdvantageBar, ReviewGraph CP/Δ, mark toggles, errors training, events, notes, selected ply |
+| TA-15 | Background | Existing archive/checkpoint/backfill/batch capacities, real pause/resume/cancel and jobs, single global access |
+| TA-16 | Settings/audio | QSettings/schema migration, sounds catalogue, cues, volume, preview and Classic 45% unchanged |
+| TA-17 | Training/Puzzles | Replay/reveal/reset, SQLite account scoped history, verified available puzzle content |
+| TA-18 | Progress | Все реально существующие StatisticsDialog tabs/trends/filters and opening numbers, чтобы переезд архива их не удалил |
+| TA-19 | Visual folder | Подтвердить текущий Windows путь «Примеры» vs старый «Пример», реальные имена/расширения утверждённых исторических снимков |
+| TA-20 | Visual evidence | Какие новые canonical PNG из §03 уже созданы и SIGNED OFF; если нет — план последующей генерации и честный acceptance status |
+| TA-21 | Legal/opening data | Только FUTURE: актуальный API, quotas, license/схема ECO/transposition, validated strategic content |
+| TA-22 | Opponent sourcing | Только FUTURE: public access, time span/limits, API throttling, background persistence и pregame Fair Play |
+| TA-23 | Data lifecycle | No UI-thread network/engine, generation+revision fencing, shutdown cancellation, notes/PGN never overwritten |
+| TA-24 | Responsive keyboard | Current Qt sizeHint/QSplitter/minimum sizes, 1120×640, keyboard tab order/accessible descriptions |
+
+### 22.2. Вопросы, которые ВЛАДЕЛЕЦ ЕЩЁ НЕ РЕШАЛ и аналитик НЕ ДОЛЖЕН додумывать как факт
+
+- **UI-финальная геометрия** двух экранов Opening Explorer: каталог всегда доступен в обзоре, но конкретный адаптивный layout под 1120×640 ещё не нарисован.
+- **Формула ранжирования** «Сильных / Проблемных дебютов», обработка покрытия/выбросов/частоты/доли выходов/ошибок. Фильтр «от N своих партий» согласован, но не готовая теория статистической достоверности.
+- **Классификация границ/transpositions**: продукты согласовали два типа выходов из исследуемого дебюта (в миттельшпиль или другой дебют), но не корректный автоматический шахматный классификатор.
+- **Модель просмотрено/изучено/проверено** и знаменатель охвата; факт просмотра сохранять, не объявлять компетентностью.
+- **Дебютная практика и тесты**: будущее общего обучения, не текущая работа. Источник упражнений/проверка альтернативных сильных ходов до будущей разработки.
+- **Профиль слабостей**: круг можно использовать как навигацию, но нет согласованной числовой модели «атака 85%»; логика причинно-следственных выводов не готова.
+- **Opponent scouting**, сохранение его результатов на дни и продолжение после перезагрузки: future, не подтверждённая работающая возможность.
+- **Progress effect-of-study**: точная метрика opening accuracy и минимум N, baseline, периодизация, автоматическое/ручное «Добавить в отслеживание».
+- **Внешний PGN file chooser**: пользователь одобрил продуктовый выбор одной игры из нескольких, но конкретный вид selector ещё не макетирован; backend gap должен быть отдельно заявлен.
+- **Auto run configuration**: продуктовое действие согласовано, но точный экран и default настройки автоматического локального анализа нужно сверить с реальным движком/безопасностью до Codex.
+- **Бесчасовой серверный режим**: запрет считать «Без часов» человеческой обычной партией, если API его не предоставляет.
+
+**ПРАВИЛО:** если unresolved вопрос влияет на безопасную реализуемость NOW или приведёт к противоречию между screens, аналитик поднимает конкретный вариант и блокер владельцу. Если вопрос относится только к FUTURE — не задерживает текущую переработку UX.
+
+### 22.3. Stop conditions
+
+Нельзя передавать технически «готовое» исполнимое задание Codex, если:
+1. неизвестен актуальный кодовый SHA либо есть конфликт с параллельным PR/§15;
+2. предлагается разрушающая миграция PGN/notes/account без отдельного data safety плана;
+3. новая автоматическая SF-аналитика обходит fresh Fair Play/admission либо не имеет состояния blocked/queued;
+4. кнопка на mock ведёт в несуществующее состояние без честного WIP;
+5. старые «Мои партии» и новый вложенный архив реализуются двумя независимыми data flow;
+6. нет плана сохранения settings/puzzle history/sounds/real queue;
+7. заявлено «pixel perfect по новому эталону», хотя canonical PNG отсутствует или не был открыт исполнителем;
+8. отсутствует разделение NOW/FUTURE и ресурсная проверка длительных/внешних задач.
+
+**Приоритет реагирования:** остановить опасный шаг, предъявить конкретный source/gap, предложить 1–2 реализуемых варианта на рассмотрение; не принимать тишину владельца за разрешение сделать произвольную архитектурную замену.
+
+---
+
+## 23. ТРЕБОВАНИЯ К ФИНАЛЬНОЙ ПЕРЕДАЧЕ ANALYST → CODEX
+
+### 23.1. Что должно появиться после технического ревью
+
+Технический аналитик до отправки Codex подготавливает:
+1. **Current-vs-target traceability matrix** с поэлементным покрытием §02–18, ID из §20 и raw legacy ledgers в §24, ответ responsible Qt/widget/handler/source, status keep/move/add/hide duplicate/future/forbidden.
+2. **Границы работ** в конкретном upcoming code PR: какие экраны в ближайшем UX-цикле, какие карточки только WIP, какие backend API gaps требуют отдельных work packages; недоказанные пожелания не masquerade as shipped.
+3. **Точный source SHA** с перечнем уже существующих изменений из PR44/45 и тестовый baseline, чтобы Codex не воспроизвёл старый Арх-UX цикл второй раз.
+4. **Маршрутный граф** с source-aware Back и функциями из удалённого шестого пункта, migration of saved settings, account-scope и ephemeral source lifecycle.
+5. **Визуальный манифест §03** с фактическим Approved/Planned состоянием КАЖДОГО изображения, реальным Windows path/extension, отсутствующими картинками и explicit gating.
+6. **Тест-план §20** + P0 negative cases, доказательства реальных Windows screenshots/Qt geometry и data migration tests, а не только screenshot схожести.
+7. **Список вопросов владельцу** только о действительно неразрешённых NOW блокерах; второстепенные future методики фиксируются в backlog.
+8. **Отчёт о рисках**: Lichess endpoint/429, account leakage, source/provenance, engine CPU/threads, Qt UI-thread, PGN/notes, доступность Windows file system.
+9. **Процедуру отката/безопасных проверок** перед merge, без force push/изменения main и без автоматической обработки приватного архива.
+
+### 23.2. Что должен получить владелец на review
+
+- Этот **единый MD** как продуктовую цель, revised analyst edition с comments/change log.
+- Конкретный список реальных новых PNG и подписей (будет отдельный этап дизайнерской генерации). Владелец скачивает и сохраняет под каноническими именами; до этого картинки не существуют.
+- Поэтапную задачу Codex после согласования именно владельцем, без лишней повторной генерации старых ТЗ или новых декоративных кнопок.
+- Заключение, что он **не потеряет**: архив, sync/backfill/queue, legal human commands/premove, notes/export, Review graph/bar, source accuracy, puzzle replay, audio settings, QSettings и account/privacy protections.
+- Честный список того, что **остаётся будущим**: полный Explorer, ловушки и планы с verified content, Weakness skills, opponent scouting, новый тренажёр, эффект освоения на графике.
+
+**Не ставить статус READY FOR CODEX, пока не выполнены TA-01…TA-24 по влияющим на ближайший цикл пунктам и не согласован владелец.**
+
+---
+
+## 24. ИСТОЧНИКИ, РЕЕСТРЫ И ИНСТРУКЦИЯ ДЛЯ НОВОГО ЧАТА
+
+### 24.1. Нормативные первоисточники для доуточнения, а НЕ конкурирующие ТЗ
+
+- **Живой реестр всех последних решений:** [CHESS_COACH_LIVING_UX_CONTRACTS.md](../ux/CHESS_COACH_LIVING_UX_CONTRACTS.md), версия 1.6, разделы 0–17. В нём подробные future-продуктовые брифы и обоснования, в том числе будущие изображения. Если появятся новые решения, обновить его и этот мастер-документ.
+- **Поздний утверждённый архив:** [MY_GAMES_TARGET_UX_V1_2026_11_07.md](../ux/MY_GAMES_TARGET_UX_V1_2026_11_07.md), [бывший подробный spec](MY_GAMES_UI_REWORK_CODEX_SPEC_2026_11_07.md), [feature ledger](../ux/MY_GAMES_FEATURE_LEDGER_2026_11_07.md). Старый пункт «sidebar 6» у них отменён.
+- **«Играть»:** [PLAY_OWNER_DECISIONS_2026_11_07.md](../ux/PLAY_OWNER_DECISIONS_2026_11_07.md), [бывший spec](PLAY_UI_REWORK_CODEX_SPEC_2026_11_07.md), [ledger](../ux/PLAY_FEATURE_LEDGER_2026_11_07.md).
+- **GAME/REVIEW:** [GAME_AND_REVIEW_TARGET_UX_V1_2026_11_07.md](../ux/GAME_AND_REVIEW_TARGET_UX_V1_2026_11_07.md), [feature ledger](../ux/GAME_AND_REVIEW_FEATURE_LEDGER_2026_11_07.md).
+- **Analysis landing:** [ANALYSIS_LANDING_OWNER_DECISIONS_2026_11_08.md](../ux/ANALYSIS_LANDING_OWNER_DECISIONS_2026_11_08.md), [бывший spec](ANALYSIS_LANDING_UI_REWORK_CODEX_SPEC_2026_11_08.md), [ledger](../ux/ANALYSIS_LANDING_FEATURE_LEDGER_2026_11_08.md).
+- **PR45 исторические:** [UX_APPROVED_BASELINE_V1.md](https://github.com/feshakomissarov-prog/chess/blob/chatgpt/ux-information-architecture-2026-11-04/docs/ux/UX_APPROVED_BASELINE_V1.md), [UX_ANALYSIS_APPROVED_V2.md](https://github.com/feshakomissarov-prog/chess/blob/chatgpt/ux-information-architecture-2026-11-04/docs/ux/UX_ANALYSIS_APPROVED_V2.md), [GAME_WORKSPACE_AND_FINISH_STATES_V1.md](https://github.com/feshakomissarov-prog/chess/blob/chatgpt/ux-information-architecture-2026-11-04/docs/ux/GAME_WORKSPACE_AND_FINISH_STATES_V1.md), [EXISTING_FEATURES_TO_UX_COVERAGE_AUDIT.md](https://github.com/feshakomissarov-prog/chess/blob/chatgpt/ux-information-architecture-2026-11-04/docs/ux/EXISTING_FEATURES_TO_UX_COVERAGE_AUDIT.md), [ARCH_UX_01_UNIFIED_EXECUTION_SPEC.md](https://github.com/feshakomissarov-prog/chess/blob/chatgpt/ux-information-architecture-2026-11-04/docs/specs/ARCH_UX_01_UNIFIED_EXECUTION_SPEC.md). **Не переписывать старую реализацию** и не возвращать прежние UX-решения из этих файлов.
+- **Реальная source code база:** PR [#44](https://github.com/feshakomissarov-prog/chess/pull/44), проверенный head 77013b734cde042165f0a006600922f8bfabf724; docs PR [#45](https://github.com/feshakomissarov-prog/chess/pull/45), проверенный head 0abf73b5e6ae2fc476330f5bed9d44b0ed3413e1. Перед исполнением head перечитать.
+
+### 24.2. Как восстановить контекст через год или в новом ChatGPT
+
+1. Прочитать §00–03: это **не заказ на разработку всех future модулей**, а согласованный целевой UI; запомнить **5** навигационных ссылок и новый путь к архиву.
+2. Прочитать §04–11 как точные экраны ближнего UX; сохранить все функции из реального исходника и исторических ledger.
+3. Прочитать §12–17 как **будущую** архитектуру и единую систему контекста (Opening 2 screens, Weakness/Scouting disabled, Education/Progress future only where нет backend).
+4. Сверить §20 тесты, §21 отменённые старые маршруты, §22 требующие уточнения источники и §23 handoff gates.
+5. При генерации изображения использовать **уже назначенные имена §03**, не придумывать новые, и добиться реального user signoff.
+6. При правке данного файла не изменять тихо старые решения: пометить version/date, причину, ссылку на новый документ/утверждение, что заменено, и проверить все маршруты/скриншоты/тесты.
+7. Не открывать Codex, не менять main/PR44/PR45 и не отправлять задание на background execution без прямого разрешения владельца. Технический аналитик — отдельный этап приёмки между этим MD и Codex.
+
+### 24.3. Статус по завершении этой редакции
+
+**Написана единая целевая UX-спецификация для ревью техническим аналитиком. НЕ БЫЛО: изменений приложенного кода, запуска Codex, создания или утверждения новых PNG, Windows physical UI acceptance или полной актуальной инженерной верификации всех backend capabilities.**
+
+Старые изображения остаются у владельца как исторические примеры; новые canonical имена определены заранее, фактическая директория «Примеры» проверяется позже на Windows. Все незакрытые технические и будущие вопросы **включены прямо в этот MD**; не нужно восстанавливать их по памяти.
+
