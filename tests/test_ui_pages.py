@@ -53,6 +53,10 @@ def test_play_preferences_are_saved_per_mode_and_restored(qtbot, tmp_path):
     page.clock.setCurrentIndex(page.clock.findText("5 + 0"))
     page.level.setCurrentIndex(page.level.findData(8))
     page.select_mode("friend")
+    color_row = page._form_grid_widgets["Цвет фигур"]
+    clock_row = page._form_grid_widgets["Контроль времени"]
+    assert page._form_grid.getItemPosition(page._form_grid.indexOf(color_row)) == (0, 0, 1, 1)
+    assert page._form_grid.getItemPosition(page._form_grid.indexOf(clock_row)) == (0, 1, 1, 1)
     page.color.setCurrentIndex(page.color.findData("white"))
     page.clock.setCurrentIndex(page.clock.findText("15 + 10"))
     page.rated.setChecked(True)
@@ -171,6 +175,7 @@ def test_library_page_emits_selected_game_actions_and_pagination(qtbot):
 
 
 def test_library_sort_help_never_opens_a_floating_window_on_reentry(qtbot):
+    preexisting_windows = set(QApplication.topLevelWidgets())
     host = QMainWindow()
     stack = QStackedWidget(host)
     page = LibraryPage()
@@ -189,7 +194,8 @@ def test_library_sort_help_never_opens_a_floating_window_on_reentry(qtbot):
         stack.setCurrentWidget(page)
         qtbot.wait(5)
         visible_orphans = [widget for widget in QApplication.topLevelWidgets()
-                           if widget is not host and widget.isVisible()]
+                           if widget is not host and widget not in preexisting_windows
+                           and widget.isVisible()]
         assert visible_orphans == []
         assert not page.findChildren(QWidget, "sortDescription")
     assert "lastMoveAt" in page.search.accessibleDescription()

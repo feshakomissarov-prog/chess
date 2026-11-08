@@ -2492,7 +2492,7 @@ class MainWindow(QMainWindow):
                 self._outer_content_layout.setContentsMargins(
                     margins.left(), margins.top(), margins.right(), target_bottom)
         self.screen_title.setVisible(
-            current is not self.review_workspace and current is not self.analysis_page)
+            current not in (self.review_workspace, self.analysis_page, self.play_page))
         # The approved dark visual tokens are the application-wide design
         # system. Previously only Home/Library/Background activated them,
         # leaving Play, Analysis, Training, Progress and nested game screens

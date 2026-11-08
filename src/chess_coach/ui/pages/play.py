@@ -8,7 +8,7 @@ import chess
 from PySide6.QtCore import Qt, Signal, QSignalBlocker, QSettings
 from PySide6.QtWidgets import (QCheckBox, QComboBox, QApplication, QFrame, QGridLayout, QHBoxLayout,
                                QLabel, QLineEdit, QListWidget, QListWidgetItem, QPushButton, QScrollArea,
-                               QSpinBox, QVBoxLayout, QWidget)
+                               QSpinBox, QVBoxLayout, QWidget, QButtonGroup, QRadioButton)
 from ...board_view import BoardView
 
 
@@ -78,16 +78,17 @@ class PlayPage(QWidget):
         ("Вызвать игрока", "Найдите соперника на Lichess и сыграйте с ним.", "challenge"),
         ("Свободная доска", "Откройте локальную доску для игры за обе стороны.", "local"),
     )
+    _MODE_ICONS = {"ai": "♟", "friend": "↗", "challenge": "♙", "local": "♖"}
 
     def __init__(self, actions: dict[str, Callable], parent=None,
                  settings: QSettings | None = None) -> None:
         super().__init__(parent)
         self.settings = settings
         root_layout = QVBoxLayout(self)
-        title = QLabel("Выберите режим игры")
+        title = QLabel("Играть")
         title.setObjectName("pageTitle")
         root_layout.addWidget(title)
-        note = QLabel("Выберите локальную доску или сетевую партию. Текущая партия не сбрасывается.")
+        note = QLabel("Выберите способ начать игру")
         note.setObjectName("secondary")
         note.setWordWrap(True)
         root_layout.addWidget(note)
@@ -115,6 +116,24 @@ class PlayPage(QWidget):
         for label, value in (("Случайный цвет", "random"), ("Белыми", "white"),
                              ("Чёрными", "black")):
             self.color.addItem(label, value)
+        self.color.hide()
+        self.color_control = QWidget()
+        color_layout = QHBoxLayout(self.color_control)
+        color_layout.setContentsMargins(0, 0, 0, 0)
+        color_layout.setSpacing(0)
+        self.color_group = QButtonGroup(self)
+        self.color_group.setExclusive(True)
+        self.color_buttons: dict[str, QRadioButton] = {}
+        for index, (label, value) in enumerate((("Белыми", "white"),
+                                                 ("Чёрными", "black"),
+                                                 ("Случайно", "random"))):
+            button = QRadioButton(label)
+            button.setAccessibleName(f"Играть {label.lower()}")
+            self.color_group.addButton(button, index)
+            self.color_buttons[value] = button
+            color_layout.addWidget(button, 1)
+        self.color_group.idClicked.connect(self._set_color_from_button)
+        self.color.currentIndexChanged.connect(self._sync_color_buttons)
         self.clock = QComboBox()
         for label, value in (("Без часов", (None, 0)), ("3 + 2", (180, 2)),
                              ("5 + 0", (300, 0)), ("10 + 0", (600, 0)),
@@ -153,16 +172,29 @@ class PlayPage(QWidget):
         self.form_status = QLabel("Выберите режим и параметры партии.")
         self.form_status.setObjectName("secondary")
         self.form_status.setWordWrap(True)
+        self.form_status.hide()
         form = QFrame()
         form.setObjectName("metricCard")
         form_layout = QVBoxLayout(form)
+        self.form_heading = QLabel()
+        self.form_heading.setStyleSheet("font-size: 22px; font-weight: 700;")
+        form_layout.addWidget(self.form_heading)
+        self.form_description = QLabel()
+        self.form_description.setObjectName("secondary")
+        self.form_description.setWordWrap(True)
+        form_layout.addWidget(self.form_description)
         self.form_rows: dict[str, QWidget] = {}
         self.form_rows["Режим"] = self.mode_selector
         self.mode_selector.hide()
         form_grid = QGridLayout()
         form_grid.setHorizontalSpacing(16)
+        form_grid.setColumnStretch(0, 1)
+        form_grid.setColumnStretch(1, 1)
+        form_grid.setColumnStretch(2, 1)
+        self._form_grid = form_grid
+        self._form_grid_widgets: dict[str, QWidget] = {}
         for index, (label, widget) in enumerate((
-                ("Ваш цвет", self.color), ("Уровень Lichess AI", self.level),
+                ("Цвет фигур", self.color_control), ("Уровень Lichess AI", self.level),
                 ("Контроль времени", self.clock), ("Соперник", self.username))):
             row_widget = QWidget()
             row = QVBoxLayout(row_widget)
@@ -170,7 +202,9 @@ class PlayPage(QWidget):
             row.addWidget(QLabel(label))
             row.addWidget(widget, 1)
             self.form_rows[label] = row_widget
+            self._form_grid_widgets[label] = row_widget
             form_grid.addWidget(row_widget, index // 3, index % 3)
+        self.form_rows["Ваш цвет"] = self.form_rows["Цвет фигур"]
         form_layout.addLayout(form_grid)
         form_layout.addWidget(self.custom_clock_row)
         form_layout.addWidget(self.rated)
@@ -190,7 +224,11 @@ class PlayPage(QWidget):
         invitation_layout.addWidget(self.cancel_invitation_button)
         self.invitation_row.setVisible(False)
         form_layout.addWidget(self.invitation_row)
-        form_layout.addWidget(self.start_button)
+        self.start_button.setMinimumWidth(280)
+        action_row = QHBoxLayout()
+        action_row.addStretch(1)
+        action_row.addWidget(self.start_button)
+        form_layout.addLayout(action_row)
         form_layout.addWidget(self.cancel_pending_button)
         layout.addWidget(form)
         self.active_panel = QFrame()
@@ -262,9 +300,23 @@ class PlayPage(QWidget):
             card.setToolTip(description)
             card_layout = QVBoxLayout(card)
             card_layout.setContentsMargins(18, 12, 18, 12)
+            heading_row = QHBoxLayout()
+            icon = QLabel(self._MODE_ICONS[key])
+            icon.setObjectName("playModeIcon")
+            icon.setFixedSize(64, 64)
+            icon.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            heading_row.addWidget(icon)
             title_label = QLabel(heading)
-            title_label.setStyleSheet("font-size: 20px; font-weight: 700;")
-            card_layout.addWidget(title_label)
+            title_label.setStyleSheet("font-size: 23px; font-weight: 700;")
+            heading_row.addWidget(title_label, 1)
+            selected_mark = QLabel("✓")
+            selected_mark.setObjectName("playModeSelectedMark")
+            selected_mark.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            selected_mark.setFixedSize(34, 34)
+            selected_mark.setVisible(False)
+            card_layout.addLayout(heading_row)
+            heading_row.addWidget(selected_mark)
+            card._selection_mark = selected_mark
             description_label = QLabel(description)
             description_label.setObjectName("secondary")
             description_label.setWordWrap(True)
@@ -285,7 +337,7 @@ class PlayPage(QWidget):
         layout.insertLayout(1, self.grid)
         layout.insertWidget(2, form)
         for card in self.cards:
-            card.setMinimumHeight(132)
+            card.setMinimumHeight(152)
         layout.addStretch(1)
 
     def select_mode(self, mode: str) -> None:
@@ -295,6 +347,35 @@ class PlayPage(QWidget):
             self.mode_selector.setCurrentIndex(index)
         for key, button in getattr(self, "buttons", {}).items():
             button.setChecked(key == mode)
+            button._selection_mark.setVisible(key == mode)
+        self._set_form_heading(str(mode))
+
+    def _set_form_heading(self, mode: str) -> None:
+        values = {
+            "ai": ("Lichess AI — параметры партии",
+                   "Настройте игру против искусственного интеллекта Lichess."),
+            "friend": ("Друг по ссылке — параметры приглашения",
+                       "Настройте ссылку и подтвердите создание приглашения."),
+            "challenge": ("Вызвать игрока — параметры вызова",
+                          "Укажите имя игрока Lichess и настройки партии."),
+            "local": ("Свободная доска",
+                      "Локальная партия для ходов обеими сторонами без сети и часов."),
+        }
+        heading, description = values.get(mode, values["ai"])
+        self.form_heading.setText(heading)
+        self.form_description.setText(description)
+
+    def _set_color_from_button(self, button_id: int) -> None:
+        value = ("white", "black", "random")[button_id]
+        index = self.color.findData(value)
+        if index >= 0:
+            self.color.setCurrentIndex(index)
+
+    def _sync_color_buttons(self, *_args) -> None:
+        value = str(self.color.currentData() or "random")
+        button = self.color_buttons.get(value)
+        if button is not None:
+            button.setChecked(True)
 
     def _mode_changed(self, *_args) -> None:
         previous = self._last_mode
@@ -322,6 +403,7 @@ class PlayPage(QWidget):
             "local": "Локальная партия работает без сети и часов.",
             "active": "Выберите подтверждённую активную партию выше.",
         }.get(mode, "Выберите режим и параметры партии."))
+        self.form_status.hide()
 
     def _copy_invitation(self) -> None:
         url = self.invitation_link.text().strip()
@@ -378,15 +460,35 @@ class PlayPage(QWidget):
         mode = str(self.mode_selector.currentData() or "local")
         for key, button in getattr(self, "buttons", {}).items():
             button.setChecked(key == mode)
+            if hasattr(button, "_selection_mark"):
+                button._selection_mark.setVisible(key == mode)
+        if hasattr(self, "form_heading"):
+            self._set_form_heading(mode)
         for card in getattr(self, "cards", ()):
             card.setVisible(True)
         online = mode in {"ai", "friend", "challenge"}
         self.color.setVisible(online)
+        self.color_control.setVisible(online)
         self.clock.setVisible(online)
         self.form_rows["Ваш цвет"].setVisible(online)
         self.form_rows["Контроль времени"].setVisible(online)
         self.form_rows["Уровень Lichess AI"].setVisible(mode == "ai")
         self.form_rows["Соперник"].setVisible(mode == "challenge")
+        if mode == "ai":
+            field_order = ["Цвет фигур", "Уровень Lichess AI", "Контроль времени"]
+        elif mode in {"friend", "challenge"}:
+            field_order = ["Цвет фигур", "Контроль времени"]
+            if mode == "challenge":
+                field_order.append("Соперник")
+        else:
+            field_order = []
+        for widget in self._form_grid_widgets.values():
+            self._form_grid.removeWidget(widget)
+        for column, label in enumerate(field_order):
+            self._form_grid.addWidget(self._form_grid_widgets[label], 0, column)
+        inactive = [label for label in self._form_grid_widgets if label not in field_order]
+        for index, label in enumerate(inactive):
+            self._form_grid.addWidget(self._form_grid_widgets[label], 1, index)
         self.level.setVisible(mode == "ai")
         self.rated.setVisible(mode in {"friend", "challenge"})
         self.username.setVisible(mode == "challenge")
@@ -513,9 +615,12 @@ class PlayPage(QWidget):
 
     def set_status(self, text: str) -> None:
         self.form_status.setText(str(text))
+        self.form_status.setVisible(bool(str(text).strip()))
 
     def set_request_pending(self, pending: bool, *, cancellable: bool = False) -> None:
         self._request_pending = bool(pending)
+        if pending:
+            self.form_status.show()
         self.start_button.setEnabled(not self._request_pending)
         self.cancel_pending_button.setVisible(self._request_pending and bool(cancellable))
         self.cancel_pending_button.setEnabled(self._request_pending and bool(cancellable))
