@@ -216,9 +216,11 @@ def _parse_external_study_text(value: str) -> dict:
             raise ValueError("Начальная позиция PGN некорректна.")
         initial_fen = board.fen()
         moves: list[str] = []
+        san_moves: list[str] = []
         for move in game.mainline_moves():
             if move not in board.legal_moves:
                 raise ValueError("PGN содержит нелегальный ход.")
+            san_moves.append(board.san(move))
             moves.append(move.uci())
             board.push(move)
         if not moves:
@@ -226,6 +228,7 @@ def _parse_external_study_text(value: str) -> dict:
         parsed_games.append({
             "initial_fen": "startpos" if initial_fen == chess.STARTING_FEN else initial_fen,
             "moves": moves,
+            "preview": " ".join(san_moves[:8]),
             "headers": headers,
         })
     if not parsed_games:
@@ -2955,7 +2958,8 @@ class MainWindow(QMainWindow):
                 players = f"{headers.get('White', 'Белые')} — {headers.get('Black', 'Чёрные')}"
                 date = str(headers.get("Date") or "дата не указана")
                 result = str(headers.get("Result") or "*")
-                labels.append(f"{index}. {players} · {date} · {result}")
+                preview = str(item.get("preview") or "без ходов")
+                labels.append(f"{index}. {players} · {date} · {result} · {preview}")
             selected, accepted = QInputDialog.getItem(
                 self, "Выберите партию", "Партии в файле:", labels, 0, False)
             if not accepted:

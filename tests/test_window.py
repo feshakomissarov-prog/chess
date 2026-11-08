@@ -3844,6 +3844,8 @@ def test_external_study_parser_accepts_custom_fen_and_multiple_games():
     assert len(parsed["games"]) == 2
     assert parsed["games"][0]["moves"] == ["e2e4", "e7e5"]
     assert parsed["games"][1]["moves"] == ["d2d4", "d7d5"]
+    assert parsed["games"][0]["preview"] == "e4 e5"
+    assert parsed["games"][1]["preview"] == "d4 d5"
 
 
 def test_library_pins_active_games_and_resumes_only_selected_session(qtbot, tmp_path):
