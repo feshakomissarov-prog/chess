@@ -32,6 +32,7 @@ PR #46 был создан на SHA `95361e95e641b4ae6ce7974d7e4ff116f21b5e2d`; 
 - `src/chess_coach/ui/pages/position_setup.py` — встроенный редактор позиции.
 - `src/chess_coach/ui/game_review.py` — сводка Review без данных и честный пустой график.
 - `src/chess_coach/ui/theme.py` — точечные токены новых карточек.
+- `scripts/capture_visual_master.py` — актуализирован переход в архив через Analysis и состояния Active для новой UI-модели.
 - `tests/test_window.py`, `tests/test_ui_pages.py`, `tests/test_game_review.py`, `tests/test_corr_gate_regressions.py`, `tests/test_arch_ux_rf5.py` — обновлённые проверки переходов, размеров, состояний и сохранения safety.
 
 ## Сопоставление визуальных эталонов UX-01…UX-13
@@ -60,7 +61,7 @@ PR #46 был создан на SHA `95361e95e641b4ae6ce7974d7e4ff116f21b5e2d`; 
 
 - Базовый SHA `d94efeb1a03a9ff16026a92aad3db507c758c093`: локально `933 passed` до изменений.
 - Итоговый локальный запуск после всех изменений: `$env:QT_QPA_PLATFORM='offscreen'; .venv312\Scripts\python.exe -m pytest -q` → **939 тестов, exit code 0**. Один предыдущий полный запуск выявил тестовый конфликт: проверка Библиотеки учитывала уже существовавшие top-level окна общего `QApplication`. Проверка изолированно проходила; тест изменён, чтобы сравнивать только новые окна, и финальный полный запуск прошёл.
-- `python -m compileall -q src tests` — завершился без ошибок.
+- `python -m compileall -q src tests scripts` — завершился без ошибок.
 - `git diff --check` — завершился без ошибок.
 - Native GUI smoke: Windows, `python -m chess_coach --offline`; проверены Analysis, архив, импорт ходов, временный Review, UX-01 Play и переключение в UX-02. Реальный Lichess/API/Stockfish при этом не запускались.
 - Автотест `test_review_without_engine_data_shows_honest_summary_and_no_fake_metrics` проверяет safe saved-game состояние с ручной CTA. Реальный оконный GUI для безопасного Review без оценок не подготавливался с production DB/учётными данными.
@@ -70,8 +71,8 @@ PR #46 был создан на SHA `95361e95e641b4ae6ce7974d7e4ff116f21b5e2d`; 
 - **Путь к изображениям:** заданная папка `Примеры` отсутствовала; найдена папка `Пример` с совпадающими точными именами UX-01…UX-13. Все 13 эталонов использовались только для чтения.
 - **Fair Play / online:** UX-04 и живые серверные ACK-состояния не тестировались против настоящего Lichess. Это исключено из offline smoke и автотестов; сетевые сценарии покрываются fake transport.
 - **Полная visual QA 13/13:** не завершена. Нет 13 сохранённых side-by-side сравнений. UX-03/04/06/12/13 не просмотрены в итоговом живом GUI; остальные экраны вошли в capture-сценарий, но не каждый кадр был вручную сопоставлен с нужным из 13 эталонов.
-- **Windows CI exact-head:** ожидается для конечного SHA `4d3db44f06c0766a70fbe04b266c05ef20943abd`; локальный Windows набор и visual capture пройдены.
-- **PR:** draft [#46](https://github.com/feshakomissarov-prog/chess/pull/46), база `main`; кодовая ветка на 15 коммитов впереди `origin/main` до обновления этого отчёта. Пользовательские незатреканные `.venv312/`, `visual-evidence/`, `vlc-help.txt` оставлены вне Git.
+- **Windows CI exact-head:** локальный Windows набор и 25-state visual capture пройдены; GitHub Actions запускается на актуальном PR SHA, результат будет проверен по завершении.
+- **PR:** draft [#46](https://github.com/feshakomissarov-prog/chess/pull/46), база `main`; ветка на 18 коммитов впереди `origin/main`. Пользовательские незатреканные `.venv312/`, `visual-evidence/`, `vlc-help.txt` оставлены вне Git.
 
 Никаких изменений в `main`, force-push, слияния PR, SQLite-файлов пользователя, токенов или реальных PGN не выполнялось.
 
