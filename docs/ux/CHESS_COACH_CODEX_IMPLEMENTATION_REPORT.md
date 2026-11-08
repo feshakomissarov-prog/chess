@@ -3,7 +3,7 @@
 Дата: 08.11.2026  
 Рабочая ветка: `codex/unified-desktop-ux-2026-11-08`  
 База: `main` / `d94efeb1a03a9ff16026a92aad3db507c758c093`  
-Последний SHA с изменениями кода: `f558da50385215d0b4bbc5f3bd690260ca04da0d`.
+Последний SHA с изменениями кода: `b89e869774cf9c6c14b88bd2c713b5c47a8b776d`.
 
 ## Дополнение после независимого source review PR #46
 
@@ -16,16 +16,18 @@
 | CC46-P1-03 · владелец async parse | DONE | Parse callback fenced по source (`paste`/`file`/`editor`), generation, вложенной вкладке, account и auth generation. Смена инструмента, аккаунта или auth generation отбрасывает запоздалый результат. Проверены смена вкладки, смена auth generation и устаревшее поколение.
 | CC46-P2-04 · source-aware Back | DONE | Временный Review возвращается в исходную вкладку, сохраняя текст, список кандидатов и выбранную строку; позиционный редактор остаётся на вкладке редактора. Проверены PGN и editor.
 | CC46-P2-05 · «Вызвать снова» через Play | DONE | AI и подтверждённый nickname соперника открывают общий Play с предзаполненными параметрами. Уровень/цвет AI берутся из подтверждённой сессии; поля формы не создают игру до Start. Username валидируется до запроса. Fake-service тесты проверяют 0 запросов до Start и ровно 1 после него, включая отказ некорректного имени.
+| R2-01 · late parse после возврата на Analysis landing | DONE | Parse-владелец содержит breakdown route; callback проверяет Analysis, breakdown workspace, исходную вкладку, generation, account/auth. Breadcrumb, повторный `show_analysis()` из вложенного breakdown и уход на другую страницу инвалидируют generation независимо от `handle.is_alive()`. Draft сохраняется. Qt-тесты проверяют late single/multi-PGN callback, повторное открытие вкладки, отсутствие Review/candidate/engine вызова и сохранность draft.
+| R2-02 · точные параметры rematch | DONE | Human и AI rematch используют общий Play с подтверждёнными color/time/increment/rated/username/AI-level. Кастомные 7+3 и 11+5 выставляются через «Свой…», preset 5+0 остаётся preset. Неизвестные поля сохраняют предпочтения и обозначаются явно; непредставимое время сообщается точно без ложного preset. Проверены 0 POST до Start и ровно 1 правильный POST после.
 
-Текущая локальная проверка на Windows для кода `f558da5…` и актуального тестового дерева: `QT_QPA_PLATFORM=offscreen; .venv312\Scripts\python.exe -m pytest -q` — **959 тестов, exit code 0**; `python -m compileall -q src tests` — exit code 0; `git diff --check` — exit code 0. Windows Actions run `42515985850` для SHA `aaa30ab83ed21136f952d8966eb97a955cfce9ff`: `test` и `visual-evidence` оба завершились SUCCESS. Этот run подтвердил полное тестирование и native capture на Windows. Нативный GUI smoke новых маршрутов и реальный Stockfish smoke не запускались. Сравнение всех 13 утверждённых эталонов остаётся отдельным следующим этапом.
+Текущая локальная проверка на Windows для кода `b89e869774cf9c6c14b88bd2c713b5c47a8b776d`: `QT_QPA_PLATFORM=offscreen; .venv312\Scripts\python.exe -m pytest -q` — **965 тестов, exit code 0**; `python -m compileall -q src tests` — exit code 0; `git diff --check` — exit code 0. Windows Actions run `42525356559` на этом же SHA: jobs `test` и `visual-evidence` завершились SUCCESS. Этот захват не является ручной side-by-side приёмкой. Нативный GUI smoke новых маршрутов и реальный Stockfish smoke не запускались; сравнение всех 13 утверждённых эталонов остаётся следующим этапом.
 
 PR #46 был создан на SHA `95361e95e641b4ae6ce7974d7e4ff116f21b5e2d`; после этой строки отчёт обновляется отдельным docs-only коммитом.
 
 ## Краткий статус
 
-В ветке реализованы основные маршруты NOW для Play, Analysis, вложенного архива, импорта PGN/FEN, редактора позиции и Review без оценки. Сохранены существующие функции приложения; FUTURE-карточки диагностики слабостей и подготовки к сопернику остаются неактивными. Результат 939 тестов относится к предыдущему SHA. После source-review исправлений локально прошли **957 тестов** (`QT_QPA_PLATFORM=offscreen`, exit code 0).
+В ветке реализованы основные маршруты NOW для Play, Analysis, вложенного архива, импорта PGN/FEN, редактора позиции и Review без оценки. Сохранены существующие функции приложения; FUTURE-карточки диагностики слабостей и подготовки к сопернику остаются неактивными. Исторические результаты 939/957/959 относятся к предыдущим SHA. На последнем кодовом SHA локально прошли **965 тестов** (`QT_QPA_PLATFORM=offscreen`, exit code 0); обновлённый Windows CI также прошёл.
 
-Визуальная приёмка **не завершена по всем 13 эталонам**. В репозитории сохранены шесть нативных скриншотов ключевых экранов; финальная capture-сессия прошла 25 синтетических состояний в настоящем Windows Qt при 1280×720. Кадры сессии лежат в отдельной папке визуализаций этой задачи, не в репозитории; 13 side-by-side сравнений с эталонами UX-01…UX-13 не создано. Draft PR [#46](https://github.com/feshakomissarov-prog/chess/pull/46) открыт для проверки. Windows CI для конечного SHA ещё ожидается.
+Визуальная приёмка **не завершена по всем 13 эталонам**. В репозитории сохранены шесть нативных скриншотов ключевых экранов; финальная capture-сессия прошла 25 синтетических состояний в настоящем Windows Qt при 1280×720. Кадры сессии лежат в отдельной папке визуализаций этой задачи, не в репозитории; 13 side-by-side сравнений с эталонами UX-01…UX-13 не создано. Draft PR [#46](https://github.com/feshakomissarov-prog/chess/pull/46) открыт для проверки. Точный Windows CI прошёл для кодового SHA `b89e869…`.
 
 ## Реализовано
 
@@ -75,7 +77,7 @@ PR #46 был создан на SHA `95361e95e641b4ae6ce7974d7e4ff116f21b5e2d`; 
 ## Проверки
 
 - Базовый SHA `d94efeb1a03a9ff16026a92aad3db507c758c093`: локально `933 passed` до изменений.
-- Итоговый локальный запуск после всех изменений: `$env:QT_QPA_PLATFORM='offscreen'; .venv312\Scripts\python.exe -m pytest -q` → **939 тестов, exit code 0**. Один предыдущий полный запуск выявил тестовый конфликт: проверка Библиотеки учитывала уже существовавшие top-level окна общего `QApplication`. Проверка изолированно проходила; тест изменён, чтобы сравнивать только новые окна, и финальный полный запуск прошёл.
+- Исторический локальный запуск предыдущего SHA: `$env:QT_QPA_PLATFORM='offscreen'; .venv312\Scripts\python.exe -m pytest -q` → **939 тестов, exit code 0**. После source-review и R2 были добавлены regression tests; актуальный полный результат — **965 тестов** на SHA `b89e869774cf9c6c14b88bd2c713b5c47a8b776d`.
 - `python -m compileall -q src tests scripts` — завершился без ошибок.
 - `git diff --check` — завершился без ошибок.
 - Native GUI smoke: Windows, `python -m chess_coach --offline`; проверены Analysis, архив, импорт ходов, временный Review, UX-01 Play и переключение в UX-02. Реальный Lichess/API/Stockfish при этом не запускались.
@@ -86,7 +88,7 @@ PR #46 был создан на SHA `95361e95e641b4ae6ce7974d7e4ff116f21b5e2d`; 
 - **Путь к изображениям:** заданная папка `Примеры` отсутствовала; найдена папка `Пример` с совпадающими точными именами UX-01…UX-13. Все 13 эталонов использовались только для чтения.
 - **Fair Play / online:** UX-04 и живые серверные ACK-состояния не тестировались против настоящего Lichess. Это исключено из offline smoke и автотестов; сетевые сценарии покрываются fake transport.
 - **Полная visual QA 13/13:** не завершена. Нет 13 сохранённых side-by-side сравнений. UX-03/04/06/12/13 не просмотрены в итоговом живом GUI; остальные экраны вошли в capture-сценарий, но не каждый кадр был вручную сопоставлен с нужным из 13 эталонов.
-- **Windows CI exact-head:** `test` и `visual-evidence` прошли на исправленном SHA `aaa30ab83ed21136f952d8966eb97a955cfce9ff` ([Actions run](https://github.com/feshakomissarov-prog/chess/actions/runs/42515985850)); до него также прошли run `42514668486` на SHA `6dd79a9…`.
+- **Windows CI exact-head:** `test` и `visual-evidence` прошли на кодовом SHA `b89e869774cf9c6c14b88bd2c713b5c47a8b776d` ([Actions run](https://github.com/feshakomissarov-prog/chess/actions/runs/42525356559)).
 - **PR:** draft [#46](https://github.com/feshakomissarov-prog/chess/pull/46), база `main`; ветка на 18 коммитов впереди `origin/main`. Пользовательские незатреканные `.venv312/`, `visual-evidence/`, `vlc-help.txt` оставлены вне Git.
 
 Никаких изменений в `main`, force-push, слияния PR, SQLite-файлов пользователя, токенов или реальных PGN не выполнялось.
