@@ -248,11 +248,15 @@ def test_manual_global_backfill_check_does_not_clear_account_wide_ttls(tmp_path)
                 "SELECT game_id FROM games WHERE source_game_id=?", (selected_source,)
             ).fetchone()[0]
         selected_state = before[selected_source]
-        assert repository.retry_lichess_analysis_game(
-            account, selected_game_id, line_revision=selected_state["line_revision"])
-        preferred = repository.list_lichess_analysis_backfill(
-            account, limit=1, preferred_game_id=selected_game_id)
-        assert preferred and preferred[0]["game_id"] == selected_game_id
+        assert not repository.retry_lichess_analysis_game(
+            account, selected_game_id, line_revision=selected_state["line_revision"],
+            source_game_id=selected_source)
+        # A selected retry keeps its own future deadline; it cannot turn a
+        # no-data result into an immediate Lichess request.
+        assert repository.list_lichess_analysis_backfill(
+            account, limit=1, selected_game_id=selected_game_id,
+            expected_line_revision=int(selected_state["line_revision"]),
+            expected_source_game_id=selected_source) == []
         # An item-level 429 is never cleared by an explicit per-game no-data retry.
         limited_game_id = ids[1]
         limited_row = repository.lichess_analysis_backfill_state(account, limited_game_id)
@@ -469,11 +473,14 @@ def test_online_move_is_pending_immediately_but_confirmed_sound_waits_for_server
     session.auth_generation = 3
     session.board = chess.Board()
     calls = []
+    monkeypatch.setattr(window.sound_player, "play_pending_move",
+                        lambda request_id: calls.append(("pending", request_id)) or True)
     monkeypatch.setattr(window.sound_player, "play_move", lambda *a, **k: calls.append("sound"))
     started = threading.Event()
     release = threading.Event()
 
     def slow_submit(game_id, uci, request_id):
+        calls.append(("send", request_id))
         started.set()
         threading.Thread(target=release.wait, daemon=True).start()
 
@@ -487,17 +494,55 @@ def test_online_move_is_pending_immediately_but_confirmed_sound_waits_for_server
         assert started.wait(1)
         assert "ожидаем подтверждения" in window.game_status.text().lower()
         assert session.moves == ""  # Server-authoritative state did not advance.
-        assert calls == []  # No confirmed move cue is played while the POST is pending.
+        assert calls == [("pending", session.pending_request_id),
+                         ("send", session.pending_request_id)]
+        assert "sound" not in calls  # Configured move cue is still ACK-gated.
         qtbot.wait(round(ack_delay * 1000))
         window._lichess_session_move_accepted(
             3, session.game_id, "e2e4", session.pending_request_id)
-        assert calls == ["sound"]
+        assert calls == [("pending", session.pending_request_id),
+                         ("send", session.pending_request_id), "sound"]
         # A duplicate REST/stream acceptance can never duplicate the cue.
         window._lichess_session_move_accepted(
             3, session.game_id, "e2e4", session.pending_request_id)
-        assert calls == ["sound"]
+        assert calls[-1] == "sound"
     finally:
         release.set()
+        window.game_repository.shutdown()
+        window.close()
+
+
+def test_rejected_online_move_keeps_only_pending_signal(qtbot, tmp_path, monkeypatch):
+    from chess_coach.lichess.session import LichessGameSession
+    from types import SimpleNamespace
+
+    window = MainWindow(QSettings(str(tmp_path / "rejected-pending-sound.ini"),
+                                  QSettings.Format.IniFormat), offline_mode=True)
+    qtbot.addWidget(window)
+    session = LichessGameSession("synthetic-rejected-sound", window.game_repository)
+    session.status = "playing"
+    session.awaiting_authoritative_snapshot = False
+    session.owner_username = "synthetic"
+    session.auth_generation = 4
+    session.board = chess.Board()
+    calls = []
+    monkeypatch.setattr(window.sound_player, "play_pending_move",
+                        lambda request_id: calls.append(("pending", request_id)) or True)
+    monkeypatch.setattr(window.sound_player, "play_move", lambda *a, **k: calls.append("confirmed"))
+    monkeypatch.setattr(window, "_lichess_move_failed", lambda *args: calls.append("rejected"))
+    window.lichess = SimpleNamespace(
+        auth_generation=4, send_move=lambda *args: calls.append(("send", args[2])),
+        is_auth_generation_current=lambda generation: int(generation) == 4)
+    window.online_session = session
+    window._screen_mode = "online"
+    try:
+        window.on_move_intent(chess.Move.from_uci("e2e4"))
+        request_id = session.pending_request_id
+        window._lichess_session_move_failed(4, session.game_id, "e2e4", request_id, 400)
+        assert calls == [("pending", request_id), ("send", request_id), "rejected"]
+        assert request_id not in window._pending_move_sound_intents
+        assert session.moves == ""
+    finally:
         window.game_repository.shutdown()
         window.close()
 

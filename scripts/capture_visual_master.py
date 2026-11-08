@@ -468,7 +468,8 @@ def exercise_play_mode_targets(window: MainWindow) -> None:
     page.content_scroll.verticalScrollBar().setValue(0)
 
 
-def capture(window: MainWindow, output: Path, name: str, width: int, height: int) -> QImage:
+def capture(window: MainWindow, output: Path, name: str, width: int, height: int, *,
+            review_selection: str = "last") -> QImage:
     if window.isMaximized() or window.isFullScreen():
         window.showNormal()
     window.resize(width, height)
@@ -534,12 +535,17 @@ def capture(window: MainWindow, output: Path, name: str, width: int, height: int
         assert_action_target(window, page.export_button, "Export PGN")
         assert_action_target(window, page.training_button, "Review mistakes")
         last_ply = len(page.review.get("moves") or {})
-        # Select the last move through the production review API so its table
-        # row is scrolled into view before verifying the real clickable target.
-        page.select_ply(last_ply)
-        QTest.qWait(50)  # allow the native splitter/table geometry pass to settle
-        QApplication.processEvents()
-        row = page.moves_list.item_by_ply(last_ply)
+        if review_selection == "last":
+            # Select the last move through the production review API so its table
+            # row is scrolled into view before verifying the real clickable target.
+            page.select_ply(last_ply)
+            QTest.qWait(50)  # allow the native splitter/table geometry pass to settle
+            QApplication.processEvents()
+        elif review_selection != "keep":
+            raise ValueError(f"Unknown review capture selection: {review_selection}")
+        selected_ply = int(page.selected_ply)
+        row = (page.moves_list.item_by_ply(selected_ply) if selected_ply else
+               page.moves_list.item_by_ply(1))
         assert row is not None and row.text().strip(), "Selected-line move row must be populated."
         bounds = page.moves_list.table.visualItemRect(row)
         if not (bounds.isValid() and page.moves_list.table.viewport().rect().contains(bounds)):
@@ -565,10 +571,12 @@ def capture(window: MainWindow, output: Path, name: str, width: int, height: int
         assert bounds.isValid() and page.moves_list.table.viewport().rect().contains(bounds), (
             "The selected move must be visible and clickable in the review table."
         )
-        QTest.mouseClick(page.moves_list.table.viewport(), Qt.MouseButton.LeftButton,
-                         pos=bounds.center())
-        assert page.selected_ply == last_ply
-        page.select_ply(0)
+        if selected_ply:
+            QTest.mouseClick(page.moves_list.table.viewport(), Qt.MouseButton.LeftButton,
+                             pos=bounds.center())
+            assert page.selected_ply == selected_ply
+        if review_selection == "last":
+            page.select_ply(0)
     if current is window.home_page:
         for route, button in window._nav_buttons.items():
             if route in {"home", "games", "play", "analysis", "training", "progress"}:
@@ -952,10 +960,38 @@ def main() -> None:
         assert selected and str(selected.get("game_id")) == selected_game_id
         assert window._open_saved_game(dict(selected))
         wait_review_workspace(window.review_workspace, selected_game_id)
+        review = window.review_workspace
+        move_count = len(review.review["moves"])
+        first_move = review.moves_list.item_by_ply(1)
+        assert first_move is not None and review.moves_list.visualItemRect(first_move).intersects(
+            review.moves_list.viewport().rect()), "Review start must show the first SAN row."
+        assert review.selected_ply == 0 and review.review_board._board.fen() == \
+            review.review["positions"][0].fen()
+        captured["game-review-start"] = capture(
+            window, output, "game-review-start", width, height, review_selection="keep")
+        review.select_ply(move_count)
+        QTest.qWait(30)
+        selected_san = review.moves_list.currentItem()
+        assert review.selected_ply == move_count
+        assert selected_san is not None and selected_san.data(Qt.ItemDataRole.UserRole) == move_count
+        assert review.moves_list.visualItemRect(selected_san).intersects(
+            review.moves_list.viewport().rect()), "Selected final SAN row must be visible."
+        assert review.review_board._board.fen() == review.review["positions"][move_count].fen()
+        captured["game-review-last"] = capture(
+            window, output, "game-review-last", width, height, review_selection="keep")
+        review.select_ply(0)
+        QTest.qWait(30)
+        first_move = review.moves_list.item_by_ply(1)
+        assert review.selected_ply == 0 and first_move is not None
+        assert review.moves_list.visualItemRect(first_move).intersects(
+            review.moves_list.viewport().rect()), "Returning to start must reveal first SAN row."
+        assert review.review_board._board.fen() == review.review["positions"][0].fen()
+        captured["game-review-start-reset"] = capture(
+            window, output, "game-review-start-reset", width, height, review_selection="keep")
         captured["game-review"] = capture(window, output, "game-review", width, height)
 
         # Settings are captured once per tab at the largest target size.
-        expected_count = (3 * len(target_sizes) + len(offline_sizes) + 14
+        expected_count = (3 * len(target_sizes) + len(offline_sizes) + 17
                           + tabs.count())
         assert len(captured) == expected_count, (
             f"Expected {expected_count} screenshot states, got {len(captured)}"

@@ -238,6 +238,9 @@ class ArchiveSync:
                                 daily_limit: int = 25,
                                 force_retry: bool = False,
                                 preferred_game_id: str | None = None,
+                                selected_game_id: str | None = None,
+                                expected_line_revision: int | None = None,
+                                expected_source_game_id: str | None = None,
                                 generation_is_current: Callable[[], bool] | None = None,
                                 progress: Callable[[int, int, dict], None] | None = None
                                 ) -> dict[str, int | bool | str | None]:
@@ -245,7 +248,10 @@ class ArchiveSync:
         if not 1 <= int(limit) <= 10:
             raise ValueError("Одна фоновая порция ограничена десятью партиями.")
         account_id = self.repository.ensure_archive_account(username)
-        self.repository.enqueue_lichess_analysis_backfill(account_id)
+        self.repository.enqueue_lichess_analysis_backfill(
+            account_id, game_id=selected_game_id,
+            expected_line_revision=expected_line_revision,
+            expected_source_game_id=expected_source_game_id)
         if self.repository.lichess_analysis_backfill_paused(account_id):
             return {"selected": 0, "checked": 0, "accuracy": 0, "evals": 0,
                     "no_data": 0, "errors": 0, "paused": True, "limited": False}
@@ -256,7 +262,9 @@ class ArchiveSync:
                     "retry_after_at": retry_after_at}
         candidates = self.repository.list_lichess_analysis_backfill(
             account_id, limit=limit, force_retry=force_retry,
-            preferred_game_id=preferred_game_id)
+            preferred_game_id=preferred_game_id, selected_game_id=selected_game_id,
+            expected_line_revision=expected_line_revision,
+            expected_source_game_id=expected_source_game_id)
         checked = accuracy_count = eval_count = no_data = errors = 0
         limited = False
         fatal_status: int | None = None
@@ -304,6 +312,13 @@ class ArchiveSync:
                 target=keep_lease_alive, name="cc-lichess-backfill-lease", daemon=True)
             heartbeat_thread.start()
             try:
+                # Auth/account generation may have changed while a lease/budget
+                # reservation was being obtained. Do not start a stale request.
+                if not current():
+                    self.repository.release_lichess_analysis_backfill(
+                        account_id, game_id, lease_owner=lease_owner,
+                        check_accuracy=check_accuracy, check_evals=check_evals)
+                    break
                 payload = self.client.export_game_json(token, str(item["source_game_id"]))
                 if not current():
                     # The response belongs to a previous auth/session generation.

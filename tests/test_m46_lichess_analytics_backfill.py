@@ -234,10 +234,26 @@ def test_no_server_data_is_not_repolled_before_seven_day_ttl(tmp_path):
     assert global_check["selected"] == 0 and global_check["checked"] == 0
     assert len(fake.calls) == 1
     state = repository.lichess_analysis_backfill_state("lichess:me", game_id)
+    assert not repository.retry_lichess_analysis_game(
+        "lichess:me", game_id, line_revision=state["line_revision"],
+        source_game_id=game_id)
+    not_due = sync.refresh_ready_analytics(
+        "Me", "fake", threading.Event(), limit=10, selected_game_id=game_id,
+        expected_line_revision=int(state["line_revision"]),
+        expected_source_game_id=game_id)
+    assert not_due["selected"] == 0 and len(fake.calls) == 1
+    with repository._connection() as db:
+        db.execute("UPDATE lichess_analysis_backfill SET accuracy_next_retry_at=?,"
+                   "evals_next_retry_at=? WHERE account_id=? AND game_id=?",
+                   ("2025-01-01T00:00:00+00:00", "2025-01-01T00:00:00+00:00",
+                    "lichess:me", game_id))
     assert repository.retry_lichess_analysis_game(
-        "lichess:me", game_id, line_revision=state["line_revision"])
+        "lichess:me", game_id, line_revision=state["line_revision"],
+        source_game_id=game_id)
     manual = sync.refresh_ready_analytics(
-        "Me", "fake", threading.Event(), limit=10, preferred_game_id=game_id)
+        "Me", "fake", threading.Event(), limit=10, selected_game_id=game_id,
+        expected_line_revision=int(state["line_revision"]),
+        expected_source_game_id=game_id)
     assert manual["checked"] == 1 and len(fake.calls) == 2
     with repository._connection() as db:
         db.execute("UPDATE lichess_analysis_backfill SET accuracy_next_retry_at=?,"

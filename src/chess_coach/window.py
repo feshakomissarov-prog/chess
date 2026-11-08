@@ -1074,7 +1074,10 @@ class MainWindow(QMainWindow):
 
     def _start_lichess_analysis_backfill(self, generation: int, *, manual: bool = False,
                                          force_retry: bool = False,
-                                         preferred_game_id: str | None = None) -> None:
+                                         preferred_game_id: str | None = None,
+                                         selected_game_id: str | None = None,
+                                         expected_line_revision: int | None = None,
+                                         expected_source_game_id: str | None = None) -> None:
         self._cancel_lichess_backfill_wakeup()
         if (self._shutdown_requested or self.offline_mode
                 or not self._current_lichess_generation(generation)
@@ -1089,8 +1092,13 @@ class MainWindow(QMainWindow):
         self.lichess.refresh_lichess_analysis_background(
             generation=generation, limit=10,
             daily_limit=self.settings.value("lichess/ready_analytics_daily_limit", 25, type=int),
-            force_retry=force_retry, preferred_game_id=preferred_game_id)
-        self.lichess_analysis_status.setText("Lichess · проверяем до 10 завершённых партий…")
+            force_retry=force_retry, preferred_game_id=preferred_game_id,
+            selected_game_id=selected_game_id,
+            expected_line_revision=expected_line_revision,
+            expected_source_game_id=expected_source_game_id)
+        self.lichess_analysis_status.setText(
+            "Lichess · проверяем выбранную партию…" if selected_game_id else
+            "Lichess · проверяем до 10 завершённых партий…")
 
     def _lichess_analysis_backfill_progress(self, generation: int, username: str,
                                            done: int, total: int, _game: dict) -> None:
@@ -5465,6 +5473,7 @@ class MainWindow(QMainWindow):
             self._pending_move_sound_intents[request_id] = (
                 generation, session.game_id,
                 len(session.moves.split()) + 1, before, move)
+            self.sound_player.play_pending_move(request_id)
             self.lichess.send_move(session.game_id, move.uci(), request_id)
             self.refresh(f"Отправляем ход {move.uci()}; ожидаем подтверждения Lichess.")
             return
@@ -7340,7 +7349,15 @@ class MainWindow(QMainWindow):
             self.show_home()
         premove = session.take_ready_premove() if is_selected_live else None
         if premove and session.begin_submission(premove):
-            self.lichess.send_move(game_id, premove.uci(), session.pending_request_id)
+            request_id = str(session.pending_request_id)
+            premove_before = session.board.copy(stack=True)
+            generation = int(getattr(self.lichess, "auth_generation",
+                                     session.auth_generation or 0))
+            self._pending_move_sound_intents[request_id] = (
+                generation, game_id, len(session.moves.split()) + 1,
+                premove_before, premove)
+            self.sound_player.play_pending_move(request_id)
+            self.lichess.send_move(game_id, premove.uci(), request_id)
             if is_selected_live:
                 self.refresh(f"Предход {premove.uci()} отправлен; ожидаем подтверждения Lichess.")
         elif had_premove and session.premove is None:
@@ -7578,22 +7595,43 @@ class MainWindow(QMainWindow):
         if session.white_ms is None or session.black_ms is None:
             waiting = (self._screen_mode == "online" and session.clock_control != "-"
                        and not no_regular_clock and not finished)
-            fallback = "—:— · ожидаем часы Lichess" if waiting else "Без часов"
+            known_timed_control = bool(not no_regular_clock and session.clock_control != "-")
+            if finished and known_timed_control:
+                fallback = "Часы недоступны"
+            elif waiting:
+                fallback = "—:— · ожидаем часы Lichess"
+            elif no_regular_clock:
+                fallback = "Без обычных часов"
+            else:
+                fallback = "Часы не подтверждены"
             self.opponent_clock_label.setText(fallback)
             self.you_clock_label.setText(fallback)
             owner_is_white = session.color == chess.WHITE
             opponent_increment = session.black_inc if owner_is_white else session.white_inc
             owner_increment = session.white_inc if owner_is_white else session.black_inc
-            self.opponent_clock_detail.setText(
-                _clock_increment_label(opponent_increment))
-            self.you_clock_detail.setText(
-                _clock_increment_label(owner_increment))
-            self.clock_label.setText(
-                session.clock_control if waiting else
-                ("Партия завершена · без часов" if finished else
-                 f"Переписка · срок хода {session.days_per_turn} дн."
-                 if session.speed == "correspondence" and session.days_per_turn else
-                 "Партия без обычных часов" if no_regular_clock else "Без часов"))
+            if finished:
+                self.opponent_clock_detail.clear()
+                self.you_clock_detail.clear()
+            else:
+                self.opponent_clock_detail.setText(
+                    _clock_increment_label(opponent_increment))
+                self.you_clock_detail.setText(
+                    _clock_increment_label(owner_increment))
+            if waiting:
+                self.clock_label.setText(session.clock_control)
+            elif finished and known_timed_control:
+                self.clock_label.setText(
+                    f"Контроль {session.clock_control} · партия завершена; часы недоступны")
+            elif finished and no_regular_clock:
+                self.clock_label.setText("Партия завершена · без обычных часов")
+            elif finished:
+                self.clock_label.setText("Партия завершена · контроль времени не подтверждён")
+            elif session.speed == "correspondence" and session.days_per_turn:
+                self.clock_label.setText(f"Переписка · срок хода {session.days_per_turn} дн.")
+            elif no_regular_clock:
+                self.clock_label.setText("Партия без обычных часов")
+            else:
+                self.clock_label.setText("Ожидаем данные часов Lichess")
             self.opponent_clock_label.setStyleSheet(
                 f"font-size: 28px; font-weight: 600; padding: 2px 8px; color: {TOKENS.secondary};")
             self.you_clock_label.setStyleSheet(
@@ -7834,21 +7872,72 @@ class MainWindow(QMainWindow):
                 self._notify_inline("Проверка готовых оценок отложена до завершения активной партии.")
                 return
             username = str(getattr(self.lichess, "username", "") or "").strip()
-            account_id = str(game.get("account_id") or "")
-            if not account_id.startswith("lichess:"):
-                if not username:
-                    self._notify_inline("Не удалось определить аккаунт для выбранной партии.")
-                    return
-                account_id = self.game_repository.ensure_archive_account(username)
-            self.game_repository.enqueue_lichess_analysis_backfill(account_id)
-            line_revision = game.get("line_revision")
-            if line_revision is None or not self.game_repository.retry_lichess_analysis_game(
-                    account_id, str(game["game_id"]), line_revision=int(line_revision)):
-                self._notify_inline("Выбранная партия изменилась или не принадлежит этому аккаунту.")
+            if not username:
+                self._notify_inline("Не удалось определить текущий аккаунт Lichess.")
                 return
-            generation = self.lichess.auth_generation
+            current_account_id = f"lichess:{username.casefold()}"
+            account_id = str(game.get("account_id") or "")
+            if account_id != current_account_id:
+                self._notify_inline(
+                    f"Выберите или подключите аккаунт Lichess «{account_id.partition(':')[2] or 'партии'}», "
+                    "которому принадлежит эта партия.")
+                return
+            generation = int(getattr(self.lichess, "auth_generation", -1))
+
+            def retry_identity_is_current() -> bool:
+                return bool(
+                    self._online_actions_allowed()
+                    and self._current_lichess_generation(generation)
+                    and f"lichess:{str(getattr(self.lichess, 'username', '') or '').strip().casefold()}"
+                    == current_account_id)
+
+            if not retry_identity_is_current():
+                self._notify_inline("Подключение Lichess сменилось; повторите действие после синхронизации.")
+                return
+            selected_game_id = str(game.get("game_id") or "")
+            source_game_id = str(game.get("source_game_id") or "")
+            line_revision = game.get("line_revision")
+            current_line = (self.game_repository.current_line(selected_game_id)
+                            if selected_game_id else None)
+            if (line_revision is None or current_line is None
+                    or int(current_line["line_revision"]) != int(line_revision)):
+                self._notify_inline("Выбранная партия или её линия изменилась; обновите список.")
+                return
+            if not retry_identity_is_current():
+                self._notify_inline("Подключение Lichess сменилось; очередь не изменена.")
+                return
+            if not self.game_repository.enqueue_lichess_analysis_backfill(
+                    account_id, game_id=selected_game_id,
+                    expected_line_revision=int(line_revision),
+                    expected_source_game_id=source_game_id):
+                # Existing due entries need not be rewritten; they remain scoped below.
+                state = self.game_repository.lichess_analysis_backfill_state(
+                    account_id, selected_game_id)
+                if not state:
+                    self._notify_inline("Не удалось поставить выбранную партию в очередь.")
+                    return
+            if not retry_identity_is_current():
+                self._notify_inline("Подключение Lichess сменилось; повторная проверка отменена.")
+                return
+            if not self.game_repository.retry_lichess_analysis_game(
+                    account_id, selected_game_id, line_revision=int(line_revision),
+                    source_game_id=source_game_id):
+                state = self.game_repository.lichess_analysis_backfill_state(
+                    account_id, selected_game_id) or {}
+                if "rate_limited" in {state.get("accuracy_status"), state.get("evals_status")}:
+                    self._notify_inline("Для выбранной партии действует ограничение Lichess; дождитесь срока повтора.")
+                elif "has_data" in {state.get("accuracy_status"), state.get("evals_status")}:
+                    self._notify_inline("Готовые данные по выбранной партии уже сохранены.")
+                else:
+                    self._notify_inline("Выбранная партия пока не готова к повторной проверке.")
+                return
+            if not retry_identity_is_current():
+                self._notify_inline("Подключение Lichess сменилось; повторная проверка отменена.")
+                return
             self._start_lichess_analysis_backfill(
-                generation, manual=True, preferred_game_id=str(game["game_id"]))
+                generation, manual=True, selected_game_id=selected_game_id,
+                expected_line_revision=int(line_revision),
+                expected_source_game_id=source_game_id)
             self._notify_inline("Повторно проверяется только выбранная партия; лимиты Lichess сохранены.")
 
         page.query_requested.connect(load_page)

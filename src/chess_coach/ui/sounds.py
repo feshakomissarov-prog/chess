@@ -9,6 +9,7 @@ from typing import Callable
 
 import chess
 from PySide6.QtCore import QObject, QUrl
+from PySide6.QtWidgets import QApplication
 
 try:
     from PySide6.QtMultimedia import QSoundEffect
@@ -194,6 +195,19 @@ class ChessSoundPlayer(QObject):
         if not self.deduplicator.claim(f"premove:{event_key}", 0) or not self.moves_enabled:
             return False
         return self._play("premove")
+
+    def play_pending_move(self, request_id: str) -> bool:
+        """Give immediate neutral feedback without claiming a move was accepted.
+
+        The configured recording remains reserved for an authoritative server
+        acceptance. A pending-input beep is a system cue, not a chess sound asset.
+        """
+        request_id = str(request_id or "").strip()
+        if (not request_id or not self.moves_enabled
+                or not self.deduplicator.claim(f"pending-move:{request_id}", 0)):
+            return False
+        QApplication.beep()
+        return True
 
     def play_notification(self, event_key: str) -> bool:
         if not self.deduplicator.claim(f"notification:{event_key}", 0) or not self.notifications_enabled:

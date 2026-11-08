@@ -87,6 +87,7 @@ class MoveTable(QWidget):
             "Изменение оценки доступно отдельно для выбранного полухода.")
         self.table.cellClicked.connect(self._cell_clicked)
         self._moves = []
+        self._selected_ply: int | None = None
         layout.addWidget(self.table)
 
     def set_rows(self, moves, *, scores=None, enabled=True, show_severity=True):
@@ -270,12 +271,19 @@ class MoveTable(QWidget):
 
     def select_ply(self, ply: int):
         ply = int(ply)
+        self._selected_ply = ply
+        if ply == 0:
+            self.table.clearSelection()
+            self.table.setCurrentItem(None)
+            self.table.scrollToTop()
+            QTimer.singleShot(0, self._scroll_to_start_if_selected)
+            return
         for row in range(self.table.rowCount()):
             for column in (1, 2):
                 item = self.table.item(row, column)
                 if item is not None and item.data(Qt.ItemDataRole.UserRole) == ply:
                     self.table.setCurrentItem(item)
-                    self.table.scrollToItem(item, QAbstractItemView.ScrollHint.PositionAtBottom)
+                    self.table.scrollToItem(item, QAbstractItemView.ScrollHint.EnsureVisible)
                     # Showing an asynchronously loaded review can trigger a
                     # splitter resize after selection. Repeat the scroll once
                     # the queued layout pass has settled, fenced by ply so an
@@ -284,13 +292,18 @@ class MoveTable(QWidget):
                     return
         self.table.clearSelection()
 
+    def _scroll_to_start_if_selected(self):
+        if self._selected_ply == 0:
+            self.table.scrollToTop()
+
     def _scroll_selected_ply(self, ply: int):
         current = self.table.currentItem()
-        if current is None or current.data(Qt.ItemDataRole.UserRole) != int(ply):
+        if self._selected_ply != int(ply) or current is None \
+                or current.data(Qt.ItemDataRole.UserRole) != int(ply):
             return
         item = self.item_by_ply(ply)
         if item is not None:
-            self.table.scrollToItem(item, QAbstractItemView.ScrollHint.PositionAtBottom)
+            self.table.scrollToItem(item, QAbstractItemView.ScrollHint.EnsureVisible)
 
     def setCurrentRow(self, ply: int):
         """Compatibility helper for callers that used the former one-ply list."""

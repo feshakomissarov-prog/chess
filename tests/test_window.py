@@ -1137,7 +1137,8 @@ def test_online_move_sound_waits_for_authoritative_ack_and_deduplicates_replays(
         def send_move(self, *args): self.sent.append(args)
         def close(self, timeout=1.0): return True
     class FakeSound:
-        def __init__(self): self.moves = []
+        def __init__(self): self.moves = []; self.pending = []
+        def play_pending_move(self, request_id): self.pending.append(request_id)
         def play_move(self, *args, **kwargs): self.moves.append((args, kwargs))
         def play_game_end(self, *args): return False
     window.lichess = FakeLichess()
@@ -1150,6 +1151,7 @@ def test_online_move_sound_waits_for_authoritative_ack_and_deduplicates_replays(
     move = chess.Move.from_uci("e2e4")
     window.on_move_intent(move)
     assert len(window.lichess.sent) == 1
+    assert window.sound_player.pending == [session.pending_request_id]
     assert window.sound_player.moves == []  # pending move is not yet confirmed
     window._lichess_move_failed(session.game_id, "e2e4", session.pending_request_id, 400)
     assert window.sound_player.moves == []
@@ -4988,6 +4990,11 @@ def test_online_move_sound_waits_for_successful_post_and_is_once(qtbot, tmp_path
 
     class _Sound:
         calls = []
+        pending = []
+
+        def play_pending_move(self, request_id):
+            self.pending.append(request_id)
+            return True
 
         def play_move(self, *args, **kwargs):
             self.calls.append((args, kwargs))
@@ -5003,6 +5010,7 @@ def test_online_move_sound_waits_for_successful_post_and_is_once(qtbot, tmp_path
 
     window.on_move_intent(chess.Move.from_uci("e2e4"))
     assert len(sent) == 1 and sound.calls == []
+    assert sound.pending == [sent[0][2]]
     request_id = sent[0][2]
     window._lichess_session_move_accepted(7, "sound-ack", "e2e4", request_id)
     window._lichess_session_move_accepted(7, "sound-ack", "e2e4", request_id)
@@ -5091,7 +5099,9 @@ def test_ready_event_stream_automatically_starts_bounded_old_game_analytics(qtbo
     window._start_connected_account_background_work(7, "Me")
     qtbot.waitUntil(lambda: bool(service.calls), timeout=2500)
     assert service.calls == [{"generation": 7, "limit": 10, "daily_limit": 25,
-                              "force_retry": False, "preferred_game_id": None}]
+                              "force_retry": False, "preferred_game_id": None,
+                              "selected_game_id": None, "expected_line_revision": None,
+                              "expected_source_game_id": None}]
     assert "проверяем до 10" in window.lichess_analysis_status.text()
 
 

@@ -353,7 +353,10 @@ class LichessSyncMixin:
                                             limit: int = 10,
                                             daily_limit: int = 25,
                                             force_retry: bool = False,
-                                            preferred_game_id: str | None = None) -> None:
+                                            preferred_game_id: str | None = None,
+                                            selected_game_id: str | None = None,
+                                            expected_line_revision: int | None = None,
+                                            expected_source_game_id: str | None = None) -> None:
         """Resume one small, authenticated JSON backfill batch on the current account."""
         if (self.repository is None or not self.username or self._closing
                 or not self.is_auth_generation_current(generation)):
@@ -377,9 +380,10 @@ class LichessSyncMixin:
                 if not token:
                     return
                 account_id = self.repository.ensure_archive_account(username)
-                if not self.repository.lichess_analysis_backfill_has_due_work(
-                        account_id, daily_limit=daily_limit,
-                        force_retry=force_retry):
+                if (selected_game_id is None and
+                        not self.repository.lichess_analysis_backfill_has_due_work(
+                            account_id, daily_limit=daily_limit,
+                            force_retry=force_retry)):
                     # Avoid spending an account/playing API request when the
                     # durable local queue is paused, complete, cooling down,
                     # or has already reached its daily request budget.
@@ -413,6 +417,9 @@ class LichessSyncMixin:
                     daily_limit=max(1, min(100, int(daily_limit))),
                     force_retry=force_retry,
                     preferred_game_id=preferred_game_id,
+                    selected_game_id=selected_game_id,
+                    expected_line_revision=expected_line_revision,
+                    expected_source_game_id=expected_source_game_id,
                     generation_is_current=lambda: (
                         self.is_operation_context_current(context) and not self._closing),
                     progress=lambda done, total, game: self.lichess_analysis_backfill_progress.emit(

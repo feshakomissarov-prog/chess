@@ -95,6 +95,24 @@ def test_optimistic_move_and_duplicate_server_ack_play_once(tmp_path):
     assert sum(effect.play_count for effect in player.effects.values()) == 1
 
 
+def test_pending_move_uses_separate_neutral_system_signal_and_deduplicates(
+        tmp_path, monkeypatch):
+    from chess_coach.ui.sounds import QApplication
+
+    player = _player(tmp_path)
+    system_signals = []
+    monkeypatch.setattr(QApplication, "beep", lambda: system_signals.append("pending"))
+    assert player.play_pending_move("request-1")
+    assert not player.play_pending_move("request-1")
+    assert system_signals == ["pending"]
+    # Pending input never consumes or plays the selected confirmed move recording.
+    assert all(effect.play_count == 0 for effect in player.effects.values())
+    player.configure(moves_enabled=False, notifications_enabled=True,
+                     history_enabled=False, volume=45)
+    assert not player.play_pending_move("request-muted")
+    assert system_signals == ["pending"]
+
+
 def test_muting_volume_history_and_premove_notification_preferences(tmp_path):
     player = _player(tmp_path, moves_enabled=False, notifications_enabled=False,
                      history_enabled=False, volume=45)
