@@ -13,7 +13,10 @@ from chess_coach.window import EphemeralReviewRepository, MainWindow, SettingsDi
 from chess_coach.lichess.session import LichessGameSession
 
 
-def test_same_scope_dashboard_preview_preserves_aggregate_review_cards(qtbot, tmp_path):
+def test_same_scope_dashboard_preview_preserves_aggregate_review_cards(
+        qtbot, tmp_path, monkeypatch):
+    # Exercise only the renderer; this test does not need startup SQL workers.
+    monkeypatch.setattr(MainWindow, "_refresh_home_dashboard", lambda _self: None)
     window = MainWindow(QSettings(str(tmp_path / "preserve-dashboard-cards.ini"),
                                   QSettings.Format.IniFormat), offline_mode=True)
     qtbot.addWidget(window)
@@ -53,7 +56,7 @@ def test_same_scope_dashboard_preview_preserves_aggregate_review_cards(qtbot, tm
     assert window._latest_dashboard_snapshot is full
     assert retained_card.accessibleName() == card.accessibleName()
     assert retained_card.findChild(ReviewGraph) is not None
-    window.close()
+    assert window.close() is True
 
 
 def test_multi_pgn_chooser_requires_row_selection_and_explicit_open(qtbot):

@@ -5840,6 +5840,9 @@ def test_preflight_cancel_ignores_late_empty_snapshot_and_http_429_fails_closed(
 @pytest.mark.parametrize("transition", ["disconnect", "account-switch", "reconnect-start"])
 def test_late_safety_snapshot_cannot_authorize_old_account_session(
         qtbot, tmp_path, monkeypatch, transition):
+    # This scenario verifies the safety-generation fence only. Keep unrelated
+    # Home aggregate SQL out of the test so close() is deterministic on Windows.
+    monkeypatch.setattr(MainWindow, "_refresh_home_dashboard", lambda _self: None)
     window = MainWindow(QSettings(str(tmp_path / f"analysis-session-{transition}.ini"),
                                   QSettings.Format.IniFormat), offline_mode=True)
     qtbot.addWidget(window)
@@ -5917,6 +5920,8 @@ def test_late_safety_snapshot_cannot_authorize_old_account_session(
         window._analysis_safety_games_received(new_request, [])
         assert len(launches) == 1
         assert launches[0][0][0] == "new-account-game"
+        if window._archive_account_handle is not None:
+            qtbot.waitUntil(lambda: not window._archive_account_handle.is_alive(), timeout=5000)
     assert window.close() is True
 
 
