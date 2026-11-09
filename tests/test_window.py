@@ -5883,16 +5883,18 @@ def test_late_safety_snapshot_cannot_authorize_old_account_session(
 
     window._start_game_analysis("old-account-game", "fake-stockfish")
     old_request = service.requests[-1]
+    if transition == "account-switch":
+        # Keep this safety-generation test isolated from delayed, unrelated
+        # archive/puzzle sync timers on slower Windows runners. Set the flags
+        # before authentication/readiness can schedule those operations.
+        window.settings.setValue("lichess/auto_archive_sync", False)
+        window.settings.setValue("lichess/auto_puzzle_history_sync", False)
+        window.settings.setValue("lichess/auto_ready_analytics", False)
     if transition == "disconnect":
         window.disconnect_lichess()
     elif transition == "account-switch":
         service.username = "AccountB"
         window._lichess_authenticated("AccountB")
-        # Keep this safety-generation test isolated from delayed, unrelated
-        # archive/puzzle sync timers on slower Windows runners.
-        window.settings.setValue("lichess/auto_archive_sync", False)
-        window.settings.setValue("lichess/auto_puzzle_history_sync", False)
-        window.settings.setValue("lichess/auto_ready_analytics", False)
         window._lichess_event_stream_ready(service.auth_generation, service.username)
     else:
         window._lichess_connected = False
