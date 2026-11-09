@@ -8,8 +8,52 @@ from PySide6.QtCore import QStandardPaths
 from PySide6.QtWidgets import QInputDialog
 
 from chess_coach.ui.pages.analysis import AnalysisLandingPage
+from chess_coach.ui.game_review import ReviewGraph
 from chess_coach.window import EphemeralReviewRepository, MainWindow, SettingsDialog
 from chess_coach.lichess.session import LichessGameSession
+
+
+def test_same_scope_dashboard_preview_preserves_aggregate_review_cards(qtbot, tmp_path):
+    window = MainWindow(QSettings(str(tmp_path / "preserve-dashboard-cards.ini"),
+                                  QSettings.Format.IniFormat), offline_mode=True)
+    qtbot.addWidget(window)
+    full_game = {
+        "game_id": "evaluated-game", "status": "draw", "winner": "white",
+        "color": "white", "opponent": "Synthetic Opponent", "clock": "180+2",
+        "line_revision": 1, "opening_name": "Сицилианская защита",
+        "review_metrics": {
+            "assessments": [{"ply": 1, "white_cp": 24, "depth": 16}],
+            "moves": {1: "e4"}, "accuracy": "92.0%", "accuracy_source": "Stockfish",
+            "inaccuracies": "0", "mistakes": "0", "blunders": "0",
+            "owner_inaccuracies": "0", "owner_mistakes": "0", "owner_blunders": "0",
+            "opponent_inaccuracies": "0", "opponent_mistakes": "0",
+            "opponent_blunders": "0", "status": "complete", "coverage": "1/1",
+            "source": "Stockfish",
+        },
+    }
+    full = {
+        "filter": {"account_id": "lichess:scope", "clock": None},
+        "metrics": [], "recent_games": [full_game],
+        "activity_trend": [], "puzzle_player_rating": {},
+    }
+    window._render_dashboard_snapshot(full)
+    card = window._home_view._recent_games_layout.itemAt(0).widget()
+    assert card.findChild(ReviewGraph) is not None
+
+    preview = {
+        "filter": {"account_id": "lichess:scope", "clock": None},
+        "metrics": [{"key": "games", "value": "1", "detail": "SQLite", "source": "SQLite"}],
+        "recent_games": [{"game_id": "evaluated-game", "status": "draw",
+                          "winner": "white", "color": "white",
+                          "opponent": "Synthetic Opponent", "line_revision": 1}],
+        "activity_trend": [], "puzzle_player_rating": {}, "is_preview": True,
+    }
+    window._render_dashboard_snapshot(preview)
+    retained_card = window._home_view._recent_games_layout.itemAt(0).widget()
+    assert window._latest_dashboard_snapshot is full
+    assert retained_card.accessibleName() == card.accessibleName()
+    assert retained_card.findChild(ReviewGraph) is not None
+    window.close()
 
 
 def test_multi_pgn_chooser_requires_row_selection_and_explicit_open(qtbot):

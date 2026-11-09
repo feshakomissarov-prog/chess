@@ -3476,6 +3476,7 @@ class MainWindow(QMainWindow):
             preview and previous_snapshot and not previous_snapshot.get("is_preview")
             and scope.get("account_id") == previous_scope.get("account_id")
             and scope.get("clock") == previous_scope.get("clock"))
+        preserve_cards = bool(preserve_aggregate and previous_snapshot.get("recent_games"))
         if not preserve_aggregate:
             self._latest_dashboard_snapshot = snapshot
         trend = snapshot.get("activity_trend") or []
@@ -3559,7 +3560,12 @@ class MainWindow(QMainWindow):
             widget = item.widget()
             if widget is not None:
                 widget.deleteLater()
-        games = snapshot["recent_games"]
+        # A same-scope preview refreshes the fast count while the aggregate is
+        # refreshing. Keep the existing aggregate cards (including saved
+        # review graphs) until their replacement is ready; preview rows are
+        # intentionally neutral and contain no analysis payload.
+        games = (previous_snapshot.get("recent_games") or [] if preserve_cards
+                 else snapshot["recent_games"])
         if not games:
             empty = QLabel("Пока нет сохранённых завершённых партий. Импортируйте партии или сыграйте локально.")
             empty.setWordWrap(True)
