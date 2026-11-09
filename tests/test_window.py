@@ -34,6 +34,14 @@ def avoid_background_auth_restore(monkeypatch, tmp_path):
 
 
 def select_online(window, session):
+    # These tests drive simulated online sessions. Seed the same readiness
+    # invariants the real event stream establishes instead of bypassing the
+    # disconnect/recovery gate with an offline window.
+    window.offline_mode = False
+    window._lichess_connected = True
+    window._event_stream_recovery_pending = False
+    window._lichess_stream_ready_generation = getattr(
+        window.lichess, "auth_generation", None)
     window.online_sessions[session.game_id] = session
     window.online_session = session
     window._selected_live_game_id = session.game_id
@@ -5102,6 +5110,10 @@ def test_online_move_sound_waits_for_successful_post_and_is_once(qtbot, tmp_path
 
     sound = _Sound()
     window.lichess = _Service()
+    window.offline_mode = False
+    window._lichess_connected = True
+    window._event_stream_recovery_pending = False
+    window._lichess_stream_ready_generation = window.lichess.auth_generation
     window.sound_player = sound
     window.online_session = session
     window._screen_mode = "online"
@@ -6450,6 +6462,10 @@ def test_live_draw_offer_does_not_disable_resign_or_conflict_with_incoming_offer
     session.color = chess.WHITE
     session.apply_event({"type": "gameFull", "initialFen": "startpos",
                          "state": {"moves": "e2e4", "status": "started"}})
+    resign_calls = []
+    window.lichess = SimpleNamespace(auth_generation=0,
+                                     client=SimpleNamespace(rate_limit_remaining=0),
+                                     resign=lambda game_id: resign_calls.append(game_id))
     select_online(window, session)
     window._pending_game_actions.add((session.game_id, "offer_draw"))
     window._refresh_online()
@@ -6458,8 +6474,6 @@ def test_live_draw_offer_does_not_disable_resign_or_conflict_with_incoming_offer
     assert not window.draw_button.isEnabled()
     monkeypatch.setattr(QMessageBox, "question", lambda *_args, **_kwargs:
                         QMessageBox.StandardButton.Yes)
-    resign_calls = []
-    window.lichess = SimpleNamespace(resign=lambda game_id: resign_calls.append(game_id))
     window.resign_button.click()
     assert resign_calls == [session.game_id]
 
@@ -6491,10 +6505,137 @@ def test_live_draw_offer_does_not_disable_resign_or_conflict_with_incoming_offer
     window._refresh_online()
     assert not window.draw_button.isEnabled()
     assert not window.decline_draw_button.isEnabled()
-    assert window.resign_button.isEnabled()
+    assert not window.resign_button.isEnabled()
+    window._pending_game_actions.clear()
     window._pending_game_actions.add((session.game_id, "resign"))
     window._refresh_online()
     assert not window.resign_button.isEnabled()
+    window.close()
+
+
+def _prepare_connected_live_test(window, session):
+    service = window.lichess
+    service.username = "Synthetic"
+    window._lichess_account_authenticated = True
+    window._lichess_session_selected = True
+    window._lichess_connected = True
+    window._lichess_stream_ready_generation = service.auth_generation
+    window._event_stream_recovery_pending = False
+    select_online(window, session)
+    return service
+
+
+@pytest.mark.parametrize("status", [
+    "draw", "resign", "mate", "timeout", "outoftime", "stalemate", "aborted",
+])
+def test_terminal_draw_with_stale_offer_flags_keeps_final_result_priority(
+        qtbot, tmp_path, status):
+    window = MainWindow(QSettings(str(tmp_path / "terminal-draw-status.ini"),
+                                  QSettings.Format.IniFormat))
+    qtbot.addWidget(window)
+    session = LichessGameSession("terminal-draw-status", window.game_repository)
+    session.color = chess.WHITE
+    session.apply_event({"type": "gameFull", "initialFen": "startpos",
+                         "state": {"moves": "e2e4 e7e5", "status": "started"}})
+    _prepare_connected_live_test(window, session)
+    session.apply_event({"type": "gameState", "moves": "e2e4 e7e5",
+                         "status": status, "winner": "white",
+                         "wdraw": True, "bdraw": True})
+    window._refresh_online()
+    assert "Партия завершена" in window.game_status.text()
+    assert "ожидаем ответ" not in window.game_status.text()
+    assert not window.draw_button.isEnabled()
+    assert not window.resign_button.isEnabled()
+    assert window.decline_draw_button.isHidden()
+    window.close()
+
+
+def test_pending_resign_disables_conflicting_live_controls_but_pending_offer_does_not(
+        qtbot, tmp_path):
+    window = MainWindow(QSettings(str(tmp_path / "pending-resign-controls.ini"),
+                                  QSettings.Format.IniFormat))
+    qtbot.addWidget(window)
+    session = LichessGameSession("pending-resign-controls", window.game_repository)
+    session.color = chess.WHITE
+    session.apply_event({"type": "gameFull", "initialFen": "startpos",
+                         "state": {"moves": "e2e4", "status": "started"}})
+    _prepare_connected_live_test(window, session)
+
+    window._pending_game_actions.add((session.game_id, "offer_draw"))
+    window._refresh_online()
+    assert window.resign_button.isEnabled()
+    assert not window.draw_button.isEnabled()
+
+    window._pending_game_actions.clear()
+    window._pending_game_actions.add((session.game_id, "resign"))
+    window._refresh_online()
+    assert not window.resign_button.isEnabled()
+    assert not window.draw_button.isEnabled()
+    assert not window.decline_draw_button.isEnabled()
+    assert not window.claim_draw_button.isEnabled()
+    assert not window.takeback_button.isEnabled()
+    assert not window.board._interaction_enabled
+    window.close()
+
+
+@pytest.mark.parametrize("failure", ["disconnect", "429"])
+def test_disconnect_gates_live_actions_until_fresh_game_snapshot(
+        qtbot, tmp_path, monkeypatch, failure):
+    from PySide6.QtWidgets import QMessageBox
+
+    window = MainWindow(QSettings(str(tmp_path / "disconnect-live-gate.ini"),
+                                  QSettings.Format.IniFormat))
+    qtbot.addWidget(window)
+    session = LichessGameSession("disconnect-live-gate", window.game_repository)
+    session.color = chess.WHITE
+    session.apply_event({"type": "gameFull", "initialFen": "startpos",
+                         "state": {"moves": "e2e4", "status": "playing"}})
+    service = _prepare_connected_live_test(window, session)
+    baseline_fen = session.board.fen()
+    calls = []
+    for name in ("resign", "abort", "draw", "claim_draw", "takeback", "send_move"):
+        monkeypatch.setattr(service, name,
+                            lambda *args, _name=name, **kwargs: calls.append((_name, args)))
+
+    if failure == "429":
+        monkeypatch.setattr(window, "_lichess_rate_limit_remaining", lambda: 60)
+        window._lichess_status("Ограничение Lichess (429): переподключение через 60 с")
+    else:
+        window._lichess_status("Не подключено")
+    assert session.awaiting_authoritative_snapshot
+    assert session.board.fen() == baseline_fen
+    assert session.status == "playing"
+    assert "Партия завершена" not in window.game_status.text()
+    assert not window.board._interaction_enabled
+    assert not window.resign_button.isEnabled()
+    assert not window.draw_button.isEnabled()
+    assert not window.takeback_button.isEnabled()
+    assert not window.claim_draw_button.isEnabled()
+    monkeypatch.setattr(QMessageBox, "question", lambda *_a, **_k:
+                        QMessageBox.StandardButton.Yes)
+    window.resign_online()
+    window.handle_draw()
+    window._start_takeback_action("offer")
+    assert calls == []
+
+    # Transport restoration alone is insufficient; wait for current game data.
+    window._lichess_account_authenticated = True
+    window._lichess_connected = True
+    window._lichess_stream_ready_generation = service.auth_generation
+    window._event_stream_recovery_pending = False
+    if failure == "429":
+        monkeypatch.setattr(window, "_lichess_rate_limit_remaining", lambda: 0)
+    window._refresh_online()
+    assert session.awaiting_authoritative_snapshot
+    assert not window.resign_button.isEnabled()
+
+    session.apply_event({"type": "gameFull", "initialFen": "startpos",
+                         "state": {"moves": "e2e4", "status": "playing"}})
+    window._refresh_online()
+    assert not session.awaiting_authoritative_snapshot
+    assert window.resign_button.isEnabled()
+    assert window.board._interaction_enabled
+    assert session.board.fen() == baseline_fen
     window.close()
 
 

@@ -489,6 +489,10 @@ def test_online_move_is_pending_immediately_but_confirmed_sound_waits_for_server
     window.lichess = SimpleNamespace(
         auth_generation=3, send_move=slow_submit,
         is_auth_generation_current=lambda generation: int(generation) == 3)
+    window.offline_mode = False
+    window._lichess_connected = True
+    window._event_stream_recovery_pending = False
+    window._lichess_stream_ready_generation = 3
     window.online_session = session
     window._screen_mode = "online"
     try:
@@ -535,6 +539,10 @@ def test_rejected_online_move_keeps_only_pending_signal(qtbot, tmp_path, monkeyp
     window.lichess = SimpleNamespace(
         auth_generation=4, send_move=lambda *args: calls.append(("send", args[2])),
         is_auth_generation_current=lambda generation: int(generation) == 4)
+    window.offline_mode = False
+    window._lichess_connected = True
+    window._event_stream_recovery_pending = False
+    window._lichess_stream_ready_generation = 4
     window.online_session = session
     window._screen_mode = "online"
     try:

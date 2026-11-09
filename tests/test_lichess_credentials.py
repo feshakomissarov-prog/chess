@@ -15,6 +15,7 @@ from chess_coach.lichess.auth import (
     authorize_and_store,
 )
 from chess_coach.lichess.service import LichessService
+from chess_coach.lichess.service_games import GAME_ACTION_CONFLICTS
 from chess_coach.window import LichessConnectionDialog
 from chess_coach import diagnostics
 
@@ -870,6 +871,92 @@ def test_draw_offer_pending_lifecycle_never_reposts_and_resolves_on_fresh_absenc
     service.close(timeout=1.0)
 
 
+@pytest.mark.parametrize("replays", [0, 1, 2])
+def test_draw_offer_same_authoritative_fingerprint_replay_cannot_clear_pending(
+        qtbot, replays):
+    class Client(AccountClient):
+        def __init__(self):
+            super().__init__()
+            self.posts = []
+        def handle_draw(self, token, game_id, accept):
+            self.posts.append((game_id, accept))
+            return {}
+
+    client = Client()
+    service = LichessService(client=client, token_store=MemoryStore("token"),
+                             personal_token_store=MemoryStore("pat"))
+    completed = []
+    service.session_action_completed.connect(lambda *args: completed.append(args))
+    baseline = {"type": "gameState", "status": "started", "moves": "e2e4",
+                "wdraw": False, "bdraw": False, "turns": 1}
+    service.reconcile_game_actions("draw-game", baseline)
+    request_id = service.draw("draw-game", True)
+    qtbot.waitUntil(lambda: len(completed) == 1, timeout=1000)
+    for _ in range(replays):
+        service.reconcile_game_actions("draw-game", dict(baseline))
+    assert service.has_pending_action("draw-game", "offer_draw")
+    assert service.draw("draw-game", True) == request_id
+    assert client.posts == [("draw-game", True)]
+    service.close(timeout=1.0)
+
+
+def test_two_fake_clients_exchange_draw_offer_continue_then_receive_later_offer(qtbot):
+    class Client(AccountClient):
+        def __init__(self, name):
+            super().__init__()
+            self.name = name
+            self.posts = []
+        def handle_draw(self, token, game_id, accept):
+            self.posts.append((game_id, accept))
+
+    client_a, client_b = Client("A"), Client("B")
+    account_a = LichessService(client=client_a, token_store=MemoryStore("token-a"),
+                               personal_token_store=MemoryStore("pat-a"))
+    account_b = LichessService(client=client_b, token_store=MemoryStore("token-b"),
+                               personal_token_store=MemoryStore("pat-b"))
+    completed_a, completed_b = [], []
+    account_a.session_action_completed.connect(lambda *args: completed_a.append(args))
+    account_b.session_action_completed.connect(lambda *args: completed_b.append(args))
+    game_id = "two-fake-clients"
+    baseline = {"type": "gameFull", "state": {"status": "started", "moves": "e2e4",
+                "wdraw": False, "bdraw": False, "turns": 1}}
+    account_a.reconcile_game_actions(game_id, baseline, color="white")
+    account_b.reconcile_game_actions(game_id, baseline, color="black")
+
+    account_a.draw(game_id, True)
+    qtbot.waitUntil(lambda: len(completed_a) == 1, timeout=1000)
+    offered_by_a = {"type": "gameState", "status": "started", "moves": "e2e4",
+                    "wdraw": True, "bdraw": False, "turns": 1}
+    account_a.reconcile_game_actions(game_id, offered_by_a, color="white")
+    account_b.reconcile_game_actions(game_id, offered_by_a, color="black")
+    assert not account_a.has_pending_action(game_id, "offer_draw")
+    assert offered_by_a["wdraw"] is True  # B's incoming offer is authoritative.
+
+    continued = {"type": "gameState", "status": "started", "moves": "e2e4 e7e5",
+                 "wdraw": False, "bdraw": False, "turns": 2}
+    account_a.reconcile_game_actions(game_id, continued, color="white")
+    account_b.reconcile_game_actions(game_id, continued, color="black")
+    assert not account_a.has_pending_action(game_id, "offer_draw")
+
+    account_b.draw(game_id, True)
+    qtbot.waitUntil(lambda: len(completed_b) == 1, timeout=1000)
+    offered_by_b = {"type": "gameState", "status": "started", "moves": "e2e4 e7e5",
+                    "wdraw": False, "bdraw": True, "turns": 2}
+    account_b.reconcile_game_actions(game_id, offered_by_b, color="black")
+    account_a.reconcile_game_actions(game_id, offered_by_b, color="white")
+    account_a.draw(game_id, True, accepting_offer=True)
+    qtbot.waitUntil(lambda: len(completed_a) == 2, timeout=1000)
+    accepted = {"type": "gameState", "status": "draw", "moves": "e2e4 e7e5",
+                "wdraw": False, "bdraw": True, "turns": 2}
+    account_a.reconcile_game_actions(game_id, accepted, color="white")
+
+    assert client_a.posts == [(game_id, True), (game_id, True)]
+    assert client_b.posts == [(game_id, True)]
+    assert not account_a.has_pending_action(game_id, "accept_draw")
+    account_a.close(timeout=1.0)
+    account_b.close(timeout=1.0)
+
+
 def test_incoming_draw_response_is_independent_of_stale_offer_but_not_opposite_response(
         qtbot):
     class Client(AccountClient):
@@ -898,6 +985,79 @@ def test_incoming_draw_response_is_independent_of_stale_offer_but_not_opposite_r
     assert client.draw_posts == [("draw-game", True), ("draw-game", True)]
     assert service.draw("draw-game", False) is None
     assert client.draw_posts == [("draw-game", True), ("draw-game", True)]
+    service.close(timeout=1.0)
+
+
+def test_game_action_conflict_table_preserves_only_explicit_safe_exceptions():
+    all_actions = {"offer_draw", "accept_draw", "decline_draw", "resign", "abort",
+                   "claim_draw", "takeback"}
+    assert set(GAME_ACTION_CONFLICTS) == all_actions
+    assert "resign" not in GAME_ACTION_CONFLICTS["offer_draw"]
+    assert {"accept_draw", "decline_draw"}.isdisjoint(
+        GAME_ACTION_CONFLICTS["offer_draw"])
+    for pending in all_actions - {"offer_draw"}:
+        assert GAME_ACTION_CONFLICTS[pending] == all_actions
+
+
+def test_pending_resign_atomically_rejects_conflicting_game_posts(qtbot):
+    entered = threading.Event()
+    release = threading.Event()
+
+    class Client(AccountClient):
+        def __init__(self):
+            super().__init__()
+            self.posts = []
+        def resign(self, token, game_id):
+            self.posts.append(("resign", game_id))
+            entered.set()
+            assert release.wait(2)
+        def handle_draw(self, token, game_id, accept):
+            self.posts.append(("draw", game_id, accept))
+        def claim_draw(self, token, game_id):
+            self.posts.append(("claim_draw", game_id))
+        def handle_takeback(self, token, game_id, accept):
+            self.posts.append(("takeback", game_id, accept))
+
+    client = Client()
+    service = LichessService(client=client, token_store=MemoryStore("token"),
+                             personal_token_store=MemoryStore("pat"))
+    service.resign("game")
+    assert entered.wait(1)
+    assert service.draw("game", True) is None
+    assert service.draw("game", True, accepting_offer=True) is None
+    assert service.draw("game", False) is None
+    assert service.claim_draw("game") is None
+    completed = []
+    service.session_takeback_action_completed.connect(lambda *args: completed.append(args))
+    assert service.takeback("game", "offer", "takeback-1") is None
+    assert client.posts == [("resign", "game")]
+    assert completed and completed[-1][-1] == -2
+    release.set()
+    qtbot.waitUntil(lambda: len(client.posts) == 1, timeout=1000)
+    assert service.has_pending_action("game", "resign")
+    service.close(timeout=1.0)
+
+
+def test_terminal_authoritative_state_rejects_takeback_without_post(qtbot):
+    class Client(AccountClient):
+        def __init__(self):
+            super().__init__()
+            self.posts = []
+        def handle_takeback(self, token, game_id, accept):
+            self.posts.append((game_id, accept))
+
+    client = Client()
+    service = LichessService(client=client, token_store=MemoryStore("token"),
+                             personal_token_store=MemoryStore("pat"))
+    completed = []
+    service.session_takeback_action_completed.connect(lambda *args: completed.append(args))
+    service.reconcile_game_actions("finished", {
+        "type": "gameFull", "state": {"status": "draw", "moves": "e2e4 e7e5"}})
+
+    assert service.takeback("finished", "offer", "late-takeback") is None
+    assert completed and completed[-1][-1] == -2
+    assert client.posts == []
+    assert not service.has_pending_action("finished", "takeback")
     service.close(timeout=1.0)
 
 

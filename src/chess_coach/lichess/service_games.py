@@ -9,6 +9,31 @@ import uuid
 
 from .api import LichessError, RateLimitError
 
+
+GAME_ACTION_CONFLICTS = {
+    # Draw offers are independent from a deliberate resignation. A server-confirmed
+    # incoming offer may be answered while an outgoing offer is stale.
+    "offer_draw": frozenset({"offer_draw", "abort", "claim_draw", "takeback"}),
+    "accept_draw": frozenset({"offer_draw", "accept_draw", "decline_draw", "resign",
+                               "abort", "claim_draw", "takeback"}),
+    "decline_draw": frozenset({"offer_draw", "accept_draw", "decline_draw", "resign",
+                                "abort", "claim_draw", "takeback"}),
+    "resign": frozenset({"offer_draw", "accept_draw", "decline_draw", "resign",
+                          "abort", "claim_draw", "takeback"}),
+    "abort": frozenset({"offer_draw", "accept_draw", "decline_draw", "resign",
+                        "abort", "claim_draw", "takeback"}),
+    "claim_draw": frozenset({"offer_draw", "accept_draw", "decline_draw", "resign",
+                             "abort", "claim_draw", "takeback"}),
+    "takeback": frozenset({"offer_draw", "accept_draw", "decline_draw", "resign",
+                           "abort", "claim_draw", "takeback"}),
+}
+_TERMINAL_GAME_STATUSES = frozenset({
+    "aborted", "mate", "resign", "stalemate", "timeout", "draw", "outoftime",
+    "cheat", "noStart", "unknownFinish", "variantEnd", "repetition", "50moves",
+    "insufficientMaterial", "finished",
+})
+
+
 class LichessGameActionsMixin:
     def claim_draw(self, game_id: str):
         self._action(lambda token: self.client.claim_draw(token, game_id),
@@ -38,6 +63,37 @@ class LichessGameActionsMixin:
         accept = action != "decline"
         context = self.capture_operation_context(
             game_id=game_id, command="takeback", request_id=request_id)
+        key = (context.generation, str(game_id), "takeback")
+        with self._pending_action_lock:
+            if context.connection_stop.is_set():
+                self.session_takeback_action_completed.emit(
+                    context.generation, str(game_id), request_id, -2)
+                return None
+            authoritative = self._game_authoritative_state.get(
+                (context.generation, str(game_id)), {})
+            if authoritative.get("status") in _TERMINAL_GAME_STATUSES:
+                self.session_takeback_action_completed.emit(
+                    context.generation, str(game_id), request_id, -2)
+                return None
+            if key in self._pending_actions:
+                return self._pending_actions[key]
+            if any(
+                    pending_key[0] == context.generation
+                    and pending_key[1] == str(game_id)
+                    and "takeback" in GAME_ACTION_CONFLICTS.get(pending_key[2], ())
+                    for pending_key in self._pending_actions):
+                self.session_takeback_action_completed.emit(
+                    context.generation, str(game_id), request_id, -2)
+                return None
+            self._pending_actions[key] = request_id
+            game_key = (context.generation, str(game_id))
+            baseline = dict(self._game_authoritative_state.get(game_key) or {})
+            self._pending_action_states[key] = {
+                "context": context, "baseline": baseline, "status": "in_flight",
+                "confirmed": False, "takeback_action": action,
+            }
+        self.session_action_started.emit(
+            context.generation, request_id, "takeback", str(game_id))
 
         def work():
             status = 0
@@ -48,10 +104,31 @@ class LichessGameActionsMixin:
                 self.client.handle_takeback(token, game_id, accept)
             except Exception as exc:
                 status = exc.status if isinstance(exc, LichessError) and exc.status else -1
+            definitive = status in {-2, 400, 401, 403, 404, 422}
+            with self._pending_action_lock:
+                state = self._pending_action_states.get(key)
+                if state and state.get("context") is context:
+                    if definitive:
+                        self._pending_action_states.pop(key, None)
+                        self._pending_actions.pop(key, None)
+                    else:
+                        state["status"] = "awaiting_authoritative_state"
+                        state["ack_sequence"] = self._game_authoritative_sequence.get(
+                            (context.generation, str(game_id)), 0)
+                        state["ack_state"] = dict(self._game_authoritative_state.get(
+                            (context.generation, str(game_id)), {}))
+                        if state["confirmed"]:
+                            self._pending_action_states.pop(key, None)
+                            self._pending_actions.pop(key, None)
             if self.is_operation_context_current(context):
                 self.session_takeback_action_completed.emit(
                     context.generation, game_id, request_id, status)
                 self.takeback_action_completed.emit(game_id, request_id, status)
+                self.session_action_completed.emit(
+                    context.generation, request_id, "takeback", str(game_id), status)
+                if state and not definitive and state.get("confirmed"):
+                    self.session_action_reconciled.emit(
+                        context.generation, request_id, "takeback", str(game_id))
 
         self._thread(work, "chess-coach-takeback")
 
@@ -78,17 +155,16 @@ class LichessGameActionsMixin:
                 return None
             if key in self._pending_actions:
                 return self._pending_actions[key]
-            if command in {"accept_draw", "decline_draw"} and any(
-                    pending_key[0] == context.generation
-                    and pending_key[1] == str(game_id or "")
-                    and pending_key[2] in {"accept_draw", "decline_draw"}
-                    for pending_key in self._pending_actions):
+            authoritative = self._game_authoritative_state.get(
+                (context.generation, str(game_id or "")), {})
+            if authoritative.get("status") in _TERMINAL_GAME_STATUSES:
                 return None
-            if command == "offer_draw" and any(
-                    pending_key[0] == context.generation
-                    and pending_key[1] == str(game_id or "")
-                    and pending_key[2] in {"accept_draw", "decline_draw"}
-                    for pending_key in self._pending_actions):
+            blocked_by_pending = any(
+                pending_key[0] == context.generation
+                and pending_key[1] == str(game_id or "")
+                and command in GAME_ACTION_CONFLICTS.get(pending_key[2], ())
+                for pending_key in self._pending_actions)
+            if blocked_by_pending:
                 return None
             self._pending_actions[key] = context.request_id
             game_key = (context.generation, str(game_id or ""))
@@ -122,6 +198,8 @@ class LichessGameActionsMixin:
                         state["status"] = "awaiting_authoritative_state"
                         state["ack_sequence"] = self._game_authoritative_sequence.get(
                             (context.generation, str(game_id or "")), 0)
+                        state["ack_state"] = dict(self._game_authoritative_state.get(
+                            (context.generation, str(game_id or "")), {}))
                         if state["confirmed"]:
                             self._pending_action_states.pop(key, None)
                             self._pending_actions.pop(key, None)
@@ -152,6 +230,7 @@ class LichessGameActionsMixin:
         fingerprint = {
             "status": state.get("status"), "moves": str(state.get("moves") or ""),
             "wdraw": state.get("wdraw"), "bdraw": state.get("bdraw"),
+            "wtakeback": state.get("wtakeback"), "btakeback": state.get("btakeback"),
             "turns": state.get("turns"), "color": color,
         }
         context = self.capture_operation_context(game_id=game_id)
@@ -160,26 +239,45 @@ class LichessGameActionsMixin:
         with self._pending_action_lock:
             if context.connection_stop.is_set():
                 return
-            sequence = self._game_authoritative_sequence.get(game_key, 0) + 1
-            self._game_authoritative_sequence[game_key] = sequence
+            previous = self._game_authoritative_state.get(game_key) or {}
+            if (previous.get("status") in _TERMINAL_GAME_STATUSES
+                    and fingerprint.get("status") not in _TERMINAL_GAME_STATUSES):
+                return
+            previous_fingerprint = {key: value for key, value in previous.items()
+                                    if key != "sequence"}
+            fresh = previous_fingerprint != fingerprint
+            sequence = self._game_authoritative_sequence.get(game_key, 0)
+            if fresh:
+                sequence += 1
+                self._game_authoritative_sequence[game_key] = sequence
             fingerprint["sequence"] = sequence
-            self._game_authoritative_state[game_key] = fingerprint
+            if fresh or not previous:
+                self._game_authoritative_state[game_key] = fingerprint
             resolved = []
             for key, action_state in tuple(self._pending_action_states.items()):
                 context = action_state.get("context")
                 if (not context or context.generation != generation
                         or context.game_id != str(game_id)):
                     continue
+                effect_command = context.command
+                if context.command == "takeback":
+                    effect_command = f"takeback_{action_state.get('takeback_action') or 'offer'}"
                 effect_seen = self._action_effect_reconciled(
-                    context.command, action_state.get("baseline") or {}, fingerprint)
-                if (not effect_seen and context.command == "offer_draw"
+                    effect_command, action_state.get("baseline") or {}, fingerprint)
+                if (not effect_seen and fresh and context.command in {"offer_draw", "takeback"}
                         and action_state["status"] == "awaiting_authoritative_state"
                         and sequence > action_state.get("ack_sequence", sequence)
                         and fingerprint.get("status") in {"created", "started", "playing"}):
-                    # A post-ACK authoritative snapshot with the player's draw
-                    # flag absent proves that the offer is no longer pending.
-                    own_flag = "wdraw" if color == "white" else "bdraw"
-                    effect_seen = fingerprint.get(own_flag) is False
+                    ack = action_state.get("ack_state") or {}
+                    before_moves = str(ack.get("moves") or "").split()
+                    after_moves = str(fingerprint.get("moves") or "").split()
+                    if context.command == "offer_draw":
+                        own_flag = "wdraw" if color == "white" else "bdraw"
+                        flag_cleared = (ack.get(own_flag) is True
+                                        and fingerprint.get(own_flag) is False)
+                        line_advanced = len(after_moves) > len(before_moves)
+                        effect_seen = (fingerprint.get(own_flag) is False
+                                       and (flag_cleared or line_advanced))
                 if not effect_seen:
                     continue
                 if action_state["status"] == "in_flight":
@@ -208,6 +306,17 @@ class LichessGameActionsMixin:
             key = "bdraw" if after["color"] == "white" else "wdraw"
             return terminal or (
                 before.get(key) is True and after.get(key) is not True)
+        if command == "takeback_offer":
+            key = "wtakeback" if after["color"] == "white" else "btakeback"
+            return (after.get(key) is True and before.get(key) is not True) or (
+                len(str(after.get("moves") or "").split())
+                < len(str(before.get("moves") or "").split()))
+        if command == "takeback_accept":
+            return terminal or len(str(after.get("moves") or "").split()) < len(
+                str(before.get("moves") or "").split())
+        if command == "takeback_decline":
+            key = "btakeback" if after["color"] == "white" else "wtakeback"
+            return terminal or (before.get(key) is True and after.get(key) is False)
         return False
 
     def open_friend_game(self, color: str, clock_limit: int | None, increment: int = 0, rated: bool = False):
