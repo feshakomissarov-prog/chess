@@ -1,7 +1,7 @@
 # Chess Coach · PR #46 — ЕДИНЫЙ ПАКЕТ АУДИТА И ИСПРАВЛЕНИЙ БЕЗ ПООЧЕРЁДНЫХ МИКРО-ТЗ
 
 **Дата аудита:** 09.11.2026.  
-**Статус:** **SINGLE CONSOLIDATED AUDIT / REQUEST CHANGES / НЕ ПОДТВЕРЖДЕНА РУЧНАЯ ПРИЁМКА.** Этот документ заменяет мелкое отдельное ТЗ «четвёртого ревью». **Не отдавать Codex как «пару новых правок»**: при передаче требуется целиком выполнить всю регрессионную матрицу и сквозную проверку ниже.  
+**Статус:** **SINGLE CONSOLIDATED AUDIT / REQUEST CHANGES / НЕ ПОДТВЕРЖДЕНА РУЧНАЯ ПРИЁМКА.** Этот документ заменяет мелкое отдельное ТЗ «четвёртого ревью». **Не отдавать Codex как «пару новых правок»**: при передаче требуется целиком выполнить всю регрессионную матрицу и сквозную проверку ниже.   **Реальный двухаккаунтный тест Lichess исключён из объёма этого цикла решением владельца; обязательны только симулированные двухсторонние потоки.**
 **Репозиторий:** https://github.com/feshakomissarov-prog/chess  
 **Проверенная ветка:** \`codex/unified-desktop-ux-2026-11-08\`; Draft [PR #46](https://github.com/feshakomissarov-prog/chess/pull/46).  
 **Проверенный итоговый SHA:** \`6fa202f9f2c9ee4be2785684912c4ddf5642a23f\`; кодовый коммит \`eaae8914621ec0159f80797915b2a381e377a09f\`. Перед выполнением проверить fresh HEAD; если поменялся — пересверить каждый пункт.  
@@ -19,6 +19,7 @@
 | **S1** — old/duplicated \`gameState\` после HTTP ACK может снять outgoing offer pending | **НОВЫЙ дефект последнего исправления Codex**: добавлено \`_game_authoritative_sequence\` и условие \`sequence > ack_sequence && own_flag is False\` без проверки содержательной новизны event. Раньше этого fallback не было. | Confirmed code defect |
 | **S2** — текст предложения ничьей перезаписывает финал/ошибку | **НОВЫЙ дефект последнего исправления Codex**: в конец \`_refresh_online\` добавлен unconditional \`game_status.setText\` по draw flags после уже отрисованного terminal/error state. | Confirmed code defect |
 | **S3** — начата сдача, но ещё можно предложить ничью/вернуть ход/заявить ничью | **НОВЫЙ дефект последнего исправления Codex**: старый global pending-lock выключал все команды. Новая командная схема освобождает независимую сдачу от pending offer, **но не выключает прочие конфликтующие действия при pending resign/abort/claim_draw**. | Confirmed code defect / untested cross-command path |
+| **S4** — после отключения Lichess экран игры оставляет доступными онлайн-кнопки и ввод ходов | **УНАСЛЕДОВАНО ИЗ ОСНОВНОЙ ВЕТКИ**: статус соединения сбрасывается, но `_refresh_online` вычисляет `active` только по статусу партии и `awaiting_authoritative_snapshot`, не проверяя готовность онлайн-действий. При `«Не подключено»` приложение прямо вызывает `_refresh_online`, который может снова включить `resign/draw/takeback/claim` и board input. | Confirmed source-level UI/admission defect; воспроизвести offscreen Qt |
 | Первоначальная задержка Home ~30 s и orphan \`QComboBox\` | Возникли из более раннего UX-цикла, **не новая ошибка именно последней LIVE-01 правки**. Исправлены к предыдущему SHA \`e95ba4...\`. | Закрыто по source/CI; пользовательский cold start и второй значок на Windows надо проверить вручную |
 
 **Ответственность:** последние S1–S3 введены последней кодовой правкой; **отдельная ответственность ревьюера** — проверять смежные операции и stream replay сразу, а не после следующего двухчасового запуска Codex. В следующих ревью **НЕ отдавать отдельно по одному пункту**; всё ниже должно быть проверено вместе.
@@ -33,7 +34,7 @@
 - Pending \`offer_draw\` теперь не блокирует кнопку **«Сдаться»**, а \`accept_draw\` и \`decline_draw\` взаимно исключаются в \`LichessService._action\`. Это нужная функциональность; не восстанавливать глобальную блокировку.
 - Точный Windows run [42602284418](https://github.com/feshakomissarov-prog/chess/actions/runs/42602284418): \`test\` и \`visual-evidence\` SUCCESS; по log — **977 passed за 429.74 s**; визуальная artifact создана, но это не side-by-side 13 PNG.
 
-**НЕ подтверждено этим аудитом:** реальный Live матч с двумя аккаунтами (в отчёте \`REAL_LIVE_UNVERIFIED\`), реальный Stockfish binary, first-paint на личной SQLite, Native GUI все 13 экранов, все DPI/размеры. Это не «найденные баги»; это **обязательный acceptance GAP**, который закрывается один раз до merge, а не генерирует бесконечные отдельные ТЗ.
+**НЕ подтверждено этим аудитом:** настоящий Live матч двух аккаунтов (в отчёте `REAL_LIVE_UNVERIFIED`; **отложен владельцем, не блокирует этот цикл**), настоящий Stockfish binary, first-paint на личной SQLite, Native GUI все 13 экранов, все DPI/размеры. Это не автоматически доказанные ошибки. В рамках текущего цикла обязательно покрыть два клиента **симулированными** Lichess event/HTTP trace; реальный двухаккаунтный матч пока не планировать и не просить аккаунты/токены.
 
 ## 2. КОДОВЫЕ ДЕФЕКТЫ: ЕДИНЫЙ ПАКЕТ ДЛЯ ИСПРАВЛЕНИЯ
 
@@ -71,6 +72,17 @@
 
 **Сделать одну явную таблицу конфликтов команд** \`offer_draw, accept_draw, decline_draw, resign, abort, claim_draw, takeback\`, валидировать её тестами как unit и Qt. При server terminal все network actions недоступны.
 
+### S4 [P2] После disconnect активная партия оставляет доступными сетевые кнопки и доску
+
+**Доказательство (унаследованный код):** \`src/chess_coach/window.py::_refresh_online\` вычисляет \`active\` как \`session.status in {"started","playing"} && _screen_mode != "review" && !session.awaiting_authoritative_snapshot\`. \`_online_actions_allowed()\` не учитывается. Затем \`active\` используется в \`board.set_interaction_enabled\`, \`resign_button.setEnabled\`, \`draw_button.setEnabled\`, \`takeback_button.setEnabled\`, \`claim_draw_button.setEnabled\`. В \`_lichess_status("Не подключено")\` соединение объявляется недоступным и **напрямую вызывается** \`_refresh_online\`; сессия может при этом сохранять status=playing и не иметь \`awaiting_authoritative_snapshot\`. Прямые \`resign_online\`/\`handle_draw\` тоже не выполняют свежую connection admission. Этот же расчёт \`active\` и handlers **присутствуют в базовом main commit** \`d94efeb1a03a9ff16026a92aad3db507c758c093\` — **НЕ новая регрессия последнего Codex исправления**.
+
+**Исправить:** разделить \`server_game_active\` (партия по подтверждённому состоянию не завершена) и \`live_actions_allowed\` (серверная партия активна **и** текущие соединение, auth generation, stream readiness, rate-limit, fresh snapshot удовлетворяют уже существующему admission). На disconnect/429/reconnect до нового подтверждённого snapshot **оставить последнюю позицию, историю и часы**, но сделать все сетевые действия и живой ввод ходов недоступными с понятным status/reconnect; **не показывать «Партия завершена» только из-за потери сети**. После подтверждённого восстановления возвращать разрешённые действия. Повторить fencing не только в enabled properties, но и в обработчиках/сервисе перед POST, сохранив атомарные pending-checks, возможность разрешённой независимой сдачи при pending offer (S3) и Fair Play.
+
+**Tests:** active playing + \`_lichess_status("Не подключено")\` → нет enabled network buttons и board input; прямые handlers не делают POST; reconnect без свежего authoritative game snapshot → ещё gated; после stream resync и текущего game state управление вернулось; 429 / auth generation switch — никаких stale action; сохранены история, доска и исходная позиция. Сначала зафиксировать воспроизведение на старом SHA в изолированном Qt test.
+
+---
+
+
 ## 3. ОБЯЗАТЕЛЬНАЯ ПОЛНАЯ МАТРИЦА РЕГРЕССИЙ — В ОДНОМ ЗАПУСКЕ CODEX
 
 **Этот пункт является полным acceptance scope для текущей правки LIVE-01, а не новым экраном.** Критерии проверяются на уровне \`LichessService\`, \`LichessGameSession.apply_event\` и \`MainWindow._refresh_online\` вместе; не ограничиваться одной функцией или позитивным тестом. Стараться применять table-driven tests и один CI run.
@@ -91,7 +103,7 @@
 - Терминальные состояния \`draw, resign, mate, timeout, aborted, outoftime, stalemate\` с любыми \`wdraw/bdraw\` → **финальный результат** и только postgame actions, без текста «ждём ответа» и активных live buttons.
 - При \`awaiting_authoritative_snapshot=True\` и уже существующем старом \`opponent_draw=True\`: приоритет safety-sync, нельзя предлагать принять неподтверждённый оффер.
 - Incoming while looking at move history, Focus, re-entering game via Play, switching to Analysis and back; ни одно реальное предложение не должно быть незаметно потеряно.
-- Исторический сценарий владельца: A предлагает ничью → B видит, не принимает/игра продолжается → B позже предлагает ничью → A видит и отвечает. A может сдаться в допустимом состоянии. Это обязательный **two-account live smoke**, а не только mock.
+- Исторический сценарий владельца: A предлагает ничью → B видит, не принимает/игра продолжается → B позже предлагает ничью → A видит и отвечает; при необходимости A может сдаться. **В этом цикле обязательно проверить на двух моделируемых клиентах и fake-stream/HTTP; реальный матч двух аккаунтов по решению владельца откладывается**.
 
 ### C. Конфликтующие команды
 
@@ -102,6 +114,7 @@
 - Результат после disconnect + online resume, account switch, Game A→Game B: pending не переносится между аккаунтами/партиями/поколениями авторизации.
 - После terminal ни кнопка игры, ни keyboard shortcut, ни вторичный handler не могут отправить новые серверные действия.
 
+- **S4 connectivity:** при disconnect / rate limit 429 / reconnect до fresh stream snapshot в игре с прежним `status=playing` весь network UI и board input блокируются; вызовы handlers напрямую не создают POST; отрисовка не выдаёт disconnect за финал.
 ### D. Проверка внешней семантики Lichess
 
 - [Официальная Board API документация](https://lichess-org.github.io/api/) подтверждает endpoints \`game stream, draw, resign, takeback, claim-draw\` и запрет движковой помощи в активной человеческой партии. Не строить side-channel engine для теста.
@@ -123,18 +136,18 @@
 | Home/performance | Real cold start with saved account and local SQLite, count+top-3 from consistent snapshot, newest games immediately and matched graphs safely preserved, no 30-s stalls. |
 | Regression safety | Active human Fair Play fail closed in all screens, no cached PV/accuracy tooltip or accessibility leak; read-only safe SQLite/PGN/notes; worker stale callbacks; no untracked-file modification. |
 | Responsive visual | **Side-by-side every approved UX-01…UX-13 PNG** against actual Windows Qt screenshot; at 1120×640, 1280×720, 1366×768, DPI 100/125/150; user-perceived overlap/tab order/clickability. |
-| Real integrations | **Actual** Lichess two-account game and local Stockfish binary smoke when authorized; mocks are useful but not equivalent. |
+| Real integrations | **Реальная игра двух Lichess-аккаунтов отложена владельцем**, поэтому в этом цикле обязательны качественные fake-client/integration tests. Реальный Stockfish binary проверять при доступном безопасном стенде, иначе честно оставить НЕПРОВЕРЕНО. Не представлять mocks как реальные сетевые испытания. |
 
 ## 5. ЭТАПЫ И ПОРОГИ ПРИЁМКИ
 
 **Одно поручение, а не серии по паре багов:**
 
 1. Провести необходимый исходный trace и написать **все focused tests** из §3 до/во время исправления. Убедиться, что они падают на старом SHA там, где это возможно и не требует реальной сети.
-2. Исправить S1, S2, S3 с минимальным scope. Полную матрицу §3 выполнить тестами; явно отметить несмоделированные/реальные сценарии.
+2. Исправить **S1–S4** минимальными точечными изменениями. Полную матрицу §3 выполнить тестами; явно отметить все реальные/несмоделированные сценарии, не выдавая им ложный PASS.
 3. После правки **целостно проверить** ВСЕ изменённые механизмы PR, используя таблицу §4 и 68 UX-T cases мастер-ТЗ. При находке дополнительного бага **не останавливать на половине работы и не отправлять новый запрос владельцу**: исправлять в том же рабочем цикле только если это безопасное NOW отклонение, сопровождать proof/regression test.
 4. Повторить полный local pytest, \`compileall\`, \`git diff --check\`, Windows CI **оба jobs на финальном SHA**, включая reporter-only коммит. Никаких auto-merge.
 5. Если доступен настоящий desktop Windows GUI и approved assets, выполнить **native side-by-side 13/13** в этом же цикле, приложить screenshot evidence. В случае отсутствия доступа — **нет права написать «visual QA completed»**.
-6. **Реальный двухсторонний матч** требует авторизованных тестовых аккаунтов Lichess; без них оставить \`REAL_LIVE_UNVERIFIED\` и отдельный план РУЧНОЙ пользовательской проверки, не делать ложный PASS. Это **внешний acceptance gate**, а не повод бесконечно плодить Codex tasks.
+6. **Реальный двухсторонний матч в этом цикле НЕ проводить:** владелец его отложил. Не запрашивать токены, не выходить на настоящий Lichess ради приёмки; тестировать two-client fake stream, disconnect/reconnect и HTTP outcomes, статус `REAL_LIVE_UNVERIFIED (deferred by owner)` честно сохранить. Отсутствие реального матча **не считается блокером** передачи работы владельцу.
 7. Доложить в \`docs/ux/CHESS_COACH_CODEX_IMPLEMENTATION_REPORT.md\` по таблице: \`confirmed bug/fix/new test/results/GUI screenshot/blocked reason\` и **полный список remaining acceptance gates**. PR #46 остаётся draft до ручного утверждения.
 
 **Запрещено:**
@@ -147,6 +160,6 @@
 
 ## 6. ЧЕСТНЫЙ СТАТУС АУДИТА
 
-**Подтверждённых source-дефектов на \`6fa202f...\`: 3 (S1–S3).** Дополнительные сценарии из §3 — **обязательные регрессионные тесты и риск-кейсы, а не фактически обнаруженные отдельные ошибки**. Ошибка «ни одного другого дефекта в коде вообще нет» **НЕ может быть доказана** чтением diff или зелёными 977 тестами. Автор review не имел живых Lichess токенов, личной Windows среды или всех 13 current screenshot side-by-side.
+**Подтверждённых source-дефектов на `6fa202f...`: **4** (S1–S3 — новые после LIVE-01, S4 — старый из основного кода).** Сценарии §3 — обязательные регрессионные тесты и риск-кейсы, **не** доказанные отдельные дефекты. Полное отсутствие всех остальных багов невозможно доказать только статическим review и зелёными 977 tests. Тест двумя реальными аккаунтами отложен пользователем.
 
 До следующего поручения владельцу нужно именно **одно единое техническое задание**, а не четыре раздельные ссылки. **Этот документ и есть единственный нормативный реестр** для следующего прохода; старое мелкое R4 ТЗ больше не пересылать Codex отдельно. Обнаруженные в процессе исправления проблемы должны быть присоединены к этому **одному** списку и закрыты в рамках того же прохождения, если это безопасно.
