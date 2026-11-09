@@ -1,8 +1,10 @@
 from types import SimpleNamespace
+import threading
 
 import chess
 import pytest
 from PySide6.QtCore import QSettings
+from PySide6.QtCore import QStandardPaths
 from PySide6.QtWidgets import QInputDialog
 
 from chess_coach.ui.pages.analysis import AnalysisLandingPage
@@ -651,3 +653,90 @@ def test_play_challenge_invalid_username_is_blocked_before_request(qtbot, tmp_pa
     assert service.calls == []
     assert "2–30" in window._play_mode_page.form_status.text()
     window.close()
+
+
+def test_saved_home_account_is_selected_before_first_dashboard_preview(qtbot, tmp_path,
+                                                                       monkeypatch):
+    settings = QSettings(str(tmp_path / "home-account-first-paint.ini"),
+                         QSettings.Format.IniFormat)
+    settings.setValue("workspace/selected_account", "lichess:test")
+    monkeypatch.setattr(QStandardPaths, "writableLocation",
+                        staticmethod(lambda *_args: str(tmp_path)))
+    preview_calls = []
+    monkeypatch.setattr(MainWindow, "_request_dashboard_preview",
+                        lambda self, generation, account, clock: preview_calls.append(
+                            (generation, account, clock)))
+    monkeypatch.setattr(MainWindow, "_request_dashboard_options", lambda self: None)
+    monkeypatch.setattr(MainWindow, "_launch_dashboard_snapshot", lambda self, *_args: None)
+    window = MainWindow(settings, manual_connect_mode=True)
+    qtbot.addWidget(window)
+    assert window.dashboard_account.currentData() == "lichess:test"
+    assert window.dashboard_account.currentText().casefold() == "test"
+
+    release = threading.Event()
+    slow_aggregate = threading.Thread(target=release.wait)
+    slow_aggregate.start()
+    window._dashboard_thread = slow_aggregate
+    try:
+        window._refresh_home_dashboard()
+        assert preview_calls[-1][1] == "lichess:test"
+        assert window.dashboard_queries.take_pending()[1] == "lichess:test"
+    finally:
+        release.set()
+        slow_aggregate.join(timeout=1)
+        window._dashboard_thread = None
+        window.close()
+
+
+def test_scoped_preview_paints_while_aggregate_is_blocked_and_stale_scope_is_rejected(
+        qtbot, tmp_path, monkeypatch):
+    settings = QSettings(str(tmp_path / "home-fast-preview.ini"), QSettings.Format.IniFormat)
+    settings.setValue("workspace/selected_account", "lichess:test")
+    monkeypatch.setattr(QStandardPaths, "writableLocation",
+                        staticmethod(lambda *_args: str(tmp_path)))
+    monkeypatch.setattr(MainWindow, "_refresh_home_dashboard", lambda _self: None)
+    window = MainWindow(settings, manual_connect_mode=True)
+    qtbot.addWidget(window)
+    window.show()
+    qtbot.wait(10)
+
+    release = threading.Event()
+    slow_aggregate = threading.Thread(target=release.wait)
+    slow_aggregate.start()
+    window._dashboard_thread = slow_aggregate
+    generation = window.dashboard_queries.begin_request()
+    window._dashboard_preview_operation_id = "fixture-preview"
+    preview = {
+        "is_preview": True,
+        "filter": {"account_id": "lichess:test", "clock": None},
+        "metrics": [
+            {"key": "games", "value": "37", "detail": "Локальные записи SQLite", "source": "SQLite"},
+            {"key": "accuracy", "value": "—", "detail": "Загружается", "source": "SQLite"},
+            {"key": "analysis", "value": "—", "detail": "Загружается", "source": "SQLite"},
+            {"key": "errors", "value": "—", "detail": "Загружается", "source": "SQLite"},
+        ],
+        "recent_games": [], "puzzle_player_rating": {}, "activity_trend": [],
+    }
+    try:
+        window._dashboard_preview_result_ready(generation, preview, None, "fixture-preview")
+        qtbot.waitUntil(lambda: window._dashboard_metric_values["games"].text() == "37")
+        window._nav_buttons["analysis"].click()
+        qtbot.waitUntil(lambda: window.screen_stack.currentWidget() is window.analysis_page)
+
+        stale_rendered = []
+        refreshes = []
+        monkeypatch.setattr(window, "_render_dashboard_snapshot",
+                            lambda snapshot: stale_rendered.append(snapshot))
+        monkeypatch.setattr(window, "_refresh_home_dashboard", lambda: refreshes.append(True))
+        window.show_home()
+        refreshes.clear()
+        window._dashboard_preview_operation_id = "stale-preview"
+        stale = {**preview, "filter": {"account_id": "lichess:other", "clock": None}}
+        window._dashboard_preview_result_ready(generation, stale, None, "stale-preview")
+        assert refreshes == [True]
+        assert stale_rendered == []
+    finally:
+        release.set()
+        slow_aggregate.join(timeout=1)
+        window._dashboard_thread = None
+        window.close()

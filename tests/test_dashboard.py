@@ -140,12 +140,65 @@ def test_dashboard_preview_returns_committed_local_rows_without_waiting_for_queu
             "Preview One", "Preview Two"}
         assert all(row["review_metrics"]["status"] == "loading"
                    for row in preview["recent_games"])
-        # Stored puzzle rating is already local and cheap to read; it should not
-        # disappear while the account-wide SQL summaries are being assembled.
+        # Puzzle history is intentionally deferred with other heavier derived
+        # data; the bounded preview only reads count and recent neutral rows.
         account_id = repo.ensure_archive_account("preview-user")
         repo.save_puzzle_player_rating(account_id, [[2026, 10, 6, 1675]])
         scoped = dashboard_preview_snapshot(repo, account_id=account_id)
-        assert scoped["puzzle_player_rating"]["latest"] == 1675
+        assert scoped["puzzle_player_rating"] == {}
+    finally:
+        repo.shutdown()
+
+
+def test_dashboard_preview_large_scoped_fixture_is_bounded_and_does_not_load_pgn(tmp_path):
+    repo = GameRepository(tmp_path / "dashboard-large.sqlite3")
+    try:
+        account_id = repo.ensure_archive_account("large-preview")
+        rows = []
+        links = []
+        for index in range(3000):
+            game_id = f"large-{index:04d}"
+            timestamp = f"2026-10-{(index % 28) + 1:02d}T12:00:00Z"
+            rows.append((game_id, "startpos", "", "white", "Fixture", 0, "5+0",
+                         "mate", "white", timestamp, "pgn-must-not-be-read",
+                         "Me", "Fixture", timestamp, "timestamp", "lichess_archive",
+                         1, 1760000000000 + index, "C20", "King's Pawn"))
+            links.append((account_id, game_id, f"remote-{index}", timestamp,
+                          "Fixture", "Me", "white"))
+        with repo._connection() as db:
+            db.executemany(
+                "INSERT INTO games(game_id,initial_fen,moves,color,opponent,rated,clock,status,"
+                "winner,updated_at,pgn,white_player,black_player,started_at,game_time_precision,"
+                "source,line_revision,last_move_at,opening_eco,opening_name) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)", rows)
+            db.executemany(
+                "INSERT INTO account_games(account_id,game_id,remote_id,imported_at,opponent,"
+                "player_name,color) VALUES (?,?,?,?,?,?,?)", links)
+
+        repo.puzzle_player_rating = lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("preview must defer puzzle analytics"))
+        repo.puzzle_rating_trend = lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("preview must defer puzzle trend"))
+        scoped = dashboard_preview_snapshot(repo, account_id=account_id)
+        unscoped = dashboard_preview_snapshot(repo)
+        metric = next(item for item in scoped["metrics"] if item["key"] == "games")
+        assert metric["value"] == "3000"
+        assert len(scoped["recent_games"]) == 3
+        assert len({game["game_id"] for game in scoped["recent_games"]}) == 3
+        assert scoped["recent_games"][0]["game_id"] == "large-2999"
+        assert all("pgn" not in game and "moves" not in game
+                   for game in scoped["recent_games"])
+        assert next(item for item in unscoped["metrics"] if item["key"] == "games")["value"] == "3000"
+
+        with repo._connection() as db:
+            count_plan = db.execute(
+                "EXPLAIN QUERY PLAN SELECT COUNT(*) FROM games g JOIN account_games ag "
+                "ON ag.game_id=g.game_id WHERE g.status NOT IN "
+                "('created','started','started_soon','playing') AND ag.account_id=?",
+                (account_id,)).fetchall()
+        plan_text = " ".join(str(tuple(row)) for row in count_plan)
+        assert "account_games" in plan_text
+        assert "account_id" in plan_text
     finally:
         repo.shutdown()
 

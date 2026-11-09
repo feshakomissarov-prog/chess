@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import threading
+import time
 
 from typing import Any
 
 from ..domain.accuracy import FORMULA_ID
 from ..lichess.game_review import load_game_review
 from ..lichess.statistics import StatisticsService
+from ..diagnostics import log_event
 
 
 _COMPLETED = "('created','started','started_soon','playing')"
@@ -79,17 +81,27 @@ def dashboard_preview_snapshot(repository, *, account_id: str | None = None,
                       "THEN unixepoch(substr(g.started_at,1,10)) ELSE NULL END")
     if stop_event is not None and stop_event.is_set():
         raise RuntimeError("dashboard preview superseded")
+    sql_started = time.perf_counter()
     with repository._connection() as db:
         db.set_progress_handler(
             lambda: 1 if stop_event is not None and stop_event.is_set() else 0, 1000)
         db.execute("PRAGMA busy_timeout=250")
-        total = int(db.execute(f"SELECT COUNT(DISTINCT g.game_id) FROM games g{join} "
+        total = int(db.execute(f"SELECT COUNT(*) FROM games g{join} "
                                f"WHERE {where}", params).fetchone()[0] or 0)
+        count_ms = int((time.perf_counter() - sql_started) * 1000)
+        rows_started = time.perf_counter()
         rows = db.execute(
-            f"SELECT g.*, {opponent}, {player}, {color_value} FROM games g{join} "
+            f"SELECT g.game_id,g.status,g.winner,g.opponent,g.color,g.started_at,"
+            f"g.updated_at,g.last_move_at,g.game_time_precision,g.clock,g.opening_eco,"
+            f"g.opening_name,g.line_revision,{opponent},{player},{color_value} FROM games g{join} "
             f"WHERE {where} ORDER BY ({activity_epoch}) IS NULL,{activity_epoch} DESC,"
             "g.game_id DESC LIMIT 3", params).fetchall()
+        rows_ms = int((time.perf_counter() - rows_started) * 1000)
         db.set_progress_handler(None, 0)
+    log_event("dashboard_preview_sql", "dashboard", stage="count", duration_ms=count_ms,
+              count=total, status="ok")
+    log_event("dashboard_preview_sql", "dashboard", stage="recent_rows",
+              duration_ms=rows_ms, count=len(rows), status="ok")
     if stop_event is not None and stop_event.is_set():
         raise RuntimeError("dashboard preview superseded")
     games = []
@@ -111,12 +123,8 @@ def dashboard_preview_snapshot(repository, *, account_id: str | None = None,
         {"key": "errors", "label": "Ошибки на 100 оценённых ходов", "value": "—",
          "detail": "Подготавливаем статистику ходов…", "source": "SQLite"},
     ]
-    puzzle_rating = (repository.puzzle_player_rating(account_id)
-                     if account_id and hasattr(repository, "puzzle_player_rating") else {})
-    activity_trend = (repository.puzzle_rating_trend(account_id, limit=6)
-                      if account_id and hasattr(repository, "puzzle_rating_trend") else [])
     return {"metrics": metrics, "recent_games": games,
-            "puzzle_player_rating": puzzle_rating, "activity_trend": activity_trend,
+            "puzzle_player_rating": {}, "activity_trend": [],
             "scope": scope,
             "filter": {"account_id": account_id, "clock": clock}, "is_preview": True}
 
@@ -186,6 +194,7 @@ def dashboard_snapshot(repository, *, account_id: str | None = None,
     """
     if wait_for_writes:
         repository._wait_before_read()
+    aggregate_sql_started = time.perf_counter()
     join = " JOIN account_games ag ON ag.game_id=g.game_id " if account_id else ""
     color = "ag.color" if account_id else "g.color"
     clauses = [f"g.status NOT IN {_COMPLETED}"]
@@ -275,8 +284,16 @@ def dashboard_snapshot(repository, *, account_id: str | None = None,
         "COUNT(CASE WHEN has_lichess THEN 1 END) lichess "
             "FROM game_coverage", run_params).fetchone()
 
+    log_event("dashboard_aggregate_sql", "dashboard", stage="core_aggregates",
+              duration_ms=int((time.perf_counter() - aggregate_sql_started) * 1000),
+              status="ok")
+
+    summary_started = time.perf_counter()
     summary = StatisticsService(repository).summary(
         account_id=account_id, clock=clock, wait_for_writes=wait_for_writes)
+    log_event("dashboard_aggregate_sql", "dashboard", stage="statistics_summary",
+              duration_ms=int((time.perf_counter() - summary_started) * 1000),
+              status="ok")
     activity_trend = (repository.puzzle_rating_trend(account_id, limit=6)
                       if account_id and hasattr(repository, "puzzle_rating_trend") else [])
     total = int(row["games"] or 0)
@@ -329,8 +346,12 @@ def dashboard_snapshot(repository, *, account_id: str | None = None,
                                      order_by_game_time=True,
                                      wait_for_writes=wait_for_writes)
     games = [dict(game) for game in recent["items"]]
+    cards_started = time.perf_counter()
     for game in games:
         game["review_metrics"] = game_card_metrics(repository, game)
+    log_event("dashboard_aggregate_sql", "dashboard", stage="recent_game_metrics",
+              duration_ms=int((time.perf_counter() - cards_started) * 1000),
+              count=len(games), status="ok")
     return {"metrics": metrics, "recent_games": games,
             "puzzle_player_rating": repository.puzzle_player_rating(account_id) if account_id else {},
             "activity_trend": activity_trend,

@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
+import time
+
+from ..diagnostics import log_event
 
 
 class GameLibraryQueryCoordinator:
@@ -19,7 +22,8 @@ class GameLibraryQueryCoordinator:
         if period_days:
             updated_after = (datetime.now(timezone.utc)
                              - timedelta(days=period_days)).isoformat()
-        return self.repository.search_games(
+        started = time.perf_counter()
+        result = self.repository.search_games(
             values.get("query", ""), page=max(0, int(page)),
             page_size=self.page_size, completed_only=True,
             account_id=values.get("account_id"), source=values.get("source"),
@@ -27,4 +31,8 @@ class GameLibraryQueryCoordinator:
             opponent=values.get("opponent"), opening=values.get("opening"),
             outcome=values.get("outcome"), analysis=values.get("analysis"),
             analysis_source=values.get("analysis_source"), updated_after=updated_after,
-            order_by_game_time=True)
+            order_by_game_time=True, wait_for_writes=False)
+        log_event("library_preview_sql", "library", stage="page",
+                  duration_ms=int((time.perf_counter() - started) * 1000),
+                  count=len(result.get("items", [])), status="ok")
+        return result

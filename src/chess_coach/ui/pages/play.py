@@ -103,7 +103,8 @@ class PlayPage(QWidget):
         layout.setSpacing(8)
         self.content_scroll.setWidget(self.content)
         root_layout.addWidget(self.content_scroll, 1)
-        self.mode_selector = QComboBox()
+        self.mode_selector = QComboBox(self)
+        self.mode_selector.hide()
         for label, value in (("Lichess AI", "ai"), ("Друг по ссылке", "friend"),
                              ("Вызвать игрока", "challenge"),
                              ("Свободная доска", "local"),
@@ -112,7 +113,7 @@ class PlayPage(QWidget):
             self.mode_selector.addItem(label, value)
         self.username = QLineEdit()
         self.username.setPlaceholderText("Имя пользователя Lichess")
-        self.color = QComboBox()
+        self.color = QComboBox(self)
         for label, value in (("Случайный цвет", "random"), ("Белыми", "white"),
                              ("Чёрными", "black")):
             self.color.addItem(label, value)
@@ -277,6 +278,7 @@ class PlayPage(QWidget):
         self.mode_selector.setCurrentIndex(mode_index)
         self._last_mode = str(self.mode_selector.currentData() or "ai")
         self._restore_mode_preferences(self._last_mode)
+        self._sync_color_buttons()
         self.mode_selector.currentIndexChanged.connect(self._mode_changed)
         self.clock.currentIndexChanged.connect(self._clock_changed)
         self.color.currentIndexChanged.connect(lambda *_: self._save_mode_preferences())
@@ -450,6 +452,7 @@ class PlayPage(QWidget):
         if mode == "challenge":
             self.username.setText(str(self.settings.value(prefix + "username", "", type=str)))
         del blockers
+        self._sync_color_buttons()
 
     def _clock_changed(self, *_args) -> None:
         mode = str(self.mode_selector.currentData() or "ai")
@@ -467,7 +470,9 @@ class PlayPage(QWidget):
         for card in getattr(self, "cards", ()):
             card.setVisible(True)
         online = mode in {"ai", "friend", "challenge"}
-        self.color.setVisible(online)
+        # Compatibility state model only. The visible controls are the radio
+        # buttons in color_control; a parentless combo here becomes a window.
+        self.color.hide()
         self.color_control.setVisible(online)
         self.clock.setVisible(online)
         self.form_rows["Ваш цвет"].setVisible(online)

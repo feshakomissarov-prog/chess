@@ -5,7 +5,7 @@ from types import SimpleNamespace
 from PySide6.QtCore import QPoint, Qt
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import (QApplication, QMainWindow, QPushButton, QScrollArea,
-                               QStackedWidget, QVBoxLayout, QWidget)
+                               QStackedWidget, QVBoxLayout, QWidget, QComboBox)
 
 from chess_coach.ui.pages import LibraryPage, PlayPage, ResultPage
 from chess_coach.ui.pages.analysis import AnalysisLandingPage
@@ -73,6 +73,7 @@ def test_play_preferences_are_saved_per_mode_and_restored(qtbot, tmp_path):
     qtbot.addWidget(restored)
     assert restored.mode_selector.currentData() == "ai"
     assert restored.color.currentData() == "black"
+    assert {value for value, button in restored.color_buttons.items() if button.isChecked()} == {"black"}
     assert restored.clock.currentData() == (300, 0)
     assert restored.level.currentData() == 8
     restored.select_mode("friend")
@@ -81,6 +82,48 @@ def test_play_preferences_are_saved_per_mode_and_restored(qtbot, tmp_path):
     assert restored.rated.isChecked()
     restored.select_mode("challenge")
     assert restored.username.text() == "ExampleOpponent"
+
+
+def test_play_state_combos_never_create_orphan_windows_and_radio_stays_synced(qtbot, tmp_path):
+    settings = QSettings(str(tmp_path / "play-color-sync.ini"), QSettings.Format.IniFormat)
+    settings.setValue("play/modes/ai/color", "random")
+    settings.setValue("play/modes/friend/color", "white")
+    settings.setValue("play/modes/challenge/color", "black")
+    page = PlayPage({}, settings=settings)
+    qtbot.addWidget(page)
+    page.show()
+
+    assert page.color.parent() is page
+    assert page.mode_selector.parent() is page
+    for mode, expected_color in (("ai", "random"), ("friend", "white"),
+                                 ("challenge", "black"), ("local", "black"),
+                                 ("ai", "random")):
+        page.select_mode(mode)
+        assert not page.color.isVisible()
+        assert not page.color.isWindow()
+        assert not page.mode_selector.isVisible()
+        assert not page.mode_selector.isWindow()
+        assert page.color.currentData() == expected_color
+        assert {value for value, button in page.color_buttons.items()
+                if button.isChecked()} == {expected_color}
+        assert page.color_control.isVisible() is (mode != "local")
+        assert page.color not in QApplication.topLevelWidgets()
+        assert page.mode_selector not in QApplication.topLevelWidgets()
+
+    page.color_buttons["black"].click()
+    assert page.color.currentData() == "black"
+    assert {value for value, button in page.color_buttons.items() if button.isChecked()} == {"black"}
+    assert not [widget for widget in QApplication.topLevelWidgets()
+                if isinstance(widget, QComboBox)
+                and widget.currentText() == "Случайный цвет" and widget.isVisible()]
+
+    requests = []
+    page.create_requested.connect(requests.append)
+    page.select_mode("ai")
+    page.color_buttons["black"].click()
+    page.start_button.click()
+    assert len(requests) == 1
+    assert requests[0]["color"] == "black"
 
 
 def test_play_page_mode_cards_only_select_and_explicit_button_starts(qtbot):

@@ -6529,12 +6529,13 @@ def test_home_shows_local_archive_preview_while_full_dashboard_aggregate_is_pend
 
     monkeypatch.setattr(window.dashboard_queries, "snapshot", delayed_aggregate)
     try:
+        previous_accuracy = window._dashboard_metric_values["accuracy"].text()
         window._refresh_home_dashboard()
         qtbot.waitUntil(aggregate_entered.is_set, timeout=5000)
         qtbot.waitUntil(lambda: window._dashboard_metric_values["games"].text() == "2500",
                         timeout=5000)
         assert window._dashboard_thread is not None and window._dashboard_thread.is_alive()
-        assert window._dashboard_metric_values["accuracy"].text() == "—"
+        assert window._dashboard_metric_values["accuracy"].text() == previous_accuracy
         recent_cards = [window._home_view._recent_games_layout.itemAt(index).widget()
                         for index in range(window._home_view._recent_games_layout.count())
                         if window._home_view._recent_games_layout.itemAt(index).widget()
@@ -6555,11 +6556,13 @@ def test_home_account_switch_preview_is_not_queued_behind_old_full_snapshot(
     from time import monotonic
     from concurrent.futures import ThreadPoolExecutor
     from chess_coach.bootstrap import create_runtime
+    import chess_coach.window as window_module
 
     runtime = create_runtime(offline_mode=True)
     window = MainWindow(runtime=runtime)
     qtbot.addWidget(window)
     qtbot.waitUntil(lambda: window._dashboard_thread is None, timeout=10000)
+    qtbot.waitUntil(lambda: window._dashboard_options_loaded, timeout=10000)
     repo = runtime.repository
     repo._writer = ThreadPoolExecutor(max_workers=1, thread_name_prefix="preview-test-writer")
     account_a = repo.ensure_archive_account("preview-a")
@@ -6579,9 +6582,25 @@ def test_home_account_switch_preview_is_not_queued_behind_old_full_snapshot(
               "2026-11-06T12:00:00Z", "white", f"Opponent {i}")
              for i in range(3500)])
 
+    # Prevent the pending first selector-options response from replacing these
+    # fixture accounts; this test owns the scoped selector during the switch.
+    window._dashboard_options_loaded = True
+    from chess_coach.application.dashboard import dashboard_preview_snapshot
+    assert dashboard_preview_snapshot(repo, account_id=account_b)["metrics"][0]["value"] == "3500"
+
     old_started, release_old = threading.Event(), threading.Event()
     writer_started, release_writer = threading.Event(), threading.Event()
     original_snapshot = window.dashboard_queries.snapshot
+    preview_results = []
+    original_preview = window_module.dashboard_preview_snapshot
+
+    def record_preview(repository, **kwargs):
+        result = original_preview(repository, **kwargs)
+        preview_results.append((kwargs.get("account_id"),
+                                result["metrics"][0]["value"]))
+        return result
+
+    monkeypatch.setattr(window_module, "dashboard_preview_snapshot", record_preview)
 
     def slow_writer_barrier():
         writer_started.set()
@@ -6608,6 +6627,9 @@ def test_home_account_switch_preview_is_not_queued_behind_old_full_snapshot(
         assert window._dashboard_metric_values["games"].text() != "0"
         started = monotonic()
         window._refresh_home_dashboard()
+        qtbot.waitUntil(lambda: any(scope == account_b for scope, _count in preview_results),
+                        timeout=2_000)
+        assert preview_results[-1] == (account_b, "3500"), preview_results
         qtbot.waitUntil(lambda: window._dashboard_metric_values["games"].text() == "3500",
                         timeout=2_000)
         assert monotonic() - started < 2.0

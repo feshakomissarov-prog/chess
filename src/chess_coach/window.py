@@ -400,6 +400,7 @@ class MainWindow(QMainWindow):
     position_eval_update = Signal(int, object)
     dashboard_finished = Signal(int, object, object, object)
     dashboard_preview_ready = Signal(int, object, object, str)
+    dashboard_options_ready = Signal(object)
     library_query_finished = Signal(int, object, object)
     library_target_finished = Signal(int, str, object, object)
     library_detail_finished = Signal(int, str, object, object)
@@ -443,6 +444,11 @@ class MainWindow(QMainWindow):
         runtime: ApplicationRuntime | None = None,
     ) -> None:
         super().__init__()
+        self._ui_bootstrap_started_at = time.perf_counter()
+        self._main_window_shown_at: float | None = None
+        self._dashboard_first_count_paint = False
+        self._dashboard_first_games_paint = False
+        self._dashboard_initial_refresh_at: float | None = None
         if offline_mode and manual_connect_mode:
             raise ValueError("--offline и --manual-connect нельзя включить одновременно")
         if settings is not None and runtime is not None and settings is not runtime.settings:
@@ -640,6 +646,7 @@ class MainWindow(QMainWindow):
         self.position_eval_update.connect(self._position_eval_update)
         self.dashboard_finished.connect(self._dashboard_result_ready)
         self.dashboard_preview_ready.connect(self._dashboard_preview_result_ready)
+        self.dashboard_options_ready.connect(self._dashboard_options_result_ready)
         self.library_query_finished.connect(self._library_query_result_ready)
         self.library_target_finished.connect(self._library_target_result_ready)
         self.library_detail_finished.connect(self._library_detail_result_ready)
@@ -1072,6 +1079,9 @@ class MainWindow(QMainWindow):
             self._set_connection_header("Профиль недоступен", "Ошибка локального профиля; сеть и партия не сбрасываются.")
             return
         account_id = payload["account_id"]
+        started = getattr(self, "_archive_account_started_at", time.perf_counter())
+        log_event("dashboard_stage", "dashboard", stage="account_restoration",
+                  duration_ms=int((time.perf_counter() - started) * 1000), status="ok")
         self._archive_account_ready_generation = generation
         self._home_view.select_profile(account_id, notify=False)
         self._refresh_home_dashboard()
@@ -2287,6 +2297,15 @@ class MainWindow(QMainWindow):
         self._layout_play_mode_cards()
         self._schedule_workspace_save()
 
+    def showEvent(self, event) -> None:  # noqa: N802 - Qt override
+        super().showEvent(event)
+        if self._main_window_shown_at is None:
+            self._main_window_shown_at = time.perf_counter()
+            log_event("dashboard_stage", "dashboard", stage="bootstrap_ui",
+                      duration_ms=int((self._main_window_shown_at -
+                                       self._ui_bootstrap_started_at) * 1000),
+                      status="shown")
+
     def _apply_header_responsive(self) -> None:
         if not hasattr(self, "header_widget"):
             return
@@ -3197,6 +3216,11 @@ class MainWindow(QMainWindow):
     def _refresh_home_dashboard(self) -> None:
         if not hasattr(self, "_dashboard_metric_values"):
             return
+        selection_started = time.perf_counter()
+        preferred = str(self.settings.value("workspace/selected_account", "", type=str))
+        current_account = self.dashboard_account.currentData()
+        if current_account is None and preferred.startswith("lichess:"):
+            self._home_view.select_profile(preferred, notify=False)
         account_id = self.dashboard_account.currentData() if hasattr(self, "dashboard_account") else None
         if account_id is None and hasattr(self, "dashboard_account"):
             preferred = str(self.settings.value("workspace/selected_account", "", type=str))
@@ -3207,12 +3231,19 @@ class MainWindow(QMainWindow):
                         account_id = self.dashboard_account.itemData(index)
                         break
         clock = None
+        log_event("dashboard_stage", "dashboard", stage="initial_account_selection",
+                  duration_ms=int((time.perf_counter() - selection_started) * 1000),
+                  status="scoped" if account_id else "all_accounts")
         generation = self.dashboard_queries.begin_request()
+        if self._dashboard_initial_refresh_at is None:
+            self._dashboard_initial_refresh_at = time.perf_counter()
         self._dashboard_full_rendered_generation = None
         for detail in self._dashboard_metric_details.values():
             if detail.text() in {"Локальные данные", "Обновляем локальную сводку…"}:
                 detail.setText("Обновляем локальную сводку…")
         self._request_dashboard_preview(generation, account_id, clock)
+        if not self._dashboard_options_loaded:
+            self._request_dashboard_options()
         if self._dashboard_thread is not None and self._dashboard_thread.is_alive():
             self.dashboard_queries.defer((generation, account_id, clock))
             return
@@ -3232,20 +3263,25 @@ class MainWindow(QMainWindow):
 
         operation_id = uuid.uuid4().hex
         self._dashboard_preview_operation_id = operation_id
+        log_event("dashboard_stage", "dashboard", stage="preview_submitted", status="ok")
 
         def work():
+            submitted = time.perf_counter()
             preview: dict = {"_preview_cancelled": True}
             try:
                 preview = dashboard_preview_snapshot(
                     self.game_repository, account_id=account_id, clock=clock,
                     stop_event=stop_event)
-                if not self._dashboard_options_loaded:
-                    preview["_selector_options"] = dashboard_options(self.game_repository)
             except Exception as exc:
                 preview = ({"_preview_cancelled": True} if stop_event.is_set()
                            else {"_preview_error": type(exc).__name__})
             if stop_event.is_set():
                 preview = {"_preview_cancelled": True}
+            log_event("dashboard_stage", "dashboard", stage="preview_result_ready",
+                      duration_ms=int((time.perf_counter() - submitted) * 1000),
+                      count=len(preview.get("recent_games", [])),
+                      status="cancelled" if preview.get("_preview_cancelled") else
+                      "error" if preview.get("_preview_error") else "ok")
             self.dashboard_preview_ready.emit(
                 generation, preview, threading.current_thread(), operation_id)
 
@@ -3257,6 +3293,35 @@ class MainWindow(QMainWindow):
         # if that operation still owns the slot.
         if self._dashboard_preview_operation_id == operation_id:
             self._dashboard_preview_thread = handle
+
+    def _request_dashboard_options(self) -> None:
+        if getattr(self, "_dashboard_options_loading", False):
+            return
+        self._dashboard_options_loading = True
+
+        def work() -> None:
+            try:
+                options, status = dashboard_options(self.game_repository), "ok"
+            except Exception:
+                options, status = None, "error"
+            log_event("dashboard_stage", "dashboard", stage="selector_options", status=status)
+            self.dashboard_options_ready.emit(options)
+
+        self._start_registered_work(
+            work, kind="dashboard_options_read", lane=OperationLane.INTERACTIVE,
+            thread_name="chess-coach-dashboard-options")
+
+    def _dashboard_options_result_ready(self, options: object) -> None:
+        self._dashboard_options_loading = False
+        if self._shutdown_requested or not isinstance(options, dict):
+            return
+        previous = self.dashboard_account.currentData()
+        self._home_view.set_selector_options(options)
+        self._dashboard_options_loaded = True
+        if self.dashboard_account.currentData() != previous:
+            # A new selector value is a new data scope. Start a fresh bounded
+            # preview; it must not wait behind a running aggregate.
+            self._refresh_home_dashboard()
 
     def _clear_dashboard_scope(self, message: str) -> None:
         """Immediately remove previous-account dashboard values during a switch."""
@@ -3279,15 +3344,18 @@ class MainWindow(QMainWindow):
 
     def _launch_dashboard_snapshot(self, generation: int, account_id: str | None,
                                    clock: str | None) -> None:
+        log_event("dashboard_stage", "dashboard", stage="aggregate_submitted", status="ok")
         def work():
+            started = time.perf_counter()
             try:
                 result = self.dashboard_queries.snapshot(
                     account_id=account_id, clock=clock, query=dashboard_snapshot)
-                if not self._dashboard_options_loaded:
-                    result["_selector_options"] = dashboard_options(self.game_repository)
                 error = None
             except Exception as exc:
                 result, error = None, exc
+            log_event("dashboard_stage", "dashboard", stage="aggregate_ready",
+                      duration_ms=int((time.perf_counter() - started) * 1000),
+                      status="error" if error is not None else "ok")
             self.dashboard_finished.emit(generation, result, error, threading.current_thread())
         thread = self._start_registered_work(
             work, kind="dashboard_read", lane=OperationLane.NETWORK_BACKGROUND,
@@ -3324,18 +3392,35 @@ class MainWindow(QMainWindow):
         if snapshot.get("_preview_error"):
             self._launch_pending_dashboard_preview()
             return
-        selector_options = snapshot.get("_selector_options")
-        if isinstance(selector_options, dict):
-            self._home_view.set_selector_options(selector_options)
-            self._dashboard_options_loaded = True
         if self.dashboard_account.currentData() != snapshot.get("filter", {}).get("account_id"):
-            self._launch_pending_dashboard_preview()
+            self._refresh_home_dashboard()
             return
         if self._dashboard_full_rendered_generation == generation:
             self._launch_pending_dashboard_preview()
             return
+        render_started = time.perf_counter()
         self._render_dashboard_snapshot(snapshot)
+        self._log_dashboard_first_paint(snapshot, render_started)
         self._launch_pending_dashboard_preview()
+
+    def _log_dashboard_first_paint(self, snapshot: dict, render_started: float) -> None:
+        now = time.perf_counter()
+        visible_at = self._main_window_shown_at or self._ui_bootstrap_started_at
+        recent_count = len(snapshot.get("recent_games") or [])
+        if not self._dashboard_first_count_paint:
+            self._dashboard_first_count_paint = True
+            count_value = next((m.get("value") for m in snapshot.get("metrics", [])
+                                if m.get("key") == "games"), "0")
+            count = int(count_value) if str(count_value).isdigit() else 0
+            log_event("dashboard_first_paint", "dashboard", stage="count_first_paint",
+                      duration_ms=int((now - visible_at) * 1000), count=count, status="ok")
+        if recent_count and not self._dashboard_first_games_paint:
+            self._dashboard_first_games_paint = True
+            log_event("dashboard_first_paint", "dashboard", stage="last_game_first_paint",
+                      duration_ms=int((now - visible_at) * 1000), count=recent_count, status="ok")
+        log_event("dashboard_stage", "dashboard", stage="preview_rendered",
+                  duration_ms=int((time.perf_counter() - render_started) * 1000),
+                  count=recent_count, status="ok")
 
     def _launch_pending_dashboard_preview(self) -> None:
         pending, self._dashboard_preview_pending = self._dashboard_preview_pending, None
@@ -3368,34 +3453,45 @@ class MainWindow(QMainWindow):
                 for detail in self._dashboard_metric_details.values():
                     detail.setText("Не удалось прочитать локальные данные. Повторите обновление.")
             elif isinstance(snapshot, dict):
-                selector_options = snapshot.get("_selector_options")
-                if isinstance(selector_options, dict):
-                    self._home_view.set_selector_options(selector_options)
-                    self._dashboard_options_loaded = True
                 if (self.dashboard_account.currentData()
                         != snapshot.get("filter", {}).get("account_id")):
                     self._refresh_home_dashboard()
                 else:
                     self._dashboard_full_rendered_generation = generation
                     self._render_dashboard_snapshot(snapshot)
+                    shown_at = self._main_window_shown_at or self._ui_bootstrap_started_at
+                    log_event("dashboard_stage", "dashboard", stage="full_metrics_ready",
+                              duration_ms=int((time.perf_counter() - shown_at) * 1000),
+                              status="ok")
         pending = self.dashboard_queries.take_pending()
         if pending is not None and not self._shutdown_requested:
             self._launch_dashboard_snapshot(*pending)
 
     def _render_dashboard_snapshot(self, snapshot: dict) -> None:
-        self._latest_dashboard_snapshot = snapshot
+        previous_snapshot = self._latest_dashboard_snapshot
+        scope = snapshot.get("filter") or {}
+        previous_scope = (previous_snapshot or {}).get("filter") or {}
         preview = bool(snapshot.get("is_preview"))
+        preserve_aggregate = bool(
+            preview and previous_snapshot and not previous_snapshot.get("is_preview")
+            and scope.get("account_id") == previous_scope.get("account_id")
+            and scope.get("clock") == previous_scope.get("clock"))
+        if not preserve_aggregate:
+            self._latest_dashboard_snapshot = snapshot
         trend = snapshot.get("activity_trend") or []
         puzzle_rating = snapshot.get("puzzle_player_rating") or {}
-        self._home_view.puzzle_rating.setText(str(puzzle_rating.get("latest", "—")))
-        self._home_view.puzzle_sparkline.set_points(puzzle_rating.get("points") or [])
-        if puzzle_rating:
+        if not preview:
+            self._home_view.puzzle_rating.setText(str(puzzle_rating.get("latest", "—")))
+            self._home_view.puzzle_sparkline.set_points(puzzle_rating.get("points") or [])
+        if preserve_aggregate:
+            pass
+        elif not preview and puzzle_rating:
             self._home_view.progress_trend.setText(
                 "Последние 90 дней" if puzzle_rating.get("points") else
                 f"Последняя подтверждённая запись · {puzzle_rating['date']}")
             self._home_view.progress_trend.setToolTip(
                 "Рейтинг игрока из истории Lichess. Даты попыток сгруппированы по UTC.")
-        elif trend:
+        elif not preview and trend:
             points = [f"{item['month']}: решено {item['wins']} из {item['attempts']}"
                       for item in trend]
             self._home_view.progress_trend.setText(
@@ -3403,7 +3499,7 @@ class MainWindow(QMainWindow):
             self._home_view.progress_trend.setToolTip(
                 "Источник: локально сохранённые попытки Lichess; сгруппировано по месяцу. "
                 "Числа показывают результаты попыток, а не рейтинг игрока.")
-        elif preview:
+        elif preview and not preserve_aggregate:
             self._home_view.progress_trend.setText("Сводка статистики загружается из SQLite…")
             self._home_view.progress_trend.setToolTip(
                 "Показаны уже сохранённые данные. Источник: локальная история попыток Lichess.")
@@ -3421,6 +3517,8 @@ class MainWindow(QMainWindow):
         self._home_view.recent_safety_notice.setVisible(
             not analysis_allowed and not self.offline_mode)
         for metric in snapshot["metrics"]:
+            if preserve_aggregate and metric["key"] != "games":
+                continue
             masked = metric["key"] in {"accuracy", "analysis", "errors"} and not analysis_allowed
             self._dashboard_metric_values[metric["key"]].setText(
                 "скрыто" if masked else metric["value"])
@@ -3690,7 +3788,11 @@ class MainWindow(QMainWindow):
         self._request_dashboard_display_safety_internal(manual=True)
 
     def _request_dashboard_display_safety_internal(self, *, manual: bool = False) -> None:
+        preflight_started = time.perf_counter()
         if self.offline_mode and self.lichess is None:
+            log_event("dashboard_stage", "dashboard", stage="fair_play_preflight",
+                      duration_ms=int((time.perf_counter() - preflight_started) * 1000),
+                      status="offline")
             self._dashboard_analysis_safety_allowed = True
             self._set_sidebar_safety_status("Локальные данные · офлайн")
             self._refresh_dashboard_analysis_visibility()
@@ -3753,6 +3855,9 @@ class MainWindow(QMainWindow):
             page.analysis_safety_button.setEnabled(False)
             page.analysis_mask_label.setText("Проверяем полный список активных партий Lichess…")
         try:
+            log_event("dashboard_stage", "dashboard", stage="fair_play_preflight",
+                      duration_ms=int((time.perf_counter() - preflight_started) * 1000),
+                      status="request_submitted")
             service.check_active_games_for_analysis(request_id)
         except Exception as exc:
             self._dashboard_display_safety_error(
@@ -7008,6 +7113,7 @@ class MainWindow(QMainWindow):
         self._ready_analytics_failure_session = None
         generation = int(getattr(self.lichess, "auth_generation", 0))
         self._archive_account_ready_generation = None
+        self._archive_account_started_at = time.perf_counter()
         self._account_background_started_generation = None
         previous_account_handle = self._archive_account_handle
         if previous_account_handle is not None and previous_account_handle.is_alive():
