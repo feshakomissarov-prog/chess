@@ -129,6 +129,7 @@ class LichessGameSession:
         # validate a complete authoritative gameFull snapshot.
         self.awaiting_authoritative_snapshot = True
         self.draw_offered_by_opponent = False
+        self.draw_offered_by_me = False
         self.takeback_requested_by_opponent = False
         self.takeback_requested_by_me = False
         self.takeback_accept_pending = False
@@ -321,6 +322,8 @@ class LichessGameSession:
             self._apply_clock_state(state, reanchor=kind == "gameFull")
             self.winner = state.get("winner", self.winner)
             own_draw_flag = "bdraw" if self.color == chess.WHITE else "wdraw"
+            my_draw_flag = "wdraw" if self.color == chess.WHITE else "bdraw"
+            self.draw_offered_by_me = bool(state.get(my_draw_flag, False))
             self.draw_offered_by_opponent = bool(state.get(own_draw_flag, False))
             self.takeback_requested_by_opponent = opponent_takeback_flag
             if own_takeback_flag:

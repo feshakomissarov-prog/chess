@@ -406,6 +406,7 @@ class LichessAuthMixin:
                 self._pending_action_states.clear()
                 self._pending_friend_challenges.clear()
                 self._game_authoritative_state.clear()
+                self._game_authoritative_sequence.clear()
             with self._event_lock:
                 self._event_stream_started = False
                 for stop in self._game_stops.values():

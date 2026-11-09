@@ -59,6 +59,96 @@ def test_same_scope_dashboard_preview_preserves_aggregate_review_cards(
     assert window.close() is True
 
 
+def test_same_scope_preview_uses_fresh_top_three_and_only_reuses_matching_metrics(
+        qtbot, tmp_path, monkeypatch):
+    monkeypatch.setattr(MainWindow, "_refresh_home_dashboard", lambda _self: None)
+    window = MainWindow(QSettings(str(tmp_path / "fresh-dashboard-cards.ini"),
+                                  QSettings.Format.IniFormat), offline_mode=True)
+    qtbot.addWidget(window)
+
+    def game(game_id, revision=1):
+        return {
+            "game_id": game_id, "status": "draw", "winner": None,
+            "color": "white", "account_color": "white", "opponent": game_id,
+            "line_revision": revision,
+            "review_metrics": {
+                "assessments": [{"ply": 1, "white_cp": 20, "depth": 12}],
+                "moves": {1: "e4"}, "accuracy": "90.0%",
+                "accuracy_source": "Stockfish · локально", "source": "stockfish",
+                "status": "complete", "coverage": "1/1",
+                "inaccuracies": "0", "mistakes": "0", "blunders": "0",
+                "owner_inaccuracies": "0", "owner_mistakes": "0", "owner_blunders": "0",
+                "opponent_inaccuracies": "0", "opponent_mistakes": "0",
+                "opponent_blunders": "0",
+            },
+        }
+
+    scope = {"account_id": "lichess:scope", "clock": None}
+    full = {"filter": scope, "metrics": [],
+            "recent_games": [game("G3"), game("G2"), game("G1")],
+            "activity_trend": [], "puzzle_player_rating": {}}
+    window._render_dashboard_snapshot(full)
+
+    # G4 enters the top three and G3's line revision changes while aggregate SQL
+    # remains blocked. The preview owns list membership immediately; only G2's
+    # exact old revision may retain its graph and scores.
+    preview_games = [game("G4"), game("G3", 2), game("G2")]
+    for item in preview_games:
+        item["review_metrics"] = {"status": "loading", "coverage": "—", "source": "—"}
+    preview = {"filter": scope, "metrics": [
+        {"key": "games", "value": "4", "detail": "SQLite", "source": "SQLite"}],
+        "recent_games": preview_games, "activity_trend": [],
+        "puzzle_player_rating": {}, "is_preview": True}
+    window._render_dashboard_snapshot(preview)
+
+    layout = window._home_view._recent_games_layout
+    cards = [layout.itemAt(index).widget() for index in range(layout.count())
+             if layout.itemAt(index).widget() is not None]
+    text = "\n".join(label.text() for card in cards for label in card.findChildren(type(window.screen_title)))
+    assert all(name in text for name in ("G4", "G3", "G2"))
+    assert "G1" not in text
+    graphs = [card.findChild(ReviewGraph) for card in cards]
+    assert sum(graph is not None for graph in graphs) == 1
+    assert "Загружаем сохранённые оценки" in text
+    assert window._dashboard_metric_values["games"].text() == "4"
+    assert window.close() is True
+
+
+def test_dashboard_card_with_unknown_owner_color_does_not_reuse_or_expose_analysis(
+        qtbot, tmp_path, monkeypatch):
+    monkeypatch.setattr(MainWindow, "_refresh_home_dashboard", lambda _self: None)
+    window = MainWindow(QSettings(str(tmp_path / "unknown-dashboard-color.ini"),
+                                  QSettings.Format.IniFormat), offline_mode=True)
+    qtbot.addWidget(window)
+    full = {"filter": {"account_id": "lichess:scope", "clock": None},
+            "metrics": [], "activity_trend": [], "puzzle_player_rating": {},
+            "recent_games": [{
+                "game_id": "unknown-color", "status": "draw", "color": None,
+                "account_color": None, "line_revision": 1, "opponent": "Synthetic",
+                "review_metrics": {"source": "stockfish", "accuracy": "99.0%",
+                                   "accuracy_source": "Stockfish · локально",
+                                   "assessments": [{"ply": 1, "white_cp": 80}],
+                                   "coverage": "1/1", "status": "complete"},
+            }]}
+    window._render_dashboard_snapshot(full)
+    preview = {"filter": dict(full["filter"]), "metrics": [], "activity_trend": [],
+               "puzzle_player_rating": {}, "is_preview": True,
+               "recent_games": [{"game_id": "unknown-color", "status": "draw",
+                                 "color": None, "account_color": None,
+                                 "line_revision": 1, "opponent": "Synthetic",
+                                 "review_metrics": {"status": "loading", "source": "—"}}]}
+    window._render_dashboard_snapshot(preview)
+    card = window._home_view._recent_games_layout.itemAt(0).widget()
+    assert card.findChild(ReviewGraph) is None
+    assert not any("99.0%" in label.text() or "Точность:" in label.text()
+                   for label in card.findChildren(type(window.screen_title)))
+    coverage = card.findChild(type(window.screen_title), "dashboardAnalysisCoverage")
+    assert coverage is not None
+    assert "не подтверждён" in coverage.text()
+    assert "Stockfish" not in coverage.toolTip()
+    assert window.close() is True
+
+
 def test_multi_pgn_chooser_requires_row_selection_and_explicit_open(qtbot):
     opened = []
     page = AnalysisLandingPage({

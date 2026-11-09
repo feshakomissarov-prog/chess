@@ -113,4 +113,5 @@ class LichessService(QObject, LichessAuthMixin, LichessSyncMixin, LichessGameAct
         self._pending_actions: dict[tuple[int, str, str], str] = {}
         self._pending_action_states: dict[tuple[int, str, str], dict] = {}
         self._game_authoritative_state: dict[tuple[int, str], dict] = {}
+        self._game_authoritative_sequence: dict[tuple[int, str], int] = {}
         self._pending_friend_challenges: dict[tuple[int, str], dict] = {}

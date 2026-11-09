@@ -6439,6 +6439,65 @@ def test_rv2_game_post_reconciles_only_applied_owner_snapshot(qtbot, tmp_path):
     window.close()
 
 
+def test_live_draw_offer_does_not_disable_resign_or_conflict_with_incoming_offer(
+        qtbot, tmp_path, monkeypatch):
+    from types import SimpleNamespace
+
+    window = MainWindow(QSettings(str(tmp_path / "live-draw-controls.ini"),
+                                  QSettings.Format.IniFormat), offline_mode=True)
+    qtbot.addWidget(window)
+    session = LichessGameSession("live-draw-controls", window.game_repository)
+    session.color = chess.WHITE
+    session.apply_event({"type": "gameFull", "initialFen": "startpos",
+                         "state": {"moves": "e2e4", "status": "started"}})
+    select_online(window, session)
+    window._pending_game_actions.add((session.game_id, "offer_draw"))
+    window._refresh_online()
+
+    assert window.resign_button.isEnabled()
+    assert not window.draw_button.isEnabled()
+    monkeypatch.setattr(QMessageBox, "question", lambda *_args, **_kwargs:
+                        QMessageBox.StandardButton.Yes)
+    resign_calls = []
+    window.lichess = SimpleNamespace(resign=lambda game_id: resign_calls.append(game_id))
+    window.resign_button.click()
+    assert resign_calls == [session.game_id]
+
+    session.apply_event({"type": "gameState", "moves": "e2e4 e7e5",
+                         "status": "started", "bdraw": True})
+    window._refresh_online()
+    assert session.draw_offered_by_opponent
+    assert window.draw_button.text() == "Принять ничью"
+    assert window.draw_button.isEnabled()
+    assert not window.decline_draw_button.isHidden()
+    assert window.decline_draw_button.isEnabled()
+    assert "Соперник предлагает ничью" in window.game_status.text()
+
+    # The authoritative own-side flag prevents another offer POST, while the
+    # opponent's offer remains actionable even if both flags are present.
+    session.apply_event({"type": "gameState", "moves": "e2e4 e7e5",
+                         "status": "started", "wdraw": True, "bdraw": True})
+    window._refresh_online()
+    assert window.draw_button.isEnabled()
+    session.apply_event({"type": "gameState", "moves": "e2e4 e7e5",
+                         "status": "started", "wdraw": True, "bdraw": False})
+    window._refresh_online()
+    assert not window.draw_button.isEnabled()
+    assert "ожидаем ответ соперника" in window.game_status.text()
+
+    session.apply_event({"type": "gameState", "moves": "e2e4 e7e5",
+                         "status": "started", "wdraw": True, "bdraw": True})
+    window._pending_game_actions.add((session.game_id, "accept_draw"))
+    window._refresh_online()
+    assert not window.draw_button.isEnabled()
+    assert not window.decline_draw_button.isEnabled()
+    assert window.resign_button.isEnabled()
+    window._pending_game_actions.add((session.game_id, "resign"))
+    window._refresh_online()
+    assert not window.resign_button.isEnabled()
+    window.close()
+
+
 def test_rv2_delayed_puzzle_account_read_cannot_reopen_training(qtbot, tmp_path, monkeypatch):
     window = MainWindow(QSettings(str(tmp_path / "rv2-training.ini"), QSettings.Format.IniFormat),
                         offline_mode=True)

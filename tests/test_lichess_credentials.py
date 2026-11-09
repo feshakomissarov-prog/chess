@@ -828,6 +828,79 @@ def test_draw_offer_and_acceptance_have_distinct_authoritative_effects(qtbot):
     service.close(timeout=1.0)
 
 
+@pytest.mark.parametrize("outcome", ["http_ack", "rate_limited", "timeout"])
+def test_draw_offer_pending_lifecycle_never_reposts_and_resolves_on_fresh_absence(
+        qtbot, outcome):
+    from chess_coach.lichess.api import LichessError
+
+    class Client(AccountClient):
+        def __init__(self):
+            super().__init__()
+            self.draw_posts = []
+        def handle_draw(self, token, game_id, accept):
+            self.draw_posts.append((game_id, accept))
+            if outcome == "rate_limited":
+                raise LichessError("rate limited", 429)
+            if outcome == "timeout":
+                raise TimeoutError("synthetic timeout")
+            return {}
+
+    client = Client()
+    service = LichessService(client=client, token_store=MemoryStore("token"),
+                             personal_token_store=MemoryStore("pat"))
+    completed = []
+    service.session_action_completed.connect(lambda *args: completed.append(args))
+    baseline = {"type": "gameState", "status": "started", "moves": "e2e4",
+                "wdraw": False, "bdraw": False}
+    service.reconcile_game_actions("draw-game", baseline)
+
+    request_id = service.draw("draw-game", True)
+    qtbot.waitUntil(lambda: len(completed) == 1, timeout=1000)
+    assert service.has_pending_action("draw-game", "offer_draw")
+    assert service.draw("draw-game", True) == request_id
+    assert client.draw_posts == [("draw-game", True)]
+
+    # A later active authoritative snapshot with no own-side offer clears the
+    # unknown/acknowledged lifecycle. No timer or automatic POST retries it.
+    service.reconcile_game_actions("draw-game", {
+        "type": "gameState", "status": "started", "moves": "e2e4 e7e5",
+        "wdraw": False, "bdraw": False})
+    assert not service.has_pending_action("draw-game", "offer_draw")
+    assert client.draw_posts == [("draw-game", True)]
+    service.close(timeout=1.0)
+
+
+def test_incoming_draw_response_is_independent_of_stale_offer_but_not_opposite_response(
+        qtbot):
+    class Client(AccountClient):
+        def __init__(self):
+            super().__init__()
+            self.draw_posts = []
+        def handle_draw(self, token, game_id, accept):
+            self.draw_posts.append((game_id, accept))
+            return {}
+
+    client = Client()
+    service = LichessService(client=client, token_store=MemoryStore("token"),
+                             personal_token_store=MemoryStore("pat"))
+    completed = []
+    service.session_action_completed.connect(lambda *args: completed.append(args))
+    service.reconcile_game_actions("draw-game", {
+        "type": "gameState", "status": "started", "moves": "e2e4 e7e5",
+        "wdraw": False, "bdraw": True}, color="white")
+
+    offer_id = service.draw("draw-game", True)
+    qtbot.waitUntil(lambda: len(completed) == 1, timeout=1000)
+    assert service.has_pending_action("draw-game", "offer_draw")
+    accept_id = service.draw("draw-game", True, accepting_offer=True)
+    qtbot.waitUntil(lambda: len(completed) == 2, timeout=1000)
+    assert accept_id and accept_id != offer_id
+    assert client.draw_posts == [("draw-game", True), ("draw-game", True)]
+    assert service.draw("draw-game", False) is None
+    assert client.draw_posts == [("draw-game", True), ("draw-game", True)]
+    service.close(timeout=1.0)
+
+
 def test_late_old_game_start_is_not_delivered_or_started(qtbot):
     entered = threading.Event()
     release = threading.Event()

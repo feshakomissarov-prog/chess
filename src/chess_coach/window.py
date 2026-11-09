@@ -3476,7 +3476,6 @@ class MainWindow(QMainWindow):
             preview and previous_snapshot and not previous_snapshot.get("is_preview")
             and scope.get("account_id") == previous_scope.get("account_id")
             and scope.get("clock") == previous_scope.get("clock"))
-        preserve_cards = bool(preserve_aggregate and previous_snapshot.get("recent_games"))
         if not preserve_aggregate:
             self._latest_dashboard_snapshot = snapshot
         trend = snapshot.get("activity_trend") or []
@@ -3515,6 +3514,39 @@ class MainWindow(QMainWindow):
             for session in self._sessions_for_safety())
         analysis_allowed = bool(self.offline_mode or
                                 (self._dashboard_analysis_safety_allowed and not active_human))
+        if preview and preserve_aggregate:
+            # The preview is the freshness authority for the visible list. Reuse
+            # only source-backed metrics from the prior aggregate when the exact
+            # game revision, side and account scope still match.
+            old_games = {
+                str(game.get("game_id")): game
+                for game in previous_snapshot.get("recent_games", [])
+                if game.get("game_id")
+            }
+            refreshed_games = []
+            for game in snapshot.get("recent_games", []):
+                current = dict(game)
+                old = old_games.get(str(current.get("game_id")))
+                current_color = current.get("account_color") or current.get("color")
+                if (analysis_allowed and old
+                        and current.get("line_revision") == old.get("line_revision")
+                        and current_color in {"white", "black"}
+                        and current_color
+                        == (old.get("account_color") or old.get("color"))):
+                    metrics = old.get("review_metrics") or {}
+                    source = str(metrics.get("source") or "").casefold()
+                    source_backed = (
+                        source in {"stockfish", "lichess", "lichess-pgn", "lichess-json"}
+                        or metrics.get("accuracy_source") == "Lichess"
+                        or str(metrics.get("accuracy_source") or "").casefold().startswith(
+                            "stockfish")
+                    )
+                    if source_backed and (metrics.get("assessments")
+                                          or metrics.get("accuracy_source")):
+                        current["review_metrics"] = metrics
+                refreshed_games.append(current)
+            snapshot = dict(snapshot)
+            snapshot["recent_games"] = refreshed_games
         self._home_view.recent_safety_notice.setVisible(
             not analysis_allowed and not self.offline_mode)
         for metric in snapshot["metrics"]:
@@ -3560,12 +3592,10 @@ class MainWindow(QMainWindow):
             widget = item.widget()
             if widget is not None:
                 widget.deleteLater()
-        # A same-scope preview refreshes the fast count while the aggregate is
-        # refreshing. Keep the existing aggregate cards (including saved
-        # review graphs) until their replacement is ready; preview rows are
-        # intentionally neutral and contain no analysis payload.
-        games = (previous_snapshot.get("recent_games") or [] if preserve_cards
-                 else snapshot["recent_games"])
+        # The bounded SQLite preview owns the visible ordering and membership.
+        # Matching revisions retain safe aggregate metrics; new/changed records
+        # stay neutral until the source-aware aggregate completes.
+        games = snapshot["recent_games"]
         if not games:
             empty = QLabel("Пока нет сохранённых завершённых партий. Импортируйте партии или сыграйте локально.")
             empty.setWordWrap(True)
@@ -3575,6 +3605,8 @@ class MainWindow(QMainWindow):
         for game in games:
             heading, details = game_card_text(game)
             metrics = game.get("review_metrics") or {}
+            game_color = game.get("account_color") or game.get("color")
+            game_analysis_allowed = analysis_allowed and game_color in {"white", "black"}
             card = _DashboardGameCard()
             card.setObjectName("metricCard")
             card.setAccessibleName(f"Открыть разбор партии: {heading}")
@@ -3611,15 +3643,20 @@ class MainWindow(QMainWindow):
             coverage_text = ("Загружаем сохранённые оценки…" if metrics.get("status") == "loading" else
                              "оценок пока нет" if metrics.get("status") == "без анализа" else
                              f"Оценённые ходы: {metrics.get('coverage', '—')}")
-            coverage = QLabel(coverage_text if analysis_allowed else "Оценки скрыты до проверки безопасности")
+            coverage = QLabel(
+                coverage_text if game_analysis_allowed else
+                "Цвет профиля не подтверждён" if analysis_allowed else
+                "Оценки скрыты до проверки безопасности")
             coverage.setObjectName("dashboardAnalysisCoverage")
             coverage.setParent(card)
             coverage.setWordWrap(False)
-            if analysis_allowed:
+            if game_analysis_allowed:
                 coverage.setToolTip(
                     f"Источник: {metrics.get('source') or 'нет данных'} · "
                     f"охват собственной стороны: {metrics.get('coverage') or 'н/д'}. "
                     "Серверная аналитика и Stockfish отображаются как отдельные источники.")
+            elif analysis_allowed:
+                coverage.setToolTip("Оценки скрыты, потому что цвет владельца не подтверждён.")
             else:
                 coverage.setToolTip(
                     "Источник, оценки и охват скрыты до свежего подтверждения Fair Play.")
@@ -3629,7 +3666,7 @@ class MainWindow(QMainWindow):
             # card prioritizes opponent/date, opening/accuracy, and the
             # side-by-side move table; hover and screen readers retain scope.
             coverage.hide()
-            if analysis_allowed:
+            if game_analysis_allowed:
                 accuracy = metrics.get("accuracy")
                 accuracy_group = QVBoxLayout()
                 accuracy_group.setAlignment(Qt.AlignmentFlag.AlignVCenter)
@@ -7906,13 +7943,38 @@ class MainWindow(QMainWindow):
         self.leave_game_button.setVisible(
             session.status not in {"started", "playing", "created"} and not finished_view)
         self.leave_game_button.setText("Главная")
-        pending_action = any(
-            game_id == session.game_id
-            for game_id, _command in self._pending_game_actions)
-        if pending_action:
-            for button in (self.resign_button, self.draw_button, self.decline_draw_button,
-                           self.claim_draw_button):
-                button.setEnabled(False)
+        pending_commands = {
+            command for game_id, command in self._pending_game_actions
+            if game_id == session.game_id
+        }
+        # A draw offer is independent of resignation. Keep only the duplicate
+        # command disabled while its outcome is being reconciled; an incoming
+        # authoritative offer may still be accepted/declined.
+        incoming_draw_action_pending = bool(
+            session.draw_offered_by_opponent
+            and pending_commands.intersection({"accept_draw", "decline_draw"}))
+        if "resign" in pending_commands or "abort" in pending_commands:
+            self.resign_button.setEnabled(False)
+        if session.draw_offered_by_opponent:
+            self.draw_button.setEnabled(active and not incoming_draw_action_pending)
+            self.decline_draw_button.setEnabled(
+                active and not incoming_draw_action_pending)
+        else:
+            self.draw_button.setEnabled(
+                active and "offer_draw" not in pending_commands
+                and not session.draw_offered_by_me)
+            self.decline_draw_button.setEnabled(False)
+        if "claim_draw" in pending_commands:
+            self.claim_draw_button.setEnabled(False)
+        if session.draw_offered_by_opponent:
+            self.game_status.setText(
+                "Соперник предлагает ничью. Выберите «Принять ничью» или «Отклонить ничью».")
+        elif session.draw_offered_by_me:
+            self.game_status.setText(
+                "Предложение ничьей подтверждено Lichess; ожидаем ответ соперника.")
+        elif pending_commands.intersection({"offer_draw", "accept_draw", "decline_draw"}):
+            self.game_status.setText(
+                "Предложение ничьей синхронизируется с Lichess; повторная отправка отключена.")
         self.new_game_button.setEnabled(False)
         for button in (self.friend_link_button, self.username_button, self.ai_button):
             button.setVisible(False)

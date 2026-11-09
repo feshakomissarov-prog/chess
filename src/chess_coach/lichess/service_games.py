@@ -78,6 +78,18 @@ class LichessGameActionsMixin:
                 return None
             if key in self._pending_actions:
                 return self._pending_actions[key]
+            if command in {"accept_draw", "decline_draw"} and any(
+                    pending_key[0] == context.generation
+                    and pending_key[1] == str(game_id or "")
+                    and pending_key[2] in {"accept_draw", "decline_draw"}
+                    for pending_key in self._pending_actions):
+                return None
+            if command == "offer_draw" and any(
+                    pending_key[0] == context.generation
+                    and pending_key[1] == str(game_id or "")
+                    and pending_key[2] in {"accept_draw", "decline_draw"}
+                    for pending_key in self._pending_actions):
+                return None
             self._pending_actions[key] = context.request_id
             game_key = (context.generation, str(game_id or ""))
             baseline = dict(self._game_authoritative_state.get(game_key) or {})
@@ -108,6 +120,8 @@ class LichessGameActionsMixin:
                         self._pending_actions.pop(key, None)
                     else:
                         state["status"] = "awaiting_authoritative_state"
+                        state["ack_sequence"] = self._game_authoritative_sequence.get(
+                            (context.generation, str(game_id or "")), 0)
                         if state["confirmed"]:
                             self._pending_action_states.pop(key, None)
                             self._pending_actions.pop(key, None)
@@ -146,6 +160,9 @@ class LichessGameActionsMixin:
         with self._pending_action_lock:
             if context.connection_stop.is_set():
                 return
+            sequence = self._game_authoritative_sequence.get(game_key, 0) + 1
+            self._game_authoritative_sequence[game_key] = sequence
+            fingerprint["sequence"] = sequence
             self._game_authoritative_state[game_key] = fingerprint
             resolved = []
             for key, action_state in tuple(self._pending_action_states.items()):
@@ -153,8 +170,17 @@ class LichessGameActionsMixin:
                 if (not context or context.generation != generation
                         or context.game_id != str(game_id)):
                     continue
-                if not self._action_effect_reconciled(
-                        context.command, action_state.get("baseline") or {}, fingerprint):
+                effect_seen = self._action_effect_reconciled(
+                    context.command, action_state.get("baseline") or {}, fingerprint)
+                if (not effect_seen and context.command == "offer_draw"
+                        and action_state["status"] == "awaiting_authoritative_state"
+                        and sequence > action_state.get("ack_sequence", sequence)
+                        and fingerprint.get("status") in {"created", "started", "playing"}):
+                    # A post-ACK authoritative snapshot with the player's draw
+                    # flag absent proves that the offer is no longer pending.
+                    own_flag = "wdraw" if color == "white" else "bdraw"
+                    effect_seen = fingerprint.get(own_flag) is False
+                if not effect_seen:
                     continue
                 if action_state["status"] == "in_flight":
                     action_state["confirmed"] = True

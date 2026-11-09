@@ -83,6 +83,9 @@ def dashboard_preview_snapshot(repository, *, account_id: str | None = None,
         raise RuntimeError("dashboard preview superseded")
     sql_started = time.perf_counter()
     with repository._connection() as db:
+        # Pin count and top rows to one committed SQLite read snapshot so a
+        # concurrent game save cannot make the preview's total and cards disagree.
+        db.execute("BEGIN")
         db.set_progress_handler(
             lambda: 1 if stop_event is not None and stop_event.is_set() else 0, 1000)
         db.execute("PRAGMA busy_timeout=250")
