@@ -2526,15 +2526,14 @@ def test_archive_status_discloses_offline_database_and_local_count_on_request(qt
     window.game_repository.save_snapshot("local-status-game", "startpos", "", "white",
                                         "Local", False, "-", "playing")
     messages = []
-    def inspect_dialog(dialog):
-        messages.append(dialog.findChild(QLabel).text())
-        sync = next(button for button in dialog.findChildren(QPushButton)
-                    if button.text().startswith("Синхронизировать"))
-        assert not sync.isEnabled()
-        return QDialog.DialogCode.Accepted
-    monkeypatch.setattr(QDialog, "exec", inspect_dialog)
-
     window.show_archive_status()
+    dialog = window._archive_status_dialog
+    sync = next(button for button in dialog.findChildren(QPushButton)
+                if button.text().startswith("Синхронизировать"))
+    assert not sync.isEnabled()
+    qtbot.waitUntil(lambda: "Локальных партий: 1" in dialog.findChild(
+        QLabel, "archiveStatusDetails").text(), timeout=2000)
+    messages.append(dialog.findChild(QLabel, "archiveStatusDetails").text())
 
     assert "Изолированная временная база --offline" in messages[0]
     assert "Режим запуска: --offline" in messages[0]
@@ -2543,6 +2542,7 @@ def test_archive_status_discloses_offline_database_and_local_count_on_request(qt
     assert "Локальных партий: 1" in messages[0]
     assert window.game_repository.path in messages[0]
     assert "Lichess аккаунт: не подключён" in messages[0]
+    dialog.close()
     window.close()
 
 
@@ -5547,6 +5547,7 @@ def test_window_close_cancels_analysis_and_waits_for_engine_quit_before_sqlite(
     started = threading.Event()
     result_stopped = threading.Event()
     engine_quit = threading.Event()
+    allow_engine_quit = threading.Event()
     shutdown_order = []
     engine_starts = []
 
@@ -5570,8 +5571,9 @@ def test_window_close_cancels_analysis_and_waits_for_engine_quit_before_sqlite(
         def configure(self, _options): pass
         def analysis(self, _board, _limit): return FakeAnalysisResult()
         def quit(self):
-            shutdown_order.append("engine.quit")
             engine_quit.set()
+            assert allow_engine_quit.wait(3), "test must release the fake engine during shutdown"
+            shutdown_order.append("engine.quit")
 
     engine = FakeEngine()
     def make_engine(_path, **_kwargs):
@@ -5601,6 +5603,7 @@ def test_window_close_cancels_analysis_and_waits_for_engine_quit_before_sqlite(
     assert window._analysis_stop is not None and window._analysis_stop.is_set()
     assert not shutdown_order
     window._close_retry_timer.stop()
+    allow_engine_quit.set()
 
     qtbot.waitUntil(lambda: not worker.is_alive(), timeout=4000)
     assert result_stopped.is_set()

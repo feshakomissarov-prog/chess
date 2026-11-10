@@ -387,6 +387,12 @@ def test_send_move_ack_emits_sound_eligibility_only_after_success(monkeypatch):
 
     service.send_move("synthetic-game", "e2e4", "request-ok")
     assert accepted == [(service.auth_generation, "synthetic-game", "e2e4", "request-ok")]
+    # A second intent is admitted only after authoritative server progress
+    # settles the first one-shot request.
+    service.reconcile_game_actions(
+        "synthetic-game", {"type": "gameState", "state": {
+            "status": "started", "moves": "e2e4", "wdraw": False, "bdraw": False}},
+        generation)
     client.fail = True
     service.send_move("synthetic-game", "d2d4", "request-rejected")
     assert len(accepted) == 1

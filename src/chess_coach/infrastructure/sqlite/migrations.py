@@ -450,8 +450,10 @@ class SQLiteMigrationMixin:
                 fetched_at TEXT NOT NULL,
                 points_json TEXT NOT NULL
             )""")
-            # A durable revision fence lets the Home sidecar reuse its complete
-            # analytics across restarts without re-running broad aggregates.
+            # Semantic source revisions let the two Home read models survive
+            # restarts. Metadata-only sync writes must not invalidate analytics,
+            # while every table used by dashboard SQL remains in the dependency
+            # map (including denominator/coverage sources).
             db.execute("""CREATE TABLE IF NOT EXISTS dashboard_data_revision (
                 singleton INTEGER PRIMARY KEY CHECK(singleton=1),
                 revision INTEGER NOT NULL DEFAULT 0
@@ -463,7 +465,42 @@ class SQLiteMigrationMixin:
                 "move_metrics", "analysis_events", "event_tags", "analysis_alternatives",
                 "lichess_ready_analysis_metadata", "puzzle_attempts",
                 "puzzle_player_rating_history", "puzzle_dashboard_snapshots",
+                "analysis_jobs", "game_positions",
             )
+            dashboard_columns = {
+                "games": ("game_id", "status", "winner", "color", "clock", "source",
+                          "source_game_id", "lichess_accuracy_white", "lichess_accuracy_black",
+                          "started_at", "last_move_at", "game_time_precision", "line_revision",
+                          "opening_eco", "opening_name", "opponent", "white_player", "black_player"),
+                "account_games": ("account_id", "game_id", "remote_id", "color",
+                                  "player_rating", "opponent_rating", "opponent", "player_name"),
+                "game_revisions": ("game_id", "line_revision", "line_hash", "is_current"),
+                "analysis_runs": ("run_id", "game_id", "line_revision", "line_hash",
+                                  "source", "status", "finished_at", "parameters_json"),
+                "analysis_game_accuracy": ("run_id", "formula_id", "white_accuracy",
+                                           "black_accuracy", "run_finished_at"),
+                "position_assessments": ("run_id", "ply", "white_cp", "mate_white",
+                                         "depth", "nodes", "wdl_json"),
+                "move_classifications": ("run_id", "ply", "mover", "phase", "label",
+                                         "eval_loss_cp", "algorithm_version"),
+                "move_metrics": ("run_id", "ply", "metric_version", "source", "accuracy",
+                                 "accuracy_source", "severity"),
+                "analysis_events": ("event_key", "run_id", "ply", "event_type",
+                                    "confidence_state", "source", "detector_version"),
+                "event_tags": ("event_key", "tag", "confidence_state", "detector_version"),
+                "analysis_alternatives": ("run_id", "ply", "multipv_rank", "white_cp",
+                                          "mate_white", "pv_uci"),
+                "lichess_ready_analysis_metadata": ("game_id", "line_revision",
+                                                     "metadata_json", "fetched_at"),
+                "puzzle_attempts": ("attempt_uid", "account_id", "puzzle_id",
+                                    "attempt_date_ms", "win"),
+                "puzzle_player_rating_history": ("account_id", "fetched_at", "points_json"),
+                "puzzle_dashboard_snapshots": ("snapshot_id", "account_id", "days",
+                                               "fetched_at", "payload_json"),
+                "analysis_jobs": ("job_id", "game_id", "line_revision", "analysis_pass",
+                                  "status", "result_run_id"),
+                "game_positions": ("game_id", "line_revision", "ply"),
+            }
             for table in source_tables:
                 exists = db.execute(
                     "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (table,)
@@ -471,12 +508,28 @@ class SQLiteMigrationMixin:
                 if not exists:
                     continue
                 safe_table = table.replace("'", "")
+                columns = {row[1] for row in db.execute(
+                    f"PRAGMA table_info({safe_table})")}
+                watched = [name for name in dashboard_columns.get(table, ())
+                           if name in columns]
                 for operation in ("INSERT", "UPDATE", "DELETE"):
                     trigger = f"dashboard_revision_{safe_table}_{operation.casefold()}"
-                    db.execute(
-                        f"CREATE TRIGGER IF NOT EXISTS {trigger} AFTER {operation} ON {safe_table} "
-                        "BEGIN UPDATE dashboard_data_revision SET revision=revision+1 "
-                        "WHERE singleton=1; END")
+                    update_of = (f" OF {','.join(watched)}" if operation == "UPDATE" and watched
+                                 else "")
+                    changed = (" OR ".join(
+                        f"OLD.{name} IS NOT NEW.{name}" for name in watched)
+                               if operation == "UPDATE" and watched else "1")
+                    when = f" WHEN {changed}" if operation == "UPDATE" else ""
+                    sql = (f"CREATE TRIGGER {trigger} AFTER {operation}{update_of} ON {safe_table}"
+                           f"{when} BEGIN UPDATE dashboard_data_revision SET revision=revision+1 "
+                           "WHERE singleton=1; END")
+                    existing = db.execute(
+                        "SELECT sql FROM sqlite_master WHERE type='trigger' AND name=?",
+                        (trigger,)).fetchone()
+                    normalize = lambda value: " ".join(str(value or "").split()).casefold()
+                    if existing is None or normalize(existing[0]) != normalize(sql):
+                        db.execute(f"DROP TRIGGER IF EXISTS {trigger}")
+                        db.execute(sql)
             db.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
 
     @staticmethod

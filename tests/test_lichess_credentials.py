@@ -1000,15 +1000,19 @@ def test_incoming_draw_response_is_independent_of_stale_offer_but_not_opposite_r
         "status": "started", "moves": "e2e4 e7e5",
         "wdraw": False, "bdraw": True})
 
+    # A server-confirmed incoming offer must never turn POST /draw/yes into an
+    # accidental acceptance. Only the explicit accept action may respond.
     offer_id = service.draw("draw-game", True)
-    qtbot.waitUntil(lambda: len(completed) == 1, timeout=1000)
-    assert service.has_pending_action("draw-game", "offer_draw")
+    assert offer_id is None
+    qtbot.wait(20)
+    assert completed == []
+    assert not service.has_pending_action("draw-game", "offer_draw")
     accept_id = service.draw("draw-game", True, accepting_offer=True)
-    qtbot.waitUntil(lambda: len(completed) == 2, timeout=1000)
-    assert accept_id and accept_id != offer_id
-    assert client.draw_posts == [("draw-game", True), ("draw-game", True)]
+    qtbot.waitUntil(lambda: len(completed) == 1, timeout=1000)
+    assert accept_id
+    assert client.draw_posts == [("draw-game", True)]
     assert service.draw("draw-game", False) is None
-    assert client.draw_posts == [("draw-game", True), ("draw-game", True)]
+    assert client.draw_posts == [("draw-game", True)]
     service.close(timeout=1.0)
 
 

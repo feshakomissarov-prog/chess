@@ -389,11 +389,25 @@ def game_card_metrics(repository, game: dict[str, Any]) -> dict[str, Any]:
     errors = int(side.get("inaccuracy") or 0) + int(side.get("mistake") or 0) + int(side.get("blunder") or 0)
     # Current detectors do not yet implement a verified "strong move" fact.
     # Candidate best_move_confirmed is intentionally not presented as verified.
+    raw_assessments = list(analysis.get("assessments") or [])
+    if len(raw_assessments) > 64:
+        indexes = {round(index * (len(raw_assessments) - 1) / 63) for index in range(64)}
+        graph_assessments = [raw_assessments[index] for index in sorted(indexes)]
+    else:
+        graph_assessments = raw_assessments
+    graph_points = [
+        {"ply": int(item["ply"]),
+         "white_cp": int(item["white_cp"]) if item.get("white_cp") is not None else None,
+         "mate_white": int(item["mate_white"]) if item.get("mate_white") is not None else None}
+        for item in graph_assessments if type(item.get("ply")) is int
+    ]
     return {
         "accuracy": f"{float(own_color_accuracy):.1f}%" if own_color_accuracy is not None else "н/д",
         "accuracy_source": accuracy_source,
-        "assessments": list(analysis.get("assessments") or []),
-        "moves": {int(move.ply): str(move.san) for move in view.get("moves") or []},
+        # Home needs a bounded sparkline only. Full PGN, SAN map and engine PVs
+        # remain in SQLite and are loaded after the user opens a specific game.
+        "graph_points": graph_points,
+        "total_positions": int((view.get("coverage") or {}).get("total") or 0),
         "errors": str(errors) if classified else "н/д",
         "inaccuracies": str(int(side.get("inaccuracy") or 0)) if classified else "н/д",
         "mistakes": str(int(side.get("mistake") or 0)) if classified else "н/д",

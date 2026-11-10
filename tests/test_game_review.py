@@ -1,5 +1,7 @@
 import chess
 import pytest
+from PySide6.QtCore import Qt
+from PySide6.QtWidgets import QScrollArea
 
 from chess_coach.ui.game_review import AdvantageBar, GameReviewWorkspace, ReviewGraph
 from chess_coach.lichess.game_review import (
@@ -575,7 +577,10 @@ def test_review_layout_has_no_outer_scroll_and_renders_at_desktop_sizes(qtbot, t
         workspace = GameReviewWorkspace(repo, training_allowed=True)
         qtbot.addWidget(workspace)
         workspace.load_game(game)
-        assert not workspace.findChildren(QScrollArea)
+        metric_scrolls = workspace.findChildren(QScrollArea, "reviewMetricsScroll")
+        assert len(metric_scrolls) == 1
+        assert metric_scrolls[0].widget() is not None
+        assert metric_scrolls[0].verticalScrollBarPolicy() == Qt.ScrollBarPolicy.ScrollBarAsNeeded
         for width, height in ((1024, 700), (1280, 720), (1360, 860), (1920, 1080)):
             workspace.setFixedSize(width, height)
             workspace.show()

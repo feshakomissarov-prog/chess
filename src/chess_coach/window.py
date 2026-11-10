@@ -420,6 +420,9 @@ class MainWindow(QMainWindow):
     puzzle_history_finished = Signal(str, object, object)
     statistics_filter_options_finished = Signal(int, object, object)
     home_game_read_finished = Signal(int, str, object, object, object, object)
+    archive_status_ready = Signal(str, object)
+    saved_review_ready = Signal(str, object)
+    batch_preflight_ready = Signal(object)
 
     @property
     def _selected_live_game_id(self) -> str | None:
@@ -653,6 +656,9 @@ class MainWindow(QMainWindow):
         self.position_eval_update.connect(self._position_eval_update)
         self.dashboard_finished.connect(self._dashboard_result_ready)
         self.dashboard_preview_ready.connect(self._dashboard_preview_result_ready)
+        self.archive_status_ready.connect(self._archive_status_result_ready)
+        self.saved_review_ready.connect(self._saved_review_result_ready)
+        self.batch_preflight_ready.connect(self._batch_preflight_result_ready)
         self.dashboard_options_ready.connect(self._dashboard_options_result_ready)
         self.library_query_finished.connect(self._library_query_result_ready)
         self.library_target_finished.connect(self._library_target_result_ready)
@@ -2676,6 +2682,46 @@ class MainWindow(QMainWindow):
         if self.screen_stack.currentWidget() is self.home_page:
             self._refresh_home_dashboard()
 
+    def request_resume_saved_review(self, *, show_message: bool = True) -> None:
+        """Load the persisted review target without locking the UI thread on SQLite."""
+        operation_id = uuid.uuid4().hex
+        self._resume_review_operation_id = operation_id
+        target = self.workspace_state.load_review_target()
+        if target is None:
+            self.saved_review_ready.emit(
+                operation_id, {"target": None, "show_message": show_message})
+            return
+        self._notify_inline("Загружаем сохранённый разбор…", 3000)
+
+        def work() -> None:
+            try:
+                game = self.game_repository.get_game(target.game_id)
+                line = self.game_repository.current_line(target.game_id) if game else None
+                review_data = (load_game_review(self.game_repository, game)
+                               if game and line else None)
+                payload = {"target": target, "game": game, "line": line,
+                           "review_data": review_data,
+                           "show_message": show_message}
+            except Exception as exc:
+                payload = {"error": type(exc).__name__}
+            self.saved_review_ready.emit(operation_id, payload)
+
+        self._start_registered_work(work, kind="resume_saved_review_read",
+                                    lane=OperationLane.INTERACTIVE,
+                                    thread_name="chess-coach-resume-review")
+
+    def _saved_review_result_ready(self, operation_id: str, payload: object) -> None:
+        if (operation_id != getattr(self, "_resume_review_operation_id", None)
+                or not isinstance(payload, dict) or self._shutdown_requested):
+            return
+        if payload.get("error"):
+            self._notify_inline("Не удалось прочитать сохранённый разбор.")
+            return
+        self._resume_saved_review_data(
+            payload.get("target"), payload.get("game"), payload.get("line"),
+            show_message=bool(payload.get("show_message", True)),
+            review_data=payload.get("review_data"))
+
     def resume_saved_review(self, *, show_message: bool = True) -> bool:
         target = self.workspace_state.load_review_target()
         if target is None:
@@ -2685,6 +2731,16 @@ class MainWindow(QMainWindow):
         game_id = target.game_id
         game = self.game_repository.get_game(game_id)
         line = self.game_repository.current_line(game_id) if game else None
+        return self._resume_saved_review_data(target, game, line,
+                                              show_message=show_message)
+
+    def _resume_saved_review_data(self, target, game, line, *, show_message: bool,
+                                  review_data: dict | None = None) -> bool:
+        if target is None:
+            if show_message:
+                self._notify_inline("Нет сохранённого разбора для продолжения.")
+            return False
+        game_id = target.game_id
         if (not game or not line or not self._is_standard_board_game(game)
                 or game.get("status") in {"created", "started", "started_soon", "playing"}):
             self._active_route = "home"
@@ -2697,7 +2753,7 @@ class MainWindow(QMainWindow):
                      and str(line["line_hash"]) == target.line_hash)
         self._workspace_state_restoring = True
         try:
-            if not self._open_saved_game(game):
+            if not self._open_saved_game(game, review_data=review_data):
                 return False
             ply = target.viewed_ply if same_line else 0
             self.review_workspace.select_ply(max(0, min(len(self.review_workspace.review["moves"]), ply)))
@@ -2741,7 +2797,7 @@ class MainWindow(QMainWindow):
                 "play_ai": self.play_ai, "start_local_game": self.start_local_game,
                 "resume_current_game": self.resume_current_game,
                 "show_saved_games": self.show_saved_games,
-                "resume_saved_review": self.resume_saved_review,
+                "resume_saved_review": self.request_resume_saved_review,
                 "open_friend_game": self.open_friend_game,
                 "challenge_username": self.challenge_username,
                 "show_active_games": self.show_active_games,
@@ -3217,7 +3273,6 @@ class MainWindow(QMainWindow):
     def _refresh_home_dashboard(self) -> None:
         if not hasattr(self, "_dashboard_metric_values"):
             return
-        selection_started = time.perf_counter()
         preferred = str(self.settings.value("workspace/selected_account", "", type=str))
         current_account = self.dashboard_account.currentData()
         if current_account is None and preferred.startswith("lichess:"):
@@ -3231,41 +3286,20 @@ class MainWindow(QMainWindow):
                     if self.dashboard_account.itemText(index).casefold() == username:
                         account_id = self.dashboard_account.itemData(index)
                         break
-        log_event("dashboard_stage", "dashboard", stage="initial_account_selection",
-                  duration_ms=int((time.perf_counter() - selection_started) * 1000),
-                  status="scoped" if account_id else "all_accounts")
         generation = self.dashboard_queries.begin_request()
         clock = None
         if not self._dashboard_options_loaded:
             self._request_dashboard_options()
-        cache_read_started = time.perf_counter()
-        cache_revision = self.game_repository.dashboard_data_revision()
-        cached = self._dashboard_snapshot_cache.load(account_id, clock)
-        if (isinstance(cached, dict)
-                and self.game_repository.dashboard_data_revision() == cache_revision):
-            if self._screen_mode == "home" and self.screen_stack.currentWidget() is self.home_page:
-                self._dashboard_full_rendered_generation = generation
-                self._latest_dashboard_snapshot = cached
-                self._dashboard_snapshot_cache_revision = cache_revision
-                self._render_dashboard_snapshot(cached)
-            log_event("dashboard_cache", "dashboard", stage="persistent_hit",
-                      duration_ms=int((time.perf_counter() - cache_read_started) * 1000),
-                      status="ok")
-            return
-        log_event("dashboard_cache", "dashboard", stage="persistent_miss",
-                  duration_ms=int((time.perf_counter() - cache_read_started) * 1000),
-                  status="refresh")
+        requested_scope = {"account_id": account_id, "clock": clock}
+        prior_scope = (self._latest_dashboard_snapshot or {}).get("filter") or {}
+        if prior_scope != requested_scope:
+            self._clear_dashboard_scope("Загружаем сохранённую сводку выбранного профиля…")
         if self._dashboard_initial_refresh_at is None:
             self._dashboard_initial_refresh_at = time.perf_counter()
         self._dashboard_full_rendered_generation = None
-        for detail in self._dashboard_metric_details.values():
-            if detail.text() in {"Локальные данные", "Обновляем локальную сводку…"}:
-                detail.setText("Обновляем локальную сводку…")
-        self._request_dashboard_preview(generation, account_id, clock)
         if self._dashboard_thread is not None and self._dashboard_thread.is_alive():
             self.dashboard_queries.defer((generation, account_id, clock))
-            return
-        self._launch_dashboard_snapshot(generation, account_id, clock)
+        self._request_dashboard_preview(generation, account_id, clock)
 
     def _request_dashboard_preview(self, generation: int, account_id: str | None,
                                    clock: str | None) -> None:
@@ -3287,9 +3321,41 @@ class MainWindow(QMainWindow):
             submitted = time.perf_counter()
             preview: dict = {"_preview_cancelled": True}
             try:
-                preview = dashboard_preview_snapshot(
-                    self.game_repository, account_id=account_id, clock=clock,
-                    stop_event=stop_event)
+                for attempt in range(3):
+                    if stop_event.is_set():
+                        raise RuntimeError("dashboard preview superseded")
+                    revision = self.game_repository.dashboard_data_revision()
+                    cached = self._dashboard_snapshot_cache.load(
+                        account_id, clock, expected_revision=revision)
+                    if cached is not None and not stop_event.is_set():
+                        candidate = dict(cached)
+                        cache_hit = not bool(cached.get("is_preview"))
+                    else:
+                        candidate = dashboard_preview_snapshot(
+                            self.game_repository, account_id=account_id, clock=clock,
+                            stop_event=stop_event)
+                        cache_hit = False
+                    current_revision = self.game_repository.dashboard_data_revision()
+                    if current_revision != revision:
+                        if attempt < 2:
+                            continue
+                        candidate = dashboard_preview_snapshot(
+                            self.game_repository, account_id=account_id, clock=clock,
+                            stop_event=stop_event)
+                        revision = self.game_repository.dashboard_data_revision()
+                        cache_hit = False
+                    candidate["_dashboard_revision"] = revision
+                    candidate["_dashboard_cache_hit"] = cache_hit
+                    preview = candidate
+                    if (not cache_hit and not stop_event.is_set()
+                            and self.game_repository.dashboard_data_revision() == revision):
+                        saved = self._dashboard_snapshot_cache.save_tier_a(
+                            account_id, clock, revision, preview)
+                        log_event("dashboard_cache", "dashboard", stage="tier_a_save",
+                                  bytes=self._dashboard_snapshot_cache.last_save_bytes,
+                                  status=("ok" if saved else
+                                          self._dashboard_snapshot_cache.last_save_status))
+                    break
             except Exception as exc:
                 preview = ({"_preview_cancelled": True} if stop_event.is_set()
                            else {"_preview_error": type(exc).__name__})
@@ -3428,9 +3494,27 @@ class MainWindow(QMainWindow):
         if self._dashboard_full_rendered_generation == generation:
             self._launch_pending_dashboard_preview()
             return
+        source_revision = snapshot.get("_dashboard_revision")
+        cache_hit = bool(snapshot.get("_dashboard_cache_hit"))
+        snapshot = {key: value for key, value in snapshot.items()
+                    if key not in {"_dashboard_revision", "_dashboard_cache_hit"}}
         render_started = time.perf_counter()
         self._render_dashboard_snapshot(snapshot)
         self._log_dashboard_first_paint(snapshot, render_started)
+        if cache_hit:
+            self._dashboard_full_rendered_generation = generation
+            self._dashboard_snapshot_cache_revision = int(source_revision or 0)
+            log_event("dashboard_cache", "dashboard", stage="persistent_hit",
+                      status="ok")
+        else:
+            scope = snapshot.get("filter") or {}
+            account_id, clock = scope.get("account_id"), scope.get("clock")
+            self._dashboard_snapshot_cache_revision = (
+                int(source_revision) if source_revision is not None else None)
+            if (self._dashboard_thread is not None and self._dashboard_thread.is_alive()):
+                self.dashboard_queries.defer((generation, account_id, clock))
+            else:
+                self._launch_dashboard_snapshot(generation, account_id, clock)
         self._launch_pending_dashboard_preview()
 
     def _log_dashboard_first_paint(self, snapshot: dict, render_started: float) -> None:
@@ -3489,12 +3573,7 @@ class MainWindow(QMainWindow):
                     # stripping only our worker's internal freshness marker.
                     snapshot = {key: value for key, value in snapshot.items()
                                 if key != "_dashboard_revision"}
-                if (source_revision is not None
-                        and int(source_revision) != self.game_repository.dashboard_data_revision()):
-                    # A concurrent archive/analysis write invalidated this read
-                    # model; never install it as the cache/UI value for a newer revision.
-                    self._refresh_home_dashboard()
-                elif (self.dashboard_account.currentData()
+                if (self.dashboard_account.currentData()
                         != snapshot.get("filter", {}).get("account_id")):
                     self._refresh_home_dashboard()
                 else:
@@ -3580,7 +3659,7 @@ class MainWindow(QMainWindow):
                         or str(metrics.get("accuracy_source") or "").casefold().startswith(
                             "stockfish")
                     )
-                    if source_backed and (metrics.get("assessments")
+                    if source_backed and (metrics.get("graph_points")
                                           or metrics.get("accuracy_source")):
                         current["review_metrics"] = metrics
                 refreshed_games.append(current)
@@ -3734,12 +3813,18 @@ class MainWindow(QMainWindow):
                     "Показатели ходов отдельно для владельца и соперника. "
                     + coverage.toolTip())
                 row_layout.addWidget(statistics, 2)
-                if metrics.get("assessments"):
-                    graph = ReviewGraph(metrics["assessments"], [])
+                graph_points = metrics.get("graph_points")
+                legacy_assessments = metrics.get("assessments") or []
+                if not graph_points and legacy_assessments:
+                    graph_points = legacy_assessments[-64:]
+                if graph_points:
+                    graph = ReviewGraph(graph_points, [])
                     graph.compact = True
                     graph.setMinimumSize(0, 70)
+                    graph.full_ply_count = int(
+                        metrics.get("total_positions") or
+                        len(metrics.get("moves") or {}) or len(graph_points))
                     graph.move_san = metrics.get("moves") or {}
-                    graph.full_ply_count = len(graph.move_san)
                     graph.analysis_source = str(metrics.get("source") or "")
                     graph.set_safety_gate(True)
                     row_layout.addWidget(graph, 3)
@@ -4248,7 +4333,13 @@ class MainWindow(QMainWindow):
         self._screen_mode = "home"
         self.screen_title.setText("Главная")
         self.screen_stack.setCurrentWidget(self.home_page)
-        self._refresh_home_dashboard()
+        active_scope = {"account_id": self.dashboard_account.currentData(), "clock": None}
+        cached_scope = (self._latest_dashboard_snapshot or {}).get("filter") or {}
+        # Re-entry is a page switch only. The snapshot/widgets already painted
+        # for this scope remain live in memory; validation and storage reads run
+        # only when a scope is missing or an explicit source change requests it.
+        if cached_scope != active_scope:
+            self._refresh_home_dashboard()
         self.resume_review_button.setVisible(bool(
             self.settings.value("workspace/review_game_id", "", type=str)))
         active_id = self._selected_live_game_id
@@ -4365,40 +4456,13 @@ class MainWindow(QMainWindow):
     def show_archive_status(self) -> None:
         username = self.lichess.username if self.lichess and self.lichess.username else None
         account_id = f"lichess:{username.strip().lower()}" if username else None
-        count = self.game_repository.search_games(
-            completed_only=False, account_id=account_id, page_size=1)["total"]
         store_type = "Изолированная временная база --offline" if self.offline_mode else "Пользовательская SQLite"
-        details = [
-            f"Хранилище: {store_type}",
-            f"Режим запуска: {'--offline' if self.offline_mode else '--manual-connect' if self.manual_connect_mode else 'обычный'}",
-            f"Состояние Lichess: {'подключено' if self._lichess_connected else 'не подключено'}",
-            f"Python: {platform.python_version()} · PySide6: {PySide6.__version__} · Qt: {qVersion()} · shiboken6: {shiboken6.__version__}",
-            f"Путь к базе (показан по явному запросу): {self.game_repository.path}",
-            f"Локальных партий: {count}",
-            f"Lichess аккаунт: {username or 'не подключён'}",
-        ]
-        if account_id:
-            state = self.archive_sync.account_state(account_id)
-            stage = "Полная выгрузка завершена" if state.get("backfill_complete") else "Полная выгрузка не завершена"
-            details.append(f"Этап архива: {stage}")
-            details.append(f"Последняя полная/инкрементальная синхронизация: "
-                           f"{self._format_sync_time(state.get('last_success_at')) if state.get('last_success_at') else 'нет'}")
-            details.append(f"Новых партий при последней синхронизации: {state.get('last_sync_new_count', 0)}")
-            details.append(f"Можно продолжить: {'да' if state.get('last_error') or not state.get('backfill_complete') else 'нет'}")
-            runs = self.archive_sync.recent_pilot_runs(account_id, limit=1)
-            if runs:
-                pilot = runs[0]
-                details.append(f"Последний пробный импорт: получено {pilot['received_count']}, "
-                               f"новых {pilot['new_count']} · {pilot['status']}")
-            if state.get("last_error"):
-                details.append(f"Последняя ошибка/прерывание: {state['last_error']}")
-        else:
-            details.append("Подключите Lichess, чтобы увидеть статус архива по аккаунту.")
         dialog = QDialog(self)
         dialog.setWindowTitle("Хранилище и статус архива")
         dialog.resize(640, 440)
         layout = QVBoxLayout(dialog)
-        status = QLabel("\n".join(details))
+        status = QLabel("Загружаем локальный статус архива…")
+        status.setObjectName("archiveStatusDetails")
         status.setWordWrap(True)
         layout.addWidget(status, 1)
         sync = QPushButton("Синхронизировать / возобновить архив")
@@ -4412,7 +4476,69 @@ class MainWindow(QMainWindow):
         close = QPushButton("Закрыть")
         close.clicked.connect(dialog.accept)
         layout.addWidget(close)
-        dialog.exec()
+        dialog.finished.connect(lambda _result, current=dialog:
+                                setattr(self, "_archive_status_dialog", None)
+                                if getattr(self, "_archive_status_dialog", None) is current else None)
+        dialog.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose, True)
+        self._archive_status_dialog = dialog
+        operation_id = uuid.uuid4().hex
+        self._archive_status_operation_id = operation_id
+        dialog.open()
+
+        repository = self.game_repository
+        archive_sync = self.archive_sync
+        connected = self._lichess_connected
+        mode = "--offline" if self.offline_mode else "--manual-connect" if self.manual_connect_mode else "обычный"
+        online_allowed = self._online_actions_allowed()
+
+        def work() -> None:
+            try:
+                count = repository.search_games(
+                    completed_only=False, account_id=account_id, page_size=1)["total"]
+                details = [
+                    f"Хранилище: {store_type}", f"Режим запуска: {mode}",
+                    f"Состояние Lichess: {'подключено' if connected else 'не подключено'}",
+                    f"Python: {platform.python_version()} · PySide6: {PySide6.__version__} · Qt: {qVersion()} · shiboken6: {shiboken6.__version__}",
+                    f"Путь к базе (показан по явному запросу): {repository.path}",
+                    f"Локальных партий: {count}", f"Lichess аккаунт: {username or 'не подключён'}",
+                ]
+                if account_id:
+                    state = archive_sync.account_state(account_id)
+                    stage = "Полная выгрузка завершена" if state.get("backfill_complete") else "Полная выгрузка не завершена"
+                    details.append(f"Этап архива: {stage}")
+                    details.append(f"Последняя полная/инкрементальная синхронизация: "
+                                   f"{self._format_sync_time(state.get('last_success_at')) if state.get('last_success_at') else 'нет'}")
+                    details.append(f"Новых партий при последней синхронизации: {state.get('last_sync_new_count', 0)}")
+                    details.append(f"Можно продолжить: {'да' if state.get('last_error') or not state.get('backfill_complete') else 'нет'}")
+                    runs = archive_sync.recent_pilot_runs(account_id, limit=1)
+                    if runs:
+                        pilot = runs[0]
+                        details.append(f"Последний пробный импорт: получено {pilot['received_count']}, "
+                                       f"новых {pilot['new_count']} · {pilot['status']}")
+                    if state.get("last_error"):
+                        details.append(f"Последняя ошибка/прерывание: {state['last_error']}")
+                else:
+                    details.append("Подключите Lichess, чтобы увидеть статус архива по аккаунту.")
+                payload = {"details": "\n".join(details), "online_allowed": online_allowed}
+            except Exception as exc:
+                payload = {"details": f"Не удалось прочитать статус архива ({type(exc).__name__}).",
+                           "online_allowed": online_allowed}
+            self.archive_status_ready.emit(operation_id, payload)
+
+        self._start_registered_work(work, kind="archive_status_read",
+                                    lane=OperationLane.INTERACTIVE,
+                                    thread_name="chess-coach-archive-status")
+
+    def _archive_status_result_ready(self, operation_id: str, payload: object) -> None:
+        if (operation_id != getattr(self, "_archive_status_operation_id", None)
+                or not isinstance(payload, dict)):
+            return
+        dialog = getattr(self, "_archive_status_dialog", None)
+        if dialog is None:
+            return
+        label = dialog.findChild(QLabel, "archiveStatusDetails")
+        if label is not None:
+            label.setText(str(payload.get("details", "Статус архива недоступен.")))
 
     @staticmethod
     def _format_sync_time(value: str) -> str:
@@ -4580,8 +4706,11 @@ class MainWindow(QMainWindow):
 
     def _start_batch_analysis(self, dialog: BatchAnalysisDialog, limit: int, nodes: int,
                               hash_mb: int, resume: bool, retry_failed: bool = False,
-                              selective_review: bool = False, *, automatic: bool = False) -> None:
-        if self._shutdown_requested or (self._batch_thread and self._batch_thread.is_alive()):
+                              selective_review: bool = False, *, automatic: bool = False,
+                              _preflight_complete: bool = False,
+                              _saved_parameters: dict | None = None) -> None:
+        if (self._shutdown_requested or getattr(self, "_batch_preflight_pending", False)
+                or (self._batch_thread and self._batch_thread.is_alive())):
             return
         service = self.lichess
         username = str(getattr(service, "username", "") or "").strip()
@@ -4609,9 +4738,32 @@ class MainWindow(QMainWindow):
             runner = self.engine_analysis.create_batch_runner(
                 self.game_repository, engine_path, options=options)
             resumed_original_budget = False
+            if resume and not all_missing and not _preflight_complete:
+                engine_key = runner.engine_key
+                self._batch_preflight_pending = True
+                preflight_generation = self._analysis_session_generation
+                dialog.set_running(True)
+                dialog.worker_progress.emit("Проверяем сохранённые параметры очереди…")
+
+                def read_saved_parameters() -> None:
+                    try:
+                        saved = self.game_repository.pending_fast_analysis_parameters(
+                            engine_key, account_id=account_id)
+                        result = {"saved": saved}
+                    except Exception as exc:
+                        result = {"error": type(exc).__name__}
+                    self.batch_preflight_ready.emit((
+                        dialog, limit, nodes, hash_mb, resume, retry_failed,
+                        selective_review, automatic, result, account_id, service,
+                        preflight_generation))
+
+                self._start_registered_work(
+                    read_saved_parameters, kind="batch_analysis_parameters_read",
+                    lane=OperationLane.INTERACTIVE,
+                    thread_name="chess-coach-batch-preflight")
+                return
             if resume and not all_missing:
-                saved_parameters = self.game_repository.pending_fast_analysis_parameters(
-                    runner.engine_key, account_id=account_id)
+                saved_parameters = _saved_parameters or {}
                 if saved_parameters:
                     saved_nodes = int(saved_parameters.get("limit_value", nodes))
                     saved_hash = int(saved_parameters.get("hash_mb", hash_mb))
@@ -4780,6 +4932,32 @@ class MainWindow(QMainWindow):
             work, kind="stockfish_batch_analysis", lane=OperationLane.ENGINE,
             stop_event=stop, thread_name="chess-coach-batch-analysis")
         self._batch_thread = thread
+
+    def _batch_preflight_result_ready(self, payload: object) -> None:
+        if not isinstance(payload, tuple) or len(payload) != 12:
+            return
+        (dialog, limit, nodes, hash_mb, resume, retry_failed,
+         selective_review, automatic, result, account_id, service,
+         generation) = payload
+        self._batch_preflight_pending = False
+        if self._shutdown_requested or not isinstance(result, dict):
+            return
+        if (self.lichess is not service
+                or self._analysis_session_generation != generation
+                or f"lichess:{str(getattr(service, 'username', '') or '').strip().lower()}"
+                != account_id):
+            dialog.set_running(False)
+            dialog.progress_label.setText("Аккаунт изменился; повторите запуск очереди.")
+            return
+        if result.get("error"):
+            dialog.set_running(False)
+            dialog.progress_label.setText("Не удалось прочитать параметры сохранённой очереди.")
+            return
+        dialog.set_running(False)
+        self._start_batch_analysis(
+            dialog, limit, nodes, hash_mb, resume, retry_failed, selective_review,
+            automatic=automatic, _preflight_complete=True,
+            _saved_parameters=result.get("saved"))
 
     def _pause_batch_analysis(self, *, manual: bool = True) -> None:
         if manual:
@@ -9589,7 +9767,8 @@ class MainWindow(QMainWindow):
         return (f"Запись сохранена как исходный PGN. Вариант: {variant}. "
                 f"Просмотр доски и анализ недоступны: {reason}. Экспорт PGN доступен.")
 
-    def _open_saved_game(self, game: dict, *, analysis_source: str | None = None) -> bool:
+    def _open_saved_game(self, game: dict, *, analysis_source: str | None = None,
+                         review_data: dict | None = None) -> bool:
         if not self._is_standard_board_game(game):
             self.home_status.setText(self._raw_only_game_message(game))
             return False
@@ -9623,7 +9802,8 @@ class MainWindow(QMainWindow):
             self.review_workspace.load_game(game, training_allowed=allowed,
                                             training_block_reason=reason,
                                             analysis_source=analysis_source,
-                                            evaluation_allowed=display_allowed)
+                                            evaluation_allowed=display_allowed,
+                                            review_data=review_data)
         except (KeyError, ValueError) as exc:
             self.home_status.setText(f"Не удалось открыть сохранённую линию: {exc}")
             return False

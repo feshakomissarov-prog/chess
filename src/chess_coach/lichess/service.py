@@ -112,6 +112,11 @@ class LichessService(QObject, LichessAuthMixin, LichessSyncMixin, LichessGameAct
         self._pending_action_lock = threading.Lock()
         self._pending_actions: dict[tuple[int, str, str], str] = {}
         self._pending_action_states: dict[tuple[int, str, str], dict] = {}
+        # Service-level one-shot ledger: Qt is not the only possible caller of
+        # send_move. Keep recent request IDs bounded while retaining unresolved
+        # intents until an authoritative line change or a definitive rejection.
+        self._move_request_ledger = {}
+        self._pending_move_by_game = {}
         self._game_authoritative_state: dict[tuple[int, str], dict] = {}
         self._game_authoritative_sequence: dict[tuple[int, str], int] = {}
         self._accepted_game_full_sequence: dict[tuple[int, str], int] = {}

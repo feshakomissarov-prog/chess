@@ -9,7 +9,7 @@ from PySide6.QtGui import QColor, QKeySequence, QPainter, QPen, QPolygonF, QShor
 from PySide6.QtWidgets import (
     QAbstractItemView, QCheckBox, QComboBox, QFrame, QGridLayout, QGroupBox,
     QHBoxLayout, QHeaderView, QLabel, QListWidget, QListWidgetItem, QPushButton,
-    QSplitter, QSizePolicy, QTableWidget, QTableWidgetItem, QTabWidget, QVBoxLayout,
+    QScrollArea, QSplitter, QSizePolicy, QTableWidget, QTableWidgetItem, QTabWidget, QVBoxLayout,
     QWidget,
 )
 
@@ -554,10 +554,17 @@ class GameReviewWorkspace(QWidget):
                                Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
         board_layout.addWidget(self.black_name)
 
-        self.left_metrics = QWidget()
-        self.left_metrics.setMinimumWidth(360)
-        self.left_metrics.setMaximumWidth(370)
-        metrics_column = QVBoxLayout(self.left_metrics)
+        self.left_metrics = QScrollArea()
+        self.left_metrics.setObjectName("reviewMetricsScroll")
+        self.left_metrics.setWidgetResizable(True)
+        self.left_metrics.setFrameShape(QFrame.Shape.NoFrame)
+        self.left_metrics.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.left_metrics.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        self.left_metrics.setMinimumWidth(0)
+        self.left_metrics.setMaximumWidth(16777215)
+        metrics_content = QWidget()
+        metrics_content.setMinimumWidth(0)
+        metrics_column = QVBoxLayout(metrics_content)
         metrics_column.setContentsMargins(2, 2, 4, 2)
         metrics_column.setSpacing(5)
         self.phase_selector = QComboBox()
@@ -621,6 +628,7 @@ class GameReviewWorkspace(QWidget):
         empty_layout.addWidget(self.no_analysis_title)
         empty_layout.addWidget(self.no_analysis_detail)
         metrics_column.insertWidget(1, self.no_analysis_summary)
+        self.left_metrics.setWidget(metrics_content)
         split.addWidget(self.left_metrics)
         split.addWidget(board_column)
 
@@ -849,7 +857,8 @@ class GameReviewWorkspace(QWidget):
                   training_block_reason: str | None = None,
                   ephemeral: bool = False,
                   analysis_source: str | None = None,
-                  evaluation_allowed: bool | None = None) -> None:
+                  evaluation_allowed: bool | None = None,
+                  review_data: dict | None = None) -> None:
         self._ephemeral_study = bool(ephemeral)
         self._ephemeral_board = None
         self._ephemeral_branch.clear()
@@ -860,8 +869,9 @@ class GameReviewWorkspace(QWidget):
             if self._ephemeral_study else "")
         self.ephemeral_status.setToolTip(
             "Ходы исследования не попадут в PGN, SQLite или онлайн-партию.")
-        self.review = load_game_review(self.repository, game,
-                                       analysis_source=analysis_source)
+        self.review = (dict(review_data) if isinstance(review_data, dict) else
+                       load_game_review(self.repository, game,
+                                        analysis_source=analysis_source))
         if training_allowed is not None:
             self.training_allowed = training_allowed
             if evaluation_allowed is None:

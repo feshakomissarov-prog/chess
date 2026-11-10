@@ -4,8 +4,19 @@ import json
 import logging
 import threading
 
+import pytest
+
 from chess_coach import diagnostics
 from chess_coach.lichess.api import LichessClient
+
+
+@pytest.fixture(autouse=True)
+def isolate_diagnostics_logger():
+    diagnostics.shutdown_logging()
+    diagnostics._LOGGER.handlers.clear()
+    yield
+    diagnostics.shutdown_logging()
+    diagnostics._LOGGER.handlers.clear()
 
 
 def test_diagnostics_are_allowlisted_redacted_and_utf8(tmp_path, monkeypatch):
@@ -19,8 +30,7 @@ def test_diagnostics_are_allowlisted_redacted_and_utf8(tmp_path, monkeypatch):
         count=1,
         username="Alice",
     )
-    for handler in diagnostics._LOGGER.handlers:
-        handler.flush()
+    diagnostics.flush_logging()
     contents = (tmp_path / "chess-coach.log").read_text(encoding="utf-8")
     event = json.loads(contents)
     assert event["mode"].startswith("[redacted]")
@@ -44,7 +54,7 @@ def test_diagnostics_use_rotating_bounded_files(tmp_path, monkeypatch):
     handler.maxBytes = 512
     for index in range(40):
         diagnostics.log_event("batch_job_completed", "batch", count=index)
-    handler.flush()
+    diagnostics.flush_logging()
     assert (tmp_path / "chess-coach.log").exists()
     assert (tmp_path / "chess-coach.log.1").exists()
     diagnostics._LOGGER.handlers.clear()
@@ -65,8 +75,7 @@ def test_diagnostics_attach_only_valid_operation_ids_and_redact_exception_text(
                 "C:\\Users\\Owner\\private\\game.pgn"))
     finally:
         diagnostics.reset_context(context)
-    for handler in diagnostics._LOGGER.handlers:
-        handler.flush()
+    diagnostics.flush_logging()
     content = (tmp_path / "chess-coach.log").read_text(encoding="utf-8")
     event = json.loads(content)
     assert event["operation_id"] == "a" * 32
@@ -108,8 +117,7 @@ def test_puzzle_api_diagnostics_never_include_request_url_or_token(tmp_path, mon
     client = LichessClient(Transport(), base_url="https://lichess.test")
     list(client.stream_puzzle_activity(
         "secret-token", threading.Event(), max_items=1))
-    for handler in diagnostics._LOGGER.handlers:
-        handler.flush()
+    diagnostics.flush_logging()
     text = (tmp_path / "chess-coach.log").read_text(encoding="utf-8")
     assert "secret-token" not in text
     assert "private-user" not in text
