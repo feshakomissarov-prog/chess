@@ -96,7 +96,10 @@ def dashboard_preview_snapshot(repository, *, account_id: str | None = None,
         rows = db.execute(
             f"SELECT g.game_id,g.status,g.winner,g.opponent,g.color,g.started_at,"
             f"g.updated_at,g.last_move_at,g.game_time_precision,g.clock,g.opening_eco,"
-            f"g.opening_name,g.line_revision,{opponent},{player},{color_value} FROM games g{join} "
+            f"g.opening_name,g.line_revision,g.source,"
+            "(SELECT gr.line_hash FROM game_revisions gr WHERE gr.game_id=g.game_id "
+            "AND gr.is_current=1 LIMIT 1) AS line_hash,"
+            f"{opponent},{player},{color_value} FROM games g{join} "
             f"WHERE {where} ORDER BY ({activity_epoch}) IS NULL,{activity_epoch} DESC,"
             "g.game_id DESC LIMIT 3", params).fetchall()
         rows_ms = int((time.perf_counter() - rows_started) * 1000)
@@ -189,7 +192,7 @@ def dashboard_options(repository) -> dict[str, list[dict[str, str]]]:
 
 
 def dashboard_snapshot(repository, *, account_id: str | None = None,
-                       clock: str | None = None, wait_for_writes: bool = True) -> dict[str, Any]:
+                       clock: str | None = None, wait_for_writes: bool = False) -> dict[str, Any]:
     """Return scoped KPIs plus at most three completed games.
 
     All archive-wide counts are SQL aggregates. Only three current game lines are

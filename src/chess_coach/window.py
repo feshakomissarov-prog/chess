@@ -498,6 +498,7 @@ class MainWindow(QMainWindow):
         self.dashboard_queries = DashboardQueryCoordinator(self.game_repository)
         self._dashboard_snapshot_cache = DashboardSnapshotCache(self.game_repository)
         self._dashboard_snapshot_cache_revision: int | None = None
+        self._dashboard_revision_retry_counts: dict[int, int] = {}
         self._dashboard_options_loaded = False
         self._home_detail_game_id: str | None = None
         self._home_detail_payload: dict | None = None
@@ -3287,6 +3288,7 @@ class MainWindow(QMainWindow):
                         account_id = self.dashboard_account.itemData(index)
                         break
         generation = self.dashboard_queries.begin_request()
+        self._dashboard_revision_retry_counts[generation] = 0
         clock = None
         if not self._dashboard_options_loaded:
             self._request_dashboard_options()
@@ -3327,14 +3329,24 @@ class MainWindow(QMainWindow):
                     revision = self.game_repository.dashboard_data_revision()
                     cached = self._dashboard_snapshot_cache.load(
                         account_id, clock, expected_revision=revision)
-                    if cached is not None and not stop_event.is_set():
+                    cache_has_tier_b = bool(cached is not None and
+                                            cached.get("_dashboard_tier_b_revision") is not None)
+                    cache_fresh = bool(cached is not None and
+                                       cached.get("_dashboard_tier_a_revision") == revision and
+                                       cached.get("_dashboard_tier_b_revision") == revision)
+                    if cache_fresh and not cached.get("is_preview") and not stop_event.is_set():
                         candidate = dict(cached)
-                        cache_hit = not bool(cached.get("is_preview"))
+                        cache_hit = True
                     else:
                         candidate = dashboard_preview_snapshot(
                             self.game_repository, account_id=account_id, clock=clock,
                             stop_event=stop_event)
                         cache_hit = False
+                        if cache_has_tier_b and cached is not None:
+                            from .application.dashboard_cache import merge_last_good
+                            candidate = merge_last_good(
+                                candidate, cached,
+                                stale=(cached.get("_dashboard_tier_b_revision") != revision))
                     current_revision = self.game_repository.dashboard_data_revision()
                     if current_revision != revision:
                         if attempt < 2:
@@ -3431,24 +3443,53 @@ class MainWindow(QMainWindow):
         log_event("dashboard_stage", "dashboard", stage="aggregate_submitted", status="ok")
         def work():
             started = time.perf_counter()
-            source_revision = self.game_repository.dashboard_data_revision()
-            try:
-                result = self.dashboard_queries.snapshot(
-                    account_id=account_id, clock=clock, query=dashboard_snapshot)
-                error = None
-            except Exception as exc:
-                result, error = None, exc
-            if isinstance(result, dict):
+            result = error = None
+            source_revision = None
+            for attempt in range(4):
+                source_revision = self.game_repository.dashboard_data_revision()
+                try:
+                    candidate = self.dashboard_queries.snapshot(
+                        account_id=account_id, clock=clock, query=dashboard_snapshot)
+                    error = None
+                except Exception as exc:
+                    candidate, error = None, exc
+                if not isinstance(candidate, dict):
+                    result = candidate
+                    break
                 completed_revision = self.game_repository.dashboard_data_revision()
-                result["_dashboard_revision"] = completed_revision
                 if completed_revision == source_revision:
-                    cache_value = {key: value for key, value in result.items()
-                                   if key != "_dashboard_revision"}
-                    self._dashboard_snapshot_cache.save(
+                    cache_value = {key: value for key, value in candidate.items()
+                                   if not key.startswith("_dashboard_")}
+                    # A completed stable aggregate is the point at which both
+                    # compact tiers can be published atomically. This also
+                    # refreshes Tier A when commits arrived during the preview.
+                    saved = self._dashboard_snapshot_cache.save(
                         account_id, clock, source_revision, cache_value)
+                    log_event("dashboard_cache", "dashboard", stage="tier_b_publish",
+                              bytes=self._dashboard_snapshot_cache.last_save_bytes,
+                              status=("saved" if saved else
+                                      self._dashboard_snapshot_cache.last_save_status))
+                    result = candidate
+                    result["_dashboard_revision"] = source_revision
+                    result["_dashboard_stale"] = not saved
+                    if saved:
+                        break
+                    if self._dashboard_snapshot_cache.last_save_status != "revision_changed":
+                        # A schema/IO failure cannot be repaired by immediately
+                        # rerunning the same archive-wide aggregate. Keep the
+                        # computed snapshot visible and let the next scheduled
+                        # refresh retry its cache publication.
+                        break
                 else:
-                    log_event("dashboard_cache", "dashboard", stage="write_skipped_revision_changed",
-                              status="stale")
+                    result = candidate
+                    result["_dashboard_revision"] = source_revision
+                    result["_dashboard_stale"] = True
+                    log_event("dashboard_cache", "dashboard", stage="aggregate_retry_revision_changed",
+                              attempt=attempt + 1, status="stale")
+                if attempt < 3:
+                    time.sleep(min(0.05 * (attempt + 1), 0.2))
+            if isinstance(result, dict) and result.get("_dashboard_stale"):
+                result["_dashboard_refresh_pending"] = True
             log_event("dashboard_stage", "dashboard", stage="aggregate_ready",
                       duration_ms=int((time.perf_counter() - started) * 1000),
                       status="error" if error is not None else "ok")
@@ -3567,12 +3608,18 @@ class MainWindow(QMainWindow):
                 for detail in self._dashboard_metric_details.values():
                     detail.setText("Не удалось прочитать локальные данные. Повторите обновление.")
             elif isinstance(snapshot, dict):
+                result_scope = snapshot.get("filter") or {}
+                account_id, clock = result_scope.get("account_id"), result_scope.get("clock")
                 source_revision = snapshot.get("_dashboard_revision")
+                stale = bool(snapshot.get("_dashboard_stale"))
+                refresh_pending = bool(snapshot.get("_dashboard_refresh_pending"))
                 if source_revision is not None:
                     # Keep externally supplied/test snapshots immutable while
                     # stripping only our worker's internal freshness marker.
                     snapshot = {key: value for key, value in snapshot.items()
-                                if key != "_dashboard_revision"}
+                                if key not in {"_dashboard_revision", "_dashboard_refresh_pending"}}
+                if stale:
+                    snapshot["_dashboard_stale"] = True
                 if (self.dashboard_account.currentData()
                         != snapshot.get("filter", {}).get("account_id")):
                     self._refresh_home_dashboard()
@@ -3585,9 +3632,26 @@ class MainWindow(QMainWindow):
                     log_event("dashboard_stage", "dashboard", stage="full_metrics_ready",
                               duration_ms=int((time.perf_counter() - shown_at) * 1000),
                               status="ok")
+                    if refresh_pending:
+                        attempts = self._dashboard_revision_retry_counts.get(generation, 0)
+                        if (attempts < 3 and self.dashboard_queries.is_current(generation)
+                                and not self._shutdown_requested):
+                            self._dashboard_revision_retry_counts[generation] = attempts + 1
+                            QTimer.singleShot(500, lambda g=generation, a=account_id, c=clock:
+                                              self._retry_dashboard_snapshot(g, a, c))
         pending = self.dashboard_queries.take_pending()
         if pending is not None and not self._shutdown_requested:
             self._launch_dashboard_snapshot(*pending)
+
+    def _retry_dashboard_snapshot(self, generation: int, account_id: str | None,
+                                  clock: str | None) -> None:
+        if (not self._shutdown_requested and self.dashboard_queries.is_current(generation)
+                and self.dashboard_account.currentData() == account_id):
+            request = (generation, account_id, clock)
+            if self._dashboard_thread is not None and self._dashboard_thread.is_alive():
+                self.dashboard_queries.defer(request)
+            else:
+                self._launch_dashboard_snapshot(*request)
 
     def _render_dashboard_snapshot(self, snapshot: dict) -> None:
         previous_snapshot = self._latest_dashboard_snapshot
@@ -3602,6 +3666,14 @@ class MainWindow(QMainWindow):
             self._latest_dashboard_snapshot = snapshot
         trend = snapshot.get("activity_trend") or []
         puzzle_rating = snapshot.get("puzzle_player_rating") or {}
+        saved_at_label = ""
+        saved_at = snapshot.get("_dashboard_tier_b_saved_at")
+        if saved_at:
+            try:
+                saved_time = datetime.fromisoformat(str(saved_at).replace("Z", "+00:00"))
+                saved_at_label = saved_time.astimezone().strftime("%d.%m.%Y %H:%M")
+            except (TypeError, ValueError, OverflowError):
+                saved_at_label = ""
         if not preview:
             self._home_view.puzzle_rating.setText(str(puzzle_rating.get("latest", "—")))
             self._home_view.puzzle_sparkline.set_points(puzzle_rating.get("points") or [])
@@ -3609,8 +3681,12 @@ class MainWindow(QMainWindow):
             pass
         elif not preview and puzzle_rating:
             self._home_view.progress_trend.setText(
-                "Последние 90 дней" if puzzle_rating.get("points") else
-                f"Последняя подтверждённая запись · {puzzle_rating['date']}")
+                ((f"Данные на {saved_at_label} · обновляется" if saved_at_label else
+                  "Сохранённый рейтинг · обновляется") if snapshot.get("_dashboard_stale") else
+                 "Последние 90 дней") if puzzle_rating.get("points") else
+                f"Последняя подтверждённая запись · {puzzle_rating['date']}" +
+                ((f" · данные на {saved_at_label}" if saved_at_label else "") +
+                 (" · обновляется" if snapshot.get("_dashboard_stale") else "")))
             self._home_view.progress_trend.setToolTip(
                 "Рейтинг игрока из истории Lichess. Даты попыток сгруппированы по UTC.")
         elif not preview and trend:
@@ -3689,6 +3765,12 @@ class MainWindow(QMainWindow):
                     detail_text = f"С оценками: {analyzed if analyzed is not None else '—'}\n{parts[2]} · {parts[3]}"
             self._dashboard_metric_details[metric["key"]].setText(
                 "Проверка безопасности Lichess не подтверждена." if masked else detail_text)
+            if snapshot.get("_dashboard_stale") and metric["key"] in {"accuracy", "analysis", "errors"}:
+                freshness = f"Данные на {saved_at_label} · обновляется" if saved_at_label else \
+                    "Сохранённые данные · обновляется"
+                detail_text = f"{freshness}\n{detail_text}"
+                self._dashboard_metric_details[metric["key"]].setText(
+                    "Проверка безопасности Lichess не подтверждена." if masked else detail_text)
             source_description = ("Аналитика скрыта до свежего разрешения Fair Play."
                                   if masked else
                                   f"{metric['detail']}\nИсточник: {metric['source']}"
@@ -3758,7 +3840,10 @@ class MainWindow(QMainWindow):
             description.setWordWrap(True)
             description.setToolTip(opening_tooltip(game.get("opening_name")))
             card_layout.addWidget(description)
-            coverage_text = ("Загружаем сохранённые оценки…" if metrics.get("status") == "loading" else
+            coverage_text = ("Новая партия · оценки обновляются" if
+                             snapshot.get("_dashboard_stale") and
+                             metrics.get("status") in {"loading", "updating"} else
+                             "Загружаем сохранённые оценки…" if metrics.get("status") == "loading" else
                              "оценок пока нет" if metrics.get("status") == "без анализа" else
                              f"Оценённые ходы: {metrics.get('coverage', '—')}")
             coverage = QLabel(
@@ -3793,6 +3878,9 @@ class MainWindow(QMainWindow):
                 opening_label.setStyleSheet("font-size: 16px; font-weight: 600;")
                 accuracy_group.addWidget(opening_label)
                 accuracy_label = QLabel(
+                    "Новая партия · оценка ещё не рассчитана"
+                    if snapshot.get("_dashboard_stale") and
+                    metrics.get("status") in {"loading", "updating"} else
                     "Сверяем локально сохранённую аналитику…"
                     if metrics.get("status") == "loading" else
                     f"Точность: {accuracy} · {metrics['accuracy_source']}"
@@ -9860,8 +9948,11 @@ class MainWindow(QMainWindow):
         batch_thread = self._batch_thread
         batch_running = bool(batch_thread and batch_thread.is_alive())
         dashboard_thread = self._dashboard_thread
+        # Dashboard work can include archive-wide aggregates. Keep the bounded
+        # shutdown probe short so an already-finished worker can release its
+        # handle without letting a long read stall the Qt event loop.
         if dashboard_thread is not None and dashboard_thread.is_alive():
-            dashboard_thread.join(timeout=0.5)
+            dashboard_thread.join(timeout=0.05)
         dashboard_running = bool(dashboard_thread and dashboard_thread.is_alive())
         if not dashboard_running:
             self._dashboard_thread = None
@@ -9869,8 +9960,7 @@ class MainWindow(QMainWindow):
         if dashboard_preview_thread is not None and dashboard_preview_thread.is_alive():
             if self._dashboard_preview_stop is not None:
                 self._dashboard_preview_stop.set()
-        if dashboard_preview_thread is not None and dashboard_preview_thread.is_alive():
-            dashboard_preview_thread.join(timeout=0.5)
+            dashboard_preview_thread.join(timeout=0.05)
         dashboard_preview_running = bool(
             dashboard_preview_thread and dashboard_preview_thread.is_alive())
         if not dashboard_preview_running:

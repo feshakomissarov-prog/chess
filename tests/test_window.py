@@ -6423,6 +6423,11 @@ def test_fair_play_revocation_stops_running_game_analysis_and_discards_late_succ
     assert not opened
     assert "Анализ остановлен" in window.home_status.text()
     assert window.game_repository.list_analyses("finished-game") == []
+    qtbot.waitUntil(
+        lambda: (window._dashboard_preview_thread is None
+                 or not window._dashboard_preview_thread.is_alive())
+        and (window._dashboard_thread is None or not window._dashboard_thread.is_alive()),
+        timeout=5000)
     assert window.close() is True
 
 

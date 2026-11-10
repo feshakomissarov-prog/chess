@@ -9,12 +9,14 @@ import sys
 import threading
 import uuid
 from contextlib import contextmanager
+from datetime import datetime, timezone
 
 from ..domain.accuracy import FORMULA_ID
 from ..infrastructure.sqlite.constants import SCHEMA_VERSION
 
 
-_CACHE_FORMAT = 2
+_CACHE_FORMAT = 3
+_COMPATIBLE_CACHE_FORMATS = {2, 3}
 _MAX_SCOPES = 12
 _MAX_CACHE_BYTES = 8 * 1024 * 1024
 _MAX_GRAPH_POINTS = 64
@@ -39,6 +41,18 @@ def _scope_key(account_id: str | None, clock: str | None) -> str:
 def _scope_matches(value: object, account_id: str | None, clock: str | None) -> bool:
     return (isinstance(value, dict) and
             value.get("account_id") == account_id and value.get("clock") == clock)
+
+
+def _document_scope_key(key: object, account_id: str | None,
+                        clock: str | None) -> bool:
+    try:
+        value = json.loads(key) if isinstance(key, str) else None
+    except (ValueError, TypeError):
+        return False
+    return (isinstance(value, dict) and value.get("account") == account_id
+            and value.get("clock") == clock and value.get("formula") == FORMULA_ID
+            and value.get("schema") == SCHEMA_VERSION
+            and value.get("format") in _COMPATIBLE_CACHE_FORMATS)
 
 
 def _valid_metrics(metrics: object, allowed: set[str]) -> bool:
@@ -73,7 +87,7 @@ def _valid_game_shell(game: object) -> bool:
             return False
     for key in ("account_id", "account_opponent", "opponent", "account_player_name",
                 "player_name", "started_at", "clock", "opening_eco", "opening_name",
-                "source", "source_game_id"):
+                "source", "source_game_id", "line_hash"):
         value = game.get(key)
         if value is not None and (not isinstance(value, str) or len(value) > 500):
             return False
@@ -159,6 +173,11 @@ def _valid_tier_b(tier: object) -> bool:
     for item in recent:
         if (not isinstance(item, dict) or not isinstance(item.get("game_id"), str)
                 or type(item.get("line_revision")) is not int
+                or (item.get("line_hash") is not None and
+                    (not isinstance(item["line_hash"], str) or len(item["line_hash"]) > 200))
+                or item.get("account_color") not in {None, "white", "black"}
+                or (item.get("source_id") is not None and
+                    (not isinstance(item["source_id"], str) or len(item["source_id"]) > 500))
                 or not _valid_game_shell({
                     "game_id": item["game_id"], "status": "complete",
                     "review_metrics": item.get("review_metrics")})):
@@ -180,11 +199,14 @@ def _split_snapshot(snapshot: dict) -> tuple[dict, dict]:
             "game_id", "status", "winner", "color", "account_color", "account_id",
             "account_opponent", "opponent", "account_player_name", "player_name",
             "started_at", "clock", "opening_eco", "opening_name", "source",
-            "source_game_id", "line_revision")}
+            "source_game_id", "line_revision", "line_hash")}
         if isinstance(review_metrics, dict):
             recent_metrics.append({
                 "game_id": str(shell.get("game_id") or ""),
                 "line_revision": int(shell.get("line_revision") or 0),
+                "line_hash": shell.get("line_hash"),
+                "account_color": shell.get("account_color") or shell.get("color"),
+                "source_id": shell.get("source"),
                 "review_metrics": _compact_review_metrics(review_metrics),
             })
         recent_games.append(shell)
@@ -254,9 +276,50 @@ def _merge_tiers(tier_a: dict, tier_b: dict | None) -> dict:
     by_id = {item["game_id"]: item for item in tier_b["recent_metrics"]}
     for game in snapshot["recent_games"]:
         saved = by_id.get(str(game.get("game_id")))
-        if saved and saved.get("line_revision") == (game.get("line_revision") or 0):
+        same_identity = bool(saved and
+            saved.get("line_revision") == (game.get("line_revision") or 0) and
+            saved.get("line_hash") == game.get("line_hash") and
+            saved.get("account_color") == (game.get("account_color") or game.get("color")) and
+            saved.get("source_id") == game.get("source"))
+        if same_identity:
             game["review_metrics"] = saved["review_metrics"]
     return snapshot
+
+
+def merge_last_good(current: dict, previous: dict | None, *, stale: bool) -> dict:
+    """Overlay prior verified Tier B facts onto the current bounded Tier A rows."""
+    result = dict(current)
+    if previous:
+        old_metrics = {item.get("key"): item for item in previous.get("metrics", [])}
+        result["metrics"] = [old_metrics.get(item.get("key"), item)
+                             if item.get("key") != "games" else item
+                             for item in result.get("metrics", [])]
+        if previous.get("puzzle_player_rating"):
+            result["puzzle_player_rating"] = previous["puzzle_player_rating"]
+        if previous.get("activity_trend"):
+            result["activity_trend"] = previous["activity_trend"]
+            result["activity_trend_source"] = previous.get("activity_trend_source")
+        old_games = {game.get("game_id"): game for game in previous.get("recent_games", [])}
+        for game in result.get("recent_games", []):
+            old = old_games.get(game.get("game_id"))
+            if not old:
+                continue
+            same_identity = (
+                game.get("line_revision") == old.get("line_revision")
+                and game.get("line_hash") == old.get("line_hash")
+                and (game.get("account_color") or game.get("color"))
+                == (old.get("account_color") or old.get("color"))
+                and game.get("source") == old.get("source"))
+            if same_identity and old.get("review_metrics"):
+                game["review_metrics"] = old["review_metrics"]
+            elif stale:
+                game["review_metrics"] = {
+                    "status": "updating", "coverage": "—", "source": "—"}
+    result.pop("is_preview", None)
+    result["_dashboard_stale"] = bool(stale)
+    result["_dashboard_tier_b_saved_at"] = (previous or {}).get(
+        "_dashboard_tier_b_saved_at")
+    return result
 
 
 class DashboardSnapshotCache:
@@ -298,19 +361,44 @@ class DashboardSnapshotCache:
                 finally:
                     fcntl.flock(stream.fileno(), fcntl.LOCK_UN)
 
-    def _read_document(self, expected_revision: int) -> dict | None:
+    def _read_document(self, expected_revision: int | None = None) -> dict | None:
         for candidate in (self.path, self.previous_path):
             try:
                 if not candidate.is_file() or candidate.stat().st_size > _MAX_CACHE_BYTES:
                     continue
                 document = json.loads(candidate.read_text(encoding="utf-8"))
                 if (not isinstance(document, dict)
-                        or document.get("format") != _CACHE_FORMAT
+                        or document.get("format") not in _COMPATIBLE_CACHE_FORMATS
                         or document.get("schema_version") != SCHEMA_VERSION
                         or document.get("formula_id") != FORMULA_ID
-                        or document.get("revision") != int(expected_revision)
                         or not isinstance(document.get("scopes"), dict)):
                     continue
+                saved_revision = int(document.get("revision", -1))
+                if document["format"] == 2:
+                    scopes = {}
+                    for old_key, old_entry in document["scopes"].items():
+                        try:
+                            old_scope = json.loads(old_key)
+                        except (TypeError, ValueError):
+                            continue
+                        if not isinstance(old_scope, dict):
+                            continue
+                        account_id, clock = old_scope.get("account"), old_scope.get("clock")
+                        if not _document_scope_key(old_key, account_id, clock):
+                            continue
+                        scopes[_scope_key(account_id, clock)] = {
+                            **old_entry,
+                            "tier_a_revision": saved_revision,
+                            "tier_b_revision": saved_revision,
+                            "tier_b_saved_at": None,
+                        }
+                    document = {**document, "format": _CACHE_FORMAT, "scopes": scopes}
+                else:
+                    for entry in document["scopes"].values():
+                        if isinstance(entry, dict):
+                            entry.setdefault("tier_a_revision", saved_revision)
+                            entry.setdefault("tier_b_revision", saved_revision)
+                            entry.setdefault("tier_b_saved_at", None)
                 return document
             except (OSError, ValueError, TypeError):
                 continue
@@ -322,11 +410,14 @@ class DashboardSnapshotCache:
             revision = (self.repository.dashboard_data_revision()
                         if expected_revision is None else int(expected_revision))
             with self._lock, self._process_lock():
-                document = self._read_document(revision)
+                document = self._read_document()
             if (document is None
                     or self.repository.dashboard_data_revision() != revision):
                 return None
             entry = document["scopes"].get(_scope_key(account_id, clock))
+            if entry is None:
+                entry = next((value for key, value in document["scopes"].items()
+                              if _document_scope_key(key, account_id, clock)), None)
             if not isinstance(entry, dict):
                 return None
             tier_a = entry.get("tier_a")
@@ -335,7 +426,17 @@ class DashboardSnapshotCache:
                 return None
             if tier_b is not None and not _valid_tier_b(tier_b):
                 return None
-            return _merge_tiers(tier_a, tier_b)
+            result = _merge_tiers(tier_a, tier_b)
+            tier_a_revision = int(entry.get("tier_a_revision", document.get("revision", -1)))
+            tier_b_revision = int(entry.get("tier_b_revision", document.get("revision", -1)))
+            result["_dashboard_revision"] = revision
+            result["_dashboard_tier_a_revision"] = tier_a_revision
+            result["_dashboard_tier_b_revision"] = tier_b_revision
+            result["_dashboard_stale"] = tier_b is not None and tier_b_revision != revision
+            result["_dashboard_tier_b_saved_at"] = entry.get("tier_b_saved_at")
+            if self.repository.dashboard_data_revision() != revision:
+                return None
+            return result
         except Exception:
             return None
 
@@ -347,13 +448,17 @@ class DashboardSnapshotCache:
                 self.last_save_status = "invalid_schema"
                 return False
             with self._lock, self._process_lock():
-                document = self._read_document(int(revision)) or {
+                document = self._read_document() or {
                     "format": _CACHE_FORMAT, "schema_version": SCHEMA_VERSION,
                     "formula_id": FORMULA_ID, "revision": int(revision), "scopes": {}}
                 entry = document["scopes"].setdefault(
                     _scope_key(account_id, clock), {"tier_a": None, "tier_b": None})
                 entry["tier_a"] = tier_a
                 entry["tier_b"] = tier_b
+                entry["tier_a_revision"] = int(revision)
+                entry["tier_b_revision"] = int(revision)
+                entry["tier_b_saved_at"] = datetime.now(timezone.utc).isoformat()
+                document["revision"] = int(revision)
                 while len(document["scopes"]) > _MAX_SCOPES:
                     document["scopes"].pop(next(iter(document["scopes"])))
                 encoded = json.dumps(document, ensure_ascii=False, separators=(",", ":"))
@@ -394,12 +499,19 @@ class DashboardSnapshotCache:
                 self.last_save_status = "revision_changed"
                 return False
             with self._lock, self._process_lock():
-                document = self._read_document(int(revision)) or {
+                document = self._read_document() or {
                     "format": _CACHE_FORMAT, "schema_version": SCHEMA_VERSION,
                     "formula_id": FORMULA_ID, "revision": int(revision), "scopes": {}}
                 entry = document["scopes"].setdefault(
-                    _scope_key(account_id, clock), {"tier_a": None, "tier_b": None})
+                    _scope_key(account_id, clock), {"tier_a": None, "tier_b": None,
+                                                     "tier_a_revision": None,
+                                                     "tier_b_revision": None,
+                                                     "tier_b_saved_at": None})
                 entry[tier_name] = tier
+                entry[f"{tier_name}_revision"] = int(revision)
+                if tier_name == "tier_b":
+                    entry["tier_b_saved_at"] = datetime.now(timezone.utc).isoformat()
+                document["revision"] = int(revision)
                 while len(document["scopes"]) > _MAX_SCOPES:
                     document["scopes"].pop(next(iter(document["scopes"])))
                 encoded = json.dumps(document, ensure_ascii=False, separators=(",", ":"))

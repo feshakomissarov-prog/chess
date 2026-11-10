@@ -1,0 +1,97 @@
+{
+  "shown_at_monotonic": 119802.4404505,
+  "first_count_ms": 145.28,
+  "first_useful_ms": 145.28,
+  "full_ready_ms": 145.28,
+  "games": "10000",
+  "accuracy": "68.0%",
+  "accuracy_detail": "Lichess: 68.0% (9997)\nStockfish: — (0)",
+  "analysis": "3/10000 (0.0%)",
+  "errors": "н/д",
+  "puzzle_rating": "1492",
+  "progress": "Последние 90 дней",
+  "snapshot_stale": false,
+  "snapshot_revision": null,
+  "recent_ids": [
+    "seed-0",
+    "seed-old-09996",
+    "seed-old-09995"
+  ],
+  "recent_card_labels": [
+    [
+      "♟  Победа",
+      "Opponent seed-0",
+      "Время начала неизвестно · 5 с + 0 с",
+      "Оценённые ходы: 2/2",
+      "Дебют не определён",
+      "Точность: 72.0% · Lichess",
+      "                   Я   Соперник\nНеточности:  2  /  1\nОшибки:  0  /  0\nЗевки:  0  /  0"
+    ],
+    [
+      "♟  Победа",
+      "Opponent 9996",
+      "Время начала неизвестно · 5 с + 0 с",
+      "оценок пока нет",
+      "Дебют не определён",
+      "Точность: 68.0% · Lichess",
+      "                   Я   Соперник\nНеточности:  н/д  /  н/д\nОшибки:  н/д  /  н/д\nЗевки:  н/д  /  н/д"
+    ],
+    [
+      "♟  Победа",
+      "Opponent 9995",
+      "Время начала неизвестно · 5 с + 0 с",
+      "оценок пока нет",
+      "Дебют не определён",
+      "Точность: 68.0% · Lichess",
+      "                   Я   Соперник\nНеточности:  н/д  /  н/д\nОшибки:  н/д  /  н/д\nЗевки:  н/д  /  н/д"
+    ]
+  ],
+  "first_useful_accuracy": "68.0%",
+  "first_useful_accuracy_detail": "Lichess: 68.0% (9997)\nStockfish: — (0)",
+  "first_useful_rating": "1492",
+  "first_useful_stale": false,
+  "first_useful_recent_ids": [
+    "seed-0",
+    "seed-old-09996",
+    "seed-old-09995"
+  ],
+  "first_useful_cards": [
+    [
+      "♟  Победа",
+      "Opponent seed-0",
+      "Время начала неизвестно · 5 с + 0 с",
+      "Оценённые ходы: 2/2",
+      "Дебют не определён",
+      "Точность: 72.0% · Lichess",
+      "                   Я   Соперник\nНеточности:  2  /  1\nОшибки:  0  /  0\nЗевки:  0  /  0"
+    ],
+    [
+      "♟  Победа",
+      "Opponent 9996",
+      "Время начала неизвестно · 5 с + 0 с",
+      "оценок пока нет",
+      "Дебют не определён",
+      "Точность: 68.0% · Lichess",
+      "                   Я   Соперник\nНеточности:  н/д  /  н/д\nОшибки:  н/д  /  н/д\nЗевки:  н/д  /  н/д"
+    ],
+    [
+      "♟  Победа",
+      "Opponent 9995",
+      "Время начала неизвестно · 5 с + 0 с",
+      "оценок пока нет",
+      "Дебют не определён",
+      "Точность: 68.0% · Lichess",
+      "                   Я   Соперник\nНеточности:  н/д  /  н/д\nОшибки:  н/д  /  н/д\nЗевки:  н/д  /  н/д"
+    ]
+  ],
+  "aggregate_calls": 0,
+  "navigation_cycles": 0,
+  "navigation_p50_ms": null,
+  "navigation_p95_ms": null,
+  "navigation_max_ms": null,
+  "max_heartbeat_gap_ms": 22.24,
+  "heartbeat_gaps_over_40ms": [],
+  "count_capture_saved": true,
+  "useful_capture_saved": true,
+  "updated_capture_saved": true
+}
