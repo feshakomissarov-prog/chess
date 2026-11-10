@@ -750,6 +750,154 @@ def test_background_inspector_reads_archive_and_puzzle_checkpoints_off_ui(
     window.close()
 
 
+def test_background_status_refresh_is_coalesced_while_sqlite_and_home_reads_overlap(
+        qtbot, tmp_path, monkeypatch):
+    """A slow reader must not be cancelled/restarted by live progress refreshes."""
+    from datetime import datetime, timezone
+    from types import SimpleNamespace
+    from chess_coach.application.background_work import OperationLane
+
+    window = MainWindow(QSettings(str(tmp_path / "background-coalesce.ini"),
+                                  QSettings.Format.IniFormat), offline_mode=True)
+    qtbot.addWidget(window)
+    account_id = window.game_repository.ensure_archive_account("DelayedStatus")
+    timestamp = datetime.now(timezone.utc).isoformat()
+    service = SimpleNamespace(username="DelayedStatus", auth_generation=1)
+    window.lichess = service
+
+    status_entered, release_status = threading.Event(), threading.Event()
+    followup_entered, release_followup = threading.Event(), threading.Event()
+    dashboard_entered, release_dashboard = threading.Event(), threading.Event()
+    read_lock = threading.Lock()
+    counters = {"calls": 0, "active": 0, "max_active": 0}
+    original_archive = window.game_repository.archive_sync_state
+
+    def delayed_archive_read(scope):
+        with read_lock:
+            counters["calls"] += 1
+            call_number = counters["calls"]
+            counters["active"] += 1
+            counters["max_active"] = max(counters["max_active"], counters["active"])
+        gate = None
+        if call_number == 1:
+            status_entered.set()
+            gate = release_status
+        elif call_number == 2:
+            followup_entered.set()
+            gate = release_followup
+        try:
+            # Delay the real SQLite query boundary; the release gate makes the
+            # progress timer and explicit second refresh race deterministic.
+            if gate is not None:
+                assert gate.wait(3), "test did not release the SQLite status read"
+            result = original_archive(scope)
+            result.update(imported_count=8, backfill_complete=0,
+                          last_success_at=timestamp)
+            return result
+        finally:
+            with read_lock:
+                counters["active"] -= 1
+
+    monkeypatch.setattr(window.game_repository, "archive_sync_state", delayed_archive_read)
+    original_puzzles = window.game_repository.puzzle_sync_state
+    monkeypatch.setattr(window.game_repository, "puzzle_sync_state", lambda scope: {
+        **original_puzzles(scope), "imported_count": 12, "backfill_complete": 1,
+        "last_success_at": timestamp,
+    })
+    original_summary = window.game_repository.lichess_analysis_backfill_summary
+    monkeypatch.setattr(window.game_repository, "lichess_analysis_backfill_summary",
+                        lambda scope: {**original_summary(scope), "total": 3, "checked": 3,
+                                       "accuracy": 1, "evals": 1, "no_data": 0,
+                                       "errors": 0, "pending": 1, "retry_waiting": 0,
+                                       "last_checked_at": timestamp})
+    monkeypatch.setattr(window.game_repository, "analysis_job_counts",
+                        lambda **_kwargs: {"complete": 1})
+    monkeypatch.setattr(window.game_repository, "latest_analysis_job_event",
+                        lambda **_kwargs: {"status": "complete", "finished_at": timestamp})
+
+    original_dashboard_snapshot = window.dashboard_queries.snapshot
+
+    def delayed_dashboard_read(*args, **kwargs):
+        dashboard_entered.set()
+        assert release_dashboard.wait(3), "test did not release the Home aggregate"
+        return original_dashboard_snapshot(*args, **kwargs)
+
+    monkeypatch.setattr(window.dashboard_queries, "snapshot", delayed_dashboard_read)
+    operation_releases = []
+    operation_handles = []
+    for kind, lane in (("lichess_archive_sync", OperationLane.NETWORK_BACKGROUND),
+                       ("stockfish_batch_analysis", OperationLane.ENGINE)):
+        release = threading.Event()
+        operation_releases.append(release)
+        operation_handles.append(window.runtime.work_coordinator.start(
+            lambda event=release: event.wait(), kind=kind,
+            lane=lane,
+            account_id=account_id, auth_generation=1, stop_event=release))
+    for handle in operation_handles:
+        qtbot.waitUntil(lambda item=handle: item.snapshot.status.value == "running",
+                        timeout=2000)
+
+    heartbeat = []
+    timer = QTimer(window)
+    timer.timeout.connect(lambda: heartbeat.append(time.monotonic()))
+    timer.start(10)
+    try:
+        window.show_background_analytics()
+        assert status_entered.wait(2), "initial background status SQLite read did not start"
+        generation = window.dashboard_queries.begin_request()
+        window._launch_dashboard_snapshot(generation, account_id, None)
+        assert dashboard_entered.wait(2), "parallel Home aggregate did not start"
+
+        # Reproduce the refresh made by live batch progress while both reads
+        # are pending. Same-scope work must be coalesced, not superseded.
+        window._refresh_background_operations_page()
+        qtbot.wait(80)
+        assert counters["calls"] == 1
+        assert counters["max_active"] == 1
+        assert heartbeat, "Qt event loop stopped while SQLite workers were delayed"
+
+        release_status.set()
+        release_dashboard.set()
+        page = window._background_operations_page
+        try:
+            qtbot.waitUntil(lambda: followup_entered.is_set()
+                            and page.summary.text().startswith("Сейчас:")
+                            and page.workflow_badges["archive"].text() == "Идёт"
+                            and page.workflow_badges["stockfish"].text() == "Идёт"
+                            and page.workflow_badges["puzzles"].text() == "Готово"
+                            and page.workflow_badges["ready"].text() == "Ожидает"
+                            and page.recent_events.count() == 4,
+                            timeout=5000)
+        except Exception:
+            print("coalesced status diagnostics", {
+                "counters": counters,
+                "summary": page.summary.text().encode("unicode_escape").decode("ascii"),
+                "badges": {key: value.text().encode("unicode_escape").decode("ascii")
+                           for key, value in page.workflow_badges.items()},
+                "events": page.recent_events.count(),
+                "loaded_scope": window._background_status_loaded_scope,
+                "inflight": window._background_status_inflight_generation,
+                "pending": window._background_status_refresh_pending,
+            })
+            raise
+        assert counters["max_active"] == 1
+        assert len(heartbeat) >= 2
+        assert not page.summary.text().startswith("Читаю сохранённый статус")
+        release_followup.set()
+        qtbot.waitUntil(lambda: window._background_status_inflight_generation is None,
+                        timeout=3000)
+    finally:
+        release_status.set()
+        release_followup.set()
+        release_dashboard.set()
+        timer.stop()
+        for release in operation_releases:
+            release.set()
+        for handle in operation_handles:
+            handle.join(1)
+        window.close()
+
+
 def test_background_inspector_discards_status_for_previous_account(
         qtbot, tmp_path, monkeypatch):
     window = MainWindow(QSettings(str(tmp_path / "background-stale-account.ini"),
@@ -776,7 +924,8 @@ def test_background_inspector_discards_status_for_previous_account(
     assert entered.wait(2)
     service.username = "NewAccount"
     release.set()
-    qtbot.waitUntil(lambda: not window._background_status_handle.is_alive(), timeout=5000)
+    qtbot.waitUntil(lambda: window._background_status_inflight_generation is None,
+                    timeout=5000)
     rows = [window._background_operations_page.operation_list.item(i).text()
             for i in range(window._background_operations_page.operation_list.count())]
     assert not any("OldAccount" in row for row in rows)

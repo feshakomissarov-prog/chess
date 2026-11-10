@@ -262,3 +262,27 @@ PR #46 был создан на SHA `95361e95e641b4ae6ce7974d7e4ff116f21b5e2d`; 
 ### Статус владельческой приёмки
 
 `USER_ACCEPTANCE_PENDING`. Владелец должен повторить ключевой сценарий на своей копии: готовая аналитика → новая партия → закрыть → новый запуск → старые готовые показатели видны сразу, новая аналитика обновляется, затем перезапустить и подтвердить сохранённые свежие значения. Ни production-база, ни сторонний аккаунт, ни сетевое соединение к Lichess этой проверкой не заменяются.
+
+## Раздел 12: coalescing фонового статуса и Windows visual smoke (10.11.2026)
+
+Работа продолжена в том же Draft PR #46 и ветке `codex/unified-desktop-ux-2026-11-08`, поверх `e1ea4be86507b7fa41f6028715e1ed4a2f62f6cc`. Новый PR не создавался, `main` не изменялся.
+
+### Воспроизведение и причина
+
+- На исходном `e1ea4be` Windows run [42845359065](https://github.com/feshakomissarov-prog/chess/actions/runs/42845359065) подтвердил `test SUCCESS` (**1114 passed**) и `visual-evidence FAILURE` на 125% DPI. Job log показывает `1280x720-background-active`: заголовок «Читаю сохранённый статус…» оставался на экране, хотя четыре workflow badge и четыре события уже были отрисованы; в work registry находились `background_status_read` и `dashboard_read`.
+- Причина установлена по цепочке кода и воспроизведена регрессионным сценарием. Пока активен batch, `_show_batch_live_progress` просит durable refresh примерно каждые 5 секунд. Каждый запрос `_refresh_background_operations_page` до исправления отменял предыдущий и сразу запускал новый, а также безусловно заменял подтверждённый заголовок на loading. `OperationHandle.cancel()` выставляет stop event, но не может прервать SQLite-вызов, уже исполняющийся в Python thread. Если запрос длится дольше интервала прогресса, его завершение становится устаревшим по generation; заголовок сбрасывается повторно, хотя ранее полученные карточки и события уже валидны. Параллельный Home aggregate увеличивает вероятность такого перекрытия. Это объясняет конкретный CI state и не связано с Home Tier B cache.
+
+### Исправление и регрессия
+
+- Для одного `(account_id, analysis_session_generation)` теперь допускается один фоновый status reader. Повторные запросы во время него схлопываются в один follow-up после отображения последнего полного snapshot. Новый account/session scope всё ещё отменяет старый запрос, сбрасывает данные старого scope и использует generation fencing; добавлены cancellation checkpoints между последовательными SQL-чтениями.
+- «Читаю сохранённый статус…» устанавливается только для первой загрузки нового scope. Последующий durable refresh сохраняет последний подтверждённый заголовок, карточки и события до прихода следующего snapshot; это убирает ложный бесконечный loading и не объявляет новый статус готовым раньше данных.
+- `test_background_status_refresh_is_coalesced_while_sqlite_and_home_reads_overlap` воспроизводит задержанный настоящий `archive_sync_state` SQLite read, параллельный Home aggregate, активные synthetic archive/Stockfish операции и второй запрос статуса. Проверяет не более одного одновременного SQLite status read, responsive Qt heartbeat, видимые четыре badge + четыре события и подтверждённый заголовок во время задержанного follow-up. Реальные сервисы/аккаунты не используются. Изменён stale-account тест, чтобы он ждал завершения поколения статуса, а не ссылался на уже очищенный handle.
+- Локальный адресный прогон: `tests/test_window.py -k background tests/test_visual_master_final_regressions.py` — **12 passed**; отдельный целевой regression — **1 passed**.
+- Полный локальный pytest на коде этого изменения: `.venv312\Scripts\python.exe -X faulthandler -m pytest -o addopts= -q -W error::pytest.PytestUnhandledThreadExceptionWarning --tb=short` — **1115 passed in 413.76 s**. `compileall -q src tests scripts` и `git diff --check` — **PASS**.
+- Нативный Windows Qt smoke локально на 100%, 1280×720: **25 strict synthetic states PASS**, включая active/offline Background, геометрию, карточки и события; точные окно/пиксельные размеры проверены. Эта локальная проверка не заменяет hosted CI 125%/150%.
+
+### Проверка точного SHA
+
+Source, regression test и данный отчёт собраны одним коммитом. На момент записи отчёта точный Windows CI этого нового head ещё не завершён; итоговые `test` и `visual-evidence` должны быть оба зелёными на одном SHA, прежде чем считать пункт 12 закрытым. Предыдущий failure `42845359065` остаётся явно зафиксированным выше.
+
+Visual comparison UX-01…UX-13 и пользовательская проверка на базе владельца остаются `NOT_VERIFIED`; успешные синтетические состояния не являются визуальной приёмкой или принятием PR.

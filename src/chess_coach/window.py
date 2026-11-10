@@ -682,6 +682,10 @@ class MainWindow(QMainWindow):
         self._external_study_generation = 0
         self._background_status_generation = 0
         self._background_status_handle = None
+        self._background_status_inflight_generation: int | None = None
+        self._background_status_inflight_scope: tuple[str | None, int] | None = None
+        self._background_status_refresh_pending = False
+        self._background_status_loaded_scope: tuple[str | None, int] | None = None
         self.setWindowTitle("Chess Coach")
         self.setMinimumSize(500, 360)
         self.resize(1360, 860)
@@ -1317,17 +1321,29 @@ class MainWindow(QMainWindow):
         if getattr(self, "_background_visible_scope", None) != scope:
             self._background_visible_scope = scope
             self._batch_position_progress = None
+            self._background_status_refresh_pending = False
+            self._background_status_loaded_scope = None
+            previous = self._background_status_handle
+            if (previous is not None
+                    and self._background_status_inflight_generation is not None):
+                previous.cancel("account_switched")
+            self._background_status_inflight_generation = None
+            self._background_status_inflight_scope = None
             page.set_snapshot((), source_summary="", backfill_paused=False,
                               can_check=False, can_pause=False)
+        # A status query may outlast the live progress timer. Keep one SQLite
+        # reader per scope and coalesce refresh requests while it is running;
+        # cancelling a Python thread cannot interrupt a query already in SQLite.
+        if (self._background_status_inflight_generation is not None
+                and self._background_status_inflight_scope == scope):
+            self._background_status_refresh_pending = True
+            return
         available = bool(
             self.lichess and not self.offline_mode and self._lichess_connected
             and self._lichess_stream_ready_generation == getattr(
                 self.lichess, "auth_generation", None))
         self._background_status_generation += 1
         generation = self._background_status_generation
-        previous = self._background_status_handle
-        if previous is not None:
-            previous.cancel("status_refresh_superseded")
         stop_event = threading.Event()
         repository = self.game_repository
         metric_scope = (self.dashboard_account.currentData()
@@ -1343,9 +1359,15 @@ class MainWindow(QMainWindow):
                 if stop_event.is_set():
                     return
                 archive = repository.archive_sync_state(account_id) if account_id else {}
+                if stop_event.is_set():
+                    return
                 puzzles = repository.puzzle_sync_state(account_id) if account_id else {}
+                if stop_event.is_set():
+                    return
                 summary = (repository.lichess_analysis_backfill_summary(account_id)
                            if account_id else {})
+                if stop_event.is_set():
+                    return
                 daily_limit = self.settings.value(
                     "lichess/ready_analytics_daily_limit", 25, type=int)
                 next_eligible_at = (
@@ -1353,21 +1375,29 @@ class MainWindow(QMainWindow):
                         account_id, daily_limit=daily_limit, enqueue=False)
                     if account_id and hasattr(
                         repository, "lichess_analysis_backfill_next_eligible_at") else None)
+                if stop_event.is_set():
+                    return
                 metric_status = repository.analysis_metrics_migration_status(
                     account_id=str(metric_scope) if metric_scope else None)
+                if stop_event.is_set():
+                    return
                 jobs = (repository.analysis_job_counts(engine_version=engine_key,
                                                       parameters=parameters,
                                                       account_id=account_id)
                         if account_id or self.offline_mode else {})
+                if stop_event.is_set():
+                    return
                 unqueued = (repository.count_games_needing_fast_analysis(
                     account_id=account_id, engine_version=engine_key, parameters=parameters)
                     if account_id and parameters else None)
-                last_job = (repository.latest_analysis_job_event(account_id=account_id)
-                            if account_id or self.offline_mode else None)
-                paused = bool(account_id and
-                              repository.lichess_analysis_backfill_paused(account_id))
                 if stop_event.is_set():
                     return
+                last_job = (repository.latest_analysis_job_event(account_id=account_id)
+                            if account_id or self.offline_mode else None)
+                if stop_event.is_set():
+                    return
+                paused = bool(account_id and
+                              repository.lichess_analysis_backfill_paused(account_id))
                 self.background_status_finished.emit(generation, {
                     "account_id": account_id, "username": username, "available": available,
                     "archive": archive, "puzzles": puzzles, "summary": summary,
@@ -1382,7 +1412,11 @@ class MainWindow(QMainWindow):
                         "failure_code": type(exc).__name__, "operations": operations,
                     })
 
-        page.summary.setText("Читаю сохранённый статус фоновых операций…")
+        if self._background_status_loaded_scope != scope:
+            page.summary.setText("Читаю сохранённый статус фоновых операций…")
+        self._background_status_inflight_generation = generation
+        self._background_status_inflight_scope = scope
+        self._background_status_refresh_pending = False
         self._background_status_handle = self._start_registered_work(
             worker, kind="background_status_read", lane=OperationLane.INTERACTIVE,
             thread_name="cc-background-status", stop_event=stop_event)
@@ -1392,10 +1426,25 @@ class MainWindow(QMainWindow):
                 or not isinstance(payload, dict)
                 or getattr(self, "_background_operations_page", None) is None):
             return
+        pending_refresh = False
+        if self._background_status_inflight_generation == generation:
+            pending_refresh = self._background_status_refresh_pending
+            self._background_status_refresh_pending = False
+            self._background_status_inflight_generation = None
+            self._background_status_inflight_scope = None
+            self._background_status_handle = None
         username = str(getattr(self.lichess, "username", "") or "").strip()
         account_id = f"lichess:{username.casefold()}" if username else None
         if payload.get("account_id") != account_id:
+            if pending_refresh:
+                QTimer.singleShot(0, self._refresh_background_operations_page)
             return
+        self._background_status_loaded_scope = (
+            account_id, self._analysis_session_generation)
+        if pending_refresh:
+            # Render this confirmed snapshot first, then perform one coalesced
+            # refresh to pick up state changes requested during its SQL reads.
+            QTimer.singleShot(0, self._refresh_background_operations_page)
         summary = payload.get("summary") or {}
         statuses: list[str] = []
         safety_allowed = self._library_detail_safety_allowed()
