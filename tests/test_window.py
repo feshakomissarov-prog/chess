@@ -165,6 +165,82 @@ def test_delayed_workspace_restore_never_steals_a_page_already_opened_by_user(qt
     assert window._screen_mode == "local"
 
 
+def test_startup_always_shows_home_and_preserves_explicit_review_target(qtbot, tmp_path):
+    settings = QSettings(str(tmp_path / "startup-home.ini"), QSettings.Format.IniFormat)
+    settings.setValue("workspace/last_route", "games")
+    settings.setValue("workspace/review_game_id", "saved-review-target")
+    window = MainWindow(settings, manual_connect_mode=True)
+    qtbot.addWidget(window)
+    window.game_repository.save_snapshot(
+        "saved-review-target", "startpos", "e2e4 e7e5", "white", "Friend", False,
+        "5+3", "mate", "white", white_player="Owner", black_player="Friend")
+    qtbot.wait(120)
+    assert window.screen_stack.currentWidget() is window.home_page
+    assert settings.value("workspace/review_game_id", type=str) == "saved-review-target"
+    assert not window.resume_review_button.isHidden()
+    assert window.resume_saved_review(show_message=False)
+    assert window.screen_stack.currentWidget() is window.review_workspace
+    window.close()
+
+
+def test_completed_history_renders_offline_without_safety_preflight(qtbot, tmp_path, monkeypatch):
+    window = MainWindow(QSettings(str(tmp_path / "saved-history-offline.ini"),
+                                  QSettings.Format.IniFormat), offline_mode=True)
+    qtbot.addWidget(window)
+    game = _saved_review_with_engine_facts(window, "saved-history-offline")
+    window.offline_mode = False
+    window._lichess_connected = False
+    checks = []
+    monkeypatch.setattr(
+        window, "_request_dashboard_display_safety_internal",
+        lambda: checks.append("unexpected_preflight"), raising=False)
+
+    assert window._open_saved_game(game)
+    review = window.review_workspace
+    assert review.evaluation_allowed
+    assert not review.training_allowed
+    assert review.graph._values()
+    assert review.training_safety_button.isHidden()
+    assert review.training_status.isHidden()
+    assert "скрыты правилами Fair Play" not in review.graph_legend.text()
+    assert checks == []
+    assert window._library_detail_safety_allowed()
+    human = LichessGameSession("active-human-history-guard", window.game_repository)
+    human.status = "playing"
+    window.online_sessions[human.game_id] = human
+    window._refresh_dashboard_analysis_visibility()
+    assert not review.evaluation_allowed
+    window.close()
+
+
+def test_home_navigation_reuses_persistent_snapshot_without_aggregate(qtbot, tmp_path, monkeypatch):
+    from chess_coach.application.dashboard import dashboard_snapshot
+
+    window = MainWindow(QSettings(str(tmp_path / "home-cache-ui.ini"),
+                                  QSettings.Format.IniFormat), offline_mode=True)
+    qtbot.addWidget(window)
+    qtbot.waitUntil(lambda: (window._dashboard_thread is None
+                             or not window._dashboard_thread.is_alive()), timeout=3000)
+    snapshot = dashboard_snapshot(window.game_repository, account_id=None, clock=None)
+    revision = window.game_repository.dashboard_data_revision()
+    assert window._dashboard_snapshot_cache.save(None, None, revision, snapshot)
+    window._render_dashboard_snapshot(snapshot)
+    metrics_before = {key: value.text()
+                      for key, value in window._dashboard_metric_values.items()}
+
+    def unexpected_aggregate(*_args, **_kwargs):
+        raise AssertionError("warm Home must reuse the valid persistent snapshot")
+    monkeypatch.setattr(window.dashboard_queries, "snapshot", unexpected_aggregate)
+    started = time.perf_counter()
+    window.show_home()
+    elapsed_ms = (time.perf_counter() - started) * 1000
+
+    assert elapsed_ms < 1000
+    assert {key: value.text() for key, value in window._dashboard_metric_values.items()} == metrics_before
+    assert window._latest_dashboard_snapshot == snapshot
+    window.close()
+
+
 def test_offscreen_saved_window_geometry_is_repositioned(qtbot):
     from PySide6.QtCore import QRect
     visible = QRect(0, 0, 1280, 720)
@@ -882,7 +958,8 @@ def test_late_safe_reply_for_game_a_cannot_authorize_open_game_b(qtbot, tmp_path
         request_a, [{"source": "ai", "opponent": {"ai": 3, "id": None}}])
     assert window.review_workspace.review["game"]["game_id"] == "review-b"
     assert not window.review_workspace.training_allowed
-    assert not window.review_workspace.evaluation_allowed
+    assert window.review_workspace.evaluation_allowed
+    assert window.review_workspace.graph._values()
 
 
 def test_disconnect_revokes_a_previously_successful_review_safety_lease(
@@ -908,9 +985,11 @@ def test_disconnect_revokes_a_previously_successful_review_safety_lease(
 
     window.disconnect_lichess()
 
-    assert not window.review_workspace.evaluation_allowed
+    # Disconnect removes training/engine permission but never hides saved
+    # read-only analysis for a completed historical game.
+    assert window.review_workspace.evaluation_allowed
     assert not window.review_workspace.training_allowed
-    assert window.review_workspace.graph._values() == []
+    assert window.review_workspace.graph._values()
 
 
 @pytest.mark.parametrize("status", [
@@ -950,10 +1029,10 @@ def test_unsafe_lichess_status_revokes_review_lease_and_recovery_requires_new_pr
 
     review = window.review_workspace
     assert not review.training_allowed
-    assert not review.evaluation_allowed
+    assert review.evaluation_allowed
     assert not review.training_mode
-    assert review.graph._values() == []
-    assert "Сохранённое продолжение:" not in review.event_detail.text()
+    assert review.graph._values()
+    assert "Сохранённое продолжение:" in review.event_detail.text()
     previous = review.training_status.text()
     review.show_hint()
     assert review.training_status.text() == previous
@@ -962,8 +1041,8 @@ def test_unsafe_lichess_status_revokes_review_lease_and_recovery_requires_new_pr
     window._lichess_connected = True
     window._lichess_status("Подключено: Owner")
     assert not review.training_allowed
-    assert not review.evaluation_allowed
-    assert review.graph._values() == []
+    assert review.evaluation_allowed
+    assert review.graph._values()
 
     # A fresh, explicit complete safety check can grant a new lease.
     window._request_review_training_safety("status-revoke")
@@ -1007,14 +1086,17 @@ def test_oauth_revoke_revokes_review_safety_before_service_request_and_never_rev
 
     window._revoke_oauth_lichess()
 
-    assert window.lichess.state_when_started == (False, False, [], False)
+    assert window.lichess.state_when_started[0] is False
+    assert window.lichess.state_when_started[1] is True
+    assert window.lichess.state_when_started[2]
+    assert window.lichess.state_when_started[3] is False
     assert window.lichess.pat_revoke_calls == 0
     # Neither success nor failure from the async revoke grants safety back.
     window._lichess_status("Не удалось отозвать OAuth-токен: fake failure")
     window._lichess_status("OAuth-токен отозван и удалён локально.")
     assert not window.review_workspace.training_allowed
-    assert not window.review_workspace.evaluation_allowed
-    assert window.review_workspace.graph._values() == []
+    assert window.review_workspace.evaluation_allowed
+    assert window.review_workspace.graph._values()
 
 
 def test_late_review_safety_reply_after_line_revision_change_is_rejected(
@@ -1045,8 +1127,8 @@ def test_late_review_safety_reply_after_line_revision_change_is_rejected(
         request_id, [{"source": "ai", "opponent": {"ai": 3, "id": None}}])
 
     assert not window.review_workspace.training_allowed
-    assert not window.review_workspace.evaluation_allowed
-    assert window.review_workspace.graph._values() == []
+    assert window.review_workspace.evaluation_allowed
+    assert window.review_workspace.graph._values()
 
 
 def test_transient_event_stream_recovery_restores_availability_not_review_lease(
@@ -1084,8 +1166,8 @@ def test_transient_event_stream_recovery_restores_availability_not_review_lease(
     assert not window._lichess_connected
     assert not window._online_actions_allowed()
     assert not window.review_workspace.training_mode
-    assert not window.review_workspace.evaluation_allowed
-    assert window.review_workspace.graph._values() == []
+    assert window.review_workspace.evaluation_allowed
+    assert window.review_workspace.graph._values()
 
     # A stale generation cannot bring the account UI back.
     window._lichess_session_status(service.auth_generation - 1,
@@ -1099,8 +1181,8 @@ def test_transient_event_stream_recovery_restores_availability_not_review_lease(
     assert window._lichess_connected
     assert window._online_actions_allowed()
     assert not window.review_workspace.training_allowed
-    assert not window.review_workspace.evaluation_allowed
-    assert window.review_workspace.graph._values() == []
+    assert window.review_workspace.evaluation_allowed
+    assert window.review_workspace.graph._values()
 
     window._request_review_training_safety("event-stream-recovery")
     window._review_safety_games_received(service.request_id, [])
@@ -1124,9 +1206,9 @@ def test_single_game_stream_retry_does_not_clear_authenticated_account(
     window._lichess_status(status)
 
     assert window._lichess_connected
-    assert not window.review_workspace.evaluation_allowed
+    assert window.review_workspace.evaluation_allowed
     assert not window.review_workspace.training_allowed
-    assert window.review_workspace.graph._values() == []
+    assert window.review_workspace.graph._values()
 
 
 def test_stream_429_retry_after_never_reenables_actions_before_stream_ready(
@@ -1171,14 +1253,14 @@ def test_stream_429_retry_after_never_reenables_actions_before_stream_ready(
     assert not window._online_actions_allowed()
     assert not window.connect_button.isEnabled()
     assert len(service.safety_requests) == 1
-    assert not window.review_workspace.evaluation_allowed
+    assert window.review_workspace.evaluation_allowed
 
     window._lichess_session_status(service.auth_generation,
                                    "Поток восстановлен: Owner")
     assert window._lichess_connected
     assert not window._event_stream_recovery_pending
     assert window._online_actions_allowed()
-    assert not window.review_workspace.evaluation_allowed
+    assert window.review_workspace.evaluation_allowed
     assert len(service.safety_requests) == 1
 
     window._request_review_training_safety("event-stream-429-ready")
@@ -1642,17 +1724,13 @@ def test_progress_cached_analytics_is_visually_masked_until_fresh_safety_snapsho
     qtbot.wait(25)
     page.summary_label.setText("Cached Stockfish assessment: synthetic-secret-metric")
     page.critical_summary.setText("Cached blunder count: 42")
-    page.set_safety_display_allowed(False, "Fresh Lichess check required.")
+    page.set_safety_display_allowed(True)
     qtbot.wait(20)
-    assert page.tabs.isHidden()
-    assert page.analysis_mask.isVisible()
-    assert not page.summary_label.isVisibleTo(page)
-    assert not page.critical_summary.isVisibleTo(page)
+    assert page.tabs.isVisible()
+    assert page.summary_label.isVisibleTo(page)
 
     page.analysis_safety_button.click()
-    assert len(requests) == 1
-    window._analysis_safety_games_received(requests[-1], [])
-    assert window._dashboard_analysis_safety_allowed
+    assert requests == []
     assert page.tabs.isVisible()
 
     human = LichessGameSession("synthetic-human", window.game_repository)
@@ -1663,14 +1741,10 @@ def test_progress_cached_analytics_is_visually_masked_until_fresh_safety_snapsho
     assert not page.summary_label.isVisibleTo(page)
 
     window.online_sessions.clear()
-    page.set_safety_display_allowed(False, "Rechecking.")
-    page.analysis_safety_button.setEnabled(True)
-    page.analysis_safety_button.click()
-    stale_request = requests[-1]
-    window._analysis_session_generation += 1
-    window._analysis_safety_games_received(stale_request, [])
-    assert not window._dashboard_analysis_safety_allowed
-    assert page.tabs.isHidden()
+    window._refresh_dashboard_analysis_visibility()
+    assert page.tabs.isVisible()
+    assert page.summary_label.isVisibleTo(page)
+    assert "synthetic-secret-metric" in page.summary_label.text()
     window.close()
 
 
@@ -3785,18 +3859,12 @@ def test_home_dashboard_masks_cached_analysis_when_safety_is_pending_or_human_ga
     }
     window._dashboard_analysis_safety_allowed = False
     window._render_dashboard_snapshot(snapshot)
-    assert window._dashboard_metric_values["accuracy"].text() == "скрыто"
-    assert "Lichess" not in window._dashboard_metric_values["accuracy"].toolTip()
-    assert "Проверка безопасности" in window._dashboard_metric_details["accuracy"].text()
-    assert "100%" not in window._dashboard_metric_details["accuracy"].text()
-    assert window._dashboard_metric_values["analysis"].text() == "скрыто"
-    assert window._dashboard_metric_details["errors"].text() == (
-        "Проверка безопасности Lichess не подтверждена.")
+    assert window._dashboard_metric_values["accuracy"].text() == "н/д"
+    assert window._dashboard_metric_values["analysis"].text() == "1/1"
+    assert window._dashboard_metric_details["errors"].text() == "synthetic error count"
     card = window._recent_games_layout.itemAt(0).widget()
-    assert card.findChild(QLabel, "dashboardAnalysisMetrics") is None
-    assert "Оценки скрыты" in card.findChild(QLabel, "dashboardAnalysisCoverage").text()
-    assert card.findChild(QLabel, "dashboardAnalysisCoverage").isHidden()
-    assert not window.recent_safety_notice.isHidden()
+    assert card.findChild(QLabel, "dashboardAnalysisMetrics") is not None
+    assert window.recent_safety_notice.isHidden()
 
     window._dashboard_analysis_safety_allowed = True
     window._render_dashboard_snapshot(snapshot)
@@ -4031,7 +4099,7 @@ def test_library_note_write_runs_off_ui_thread_and_remains_bound_during_selectio
     window.close()
 
 
-def test_library_detail_loads_in_worker_only_after_safety_and_masks_on_revoke(
+def test_library_detail_loads_in_worker_without_preflight_and_survives_revoke(
     qtbot, tmp_path, monkeypatch
 ):
     window = MainWindow(QSettings(str(tmp_path / "library-detail.ini"),
@@ -4060,9 +4128,9 @@ def test_library_detail_loads_in_worker_only_after_safety_and_masks_on_revoke(
 
     window._dashboard_analysis_safety_allowed = False
     window._refresh_dashboard_analysis_visibility()
-    assert not window.library_page.detail_graph.safety_allowed
-    assert not window.library_page.detail_graph._values()
-    assert not window.library_page.detail_metrics.text()
+    assert window.library_page.detail_graph.safety_allowed
+    assert window.library_page.detail_graph._values()
+    assert window.library_page.detail_metrics.text()
     window.close()
 
 

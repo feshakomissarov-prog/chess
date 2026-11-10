@@ -848,7 +848,8 @@ class GameReviewWorkspace(QWidget):
     def load_game(self, game: dict, *, training_allowed: bool | None = None,
                   training_block_reason: str | None = None,
                   ephemeral: bool = False,
-                  analysis_source: str | None = None) -> None:
+                  analysis_source: str | None = None,
+                  evaluation_allowed: bool | None = None) -> None:
         self._ephemeral_study = bool(ephemeral)
         self._ephemeral_board = None
         self._ephemeral_branch.clear()
@@ -863,7 +864,10 @@ class GameReviewWorkspace(QWidget):
                                        analysis_source=analysis_source)
         if training_allowed is not None:
             self.training_allowed = training_allowed
-            self.evaluation_allowed = training_allowed
+            if evaluation_allowed is None:
+                self.evaluation_allowed = bool(training_allowed)
+        if evaluation_allowed is not None:
+            self.evaluation_allowed = bool(evaluation_allowed)
         if training_block_reason is not None:
             self.training_block_reason = training_block_reason
         self.selected_ply = 0
@@ -1120,18 +1124,24 @@ class GameReviewWorkspace(QWidget):
             analysis.get("assessments") or analysis.get("events") or
             analysis.get("alternatives")))
         allowed = self.training_allowed and has_errors
-        self.training_button.setEnabled(allowed)
+        # Historical analytics can be read immediately. If starting the
+        # interactive exercise needs a live-game check, request it only after
+        # the user chooses the exercise instead of replacing the saved review
+        # with a Fair Play warning on entry.
+        self.training_button.setEnabled(has_errors and self.evaluation_allowed)
         self.training_button.setVisible(not self._ephemeral_study)
-        self.training_button.setToolTip(reason if not self.training_allowed else
+        self.training_button.setToolTip("Проверить активные партии перед началом упражнения."
+            if not self.training_allowed and self.evaluation_allowed else
             "Нет завершённых собственных ошибок с проверенным улучшенным ходом." if not eligible else "")
         self.training_safety_button.setVisible(
-            game_finished and not self.training_allowed and not self._ephemeral_study)
-        self.training_safety_button.setEnabled(
-            game_finished and not self.training_allowed and not self._ephemeral_study)
+            game_finished and not self.training_allowed and not self.evaluation_allowed
+            and not self._ephemeral_study)
+        self.training_safety_button.setEnabled(not self.training_safety_button.isHidden())
         self.training_safety_button.setToolTip(reason or "Проверить текущие активные партии Lichess.")
-        self.training_status.setText("" if allowed else reason or (
+        self.training_status.setText("" if allowed or self.evaluation_allowed else reason or (
             "Нет ошибок, для которых сохранённые оценки позволяют проверить улучшение."))
-        self.training_status.setVisible(self._ephemeral_study or allowed or bool(reason))
+        self.training_status.setVisible(
+            self._ephemeral_study or allowed or (bool(reason) and not self.evaluation_allowed))
         if not self.evaluation_allowed:
             self.mask_review_analysis(self.training_block_reason)
         self._fit_review_board()
@@ -1298,34 +1308,45 @@ class GameReviewWorkspace(QWidget):
         self.training_status.setToolTip("")
         self.graph.update()
 
-    def set_training_safety_result(self, allowed: bool, reason: str = ""):
+    def set_training_safety_result(self, allowed: bool, reason: str = "", *,
+                                   evaluation_allowed: bool | None = None):
         ephemeral = bool(getattr(self, "_ephemeral_study", False))
         selected_ply = self.selected_ply
         self.training_allowed = bool(allowed)
-        self.evaluation_allowed = bool(allowed)
+        if evaluation_allowed is not None:
+            self.evaluation_allowed = bool(evaluation_allowed)
+        else:
+            # Preserve the legacy fail-closed behavior for direct safety
+            # revocations (for example a live human game start). Historical
+            # Review callers explicitly pass evaluation_allowed=True when the
+            # only capability being denied is interactive training.
+            self.evaluation_allowed = bool(allowed)
         self.training_block_reason = reason
         if not allowed:
             self.training_proven = {}
             self.training_candidate = None
         if not allowed and self.training_mode:
             self.stop_training(reason or "Упражнение остановлено: безопасность не подтверждена.")
-        if not allowed:
-            self.mask_review_analysis(reason)
         if self.review:
             game = self.review["game"]
             self.load_game(game, training_allowed=allowed,
-                           training_block_reason=reason, ephemeral=ephemeral)
+                           training_block_reason=reason, ephemeral=ephemeral,
+                           evaluation_allowed=self.evaluation_allowed)
             self.select_ply(selected_ply)
         self.training_safety_button.setText("Проверить безопасность")
 
     def set_safety_pending(self, reason: str = "Проверяем активные партии; оценки скрыты."):
         self.training_allowed = False
-        self.evaluation_allowed = False
         self.training_block_reason = reason
-        self.mask_review_analysis(reason)
         self.training_safety_button.setEnabled(False)
-        self.training_safety_button.setText("Проверяем…")
-        self.training_status.setText(reason or self._blocked_analysis_text())
+        self.training_safety_button.setVisible(False)
+        self.training_status.setText("")
+        self.training_status.setVisible(False)
+        if self.review and self.evaluation_allowed:
+            self.load_game(self.review["game"], training_allowed=False,
+                           training_block_reason=reason,
+                           ephemeral=self._ephemeral_study,
+                           evaluation_allowed=True)
 
     def revoke_safety(self, reason: str) -> None:
         self.set_training_safety_result(False, reason)
@@ -1676,8 +1697,11 @@ class GameReviewWorkspace(QWidget):
         self.event_detail.setText("\n".join(details))
 
     def start_training(self):
-        if not self.training_allowed or not self.evaluation_allowed or not self.review:
+        if not self.evaluation_allowed or not self.review:
             self.training_status.setText(self.training_block_reason or "Упражнение сейчас недоступно.")
+            return
+        if not self.training_allowed:
+            self.safety_requested.emit(str(self.review["game"]["game_id"]))
             return
         self.training_moves = eligible_error_moves(self.review)
         if not self.training_moves:

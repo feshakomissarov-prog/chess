@@ -443,6 +443,7 @@ def test_stale_send_move_401_cannot_delete_or_stop_replacement_auth_session():
     service = LichessService(client=client, token_store=oauth,
                              personal_token_store=personal, auth_method="oauth")
     service.username = "AccountA"
+    _admit_live_game_actions(service, "game-a")
     service.send_move("game-a", "e2e4", "move-request-a")
     old_worker = service._threads[-1]
     assert entered.wait(1)
@@ -834,8 +835,8 @@ def test_draw_offer_and_acceptance_have_distinct_authoritative_effects(qtbot):
     assert client.draw_posts == [("token", "draw-game", True)]
     assert service.has_pending_action("draw-game", "offer_draw")
     service.reconcile_game_actions("draw-game", {
-        "type": "gameState", "status": "started", "moves": "e2e4", "wdraw": True,
-        "bdraw": False})
+        "type": "gameState", "status": "started", "moves": "e2e4 e7e5", "wdraw": False,
+        "bdraw": True})
     assert not service.has_pending_action("draw-game", "offer_draw")
 
     accept_id = service.draw("draw-game", True, accepting_offer=True)

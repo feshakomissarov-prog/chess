@@ -398,7 +398,8 @@ def test_review_events_and_saved_pv_follow_selection_and_fair_play_gate(qtbot, t
         workspace.select_ply(1)
         assert workspace.review_board._hint_arrows == {(chess.C7, chess.C5)}
         assert "Сохранённое продолжение: c5 Nf3" in workspace.event_detail.text()
-        workspace.set_safety_pending("Активная человеческая партия")
+        workspace.set_training_safety_result(
+            False, "Активная человеческая партия", evaluation_allowed=False)
         assert workspace.review_board._hint_arrows == set()
         assert "Активная человеческая партия" in workspace.selected_move_summary.text()
         assert workspace.moves_list.item(0).text() == "e4"
@@ -465,7 +466,8 @@ def test_fair_play_revocation_masks_every_rendered_analysis_surface(
             "human-gameStart": "Lichess сообщил о партии с человеком.",
         }[transition]
         if transition in {"pending", "reconnect"}:
-            workspace.set_safety_pending(reason)
+            workspace.set_training_safety_result(
+                False, reason, evaluation_allowed=False)
         elif transition == "revoke":
             workspace.revoke_safety(reason)
         else:
@@ -517,6 +519,25 @@ def test_fair_play_revocation_masks_every_rendered_analysis_surface(
             QCoreApplication.processEvents()
             assert "1" in _metrics_text(workspace.side_metrics_summary)
             assert workspace.graph._values()
+    finally:
+        repo.shutdown()
+
+
+def test_training_preflight_does_not_mask_saved_review_on_entry(qtbot, tmp_path):
+    repo, game = _review_repo(tmp_path / "review-preflight-readonly.sqlite3")
+    try:
+        workspace = GameReviewWorkspace(repo, training_allowed=False)
+        qtbot.addWidget(workspace)
+        workspace.load_game(
+            game, training_allowed=False, training_block_reason="Проверка ещё не выполнена.",
+            evaluation_allowed=True)
+        workspace.select_ply(2)
+        workspace.set_safety_pending("Проверяем активные партии Lichess…")
+        assert workspace.evaluation_allowed
+        assert workspace.graph._values()
+        assert "+2.5" in workspace.moves_list.item_by_ply(2).text()
+        assert workspace.training_safety_button.isHidden()
+        assert workspace.training_status.isHidden()
     finally:
         repo.shutdown()
 

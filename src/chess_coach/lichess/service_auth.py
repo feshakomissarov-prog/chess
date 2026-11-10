@@ -338,6 +338,10 @@ class LichessAuthMixin:
                 if not self.mark_event_stream_ready(auth_generation):
                     return
                 self.session_event_stream_ready.emit(auth_generation, username or "")
+                if recovering_stream:
+                    # Event stream ready restores connectivity only. Each live
+                    # game stream must reconnect for an accepted fresh snapshot.
+                    self.restart_live_game_streams(auth_generation)
                 if recovering_stream and self._emit_session_status(
                         auth_generation,
                         f"Поток восстановлен: {username or 'Lichess'}"):

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import threading
+
 from types import SimpleNamespace
 
 import chess
@@ -52,6 +54,9 @@ class FakeGameClient:
 
     def handle_draw(self, token, game_id, accept):
         self.posts.append(("draw", game_id, accept))
+
+    def send_move(self, token, game_id, uci):
+        self.posts.append(("move", game_id, uci))
 
 
 def _service(client=None):
@@ -494,13 +499,21 @@ def test_two_fake_accounts_route_draw_stream_through_sessions_and_qt_controls(
 
     bob.decline_draw_button.click()
     qtbot.waitUntil(lambda: clients["Bob"].posts == [("draw", game_id, False)], timeout=1000)
+    qtbot.waitUntil(lambda: sessions["Bob"].awaiting_authoritative_snapshot, timeout=1000)
 
     # A later confirmed line and explicit false can clear the old offer; a new
     # independent offer remains reachable, preserving the normal game flow.
-    continued = _event(moves="e2e4 e7e5 g1f3", wdraw=False, bdraw=False)
-    for username in ("Alice", "Bob"):
-        windows[username]._lichess_game_event(
-            game_id, continued, generation=generation_by_name[username])
+    # A successful decline requires a fresh authoritative full snapshot; a
+    # same-line gameState false could be an old replay and is not sufficient.
+    continued = _event("gameFull", moves="e2e4 e7e5", wdraw=False, bdraw=False)
+    # Alice has an outgoing offer whose acknowledgement is only known to Bob.
+    # Confirm line progress for Alice and a fresh full snapshot for Bob after
+    # Bob's successful decline; one account's response is not another's ACK.
+    alice_progress = _event("gameState", moves="e2e4 e7e5 g1f3", wdraw=False, bdraw=False)
+    windows["Alice"]._lichess_game_event(
+        game_id, alice_progress, generation=generation_by_name["Alice"])
+    windows["Bob"]._lichess_game_event(
+        game_id, continued, generation=generation_by_name["Bob"])
     assert not sessions["Alice"].draw_offered_by_me
     assert not sessions["Bob"].draw_offered_by_opponent
     bob.draw_button.click()
@@ -508,6 +521,185 @@ def test_two_fake_accounts_route_draw_stream_through_sessions_and_qt_controls(
 
     for window in windows.values():
         window.close()
+
+
+def test_authorize_and_auth_status_use_one_lock_order_and_finish_concurrently():
+    service = _service()
+    service.mark_event_stream_ready(service.auth_generation)
+    generation = service.auth_generation
+    assert _accept_snapshot(service, "lock-order", generation=generation)
+    underlying = service._pending_action_lock
+
+    class OrderedPendingLock:
+        def __enter__(self):
+            if threading.current_thread().name == "authorize-test":
+                assert service._auth_lock._is_owned(), "auth lock must precede pending lock"
+            underlying.acquire()
+            return self
+        def __exit__(self, *_args):
+            underlying.release()
+
+    service._pending_action_lock = OrderedPendingLock()
+    completed = []
+    authorize = threading.Thread(
+        name="authorize-test",
+        target=lambda: completed.append(service.authorize_game_actions(
+            "lock-order", generation, 1, color="white")))
+    status = threading.Thread(
+        name="status-test",
+        target=lambda: completed.append(service._emit_session_status(
+            generation, "Переподключение…")))
+    authorize.start()
+    status.start()
+    authorize.join(timeout=1.0)
+    status.join(timeout=1.0)
+    assert not authorize.is_alive() and not status.is_alive()
+    assert completed == [True, True]
+    assert not service._game_action_admissions
+
+
+def test_service_send_move_requires_fresh_snapshot_and_rechecks_queued_work(qtbot, monkeypatch):
+    client = FakeGameClient()
+    service = _service(client)
+    failures = []
+    service.session_move_failed.connect(lambda *args: failures.append(args))
+    generation = service.auth_generation
+
+    service.send_move("g", "e2e4", "before-snapshot")
+    qtbot.waitUntil(lambda: len(failures) == 1, timeout=1000)
+    assert failures[0][-1] == -2
+    assert client.posts == []
+
+    service.mark_event_stream_ready(generation)
+    assert _accept_snapshot(service, "g", generation=generation)
+    entered, release = threading.Event(), threading.Event()
+    original = service.operation_token
+    def blocked_credential(context):
+        entered.set()
+        assert release.wait(1.0)
+        return original(context)
+    monkeypatch.setattr(service, "operation_token", blocked_credential)
+    service.send_move("g", "e2e4", "queued-before-loss")
+    assert entered.wait(1.0)
+    service.invalidate_game_action_admission(generation, "g")
+    release.set()
+    qtbot.waitUntil(lambda: len(failures) == 2, timeout=1000)
+    assert failures[-1][-1] == -2
+    assert client.posts == []
+
+
+def test_service_accept_and_decline_draw_require_an_authoritative_incoming_offer(qtbot):
+    client = FakeGameClient()
+    service = _service(client)
+    generation = service.auth_generation
+    service.mark_event_stream_ready(generation)
+    assert _accept_snapshot(service, "incoming", generation=generation)
+
+    assert service.draw("incoming", True, accepting_offer=True) is None
+    assert service.draw("incoming", False) is None
+    qtbot.wait(20)
+    assert client.posts == []
+
+    service.reconcile_game_actions(
+        "incoming", _event("gameState", bdraw=True, wdraw=False), generation)
+    service.draw("incoming", True, accepting_offer=True)
+    qtbot.waitUntil(lambda: client.posts == [("draw", "incoming", True)], timeout=1000)
+    # A second response, including the opposite action, is blocked while the
+    # first accepted response awaits authoritative state.
+    service.draw("incoming", False)
+    qtbot.wait(20)
+    assert client.posts == [("draw", "incoming", True)]
+
+
+def test_successful_same_line_draw_decline_requires_fresh_full_snapshot(qtbot, tmp_path):
+    client = FakeGameClient()
+    service = _service(client)
+    generation = service.auth_generation
+    service.mark_event_stream_ready(generation)
+    assert _accept_snapshot(service, "decline", generation=generation, color="black")
+    session = LichessGameSession("decline", GameRepository(tmp_path / "decline.sqlite3"))
+    session.color = chess.BLACK
+    initial = _event("gameFull", moves="e2e4 e7e5", wdraw=False, bdraw=False)
+    incoming = _event("gameState", moves="e2e4 e7e5", wdraw=True, bdraw=False)
+    session.apply_event(initial)
+    service.reconcile_game_actions("decline", incoming, generation, color="black")
+    session.apply_event(incoming)
+    assert session.draw_offered_by_opponent
+
+    service.draw("decline", False)
+    qtbot.waitUntil(lambda: client.posts == [("draw", "decline", False)], timeout=1000)
+    service.draw("decline", False)
+    qtbot.wait(20)
+    assert client.posts == [("draw", "decline", False)]
+
+    # A status-only replay after ACK remains latched. A newly accepted full
+    # snapshot is the causal resync that may clear the declined offer.
+    stale = _event("gameState", moves="e2e4 e7e5", wdraw=False, bdraw=False)
+    service.reconcile_game_actions("decline", stale, generation, color="black")
+    session.apply_event(stale)
+    assert session.draw_offered_by_opponent
+    session.awaiting_authoritative_snapshot = True
+    fresh = _event("gameFull", moves="e2e4 e7e5", wdraw=False, bdraw=False)
+    session.apply_event(fresh)
+    service.reconcile_game_actions(
+        "decline", fresh, generation, color="black", resync=True,
+        snapshot_sequence=2)
+    assert not session.draw_offered_by_opponent
+    assert service._game_authoritative_state[(generation, "decline")]["wdraw"] is False
+
+
+def test_game_stream_restart_reopens_known_games_for_fresh_full(qtbot):
+    class StreamingClient(FakeGameClient):
+        def __init__(self):
+            super().__init__()
+            self.stream_calls = []
+        def stream_game(self, token, game_id, stop):
+            self.stream_calls.append(game_id)
+            yield _event("gameFull", moves="", status="playing", wdraw=False, bdraw=False)
+            while not stop.wait(0.01):
+                yield _event("gameState", moves="", status="playing", wdraw=False, bdraw=False)
+
+    client = StreamingClient()
+    service = _service(client)
+    generation = service.auth_generation
+    service.start_game("stream-g")
+    qtbot.waitUntil(lambda: client.stream_calls == ["stream-g"], timeout=1000)
+    service.restart_live_game_streams(generation)
+    qtbot.waitUntil(lambda: client.stream_calls == ["stream-g", "stream-g"], timeout=1000)
+    assert service._game_stops.get("stream-g") is not None
+    service.close(timeout=0.2)
+
+
+def test_game_specific_429_stales_only_affected_window_session(qtbot, tmp_path):
+    window = MainWindow(QSettings(str(tmp_path / "scoped-stream-loss.ini"),
+                                  QSettings.Format.IniFormat), offline_mode=True)
+    qtbot.addWidget(window)
+    affected = LichessGameSession("affected-stream", window.game_repository)
+    other = LichessGameSession("healthy-stream", window.game_repository)
+    for session in (affected, other):
+        session.status = "playing"
+        session.awaiting_authoritative_snapshot = False
+        window.online_sessions[session.game_id] = session
+    window._lichess_status(
+        "Ограничение Lichess (429): синхронизация партии affected-stream через 60 с")
+    assert affected.awaiting_authoritative_snapshot
+    assert not other.awaiting_authoritative_snapshot
+    window.close()
+
+
+def test_not_sent_move_failure_clears_matching_local_submission(qtbot, tmp_path):
+    window = MainWindow(QSettings(str(tmp_path / "not-sent-move.ini"),
+                                  QSettings.Format.IniFormat), offline_mode=True)
+    qtbot.addWidget(window)
+    session = LichessGameSession("not-sent", window.game_repository)
+    session.status = "playing"
+    session.awaiting_authoritative_snapshot = False
+    assert session.begin_submission(chess.Move.from_uci("e2e4"))
+    request_id = session.pending_request_id
+    window.online_sessions[session.game_id] = session
+    window._lichess_move_failed(session.game_id, "e2e4", request_id, -2)
+    assert session.pending_uci is None
+    window.close()
 
 
 @pytest.mark.parametrize("status", ["mate", "resign", "stalemate", "timeout",

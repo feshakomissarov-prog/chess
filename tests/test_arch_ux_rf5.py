@@ -170,8 +170,10 @@ def test_authenticated_account_is_not_ready_until_event_stream_and_safety_snapsh
         {"key": "accuracy", "value": "92%", "detail": "Lichess", "source": "Lichess"},
         {"key": "errors", "value": "1", "detail": "synthetic", "source": "Stockfish"},
     ], "recent_games": []})
-    assert window._dashboard_metric_values["analysis"].text() == "скрыто"
-    assert window._dashboard_metric_values["accuracy"].text() == "скрыто"
+    # Persisted history is readable immediately; authentication still gates
+    # online actions independently.
+    assert window._dashboard_metric_values["analysis"].text() == "1/1"
+    assert window._dashboard_metric_values["accuracy"].text() == "92%"
     assert not window._lichess_connected
     assert not window._online_actions_allowed()
     assert window.connection.text() == "Вход"
@@ -180,13 +182,10 @@ def test_authenticated_account_is_not_ready_until_event_stream_and_safety_snapsh
     window._lichess_event_stream_ready(service.auth_generation, service.username)
     assert window._lichess_connected
     assert window._online_actions_allowed()
-    assert len(service.safety_requests) == 1
-    request_id = service.safety_requests[0]
+    assert service.safety_requests == []
     window._request_dashboard_display_safety()  # coalesced with the pending request
-    assert service.safety_requests == [request_id]
+    assert service.safety_requests == []
     assert not window._dashboard_analysis_safety_allowed
-    window._dashboard_display_safety_reply(request_id, [])
-    assert window._dashboard_analysis_safety_allowed
     assert window._dashboard_metric_values["analysis"].text() == "1/1"
     assert window._dashboard_metric_values["accuracy"].text() == "92%"
 
@@ -207,7 +206,7 @@ def test_dashboard_safety_denies_local_human_and_late_account_reply(qtbot, tmp_p
     window._lichess_authenticated(first.username)
     window.settings.setValue("lichess/auto_ready_analytics", False)
     window._lichess_event_stream_ready(first.auth_generation, first.username)
-    stale_id = first.safety_requests[0]
+    assert first.safety_requests == []
 
     second = _ReadOnlyService()
     second.username = "DifferentSyntheticAccount"
@@ -215,17 +214,24 @@ def test_dashboard_safety_denies_local_human_and_late_account_reply(qtbot, tmp_p
     window.lichess = second
     window._lichess_authenticated(second.username)
     assert window._dashboard_display_safety_request_id is None
-    assert window._dashboard_display_safety_reply(stale_id, []) is False
+    assert window._dashboard_display_safety_request_id is None
     assert not window._dashboard_analysis_safety_allowed
 
     window._lichess_stream_ready_generation = second.auth_generation
     window._lichess_connected = True
+    window._render_dashboard_snapshot({"metrics": [
+        {"key": "games", "value": "1", "detail": "local", "source": "SQLite"},
+        {"key": "analysis", "value": "1/1", "detail": "local", "source": "Stockfish"},
+        {"key": "accuracy", "value": "90%", "detail": "saved", "source": "Lichess"},
+        {"key": "errors", "value": "1", "detail": "saved", "source": "Stockfish"},
+    ], "recent_games": []})
     window.game_sessions.sessions["synthetic-human"] = type("HumanSession", (), {
         "status": "playing", "is_ai_opponent": False,
     })()
     window._request_dashboard_display_safety()
     assert not window._dashboard_analysis_safety_allowed
     assert second.safety_requests == []
+    assert window._dashboard_metric_values["analysis"].text() == "скрыто"
     window.close()
 
 
@@ -286,12 +292,11 @@ def test_header_and_sidebar_show_compact_connection_and_safety_states(qtbot, tmp
     window._lichess_authenticated(service.username)
     assert window.connection.text() == "Вход"
     assert window.sidebar_connection_label.text() == "Подключаем поток…"
-    assert window.sidebar_safety_label.text() == "Ожидание проверки активных партий"
+    assert window.sidebar_safety_label.text() == "История и сохранённые оценки · локально"
     window.settings.setValue("lichess/auto_ready_analytics", False)
     window._lichess_event_stream_ready(service.auth_generation, service.username)
     assert window.connection.text() == "Готов"
     assert window.sidebar_connection_label.text() == "Поток готов"
-    assert window.sidebar_safety_label.text() == "Проверяем активные партии Lichess…"
-    window._dashboard_display_safety_reply(service.safety_requests[0], [])
-    assert window.sidebar_safety_label.text() == "Проверка пройдена · аналитика доступна"
+    assert window.sidebar_safety_label.text() == "История и сохранённые оценки · локально"
+    assert service.safety_requests == []
     window.close()

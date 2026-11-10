@@ -450,6 +450,33 @@ class SQLiteMigrationMixin:
                 fetched_at TEXT NOT NULL,
                 points_json TEXT NOT NULL
             )""")
+            # A durable revision fence lets the Home sidecar reuse its complete
+            # analytics across restarts without re-running broad aggregates.
+            db.execute("""CREATE TABLE IF NOT EXISTS dashboard_data_revision (
+                singleton INTEGER PRIMARY KEY CHECK(singleton=1),
+                revision INTEGER NOT NULL DEFAULT 0
+            )""")
+            db.execute("INSERT OR IGNORE INTO dashboard_data_revision(singleton,revision) VALUES(1,0)")
+            source_tables = (
+                "games", "account_games", "game_revisions", "analysis_runs",
+                "analysis_game_accuracy", "position_assessments", "move_classifications",
+                "move_metrics", "analysis_events", "event_tags", "analysis_alternatives",
+                "lichess_ready_analysis_metadata", "puzzle_attempts",
+                "puzzle_player_rating_history", "puzzle_dashboard_snapshots",
+            )
+            for table in source_tables:
+                exists = db.execute(
+                    "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (table,)
+                ).fetchone()
+                if not exists:
+                    continue
+                safe_table = table.replace("'", "")
+                for operation in ("INSERT", "UPDATE", "DELETE"):
+                    trigger = f"dashboard_revision_{safe_table}_{operation.casefold()}"
+                    db.execute(
+                        f"CREATE TRIGGER IF NOT EXISTS {trigger} AFTER {operation} ON {safe_table} "
+                        "BEGIN UPDATE dashboard_data_revision SET revision=revision+1 "
+                        "WHERE singleton=1; END")
             db.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
 
     @staticmethod
