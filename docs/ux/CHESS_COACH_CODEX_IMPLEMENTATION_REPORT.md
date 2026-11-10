@@ -214,11 +214,12 @@ PR #46 был создан на SHA `95361e95e641b4ae6ce7974d7e4ff116f21b5e2d`; 
 
 ### Проверки и статус приёмки
 
-- Полный локальный набор: `.venv312\Scripts\python.exe -m pytest -o addopts= -W error::pytest.PytestUnhandledThreadExceptionWarning -q --tb=short` — **1107 passed, 342.00 s**.
-- `.venv312\Scripts\python.exe -m compileall -q src tests scripts` — **PASS**.
+- Полный локальный набор после Windows CI finding и исправления: `.venv312\Scripts\python.exe -m pytest -o addopts= -W error::pytest.PytestUnhandledThreadExceptionWarning -q --tb=short` — **1108 passed, 340.52 s**. Regression test смены archive widget дополнительно прошёл 9 последовательных запусков.
+- `.venv312\Scripts\python.exe -m compileall -q src tests scripts` — **PASS** на code SHA `19c7330826d2227aaf1f7905cc0456fe66d80582`.
 - `git diff --check` — **PASS**; Git сообщает только о стандартной нормализации LF/CRLF.
-- Проверки собраны на code commit SHA `45c952092c9c499b124713cec3b7bffdb4dbe62d`. После обновления этого отчёта Windows CI запускается на итоговом PR HEAD; до результата CI его статус — **PENDING**, не PASS.
+- Первый exact-head Windows CI run [42796682481](https://github.com/feshakomissarov-prog/chess/actions/runs/42796682481) на `1a3c059639ae44bdb09cf2c6f33d2eef7bf5e7a6`: `visual-evidence` — **SUCCESS**; `test` — **FAILURE**, `Windows fatal exception: access violation` в `AnalysisLandingPage.set_archive_widget()` при вызове `QWidget.setParent()` до удаления layout item (stack затрагивал `test_library_sqlite_query_runs_off_ui_thread_and_ignores_stale_navigation`). Исправлено: layout item теперь извлекается через `takeAt()` до отсоединения виджета; добавлен `test_analysis_archive_widget_replacement_removes_layout_item_before_detach`. Локально полный pytest и 9 повторов адресного теста прошли.
+- Повторный Windows CI на опубликованном code SHA `19c7330826d2227aaf1f7905cc0456fe66d80582` запускается; до получения его итогового результата статус — **PENDING**, не PASS.
 - Native visual-evidence captures из Windows CI не являются сравнением с эталонами. В этом цикле вручную не выполнено side-by-side сравнение UX-01…UX-13; визуальная приёмка остаётся следующей отдельной задачей.
 - Реальные Lichess аккаунты/двухсторонний live draw, настоящий Stockfish и production SQLite не использовались. Это явно непроверенные сценарии; fake transport/events не выдаются за проверку внешнего сервера.
 
-Ветка остаётся Draft PR #46; следующий этап — получить Windows CI для итогового SHA и затем провести отдельное визуальное сравнение утверждённых 13 экранов. Автоматический merge не выполнялся.
+Ветка остаётся Draft PR #46; после успешного повторного Windows CI следующий этап — отдельное визуальное сравнение утверждённых 13 экранов. Автоматический merge не выполнялся.
