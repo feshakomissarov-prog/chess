@@ -425,9 +425,10 @@ def wait_background(window, *, active: bool) -> None:
             wait_for(lambda: page.summary.text() == "Сейчас активных задач нет"
                  and not any(operation.status.value in {"queued", "running"}
                              and getattr(operation.context, "kind", "")
-                             != "background_status_read"
+                             not in {"background_status_read", "dashboard_read",
+                                     "dashboard_preview_read", "dashboard_options_read"}
                              for operation in window.runtime.work_coordinator.snapshots()),
-                     "honest offline state with no active background operations")
+                 "honest offline state with no active background workflows")
         except AssertionError:
             print("Background diagnostics:", {
                 "summary": page.summary.text(),
