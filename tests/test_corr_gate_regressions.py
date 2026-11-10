@@ -14,13 +14,15 @@ from chess_coach.ui.pages.play import PlayPage
 from chess_coach.window import MainWindow
 
 
-def test_play_active_panel_remains_hidden_for_non_active_mode(qtbot):
+def test_play_active_panel_appears_only_when_a_real_game_exists(qtbot):
     page = PlayPage({})
     qtbot.addWidget(page)
+    assert page.mode_selector.currentData() == "ai"
+    assert page.active_panel.isHidden()
     page.set_active_games([{"gameId": "synthetic", "fen": chess.STARTING_FEN}],
                           status="updated")
-    assert page.mode_selector.currentData() == "local"
-    assert page.active_panel.isHidden()
+    assert page.mode_selector.currentData() == "ai"
+    assert not page.active_panel.isHidden()
 
 
 def test_play_keeps_mode_cards_accessible_in_active_mode(qtbot):
@@ -39,7 +41,7 @@ def test_compact_play_mode_cards_can_be_reached_and_selected_by_mouse(qtbot):
     assert page.form_rows["Режим"].isHidden()
     from PySide6.QtTest import QSignalSpy
     create_spy = QSignalSpy(page.create_requested)
-    for mode in ("local", "ai", "friend", "challenge", "active"):
+    for mode in ("local", "ai", "friend", "challenge"):
         button = page.buttons[mode]
         page.content_scroll.ensureWidgetVisible(button)
         qtbot.wait(5)
@@ -49,7 +51,7 @@ def test_compact_play_mode_cards_can_be_reached_and_selected_by_mouse(qtbot):
         QTest.mouseClick(button, Qt.MouseButton.LeftButton)
         assert page.mode_selector.currentData() == mode
         assert all(not card.isHidden() for card in page.cards)
-        assert page.active_panel.isVisible() == (mode == "active")
+        assert page.active_panel.isHidden()
         assert create_spy.count() == 0
 
 
@@ -70,7 +72,7 @@ def test_active_preview_clears_previous_board_and_requires_confirmed_fen(qtbot):
     assert not page.active_open.isEnabled()
 
 
-def test_late_active_games_do_not_reveal_panel_after_mode_switch(qtbot):
+def test_active_games_remain_visible_after_switching_play_mode(qtbot):
     page = PlayPage({})
     qtbot.addWidget(page)
     page.mode_selector.setCurrentIndex(page.mode_selector.findData("active"))
@@ -78,7 +80,7 @@ def test_late_active_games_do_not_reveal_panel_after_mode_switch(qtbot):
     page.mode_selector.setCurrentIndex(page.mode_selector.findData("ai"))
     page.set_active_games([{"gameId": "late", "fen": chess.STARTING_FEN}])
     assert page.mode_selector.currentData() == "ai"
-    assert page.active_panel.isHidden()
+    assert not page.active_panel.isHidden()
     assert all(not card.isHidden() for card in page.cards)
 
 
@@ -88,15 +90,15 @@ def test_offline_play_modes_remain_selectable_without_sending_network_request(qt
     qtbot.addWidget(window)
     try:
         page = window._play_mode_page
-        for mode in ("local", "ai", "friend", "challenge", "active"):
+        for mode in ("local", "ai", "friend", "challenge"):
             button = page.buttons[mode]
             assert button.isEnabled()
             QTest.mouseClick(button, Qt.MouseButton.LeftButton)
             assert page.mode_selector.currentData() == mode
         page.select_mode("ai")
-        QTest.mouseClick(page.start_button, Qt.MouseButton.LeftButton)
+        assert not page.start_button.isEnabled()
+        assert "Подключите Lichess" in page.start_button.toolTip()
         assert window.lichess is None
-        assert "подключ" in page.form_status.text().casefold()
         assert window._pending_play_request_id is None
     finally:
         window.game_repository.shutdown()
@@ -487,6 +489,10 @@ def test_online_move_is_pending_immediately_but_confirmed_sound_waits_for_server
     window.lichess = SimpleNamespace(
         auth_generation=3, send_move=slow_submit,
         is_auth_generation_current=lambda generation: int(generation) == 3)
+    window.offline_mode = False
+    window._lichess_connected = True
+    window._event_stream_recovery_pending = False
+    window._lichess_stream_ready_generation = 3
     window.online_session = session
     window._screen_mode = "online"
     try:
@@ -533,6 +539,10 @@ def test_rejected_online_move_keeps_only_pending_signal(qtbot, tmp_path, monkeyp
     window.lichess = SimpleNamespace(
         auth_generation=4, send_move=lambda *args: calls.append(("send", args[2])),
         is_auth_generation_current=lambda generation: int(generation) == 4)
+    window.offline_mode = False
+    window._lichess_connected = True
+    window._event_stream_recovery_pending = False
+    window._lichess_stream_ready_generation = 4
     window.online_session = session
     window._screen_mode = "online"
     try:

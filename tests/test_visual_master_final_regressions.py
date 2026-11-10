@@ -371,6 +371,15 @@ def test_send_move_ack_emits_sound_eligibility_only_after_success(monkeypatch):
     client = _Client()
     service = LichessService(client=client, token_store=store)
     service.username = "synthetic-account"
+    generation = service.auth_generation
+    assert service.mark_event_stream_ready(generation)
+    service.reconcile_game_actions(
+        "synthetic-game", {"type": "gameFull", "state": {
+            "status": "started", "moves": "", "wdraw": False, "bdraw": False}},
+        generation, snapshot_sequence=1)
+    sequence = service._game_authoritative_sequence[(generation, "synthetic-game")]
+    assert service.authorize_game_actions(
+        "synthetic-game", generation, sequence, color="white")
     service._thread = lambda target, _name: target()
     accepted, failed = [], []
     service.session_move_accepted.connect(lambda *args: accepted.append(args))
@@ -378,6 +387,12 @@ def test_send_move_ack_emits_sound_eligibility_only_after_success(monkeypatch):
 
     service.send_move("synthetic-game", "e2e4", "request-ok")
     assert accepted == [(service.auth_generation, "synthetic-game", "e2e4", "request-ok")]
+    # A second intent is admitted only after authoritative server progress
+    # settles the first one-shot request.
+    service.reconcile_game_actions(
+        "synthetic-game", {"type": "gameState", "state": {
+            "status": "started", "moves": "e2e4", "wdraw": False, "bdraw": False}},
+        generation)
     client.fail = True
     service.send_move("synthetic-game", "d2d4", "request-rejected")
     assert len(accepted) == 1

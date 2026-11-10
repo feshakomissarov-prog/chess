@@ -1,5 +1,7 @@
 import chess
 import pytest
+from PySide6.QtCore import Qt
+from PySide6.QtWidgets import QScrollArea
 
 from chess_coach.ui.game_review import AdvantageBar, GameReviewWorkspace, ReviewGraph
 from chess_coach.lichess.game_review import (
@@ -145,7 +147,8 @@ def test_review_moves_graph_and_training_share_position_without_mutating_saved_p
         assert "Точность Lichess · сервер:" in workspace.metrics_label.text()
         assert "Расчёт Chess Coach (методика Lichess" in workspace.metrics_label.text()
         assert "неофициально" in workspace.metrics_label.text()
-        assert "1–0" in workspace.title.text()
+        assert workspace.title.text() == "Разбор партии"
+        assert "1–0" in workspace.subtitle.text()
         assert "Stockfish" not in workspace.subtitle.text()
         workspace.moves_list.setCurrentRow(2)
         assert workspace.selected_ply == 2
@@ -195,7 +198,8 @@ def test_ephemeral_study_can_explore_legal_branch_undo_and_reset_without_persist
     workspace.load_game(game, training_allowed=False, ephemeral=True)
     assert not workspace.ephemeral_controls.isHidden()
     assert workspace.review_board._interaction_enabled
-    assert workspace.analysis_button.isHidden()
+    assert not workspace.analysis_button.isHidden()
+    assert workspace.analysis_button.text() == "Проанализировать внешнюю партию"
     workspace.review_board.move_intent.emit(chess.Move.from_uci("d2d4"))
     assert workspace._ephemeral_board.piece_at(chess.D4) == chess.Piece(chess.PAWN, chess.WHITE)
     assert workspace._ephemeral_branch == [chess.Move.from_uci("d2d4")]
@@ -396,7 +400,8 @@ def test_review_events_and_saved_pv_follow_selection_and_fair_play_gate(qtbot, t
         workspace.select_ply(1)
         assert workspace.review_board._hint_arrows == {(chess.C7, chess.C5)}
         assert "Сохранённое продолжение: c5 Nf3" in workspace.event_detail.text()
-        workspace.set_safety_pending("Активная человеческая партия")
+        workspace.set_training_safety_result(
+            False, "Активная человеческая партия", evaluation_allowed=False)
         assert workspace.review_board._hint_arrows == set()
         assert "Активная человеческая партия" in workspace.selected_move_summary.text()
         assert workspace.moves_list.item(0).text() == "e4"
@@ -463,7 +468,8 @@ def test_fair_play_revocation_masks_every_rendered_analysis_surface(
             "human-gameStart": "Lichess сообщил о партии с человеком.",
         }[transition]
         if transition in {"pending", "reconnect"}:
-            workspace.set_safety_pending(reason)
+            workspace.set_training_safety_result(
+                False, reason, evaluation_allowed=False)
         elif transition == "revoke":
             workspace.revoke_safety(reason)
         else:
@@ -519,6 +525,25 @@ def test_fair_play_revocation_masks_every_rendered_analysis_surface(
         repo.shutdown()
 
 
+def test_training_preflight_does_not_mask_saved_review_on_entry(qtbot, tmp_path):
+    repo, game = _review_repo(tmp_path / "review-preflight-readonly.sqlite3")
+    try:
+        workspace = GameReviewWorkspace(repo, training_allowed=False)
+        qtbot.addWidget(workspace)
+        workspace.load_game(
+            game, training_allowed=False, training_block_reason="Проверка ещё не выполнена.",
+            evaluation_allowed=True)
+        workspace.select_ply(2)
+        workspace.set_safety_pending("Проверяем активные партии Lichess…")
+        assert workspace.evaluation_allowed
+        assert workspace.graph._values()
+        assert "+2.5" in workspace.moves_list.item_by_ply(2).text()
+        assert workspace.training_safety_button.isHidden()
+        assert workspace.training_status.isHidden()
+    finally:
+        repo.shutdown()
+
+
 def test_ephemeral_review_keeps_identity_and_selected_ply_across_safety_changes(qtbot, tmp_path):
     repo, game = _review_repo(tmp_path / "ephemeral-safety.sqlite3")
     try:
@@ -552,7 +577,10 @@ def test_review_layout_has_no_outer_scroll_and_renders_at_desktop_sizes(qtbot, t
         workspace = GameReviewWorkspace(repo, training_allowed=True)
         qtbot.addWidget(workspace)
         workspace.load_game(game)
-        assert not workspace.findChildren(QScrollArea)
+        metric_scrolls = workspace.findChildren(QScrollArea, "reviewMetricsScroll")
+        assert len(metric_scrolls) == 1
+        assert metric_scrolls[0].widget() is not None
+        assert metric_scrolls[0].verticalScrollBarPolicy() == Qt.ScrollBarPolicy.ScrollBarAsNeeded
         for width, height in ((1024, 700), (1280, 720), (1360, 860), (1920, 1080)):
             workspace.setFixedSize(width, height)
             workspace.show()
@@ -585,6 +613,39 @@ def test_review_layout_has_no_outer_scroll_and_renders_at_desktop_sizes(qtbot, t
                         assert workspace.moves_list.table.fontMetrics().horizontalAdvance(
                             item.text()) <= workspace.moves_list.table.columnWidth(column)
         assert workspace.workspace_splitter.orientation().name == "Horizontal"
+    finally:
+        repo.shutdown()
+
+
+def test_review_without_engine_data_shows_honest_summary_and_no_fake_metrics(qtbot, tmp_path):
+    from PySide6.QtCore import Qt
+
+    repo = GameRepository(tmp_path / "review-empty-analysis.sqlite3")
+    repo.save_snapshot("review-empty", "startpos", "e2e4 e7e5 g1f3", "white",
+                       "Opponent", False, "5+0", "mate", "white",
+                       white_player="Me", black_player="Opponent")
+    game = repo.get_game("review-empty")
+    try:
+        workspace = GameReviewWorkspace(repo, training_allowed=True)
+        qtbot.addWidget(workspace)
+        workspace.load_game(game, training_allowed=True)
+        workspace.resize(1360, 860)
+        workspace.show()
+        qtbot.wait(20)
+        assert workspace.no_analysis_summary.isVisible()
+        assert workspace.no_analysis_title.text() == "Данные движка отсутствуют"
+        assert workspace.side_metrics_summary.isHidden()
+        assert workspace.side_metrics_summary.verticalScrollBarPolicy() == (
+            Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        assert workspace.phase_selector.isHidden()
+        assert workspace.graph_legend.isHidden()
+        assert workspace.graph_mode.isHidden()
+        assert workspace.graph.empty_title == "Оценка отсутствует"
+        assert workspace.graph.empty_detail.startswith("Здесь появится график")
+        assert workspace.analysis_button.isVisible()
+        assert workspace.analysis_button.isEnabled()
+        assert not workspace.advantage_bar.isVisible()
+        assert workspace.moves_list.table.rowCount() == 2
     finally:
         repo.shutdown()
 

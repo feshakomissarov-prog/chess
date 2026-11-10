@@ -99,6 +99,10 @@ class HomePage(QWidget):
         self._preferred_account = str(settings.value("workspace/selected_account", "", type=str))
         if username:
             self._preferred_account = f"lichess:{username.strip().lower()}"
+        # Establish the saved account scope before the first Home query. The
+        # selector options may still be loading; select_profile inserts a
+        # scoped placeholder instead of briefly querying "all accounts".
+        self.select_profile(self._preferred_account, notify=False)
         self._preferred_clock = ""  # the historical key remains stored but is no longer applied on Home
 
         self.dashboard_metrics = {}
@@ -292,12 +296,16 @@ class HomePage(QWidget):
             widget.hide()
 
     def set_selector_options(self, options: dict) -> None:
+        selected = self.dashboard_account.currentData()
         self.dashboard_account.blockSignals(True)
         self.dashboard_account.clear()
         self.dashboard_account.addItem("Все локальные партии", None)
         for item in options.get("accounts", []):
             self.dashboard_account.addItem(str(item["username"]), str(item["account_id"]))
-        self.select_profile(self._preferred_account, notify=False)
+        if selected is not None and self.dashboard_account.findData(selected) >= 0:
+            self.select_profile(str(selected), notify=False)
+        else:
+            self.select_profile(self._preferred_account, notify=False)
         self.dashboard_account.blockSignals(False)
 
     def select_profile(self, profile: str | None, *, notify: bool = True) -> None:

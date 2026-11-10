@@ -122,12 +122,16 @@ class LichessGameSession:
         self.days_per_turn: int | None = None
         self._clock_ply_seen: int | None = None
         self.rated = False
+        self.rated_metadata_valid = False
         self.winner = None
         self.final_sync_pending = False
         # A newly opened game is not playable until its stream supplies and we
         # validate a complete authoritative gameFull snapshot.
         self.awaiting_authoritative_snapshot = True
         self.draw_offered_by_opponent = False
+        self.draw_offered_by_me = False
+        self._my_draw_offer_anchor_ply: tuple[str, ...] | None = None
+        self._opponent_draw_offer_anchor_ply: tuple[str, ...] | None = None
         self.takeback_requested_by_opponent = False
         self.takeback_requested_by_me = False
         self.takeback_accept_pending = False
@@ -282,8 +286,8 @@ class LichessGameSession:
             self.premove = None
         # Shortening requires explicit takeback context or a fresh gameFull resync.
         shorter_is_authoritative = (
-            kind == "gameFull" or self.takeback_requested_by_me
-            or self.takeback_accept_pending
+            (kind == "gameFull" and self.awaiting_authoritative_snapshot)
+            or self.takeback_requested_by_me or self.takeback_accept_pending
         )
         if is_shorter:
             if not is_prefix:
@@ -320,7 +324,20 @@ class LichessGameSession:
             self._apply_clock_state(state, reanchor=kind == "gameFull")
             self.winner = state.get("winner", self.winner)
             own_draw_flag = "bdraw" if self.color == chess.WHITE else "wdraw"
-            self.draw_offered_by_opponent = bool(state.get(own_draw_flag, False))
+            my_draw_flag = "wdraw" if self.color == chess.WHITE else "bdraw"
+            accepted_line_change = (incoming_moves != confirmed_moves
+                                    and (not is_shorter or shorter_is_authoritative))
+            accepted_resync = kind == "gameFull" and self.awaiting_authoritative_snapshot
+            self.draw_offered_by_me, self._my_draw_offer_anchor_ply = (
+                self._merge_draw_offer_flag(
+                    state, my_draw_flag, self.draw_offered_by_me,
+                    self._my_draw_offer_anchor_ply, incoming_moves,
+                    accepted_line_change, accepted_resync))
+            self.draw_offered_by_opponent, self._opponent_draw_offer_anchor_ply = (
+                self._merge_draw_offer_flag(
+                    state, own_draw_flag, self.draw_offered_by_opponent,
+                    self._opponent_draw_offer_anchor_ply, incoming_moves,
+                    accepted_line_change, accepted_resync))
             self.takeback_requested_by_opponent = opponent_takeback_flag
             if own_takeback_flag:
                 self.takeback_requested_by_me = True
@@ -382,6 +399,30 @@ class LichessGameSession:
             self._save()
         return self.snapshot()
 
+    @staticmethod
+    def _merge_draw_offer_flag(state: dict, key: str, current: bool,
+                               anchor_moves: tuple[str, ...] | None,
+                               incoming_moves: tuple[str, ...],
+                               accepted_line_change: bool,
+                               accepted_resync: bool) -> tuple[bool, tuple[str, ...] | None]:
+        """Latch confirmed offers across same-line replays and omitted fields.
+
+        Lichess events can be replayed or omit optional draw flags. A same-line
+        false/missing value therefore cannot revoke previously observed true.
+        Clearing requires an explicit false on a changed, accepted move line.
+        """
+        value = state.get(key)
+        if value is True:
+            return True, incoming_moves
+        if value is not False:
+            return current, anchor_moves
+        progressed = bool(anchor_moves is not None
+                          and len(incoming_moves) > len(anchor_moves)
+                          and incoming_moves[:len(anchor_moves)] == anchor_moves)
+        if not current or progressed or accepted_line_change or accepted_resync:
+            return False, None
+        return True, anchor_moves if anchor_moves is not None else incoming_moves
+
     def configure_players(self, white: dict, black: dict, my_color: str) -> None:
         self.color = chess.WHITE if my_color == "white" else chess.BLACK
         self.white_player = white.get("name") or white.get("id") or "?"
@@ -396,7 +437,10 @@ class LichessGameSession:
 
     def _apply_game_full_metadata(self, event: dict, incoming_fen: str) -> None:
         self.initial_fen = incoming_fen
-        self.rated = bool(event.get("rated", False))
+        rated = event.get("rated")
+        self.rated_metadata_valid = type(rated) is bool
+        if self.rated_metadata_valid:
+            self.rated = rated
         # A reconnect may start with gameFull and never repeat gameStart. Preserve
         # the server's time-control classification from either authoritative event.
         speed = event.get("speed")

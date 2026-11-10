@@ -7,9 +7,226 @@ import threading
 import time
 import uuid
 
-from .api import LichessError, RateLimitError
+from .api import (LichessError, RateLimitError, RequestNotSentError,
+                  authenticated_request_admission)
+from .auth import CredentialStorageError
+from .game_status import ACTIONABLE_GAME_STATUSES, TERMINAL_GAME_STATUSES
+
+_TERMINAL_GAME_STATUSES = TERMINAL_GAME_STATUSES
+
+
+GAME_ACTION_CONFLICTS = {
+    # Draw offers are independent from a deliberate resignation. A server-confirmed
+    # incoming offer may be answered while an outgoing offer is stale.
+    "offer_draw": frozenset({"offer_draw", "abort", "claim_draw", "takeback"}),
+    "accept_draw": frozenset({"offer_draw", "accept_draw", "decline_draw", "resign",
+                               "abort", "claim_draw", "claim_victory", "takeback"}),
+    "decline_draw": frozenset({"offer_draw", "accept_draw", "decline_draw", "resign",
+                                "abort", "claim_draw", "claim_victory", "takeback"}),
+    "resign": frozenset({"offer_draw", "accept_draw", "decline_draw", "resign",
+                          "abort", "claim_draw", "claim_victory", "takeback"}),
+    "abort": frozenset({"offer_draw", "accept_draw", "decline_draw", "resign",
+                        "abort", "claim_draw", "claim_victory", "takeback"}),
+    "claim_draw": frozenset({"offer_draw", "accept_draw", "decline_draw", "resign",
+                             "abort", "claim_draw", "claim_victory", "takeback"}),
+    "claim_victory": frozenset({"offer_draw", "accept_draw", "decline_draw", "resign",
+                                 "abort", "claim_draw", "claim_victory", "takeback"}),
+    "takeback": frozenset({"offer_draw", "accept_draw", "decline_draw", "resign",
+                           "abort", "claim_draw", "claim_victory", "takeback"}),
+}
+
 
 class LichessGameActionsMixin:
+    def _guarded_client_call(self, context, token: str, call, *,
+                             game_id: str | None = None,
+                             validator=None, stop_event=None):
+        """Revalidate captured identity/credential after HTTP gate admission."""
+        def guard() -> bool:
+            if not self.is_operation_context_current(context):
+                return False
+            # A token can be replaced in its credential slot without an account
+            # switch. Never let a queued request use a credential that is no
+            # longer the current value for its captured context.
+            if context.credential_store.get() != token:
+                return False
+            if game_id is not None:
+                with self._pending_action_lock:
+                    if not self._game_action_admission_ready_locked(
+                            context.generation, str(game_id)):
+                        return False
+                    if validator is not None and not validator():
+                        return False
+            elif validator is not None and not validator():
+                return False
+            return True
+
+        with authenticated_request_admission(
+                guard, stop_event or context.connection_stop):
+            # Fake/test clients and non-HTTP adapters may not enter LichessClient
+            # at all. Enforce the same final pre-send fence at this boundary;
+            # LichessClient repeats it after its priority gate wait.
+            if not guard():
+                raise RequestNotSentError()
+            return call(token)
+
+    def _guarded_client_stream(self, context, token: str, stream_factory, *,
+                               stop_event=None):
+        """Keep identity admission active for lazy streams that begin with POST."""
+        def guard() -> bool:
+            return bool(self.is_operation_context_current(context)
+                        and context.credential_store.get() == token)
+
+        def iterate():
+            with authenticated_request_admission(
+                    guard, stop_event or context.connection_stop):
+                if not guard():
+                    raise RequestNotSentError()
+                yield from stream_factory(token)
+
+        return iterate()
+
+    def _invalidate_actions_after_rate_limit(self, generation: int) -> None:
+        self.invalidate_game_action_admission(generation)
+        try:
+            remaining = max(1, int(getattr(self.client, "rate_limit_remaining", 0)))
+        except (TypeError, ValueError):
+            remaining = 60
+        self._emit_session_status(
+            generation,
+            f"Ограничение Lichess (429): повтор через {remaining} с; "
+            "ожидаем свежий подтверждённый снимок партии.")
+
+    def mark_event_stream_ready(self, generation: int) -> bool:
+        """Record current transport readiness and require fresh game snapshots."""
+        generation = int(generation)
+        if not self.is_auth_generation_current(generation):
+            return False
+        with self._pending_action_lock:
+            if generation != self._auth_generation or self._connection_stop.is_set():
+                return False
+            self._event_stream_ready_generation = generation
+            # A reconnect does not restore per-game action admission.
+            self._game_action_admissions.clear()
+            self._accepted_game_full_sequence.clear()
+        return True
+
+    def restart_live_game_streams(self, generation: int,
+                                 game_ids: tuple[str, ...] | list[str] | None = None) -> None:
+        """Reopen each current game stream to obtain a fresh gameFull lease.
+
+        Event-stream readiness alone is not authoritative game state. Stopping
+        and reopening the currently tracked streams is bounded to known live
+        games and never resends a move or game action.
+        """
+        generation = int(generation)
+        if not self.is_auth_generation_current(generation):
+            return
+        context = self.capture_operation_context(command="restart_game_streams")
+        token = self.operation_token(context)
+        if not token:
+            return
+        with self._event_lock:
+            selected = (set(map(str, game_ids)) if game_ids is not None else None)
+            existing = tuple((game_id, stop) for game_id, stop in self._game_stops.items()
+                             if selected is None or game_id in selected)
+            for _, stop in existing:
+                stop.set()
+        if not existing:
+            return
+
+        def restart() -> None:
+            for game_id, old_stop in existing:
+                while (not self._stop.is_set()
+                       and self.is_operation_context_current(context)):
+                    with self._event_lock:
+                        current = self._game_stops.get(game_id)
+                    if current is not old_stop:
+                        break
+                    self._stop.wait(0.01)
+                if (self._stop.is_set() or not self.is_operation_context_current(context)
+                        or context.connection_stop.is_set()):
+                    return
+                self.start_game(game_id, token, expected_generation=generation)
+
+        self._thread(restart, "chess-coach-restart-game-streams")
+
+    def invalidate_game_action_admission(self, generation: int,
+                                         game_id: str | None = None, *,
+                                         event_stream: bool = False) -> None:
+        """Close service-side action admission after transport/safety loss."""
+        generation = int(generation)
+        with self._pending_action_lock:
+            if event_stream and self._event_stream_ready_generation == generation:
+                self._event_stream_ready_generation = None
+            if game_id is None:
+                for key in tuple(self._game_action_admissions):
+                    if key[0] == generation:
+                        self._game_action_admissions.pop(key, None)
+                for key in tuple(self._accepted_game_full_sequence):
+                    if key[0] == generation:
+                        self._accepted_game_full_sequence.pop(key, None)
+            else:
+                self._game_action_admissions.pop((generation, str(game_id)), None)
+                self._accepted_game_full_sequence.pop((generation, str(game_id)), None)
+
+    def authorize_game_actions(self, game_id: str, generation: int,
+                               snapshot_sequence: int, *, color: str) -> bool:
+        """Admit commands only after MainWindow accepted a fresh gameFull."""
+        generation = int(generation)
+        if color not in {"white", "black"} or int(snapshot_sequence) <= 0:
+            return False
+        key = (generation, str(game_id))
+        # Combined locks always follow auth -> pending order. Reversing that
+        # order here deadlocked against auth status callbacks that invalidate
+        # leases while holding _auth_lock.
+        with self._auth_lock:
+            if generation != self._auth_generation:
+                return False
+            with self._pending_action_lock:
+                authoritative = self._game_authoritative_state.get(key) or {}
+                if (self._event_stream_ready_generation != generation
+                        or self._connection_stop.is_set()
+                        or authoritative.get("status") not in ACTIONABLE_GAME_STATUSES
+                        or self._accepted_game_full_sequence.get(key) != int(snapshot_sequence)):
+                    return False
+                self._game_action_admissions[key] = {
+                    "snapshot_sequence": int(snapshot_sequence), "color": color,
+                }
+                return True
+
+    def _game_action_admission_ready_locked(self, generation: int,
+                                            game_id: str) -> bool:
+        admission = self._game_action_admissions.get((generation, str(game_id)))
+        authoritative = self._game_authoritative_state.get((generation, str(game_id))) or {}
+        try:
+            cooldown = max(0, int(getattr(self.client, "rate_limit_remaining", 0)))
+        except (TypeError, ValueError):
+            cooldown = 1
+        return bool(
+            generation == self._auth_generation
+            and self._event_stream_ready_generation == generation
+            and admission is not None
+            and admission.get("snapshot_sequence", 0) > 0
+            and authoritative.get("status") in ACTIONABLE_GAME_STATUSES
+            and cooldown == 0
+            and not self._connection_stop.is_set()
+        )
+
+    @staticmethod
+    def _own_draw_offer_is_set(authoritative: dict, admission: dict | None) -> bool:
+        if not admission:
+            return False
+        own_key = "wdraw" if admission.get("color") == "white" else "bdraw"
+        return authoritative.get(own_key) is True
+
+    @staticmethod
+    def _opponent_draw_offer_is_set(authoritative: dict,
+                                    admission: dict | None) -> bool:
+        if not admission:
+            return False
+        opponent_key = "bdraw" if admission.get("color") == "white" else "wdraw"
+        return authoritative.get(opponent_key) is True
+
     def claim_draw(self, game_id: str):
         self._action(lambda token: self.client.claim_draw(token, game_id),
                      game_id=game_id, command="claim_draw")
@@ -24,7 +241,10 @@ class LichessGameActionsMixin:
                 token = self.operation_token(context)
                 if not token:
                     return
-                self.client.cancel_challenge(token, challenge_id)
+                self._guarded_client_call(
+                    context, token,
+                    lambda captured: self.client.cancel_challenge(
+                        captured, challenge_id))
                 if self.is_operation_context_current(context):
                     self.session_invitation_cancelled.emit(
                         context.generation, context.request_id, challenge_id)
@@ -38,20 +258,85 @@ class LichessGameActionsMixin:
         accept = action != "decline"
         context = self.capture_operation_context(
             game_id=game_id, command="takeback", request_id=request_id)
+        key = (context.generation, str(game_id), "takeback")
+        with self._pending_action_lock:
+            if context.connection_stop.is_set():
+                self.session_takeback_action_completed.emit(
+                    context.generation, str(game_id), request_id, -2)
+                return None
+            authoritative = self._game_authoritative_state.get(
+                (context.generation, str(game_id)), {})
+            if (authoritative.get("status") in TERMINAL_GAME_STATUSES
+                    or not self._game_action_admission_ready_locked(
+                        context.generation, str(game_id))):
+                self.session_takeback_action_completed.emit(
+                    context.generation, str(game_id), request_id, -2)
+                return None
+            if key in self._pending_actions:
+                return self._pending_actions[key]
+            if any(
+                    pending_key[0] == context.generation
+                    and pending_key[1] == str(game_id)
+                    and "takeback" in GAME_ACTION_CONFLICTS.get(pending_key[2], ())
+                    for pending_key in self._pending_actions):
+                self.session_takeback_action_completed.emit(
+                    context.generation, str(game_id), request_id, -2)
+                return None
+            self._pending_actions[key] = request_id
+            game_key = (context.generation, str(game_id))
+            baseline = dict(self._game_authoritative_state.get(game_key) or {})
+            self._pending_action_states[key] = {
+                "context": context, "baseline": baseline, "status": "in_flight",
+                "confirmed": False, "takeback_action": action,
+            }
+        self.session_action_started.emit(
+            context.generation, request_id, "takeback", str(game_id))
 
         def work():
-            status = 0
+            status = -2
+            state = None
             try:
                 token = self.operation_token(context)
-                if not token:
-                    return
-                self.client.handle_takeback(token, game_id, accept)
+                with self._pending_action_lock:
+                    admitted = self._game_action_admission_ready_locked(
+                        context.generation, str(game_id))
+                if token and admitted:
+                    self._guarded_client_call(
+                        context, token,
+                        lambda captured: self.client.handle_takeback(
+                            captured, game_id, accept), game_id=game_id)
+                    status = 0
             except Exception as exc:
-                status = exc.status if isinstance(exc, LichessError) and exc.status else -1
+                status = (-2 if isinstance(exc, CredentialStorageError) else
+                          exc.status if isinstance(exc, LichessError) and exc.status else -1)
+                self._emit_operation_failure(context, exc)
+                if status == 429:
+                    self._invalidate_actions_after_rate_limit(context.generation)
+            definitive = status in {-2, 400, 401, 403, 404, 422}
+            with self._pending_action_lock:
+                state = self._pending_action_states.get(key)
+                if state and state.get("context") is context:
+                    if definitive:
+                        self._pending_action_states.pop(key, None)
+                        self._pending_actions.pop(key, None)
+                    else:
+                        state["status"] = "awaiting_authoritative_state"
+                        state["ack_sequence"] = self._game_authoritative_sequence.get(
+                            (context.generation, str(game_id)), 0)
+                        state["ack_state"] = dict(self._game_authoritative_state.get(
+                            (context.generation, str(game_id)), {}))
+                        if state["confirmed"]:
+                            self._pending_action_states.pop(key, None)
+                            self._pending_actions.pop(key, None)
             if self.is_operation_context_current(context):
                 self.session_takeback_action_completed.emit(
                     context.generation, game_id, request_id, status)
                 self.takeback_action_completed.emit(game_id, request_id, status)
+                self.session_action_completed.emit(
+                    context.generation, request_id, "takeback", str(game_id), status)
+                if state and not definitive and state.get("confirmed"):
+                    self.session_action_reconciled.emit(
+                        context.generation, request_id, "takeback", str(game_id))
 
         self._thread(work, "chess-coach-takeback")
 
@@ -78,6 +363,30 @@ class LichessGameActionsMixin:
                 return None
             if key in self._pending_actions:
                 return self._pending_actions[key]
+            authoritative = self._game_authoritative_state.get(
+                (context.generation, str(game_id or "")), {})
+            admission = self._game_action_admissions.get(
+                (context.generation, str(game_id or "")))
+            if (authoritative.get("status") in TERMINAL_GAME_STATUSES
+                    or not self._game_action_admission_ready_locked(
+                        context.generation, str(game_id or ""))):
+                return None
+            if command == "offer_draw" and self._own_draw_offer_is_set(
+                    authoritative, admission):
+                return None
+            if command == "offer_draw" and self._opponent_draw_offer_is_set(
+                    authoritative, admission):
+                return None
+            if (command in {"accept_draw", "decline_draw"}
+                    and not self._opponent_draw_offer_is_set(authoritative, admission)):
+                return None
+            blocked_by_pending = any(
+                pending_key[0] == context.generation
+                and pending_key[1] == str(game_id or "")
+                and command in GAME_ACTION_CONFLICTS.get(pending_key[2], ())
+                for pending_key in self._pending_actions)
+            if blocked_by_pending:
+                return None
             self._pending_actions[key] = context.request_id
             game_key = (context.generation, str(game_id or ""))
             baseline = dict(self._game_authoritative_state.get(game_key) or {})
@@ -91,13 +400,41 @@ class LichessGameActionsMixin:
             token = None
             result_status = 0
             try:
-                token = self.operation_token(context)
-                if not token:
+                with self._pending_action_lock:
+                    admitted = self._game_action_admission_ready_locked(
+                        context.generation, str(game_id or ""))
+                    if command in {"accept_draw", "decline_draw"}:
+                        admitted = admitted and self._opponent_draw_offer_is_set(
+                            self._game_authoritative_state.get(
+                                (context.generation, str(game_id or "")), {}),
+                            self._game_action_admissions.get(
+                                (context.generation, str(game_id or ""))))
+                token = self.operation_token(context) if admitted else None
+                if not token or not admitted:
                     result_status = -2
                 else:
-                    action(token)
+                    def intent_is_current():
+                        authoritative_now = self._game_authoritative_state.get(
+                            (context.generation, str(game_id or "")), {})
+                        admission_now = self._game_action_admissions.get(
+                            (context.generation, str(game_id or "")))
+                        if command == "offer_draw":
+                            return (not self._own_draw_offer_is_set(authoritative_now, admission_now)
+                                    and not self._opponent_draw_offer_is_set(
+                                        authoritative_now, admission_now))
+                        if command in {"accept_draw", "decline_draw"}:
+                            return self._opponent_draw_offer_is_set(
+                                authoritative_now, admission_now)
+                        return True
+
+                    self._guarded_client_call(
+                        context, token, action, game_id=game_id,
+                        validator=intent_is_current)
             except Exception as exc:
-                result_status = exc.status if isinstance(exc, LichessError) and exc.status else -1
+                result_status = (-2 if isinstance(exc, CredentialStorageError) else
+                                 exc.status if isinstance(exc, LichessError) and exc.status else -1)
+                if result_status == 429:
+                    self._invalidate_actions_after_rate_limit(context.generation)
                 self._emit_operation_failure(context, exc)
             definitive_rejection = result_status in {-2, 400, 401, 403, 404, 422}
             with self._pending_action_lock:
@@ -108,10 +445,23 @@ class LichessGameActionsMixin:
                         self._pending_actions.pop(key, None)
                     else:
                         state["status"] = "awaiting_authoritative_state"
+                        state["ack_sequence"] = self._game_authoritative_sequence.get(
+                            (context.generation, str(game_id or "")), 0)
+                        state["ack_state"] = dict(self._game_authoritative_state.get(
+                            (context.generation, str(game_id or "")), {}))
                         if state["confirmed"]:
                             self._pending_action_states.pop(key, None)
                             self._pending_actions.pop(key, None)
             if self.is_auth_generation_current(context.generation):
+                if (command == "offer_draw" and result_status == -2
+                        and self._opponent_draw_offer_is_set(
+                            self._game_authoritative_state.get(
+                                (context.generation, str(game_id or "")), {}),
+                            self._game_action_admissions.get(
+                                (context.generation, str(game_id or ""))))):
+                    self._emit_session_status(
+                        context.generation,
+                        "Соперник предлагает ничью. Используйте явную кнопку ответа.")
                 self.session_action_completed.emit(
                     context.generation, context.request_id, command,
                     context.game_id or "", result_status)
@@ -119,6 +469,18 @@ class LichessGameActionsMixin:
                     self.session_action_reconciled.emit(
                         context.generation, context.request_id, command,
                         context.game_id or "")
+                if command == "decline_draw" and result_status == 0:
+                    # A successful decline is acknowledged causally by a new
+                    # gameFull. Same-line gameState replays cannot prove that
+                    # the offer was withdrawn.
+                    self.invalidate_game_action_admission(
+                        context.generation, str(game_id or ""))
+                    self._emit_session_status(
+                        context.generation,
+                        f"Потеряно соединение с партией {game_id}; "
+                        "переподтверждаем ответ на ничью…")
+                    self.restart_live_game_streams(
+                        context.generation, [str(game_id or "")])
         self._thread(work, "chess-coach-lichess-action")
         return context.request_id
 
@@ -128,7 +490,10 @@ class LichessGameActionsMixin:
                        for key in self._pending_actions)
 
     def reconcile_game_actions(self, game_id: str, event: dict,
-                               generation: int | None = None, *, color: str = "white") -> None:
+                               generation: int | None = None, *, color: str = "white",
+                               resync: bool = False,
+                               accepted_line_change: bool = False,
+                               snapshot_sequence: int | None = None) -> None:
         """Resolve one-shot POSTs only after a newer authoritative game snapshot."""
         generation = self.auth_generation if generation is None else int(generation)
         state = event.get("state", event) if isinstance(event, dict) else {}
@@ -138,6 +503,7 @@ class LichessGameActionsMixin:
         fingerprint = {
             "status": state.get("status"), "moves": str(state.get("moves") or ""),
             "wdraw": state.get("wdraw"), "bdraw": state.get("bdraw"),
+            "wtakeback": state.get("wtakeback"), "btakeback": state.get("btakeback"),
             "turns": state.get("turns"), "color": color,
         }
         context = self.capture_operation_context(game_id=game_id)
@@ -146,15 +512,92 @@ class LichessGameActionsMixin:
         with self._pending_action_lock:
             if context.connection_stop.is_set():
                 return
-            self._game_authoritative_state[game_key] = fingerprint
+            previous = self._game_authoritative_state.get(game_key) or {}
+            if (previous.get("status") in _TERMINAL_GAME_STATUSES
+                    and fingerprint.get("status") not in _TERMINAL_GAME_STATUSES):
+                return
+            old_moves = tuple(str(previous.get("moves") or "").split())
+            new_moves = tuple(str(fingerprint.get("moves") or "").split())
+            for flag in ("wdraw", "bdraw"):
+                anchor_key = f"_{flag}_anchor_moves"
+                previous_anchor = previous.get(anchor_key)
+                if previous.get(flag) is True:
+                    anchor = (tuple(previous_anchor) if previous_anchor is not None
+                              else old_moves)
+                    line_progressed_from_offer = (
+                        len(new_moves) > len(anchor) and new_moves[:len(anchor)] == anchor)
+                    if fingerprint.get(flag) is None:
+                        # Missing is unknown. Keep the latch and its original
+                        # line anchor so a later explicit false can reconcile.
+                        fingerprint[flag] = True
+                    elif fingerprint.get(flag) is False and not (
+                            line_progressed_from_offer or accepted_line_change or resync):
+                        fingerprint[flag] = True
+                    fingerprint[anchor_key] = anchor if fingerprint.get(flag) is True else None
+                elif fingerprint.get(flag) is True:
+                    fingerprint[anchor_key] = new_moves
+                elif fingerprint.get(flag) is None and previous.get(flag) is not None:
+                    # Preserve a known value only for an unchanged line. On a
+                    # later line, the missing field remains explicitly unknown.
+                    if new_moves == old_moves:
+                        fingerprint[flag] = previous.get(flag)
+                        fingerprint[anchor_key] = previous.get(anchor_key)
+                    else:
+                        fingerprint[anchor_key] = None
+                else:
+                    fingerprint[anchor_key] = None
+            previous_fingerprint = {key: value for key, value in previous.items()
+                                    if key != "sequence"}
+            fresh = previous_fingerprint != fingerprint
+            sequence = self._game_authoritative_sequence.get(game_key, 0)
+            if fresh:
+                sequence += 1
+                self._game_authoritative_sequence[game_key] = sequence
+            fingerprint["sequence"] = sequence
+            if fresh or not previous:
+                self._game_authoritative_state[game_key] = fingerprint
+            pending_move_key = self._pending_move_by_game.get(game_key)
+            if pending_move_key is not None:
+                move_intent = self._move_request_ledger.get(pending_move_key)
+                if move_intent is not None:
+                    before_move_line = tuple(
+                        str(move_intent.get("baseline_moves") or "").split())
+                    if (fresh and len(new_moves) > len(before_move_line)
+                            and new_moves[:len(before_move_line)] == before_move_line):
+                        move_intent["status"] = "settled"
+                        self._pending_move_by_game.pop(game_key, None)
+            if (event.get("type") == "gameFull"
+                    and type(snapshot_sequence) is int and snapshot_sequence > 0):
+                # MainWindow supplies this only after apply_event accepted the
+                # full snapshot. Reconnect clears it, so a stale lease cannot be
+                # reactivated by a later direct service call.
+                self._accepted_game_full_sequence[game_key] = snapshot_sequence
             resolved = []
             for key, action_state in tuple(self._pending_action_states.items()):
                 context = action_state.get("context")
                 if (not context or context.generation != generation
                         or context.game_id != str(game_id)):
                     continue
-                if not self._action_effect_reconciled(
-                        context.command, action_state.get("baseline") or {}, fingerprint):
+                effect_command = context.command
+                if context.command == "takeback":
+                    effect_command = f"takeback_{action_state.get('takeback_action') or 'offer'}"
+                effect_seen = self._action_effect_reconciled(
+                    effect_command, action_state.get("baseline") or {}, fingerprint)
+                if (not effect_seen and fresh and context.command in {"offer_draw", "takeback"}
+                        and action_state["status"] == "awaiting_authoritative_state"
+                        and sequence > action_state.get("ack_sequence", sequence)
+                        and fingerprint.get("status") in {"created", "started", "playing"}):
+                    ack = action_state.get("ack_state") or {}
+                    before_moves = str(ack.get("moves") or "").split()
+                    after_moves = str(fingerprint.get("moves") or "").split()
+                    if context.command == "offer_draw":
+                        own_flag = "wdraw" if color == "white" else "bdraw"
+                        flag_cleared = (ack.get(own_flag) is True
+                                        and fingerprint.get(own_flag) is False)
+                        line_advanced = len(after_moves) > len(before_moves)
+                        effect_seen = (fingerprint.get(own_flag) is False
+                                       and (flag_cleared or line_advanced))
+                if not effect_seen:
                     continue
                 if action_state["status"] == "in_flight":
                     action_state["confirmed"] = True
@@ -170,9 +613,7 @@ class LichessGameActionsMixin:
     @staticmethod
     def _action_effect_reconciled(command: str, before: dict, after: dict) -> bool:
         status = str(after.get("status") or "")
-        terminal = status in {"aborted", "mate", "resign", "stalemate", "timeout",
-                              "draw", "outoftime", "cheat", "noStart",
-                              "unknownFinish", "variantEnd"}
+        terminal = status in TERMINAL_GAME_STATUSES
         if command in {"abort", "resign", "claim_draw", "claim_victory", "accept_draw"}:
             return terminal
         if command == "offer_draw":
@@ -182,6 +623,17 @@ class LichessGameActionsMixin:
             key = "bdraw" if after["color"] == "white" else "wdraw"
             return terminal or (
                 before.get(key) is True and after.get(key) is not True)
+        if command == "takeback_offer":
+            key = "wtakeback" if after["color"] == "white" else "btakeback"
+            return (after.get(key) is True and before.get(key) is not True) or (
+                len(str(after.get("moves") or "").split())
+                < len(str(before.get("moves") or "").split()))
+        if command == "takeback_accept":
+            return terminal or len(str(after.get("moves") or "").split()) < len(
+                str(before.get("moves") or "").split())
+        if command == "takeback_decline":
+            key = "btakeback" if after["color"] == "white" else "wtakeback"
+            return terminal or (before.get(key) is True and after.get(key) is False)
         return False
 
     def open_friend_game(self, color: str, clock_limit: int | None, increment: int = 0, rated: bool = False):
@@ -227,7 +679,9 @@ class LichessGameActionsMixin:
         try:
             if not token or not self.is_operation_context_current(context):
                 raise LichessError("Сессия изменилась; отмена не подтверждена.")
-            self.client.cancel_challenge(token, challenge_id)
+            self._guarded_client_call(
+                context, token,
+                lambda captured: self.client.cancel_challenge(captured, challenge_id))
         except Exception as exc:
             status = getattr(exc, "status", None)
             with self._pending_action_lock:
@@ -308,7 +762,11 @@ class LichessGameActionsMixin:
                     token = self.operation_token(context)
                     if not token:
                         raise LichessError("Соединение Lichess изменилось; повторите отмену после подключения.")
-                    self.client.cancel_challenge(token, challenge_id)
+                    self._guarded_client_call(
+                        context, token,
+                        lambda captured: self.client.cancel_challenge(
+                            captured, challenge_id),
+                        stop_event=None)
                     cancelled = True
                 except Exception as exc:
                     if self.is_operation_context_current(context):
@@ -387,6 +845,7 @@ class LichessGameActionsMixin:
                     except RateLimitError as exc:
                         if not self.is_auth_generation_current(auth_generation):
                             break
+                        self.invalidate_game_action_admission(auth_generation, game_id)
                         with self._event_lock:
                             final_sync = game_id in self._final_sync_game_ids
                         if final_sync and final_attempts >= 1:
@@ -396,7 +855,7 @@ class LichessGameActionsMixin:
                             final_attempts += 1
                         self._emit_session_status(
                             auth_generation,
-                            f"Ограничение Lichess (429): синхронизация партии через {max(60, exc.retry_after)} с"
+                            f"Ограничение Lichess (429): синхронизация партии {game_id} через {max(60, exc.retry_after)} с"
                         )
                         connection_stop.wait(max(60, exc.retry_after))
                     except LichessError as exc:
@@ -406,6 +865,7 @@ class LichessGameActionsMixin:
                             connection_stop.set()
                             self._emit_session_error(auth_generation, str(exc))
                             break
+                        self.invalidate_game_action_admission(auth_generation, game_id)
                         with self._event_lock:
                             final_sync = game_id in self._final_sync_game_ids
                         if final_sync and final_attempts >= 1:
@@ -413,7 +873,9 @@ class LichessGameActionsMixin:
                             break
                         if final_sync:
                             final_attempts += 1
-                        self._emit_session_status(auth_generation, "Потеряно соединение с партией; синхронизация…")
+                        self._emit_session_status(
+                            auth_generation,
+                            f"Потеряно соединение с партией {game_id}; синхронизация…")
                         connection_stop.wait(delay)
                         delay = min(delay * 2, 30)
             finally:
@@ -483,7 +945,11 @@ class LichessGameActionsMixin:
                     f"Ожидаем ответ от {username}…", True)
                 self.challenge_status_changed.emit(f"Ожидаем ответ от {username}…", True)
             try:
-                for event in self.client.username_challenge_events(token, username, form, stop):
+                events = self._guarded_client_stream(
+                    context, token,
+                    lambda captured: self.client.username_challenge_events(
+                        captured, username, form, stop), stop_event=stop)
+                for event in events:
                     if not self.is_operation_context_current(context):
                         break
                     self.event_received.emit(event)
@@ -492,7 +958,11 @@ class LichessGameActionsMixin:
                         self._username_challenge_id = challenge_id
                         if self._username_challenge_cancel_requested:
                             try:
-                                self.client.cancel_challenge(token, challenge_id)
+                                self._guarded_client_call(
+                                    context, token,
+                                    lambda captured: self.client.cancel_challenge(
+                                        captured, challenge_id),
+                                    stop_event=None)
                             except Exception as exc:
                                 # A failed cancellation is not authoritative.
                                 # Keep the stream and pending UI alive so the
@@ -617,29 +1087,114 @@ class LichessGameActionsMixin:
         context = self.capture_operation_context(game_id=game_id,
                                                 command="send_move",
                                                 request_id=request_id)
+        request_key = (context.generation, str(game_id), str(request_id))
+        game_key = (context.generation, str(game_id))
+        with self._pending_action_lock:
+            # The same intent is idempotent even when called directly,
+            # concurrently, or again after an ambiguous result.
+            if request_key in self._move_request_ledger:
+                return
+            if game_key in self._pending_move_by_game:
+                return
+            if not self._game_action_admission_ready_locked(
+                    context.generation, str(game_id)):
+                self.session_move_failed.emit(
+                    context.generation, game_id, uci, request_id, -2)
+                return
+            baseline = dict(self._game_authoritative_state.get(game_key) or {})
+            self._move_request_ledger[request_key] = {
+                "uci": str(uci), "status": "in_flight",
+                "baseline_moves": str(baseline.get("moves") or ""),
+            }
+            self._pending_move_by_game[game_key] = request_key
+            # Prune only settled, oldest request IDs. Unresolved one-shot
+            # intents are never evicted merely to make room for another POST.
+            if len(self._move_request_ledger) > 512:
+                for old_key, value in tuple(self._move_request_ledger.items()):
+                    if old_key == request_key:
+                        continue
+                    if (old_key[0] != context.generation
+                            or value.get("status") in {"settled", "not_sent"}):
+                        self._move_request_ledger.pop(old_key, None)
+                        old_game_key = (old_key[0], old_key[1])
+                        if self._pending_move_by_game.get(old_game_key) == old_key:
+                            self._pending_move_by_game.pop(old_game_key, None)
+                        if len(self._move_request_ledger) <= 384:
+                            break
+            if len(self._move_request_ledger) > 512:
+                self._move_request_ledger.pop(request_key, None)
+                self._pending_move_by_game.pop(game_key, None)
+                self.session_move_failed.emit(
+                    context.generation, game_id, uci, request_id, -2)
+                return
+
         def work():
             token = None
+            status = -2
             try:
-                token = self.operation_token(context)
-                if not token:
-                    if self.is_operation_context_current(context):
-                        self.session_move_failed.emit(
-                            context.generation, game_id, uci, request_id, 0)
-                    return
-                self.client.send_move(token, game_id, uci)
+                with self._pending_action_lock:
+                    admitted = self._game_action_admission_ready_locked(
+                        context.generation, str(game_id))
+                if not admitted:
+                    status = -2
+                else:
+                    token = self.operation_token(context)
+                    with self._pending_action_lock:
+                        admitted_after_credential = self._game_action_admission_ready_locked(
+                            context.generation, str(game_id))
+                    if not token or not admitted_after_credential:
+                        status = -2
+                    else:
+                        self._guarded_client_call(
+                            context, token,
+                            lambda captured: self.client.send_move(
+                                captured, game_id, uci),
+                            game_id=game_id)
+                        status = 0
+                if status == 0:
+                    with self._pending_action_lock:
+                        ledger = self._move_request_ledger.get(request_key)
+                        if ledger is not None and ledger.get("status") == "in_flight":
+                            ledger["status"] = "awaiting_authoritative_state"
                 if self.is_operation_context_current(context):
-                    self.session_move_accepted.emit(
-                        context.generation, game_id, uci, request_id)
+                    if status == 0:
+                        self.session_move_accepted.emit(
+                            context.generation, game_id, uci, request_id)
+                    else:
+                        self.session_move_failed.emit(
+                            context.generation, game_id, uci, request_id, status)
             except Exception as exc:
-                status = exc.status if isinstance(exc, LichessError) and exc.status else 0
+                status = (-2 if isinstance(exc, CredentialStorageError) else
+                          exc.status if isinstance(exc, LichessError) and exc.status else 0)
                 revoked = False
                 if status == 401:
                     revoked = bool(token and self.reject_current_credential_if_matches(context, token))
+                if status == 429:
+                    self._invalidate_actions_after_rate_limit(context.generation)
+                with self._pending_action_lock:
+                    ledger = self._move_request_ledger.get(request_key)
+                    if ledger is not None:
+                        if status in {-2, 400, 401, 403, 404, 422, 429}:
+                            ledger["status"] = "not_sent" if status == -2 else "settled"
+                            if self._pending_move_by_game.get(game_key) == request_key:
+                                self._pending_move_by_game.pop(game_key, None)
+                        else:
+                            # Timeout/unknown transport outcome is one-shot until
+                            # a fresh authoritative line proves progress.
+                            ledger["status"] = "ambiguous"
                 if (self.is_operation_context_current(context)
                         or (revoked and self.is_auth_generation_current(context.generation))):
                     self.session_move_failed.emit(
                         context.generation, game_id, uci, request_id, status)
                     self.move_failed.emit(game_id, uci, request_id, status)
+            finally:
+                if status == -2:
+                    with self._pending_action_lock:
+                        ledger = self._move_request_ledger.get(request_key)
+                        if ledger is not None:
+                            ledger["status"] = "not_sent"
+                        if self._pending_move_by_game.get(game_key) == request_key:
+                            self._pending_move_by_game.pop(game_key, None)
         self._thread(work, "chess-coach-send-move")
 
     def abort(self, game_id: str):
@@ -721,7 +1276,7 @@ class LichessGameActionsMixin:
                             self._pending_friend_challenges.pop(
                                 (context.generation, context.request_id), None)
                     return
-                result = action(token)
+                result = self._guarded_client_call(context, token, action)
                 if (context.command == "create_ai_game"
                         and (not isinstance(result, dict) or not (result.get("id") or result.get("gameId")))):
                     raise LichessError("Lichess не подтвердил ID партии.")

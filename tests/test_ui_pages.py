@@ -5,13 +5,142 @@ from types import SimpleNamespace
 from PySide6.QtCore import QPoint, Qt
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import (QApplication, QMainWindow, QPushButton, QScrollArea,
-                               QStackedWidget, QVBoxLayout, QWidget)
+                               QStackedWidget, QVBoxLayout, QWidget, QComboBox)
 
 from chess_coach.ui.pages import LibraryPage, PlayPage, ResultPage
+from chess_coach.ui.pages.analysis import AnalysisLandingPage
 from chess_coach.ui.pages.background import BackgroundOperationsPage
 from chess_coach.ui.pages.position_setup import PositionSetupWidget
 from chess_coach.ui.dialogs import SettingsDialog
 from PySide6.QtCore import QSettings
+
+
+def test_analysis_landing_has_four_cards_and_one_three_tab_breakdown(qtbot):
+    opened = []
+    page = AnalysisLandingPage({
+        "games": lambda: opened.append("archive"),
+        "openings": lambda: opened.append("openings"),
+        "open_text": lambda text: opened.append(text),
+        "open_file": lambda: opened.append("file"),
+    })
+    qtbot.addWidget(page)
+    assert len(page.cards) == 4
+    assert page.buttons["weakness"].isEnabled() is False
+    assert page.buttons["opponent"].isEnabled() is False
+    assert page.tabs.count() == 3
+    assert [page.tabs.tabText(i) for i in range(page.tabs.count())] == [
+        "Мои партии", "Вставить ходы", "Расставить позицию"]
+    page.show_breakdown(1)
+    assert page.workspace.currentWidget() is page.breakdown_page
+    assert page.tabs.currentIndex() == 1
+    page.show_landing()
+    assert page.workspace.currentIndex() == 0
+    page.show_breakdown(2)
+    page.show()
+    assert page.position_setup.piece_buttons[0].isVisible()
+    assert page.position_setup.remove_piece_button.isVisible()
+    assert page.position_setup.board_view.isVisible()
+    assert page.position_setup.open_button.isVisible()
+
+
+def test_analysis_archive_widget_replacement_removes_layout_item_before_detach(qtbot):
+    page = AnalysisLandingPage({
+        "games": lambda: None, "openings": lambda: None,
+        "open_text": lambda _text: None, "open_file": lambda: None,
+    })
+    qtbot.addWidget(page)
+    old_widget = page.archive_layout.itemAt(0).widget()
+    replacement = QWidget()
+
+    page.set_archive_widget(replacement)
+
+    assert old_widget.parentWidget() is None
+    assert page.archive_layout.count() == 1
+    assert page.archive_layout.itemAt(0).widget() is replacement
+    assert replacement.parentWidget() is page.archive_tab
+
+
+def test_play_preferences_are_saved_per_mode_and_restored(qtbot, tmp_path):
+    settings = QSettings(str(tmp_path / "play-modes.ini"), QSettings.Format.IniFormat)
+    page = PlayPage({}, settings=settings)
+    qtbot.addWidget(page)
+    assert len(page.cards) == 4
+    assert page.mode_selector.currentData() == "ai"
+    page.color.setCurrentIndex(page.color.findData("black"))
+    page.clock.setCurrentIndex(page.clock.findText("5 + 0"))
+    page.level.setCurrentIndex(page.level.findData(8))
+    page.select_mode("friend")
+    color_row = page._form_grid_widgets["Цвет фигур"]
+    clock_row = page._form_grid_widgets["Контроль времени"]
+    assert page._form_grid.getItemPosition(page._form_grid.indexOf(color_row)) == (0, 0, 1, 1)
+    assert page._form_grid.getItemPosition(page._form_grid.indexOf(clock_row)) == (0, 1, 1, 1)
+    page.color.setCurrentIndex(page.color.findData("white"))
+    page.clock.setCurrentIndex(page.clock.findText("15 + 10"))
+    page.rated.setChecked(True)
+    page.select_mode("challenge")
+    page.username.setText("ExampleOpponent")
+    page.select_mode("ai")
+    assert page.color.currentData() == "black"
+    assert page.clock.currentData() == (300, 0)
+    assert page.level.currentData() == 8
+    page.close()
+
+    restored = PlayPage({}, settings=QSettings(
+        str(tmp_path / "play-modes.ini"), QSettings.Format.IniFormat))
+    qtbot.addWidget(restored)
+    assert restored.mode_selector.currentData() == "ai"
+    assert restored.color.currentData() == "black"
+    assert {value for value, button in restored.color_buttons.items() if button.isChecked()} == {"black"}
+    assert restored.clock.currentData() == (300, 0)
+    assert restored.level.currentData() == 8
+    restored.select_mode("friend")
+    assert restored.color.currentData() == "white"
+    assert restored.clock.currentData() == (900, 10)
+    assert restored.rated.isChecked()
+    restored.select_mode("challenge")
+    assert restored.username.text() == "ExampleOpponent"
+
+
+def test_play_state_combos_never_create_orphan_windows_and_radio_stays_synced(qtbot, tmp_path):
+    settings = QSettings(str(tmp_path / "play-color-sync.ini"), QSettings.Format.IniFormat)
+    settings.setValue("play/modes/ai/color", "random")
+    settings.setValue("play/modes/friend/color", "white")
+    settings.setValue("play/modes/challenge/color", "black")
+    page = PlayPage({}, settings=settings)
+    qtbot.addWidget(page)
+    page.show()
+
+    assert page.color.parent() is page
+    assert page.mode_selector.parent() is page
+    for mode, expected_color in (("ai", "random"), ("friend", "white"),
+                                 ("challenge", "black"), ("local", "black"),
+                                 ("ai", "random")):
+        page.select_mode(mode)
+        assert not page.color.isVisible()
+        assert not page.color.isWindow()
+        assert not page.mode_selector.isVisible()
+        assert not page.mode_selector.isWindow()
+        assert page.color.currentData() == expected_color
+        assert {value for value, button in page.color_buttons.items()
+                if button.isChecked()} == {expected_color}
+        assert page.color_control.isVisible() is (mode != "local")
+        assert page.color not in QApplication.topLevelWidgets()
+        assert page.mode_selector not in QApplication.topLevelWidgets()
+
+    page.color_buttons["black"].click()
+    assert page.color.currentData() == "black"
+    assert {value for value, button in page.color_buttons.items() if button.isChecked()} == {"black"}
+    assert not [widget for widget in QApplication.topLevelWidgets()
+                if isinstance(widget, QComboBox)
+                and widget.currentText() == "Случайный цвет" and widget.isVisible()]
+
+    requests = []
+    page.create_requested.connect(requests.append)
+    page.select_mode("ai")
+    page.color_buttons["black"].click()
+    page.start_button.click()
+    assert len(requests) == 1
+    assert requests[0]["color"] == "black"
 
 
 def test_play_page_mode_cards_only_select_and_explicit_button_starts(qtbot):
@@ -106,6 +235,7 @@ def test_library_page_emits_selected_game_actions_and_pagination(qtbot):
 
 
 def test_library_sort_help_never_opens_a_floating_window_on_reentry(qtbot):
+    preexisting_windows = set(QApplication.topLevelWidgets())
     host = QMainWindow()
     stack = QStackedWidget(host)
     page = LibraryPage()
@@ -124,7 +254,8 @@ def test_library_sort_help_never_opens_a_floating_window_on_reentry(qtbot):
         stack.setCurrentWidget(page)
         qtbot.wait(5)
         visible_orphans = [widget for widget in QApplication.topLevelWidgets()
-                           if widget is not host and widget.isVisible()]
+                           if widget is not host and widget not in preexisting_windows
+                           and widget.isVisible()]
         assert visible_orphans == []
         assert not page.findChildren(QWidget, "sortDescription")
     assert "lastMoveAt" in page.search.accessibleDescription()
@@ -448,6 +579,13 @@ def test_position_setup_uses_shared_board_and_emits_ephemeral_fen(qtbot):
     assert chess.Board(positions[-1]).turn == chess.BLACK
     assert chess.Board(positions[-1]).has_kingside_castling_rights(chess.WHITE)
     assert chess.Board(positions[-1]).has_kingside_castling_rights(chess.BLACK)
+    page.turn_selector.setCurrentIndex(page.turn_selector.findData(chess.WHITE))
+    page.piece_buttons[1].click()
+    assert page.piece_selector.currentData() == "Q"
+    assert not page.piece_buttons[1].icon().isNull()
+    page.copy_fen_button.click()
+    assert chess.Board(QApplication.clipboard().text()).is_valid()
+    page.turn_selector.setCurrentIndex(page.turn_selector.findData(chess.BLACK))
     page.ep_selector.setCurrentIndex(page.ep_selector.findData(chess.E3))
     page.open_button.click()
     assert chess.Board(positions[-1]).ep_square == chess.E3

@@ -7,6 +7,7 @@ import threading
 import time
 import uuid
 from contextlib import contextmanager, nullcontext
+from contextvars import ContextVar
 from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
 from dataclasses import dataclass
@@ -33,6 +34,33 @@ class RateLimitError(LichessError):
     def __init__(self, retry_after: int = 60) -> None:
         super().__init__(f"Lichess ограничил частоту запросов. Повторите через {retry_after} с.", 429)
         self.retry_after = retry_after
+
+
+class RequestNotSentError(LichessError):
+    """A queued request was cancelled or became stale before transport started."""
+
+    def __init__(self) -> None:
+        super().__init__("Сессия изменилась до отправки запроса Lichess.", -2)
+
+
+_REQUEST_ADMISSION: ContextVar[tuple[Callable[[], bool], threading.Event | None] | None] = (
+    ContextVar("lichess_request_admission", default=None))
+
+
+@contextmanager
+def authenticated_request_admission(guard: Callable[[], bool],
+                                    stop_event: threading.Event | None = None):
+    """Bind a captured session guard to the next synchronous client request.
+
+    The guard is evaluated only after the shared request gate is acquired and
+    immediately before invoking the physical transport. It is context-local,
+    so concurrent workers cannot replace one another's admission check.
+    """
+    token = _REQUEST_ADMISSION.set((guard, stop_event))
+    try:
+        yield
+    finally:
+        _REQUEST_ADMISSION.reset(token)
 
 
 class _PriorityRequestGate:
@@ -303,7 +331,12 @@ class LichessClient:
             body = urlencode(form).encode("utf-8")
             headers["Content-Type"] = "application/x-www-form-urlencoded"
         try:
-            with self._request_gate.request(current_work_priority()):
+            admission = _REQUEST_ADMISSION.get()
+            guard, stop_event = admission if admission is not None else (None, None)
+            with self._request_gate.request(current_work_priority(), stop_event):
+                if ((stop_event is not None and stop_event.is_set())
+                        or (guard is not None and not guard())):
+                    raise RequestNotSentError()
                 with self._cooldown_lock:
                     self._check_cooldown_locked()
                 response = self.transport.request(method, url, headers, body, self.request_timeout)

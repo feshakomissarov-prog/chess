@@ -10,6 +10,7 @@ import logging
 import logging.handlers
 import os
 import platform
+import queue
 import re
 import threading
 import traceback
@@ -23,6 +24,9 @@ _LOGGER = logging.getLogger("chess_coach.diagnostics")
 _LOGGER.setLevel(logging.INFO)
 _LOGGER.propagate = False
 _HANDLER: logging.Handler | None = None
+_QUEUE_HANDLER: logging.Handler | None = None
+_LISTENER: logging.handlers.QueueListener | None = None
+_LOG_QUEUE: queue.Queue | None = None
 _CONTEXT: contextvars.ContextVar[dict[str, str]] = contextvars.ContextVar(
     "chess_coach_diagnostic_context", default={})
 _LAST_ERROR_CODE = "none"
@@ -58,23 +62,78 @@ def _safe_text(value: object, limit: int = 120) -> str:
 
 
 def configure_logging(directory: Path | None = None) -> bool:
-    """Install a bounded rotating UTF-8 file handler; failure is non-fatal."""
-    global _HANDLER
+    """Install a queued bounded file logger; UI callers never flush the disk."""
+    global _HANDLER, _QUEUE_HANDLER, _LISTENER, _LOG_QUEUE
     with _LOCK:
-        if _HANDLER is not None:
+        if _HANDLER is not None and _LISTENER is not None:
             return True
         try:
             target = directory or logs_directory()
             target.mkdir(parents=True, exist_ok=True)
-            handler = logging.handlers.RotatingFileHandler(
+            file_handler = logging.handlers.RotatingFileHandler(
                 target / "chess-coach.log", maxBytes=5 * 1024 * 1024,
                 backupCount=4, encoding="utf-8")
-            handler.setFormatter(logging.Formatter("%(message)s"))
-            _LOGGER.addHandler(handler)
-            _HANDLER = handler
+            file_handler.setFormatter(logging.Formatter("%(message)s"))
+            records: queue.Queue = queue.Queue()
+            queue_handler = logging.handlers.QueueHandler(records)
+            listener = _TaskQueueListener(records, file_handler)
+            _LOGGER.addHandler(queue_handler)
+            listener.start()
+            _HANDLER = file_handler
+            _QUEUE_HANDLER = queue_handler
+            _LISTENER = listener
+            _LOG_QUEUE = records
             return True
         except (OSError, ValueError):
             return False
+
+
+class _TaskQueueListener(logging.handlers.QueueListener):
+    """QueueListener variant with task accounting for deterministic flushes."""
+
+    def _monitor(self) -> None:
+        while True:
+            record = self.queue.get()
+            try:
+                if record is self._sentinel:
+                    return
+                if record is not None:
+                    self.handle(record)
+            finally:
+                self.queue.task_done()
+
+
+def flush_logging() -> None:
+    """Wait for queued diagnostics; intended for tests and explicit shutdown only."""
+    records, handler = _LOG_QUEUE, _HANDLER
+    if records is not None:
+        records.join()
+    if handler is not None:
+        try:
+            handler.flush()
+        except Exception:
+            pass
+
+
+def shutdown_logging() -> None:
+    """Drain and close the background file writer, primarily for isolated tests."""
+    global _HANDLER, _QUEUE_HANDLER, _LISTENER, _LOG_QUEUE
+    with _LOCK:
+        flush_logging()
+        listener, handler, queue_handler = _LISTENER, _HANDLER, _QUEUE_HANDLER
+        _LISTENER = _HANDLER = _QUEUE_HANDLER = _LOG_QUEUE = None
+        if queue_handler is not None:
+            _LOGGER.removeHandler(queue_handler)
+        if listener is not None:
+            try:
+                listener.stop()
+            except Exception:
+                pass
+        if handler is not None:
+            try:
+                handler.close()
+            except Exception:
+                pass
 
 
 def log_event(event: str, component: str, *, level: int = logging.INFO,
@@ -109,8 +168,6 @@ def log_event(event: str, component: str, *, level: int = logging.INFO,
                "thread": _safe_text(threading.current_thread().name, 64), **safe}
     try:
         _LOGGER.log(level, json.dumps(payload, ensure_ascii=False, separators=(",", ":")))
-        for handler in _LOGGER.handlers:
-            handler.flush()
     except Exception:
         pass
 

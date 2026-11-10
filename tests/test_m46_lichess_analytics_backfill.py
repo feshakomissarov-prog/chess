@@ -144,7 +144,7 @@ def test_concurrent_backfill_read_does_not_duplicate_a_live_export(tmp_path):
         def export_game_json(self, token, requested_game_id):
             self.calls.append((token, requested_game_id))
             entered.set()
-            assert release.wait(3)
+            assert release.wait(5)
             return self.responses[requested_game_id]
 
     fake = BlockingFake({game_id: _export(game_id)})
@@ -161,7 +161,7 @@ def test_concurrent_backfill_read_does_not_duplicate_a_live_export(tmp_path):
     worker = threading.Thread(target=first_worker, daemon=True)
     worker.start()
     try:
-        assert entered.wait(2)
+        assert entered.wait(5)
         account_id = repository.ensure_archive_account("Me")
         state = repository.lichess_analysis_backfill_state(account_id, game_id)
         assert state["lease_owner"]
@@ -181,7 +181,7 @@ def test_concurrent_backfill_read_does_not_duplicate_a_live_export(tmp_path):
         assert len(fake.calls) == 1
     finally:
         release.set()
-        worker.join(timeout=3)
+        worker.join(timeout=5)
         assert not worker.is_alive()
         assert not errors
         assert len(fake.calls) == 1

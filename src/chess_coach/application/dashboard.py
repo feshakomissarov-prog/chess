@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import threading
+import time
 
 from typing import Any
 
 from ..domain.accuracy import FORMULA_ID
 from ..lichess.game_review import load_game_review
 from ..lichess.statistics import StatisticsService
+from ..diagnostics import log_event
 
 
 _COMPLETED = "('created','started','started_soon','playing')"
@@ -79,17 +81,33 @@ def dashboard_preview_snapshot(repository, *, account_id: str | None = None,
                       "THEN unixepoch(substr(g.started_at,1,10)) ELSE NULL END")
     if stop_event is not None and stop_event.is_set():
         raise RuntimeError("dashboard preview superseded")
+    sql_started = time.perf_counter()
     with repository._connection() as db:
+        # Pin count and top rows to one committed SQLite read snapshot so a
+        # concurrent game save cannot make the preview's total and cards disagree.
+        db.execute("BEGIN")
         db.set_progress_handler(
             lambda: 1 if stop_event is not None and stop_event.is_set() else 0, 1000)
         db.execute("PRAGMA busy_timeout=250")
-        total = int(db.execute(f"SELECT COUNT(DISTINCT g.game_id) FROM games g{join} "
+        total = int(db.execute(f"SELECT COUNT(*) FROM games g{join} "
                                f"WHERE {where}", params).fetchone()[0] or 0)
+        count_ms = int((time.perf_counter() - sql_started) * 1000)
+        rows_started = time.perf_counter()
         rows = db.execute(
-            f"SELECT g.*, {opponent}, {player}, {color_value} FROM games g{join} "
+            f"SELECT g.game_id,g.status,g.winner,g.opponent,g.color,g.started_at,"
+            f"g.updated_at,g.last_move_at,g.game_time_precision,g.clock,g.opening_eco,"
+            f"g.opening_name,g.line_revision,g.source,"
+            "(SELECT gr.line_hash FROM game_revisions gr WHERE gr.game_id=g.game_id "
+            "AND gr.is_current=1 LIMIT 1) AS line_hash,"
+            f"{opponent},{player},{color_value} FROM games g{join} "
             f"WHERE {where} ORDER BY ({activity_epoch}) IS NULL,{activity_epoch} DESC,"
             "g.game_id DESC LIMIT 3", params).fetchall()
+        rows_ms = int((time.perf_counter() - rows_started) * 1000)
         db.set_progress_handler(None, 0)
+    log_event("dashboard_preview_sql", "dashboard", stage="count", duration_ms=count_ms,
+              count=total, status="ok")
+    log_event("dashboard_preview_sql", "dashboard", stage="recent_rows",
+              duration_ms=rows_ms, count=len(rows), status="ok")
     if stop_event is not None and stop_event.is_set():
         raise RuntimeError("dashboard preview superseded")
     games = []
@@ -111,12 +129,8 @@ def dashboard_preview_snapshot(repository, *, account_id: str | None = None,
         {"key": "errors", "label": "Ошибки на 100 оценённых ходов", "value": "—",
          "detail": "Подготавливаем статистику ходов…", "source": "SQLite"},
     ]
-    puzzle_rating = (repository.puzzle_player_rating(account_id)
-                     if account_id and hasattr(repository, "puzzle_player_rating") else {})
-    activity_trend = (repository.puzzle_rating_trend(account_id, limit=6)
-                      if account_id and hasattr(repository, "puzzle_rating_trend") else [])
     return {"metrics": metrics, "recent_games": games,
-            "puzzle_player_rating": puzzle_rating, "activity_trend": activity_trend,
+            "puzzle_player_rating": {}, "activity_trend": [],
             "scope": scope,
             "filter": {"account_id": account_id, "clock": clock}, "is_preview": True}
 
@@ -178,7 +192,7 @@ def dashboard_options(repository) -> dict[str, list[dict[str, str]]]:
 
 
 def dashboard_snapshot(repository, *, account_id: str | None = None,
-                       clock: str | None = None, wait_for_writes: bool = True) -> dict[str, Any]:
+                       clock: str | None = None, wait_for_writes: bool = False) -> dict[str, Any]:
     """Return scoped KPIs plus at most three completed games.
 
     All archive-wide counts are SQL aggregates. Only three current game lines are
@@ -186,6 +200,7 @@ def dashboard_snapshot(repository, *, account_id: str | None = None,
     """
     if wait_for_writes:
         repository._wait_before_read()
+    aggregate_sql_started = time.perf_counter()
     join = " JOIN account_games ag ON ag.game_id=g.game_id " if account_id else ""
     color = "ag.color" if account_id else "g.color"
     clauses = [f"g.status NOT IN {_COMPLETED}"]
@@ -275,8 +290,16 @@ def dashboard_snapshot(repository, *, account_id: str | None = None,
         "COUNT(CASE WHEN has_lichess THEN 1 END) lichess "
             "FROM game_coverage", run_params).fetchone()
 
+    log_event("dashboard_aggregate_sql", "dashboard", stage="core_aggregates",
+              duration_ms=int((time.perf_counter() - aggregate_sql_started) * 1000),
+              status="ok")
+
+    summary_started = time.perf_counter()
     summary = StatisticsService(repository).summary(
         account_id=account_id, clock=clock, wait_for_writes=wait_for_writes)
+    log_event("dashboard_aggregate_sql", "dashboard", stage="statistics_summary",
+              duration_ms=int((time.perf_counter() - summary_started) * 1000),
+              status="ok")
     activity_trend = (repository.puzzle_rating_trend(account_id, limit=6)
                       if account_id and hasattr(repository, "puzzle_rating_trend") else [])
     total = int(row["games"] or 0)
@@ -329,8 +352,12 @@ def dashboard_snapshot(repository, *, account_id: str | None = None,
                                      order_by_game_time=True,
                                      wait_for_writes=wait_for_writes)
     games = [dict(game) for game in recent["items"]]
+    cards_started = time.perf_counter()
     for game in games:
         game["review_metrics"] = game_card_metrics(repository, game)
+    log_event("dashboard_aggregate_sql", "dashboard", stage="recent_game_metrics",
+              duration_ms=int((time.perf_counter() - cards_started) * 1000),
+              count=len(games), status="ok")
     return {"metrics": metrics, "recent_games": games,
             "puzzle_player_rating": repository.puzzle_player_rating(account_id) if account_id else {},
             "activity_trend": activity_trend,
@@ -365,11 +392,25 @@ def game_card_metrics(repository, game: dict[str, Any]) -> dict[str, Any]:
     errors = int(side.get("inaccuracy") or 0) + int(side.get("mistake") or 0) + int(side.get("blunder") or 0)
     # Current detectors do not yet implement a verified "strong move" fact.
     # Candidate best_move_confirmed is intentionally not presented as verified.
+    raw_assessments = list(analysis.get("assessments") or [])
+    if len(raw_assessments) > 64:
+        indexes = {round(index * (len(raw_assessments) - 1) / 63) for index in range(64)}
+        graph_assessments = [raw_assessments[index] for index in sorted(indexes)]
+    else:
+        graph_assessments = raw_assessments
+    graph_points = [
+        {"ply": int(item["ply"]),
+         "white_cp": int(item["white_cp"]) if item.get("white_cp") is not None else None,
+         "mate_white": int(item["mate_white"]) if item.get("mate_white") is not None else None}
+        for item in graph_assessments if type(item.get("ply")) is int
+    ]
     return {
         "accuracy": f"{float(own_color_accuracy):.1f}%" if own_color_accuracy is not None else "н/д",
         "accuracy_source": accuracy_source,
-        "assessments": list(analysis.get("assessments") or []),
-        "moves": {int(move.ply): str(move.san) for move in view.get("moves") or []},
+        # Home needs a bounded sparkline only. Full PGN, SAN map and engine PVs
+        # remain in SQLite and are loaded after the user opens a specific game.
+        "graph_points": graph_points,
+        "total_positions": int((view.get("coverage") or {}).get("total") or 0),
         "errors": str(errors) if classified else "н/д",
         "inaccuracies": str(int(side.get("inaccuracy") or 0)) if classified else "н/д",
         "mistakes": str(int(side.get("mistake") or 0)) if classified else "н/д",

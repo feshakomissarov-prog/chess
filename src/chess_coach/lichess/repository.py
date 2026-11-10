@@ -67,6 +67,13 @@ class GameRepository(
     def invalidate_statistics_cache(self) -> None:
         self._statistics_revision += 1
 
+    def dashboard_data_revision(self) -> int:
+        """Return the persistent revision for source tables used by Home."""
+        with self._connection() as db:
+            row = db.execute(
+                "SELECT revision FROM dashboard_data_revision WHERE singleton=1").fetchone()
+            return int(row[0]) if row else 0
+
     def merge_lichess_ready_analysis(self, username: str, game_id: str, *,
                                      source_game_id: str, account_id: str,
                                      expected_line_revision: int, expected_line_hash: str,

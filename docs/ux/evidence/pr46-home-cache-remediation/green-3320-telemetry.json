@@ -1,0 +1,114 @@
+{
+  "shown_at_monotonic": 122609.4387282,
+  "first_count_ms": 149.24,
+  "first_useful_ms": 149.24,
+  "first_recent_cards_ms": 149.24,
+  "full_ready_ms": 1150.05,
+  "games": "3320",
+  "accuracy": "68.0%",
+  "accuracy_detail": "Lichess: 68.0% (3316)\nStockfish: — (0)",
+  "analysis": "3/3320 (0.1%)",
+  "errors": "н/д",
+  "puzzle_rating": "1492",
+  "progress": "Последние 90 дней",
+  "snapshot_stale": false,
+  "snapshot_revision": null,
+  "recent_ids": [
+    "seed-new",
+    "seed-0",
+    "seed-old-03315"
+  ],
+  "recent_card_labels": [
+    [
+      "♟  Победа",
+      "New opponent",
+      "Начата: 10.11.2026 · 15:00 · 5 с + 0 с",
+      "Новая партия · оценки обновляются",
+      "Дебют не определён",
+      "Новая партия · оценка ещё не рассчитана",
+      "                   Я   Соперник\nНеточности:  —  /  —\nОшибки:  —  /  —\nЗевки:  —  /  —"
+    ],
+    [
+      "♟  Победа",
+      "Opponent seed-0",
+      "Начата: 09.11.2026 · 15:00 · 5 с + 0 с",
+      "Оценённые ходы: 2/2",
+      "Дебют не определён",
+      "Точность: 72.0% · Lichess",
+      "                   Я   Соперник\nНеточности:  2  /  1\nОшибки:  0  /  0\nЗевки:  0  /  0"
+    ],
+    [
+      "♟  Победа",
+      "Opponent 3315",
+      "Начата: 09.11.2026 · 03:00 · 5 с + 0 с",
+      "оценок пока нет",
+      "Дебют не определён",
+      "Точность: 68.0% · Lichess",
+      "                   Я   Соперник\nНеточности:  н/д  /  н/д\nОшибки:  н/д  /  н/д\nЗевки:  н/д  /  н/д"
+    ]
+  ],
+  "first_useful_accuracy": "68.0%",
+  "first_useful_accuracy_detail": "Данные на 10.11.2026 17:49 · обновляется\nLichess: 68.0% (3316)\nStockfish: — (0)",
+  "first_useful_rating": "1492",
+  "first_useful_stale": true,
+  "first_useful_recent_ids": [
+    "seed-new",
+    "seed-0",
+    "seed-old-03315"
+  ],
+  "first_useful_cards": [
+    [
+      "♟  Победа",
+      "New opponent",
+      "Начата: 10.11.2026 · 15:00 · 5 с + 0 с",
+      "Новая партия · оценки обновляются",
+      "Дебют не определён",
+      "Новая партия · оценка ещё не рассчитана",
+      "                   Я   Соперник\nНеточности:  —  /  —\nОшибки:  —  /  —\nЗевки:  —  /  —"
+    ],
+    [
+      "♟  Победа",
+      "Opponent seed-0",
+      "Начата: 09.11.2026 · 15:00 · 5 с + 0 с",
+      "Оценённые ходы: 2/2",
+      "Дебют не определён",
+      "Точность: 72.0% · Lichess",
+      "                   Я   Соперник\nНеточности:  2  /  1\nОшибки:  0  /  0\nЗевки:  0  /  0"
+    ],
+    [
+      "♟  Победа",
+      "Opponent 3315",
+      "Начата: 09.11.2026 · 03:00 · 5 с + 0 с",
+      "оценок пока нет",
+      "Дебют не определён",
+      "Точность: 68.0% · Lichess",
+      "                   Я   Соперник\nНеточности:  н/д  /  н/д\nОшибки:  н/д  /  н/д\nЗевки:  н/д  /  н/д"
+    ]
+  ],
+  "aggregate_calls": 1,
+  "navigation_cycles": 0,
+  "navigation_p50_ms": null,
+  "navigation_p95_ms": null,
+  "navigation_max_ms": null,
+  "max_heartbeat_gap_ms": 84.1,
+  "heartbeat_gaps_over_40ms": [
+    {
+      "at_ms": 226.19,
+      "gap_ms": 84.1,
+      "during_navigation": false
+    },
+    {
+      "at_ms": 601.23,
+      "gap_ms": 68.83,
+      "during_navigation": false
+    },
+    {
+      "at_ms": 1208.02,
+      "gap_ms": 58.02,
+      "during_navigation": false
+    }
+  ],
+  "count_capture_saved": true,
+  "useful_capture_saved": true,
+  "updated_capture_saved": true
+}

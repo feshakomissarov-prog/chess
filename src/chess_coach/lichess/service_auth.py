@@ -92,6 +92,13 @@ class LichessAuthMixin:
         with self._auth_lock:
             if generation != self._auth_generation:
                 return False
+            status_text = str(status or "")
+            if (status_text.startswith(("Не подключено", "Ошибка подключения",
+                                       "Переподключение"))
+                    or (status_text.startswith("Ограничение Lichess (429)")
+                        and "переподключение" in status_text.casefold())):
+                self.invalidate_game_action_admission(
+                    generation, event_stream=True)
             self.session_status_changed.emit(generation, status)
             # Retain the legacy signal for external callers. The application
             # itself consumes only the generation-tagged version.
@@ -328,7 +335,13 @@ class LichessAuthMixin:
                         or self._connection_stop is not connection_stop
                         or not self.is_auth_generation_current(auth_generation)):
                     return
+                if not self.mark_event_stream_ready(auth_generation):
+                    return
                 self.session_event_stream_ready.emit(auth_generation, username or "")
+                if recovering_stream:
+                    # Event stream ready restores connectivity only. Each live
+                    # game stream must reconnect for an accepted fresh snapshot.
+                    self.restart_live_game_streams(auth_generation)
                 if recovering_stream and self._emit_session_status(
                         auth_generation,
                         f"Поток восстановлен: {username or 'Lichess'}"):
@@ -406,6 +419,10 @@ class LichessAuthMixin:
                 self._pending_action_states.clear()
                 self._pending_friend_challenges.clear()
                 self._game_authoritative_state.clear()
+                self._game_authoritative_sequence.clear()
+                self._accepted_game_full_sequence.clear()
+                self._event_stream_ready_generation = None
+                self._game_action_admissions.clear()
             with self._event_lock:
                 self._event_stream_started = False
                 for stop in self._game_stops.values():

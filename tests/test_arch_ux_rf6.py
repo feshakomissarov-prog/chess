@@ -135,7 +135,7 @@ def test_background_analytics_denial_masks_dashboard_without_closing_game_lane(
     window._lichess_authenticated(service.username)
     window.settings.setValue("lichess/auto_ready_analytics", False)
     window._lichess_event_stream_ready(service.auth_generation, service.username)
-    window._dashboard_display_safety_reply(service.safety_requests[-1], [])
+    assert service.safety_requests == []
     window._render_dashboard_snapshot({"metrics": [
         {"key": "games", "value": "3", "detail": "B scope", "source": "SQLite"},
         {"key": "analysis", "value": "2/3", "detail": "analysis", "source": "Stockfish"},
@@ -152,13 +152,12 @@ def test_background_analytics_denial_masks_dashboard_without_closing_game_lane(
     assert window._lichess_connected is True
     assert window._online_actions_allowed() is True
     assert window._dashboard_analysis_safety_allowed is False
-    assert window._dashboard_metric_values["analysis"].text() == "скрыто"
-    assert window._dashboard_metric_values["accuracy"].text() == "скрыто"
-    assert window.safety_retry_button.isVisible()
+    assert window._dashboard_metric_values["analysis"].text() == "2/3"
+    assert window._dashboard_metric_values["accuracy"].text() == "91%"
     assert "HTTP 403" in window.lichess_analysis_status.text()
     request_count = len(service.safety_requests)
-    window.safety_retry_button.click()
-    assert len(service.safety_requests) == request_count + 1
+    assert not window.safety_retry_button.isVisible()
+    assert len(service.safety_requests) == request_count
     assert not window._dashboard_analysis_safety_allowed
     window.close()
 
@@ -190,7 +189,7 @@ def test_disconnect_is_clickable_during_restore_reconnect_and_rate_limit(qtbot, 
     window.close()
 
 
-def test_safety_preflight_429_masks_until_due_retry_has_complete_reply(qtbot, tmp_path):
+def test_safety_preflight_429_does_not_mask_saved_historical_analytics(qtbot, tmp_path):
     window = _window(qtbot, tmp_path, name="safety-retry-after")
     service = _ReadOnlyService()
     window.offline_mode = False
@@ -198,24 +197,20 @@ def test_safety_preflight_429_masks_until_due_retry_has_complete_reply(qtbot, tm
     window.show()
     window._lichess_authenticated(service.username)
     window._lichess_event_stream_ready(service.auth_generation, service.username)
-    request_id = service.safety_requests[-1]
+    assert service.safety_requests == []
+    window._render_dashboard_snapshot({"metrics": [
+        {"key": "games", "value": "1", "detail": "local", "source": "SQLite"},
+        {"key": "analysis", "value": "1/1", "detail": "local", "source": "Stockfish"},
+        {"key": "accuracy", "value": "90%", "detail": "saved", "source": "Lichess"},
+        {"key": "errors", "value": "1", "detail": "saved", "source": "Stockfish"},
+    ], "recent_games": []})
     service.client.rate_limit_remaining = 60
-    window._dashboard_display_safety_error(request_id, "HTTP 429 Retry-After: 60")
+    window._dashboard_display_safety_error("not-needed", "HTTP 429 Retry-After: 60")
     assert window._dashboard_analysis_safety_allowed is False
-    assert window.safety_retry_button.isVisible()
-    assert window._dashboard_safety_retry_timer.isActive()
-    assert window._dashboard_safety_retry_timer.remainingTime() >= 59_000
-
-    count = len(service.safety_requests)
-    window.safety_retry_button.click()
-    assert len(service.safety_requests) == count  # API cooldown is still authoritative.
-    service.client.rate_limit_remaining = 0
-    window._dashboard_safety_retry_timer.start(1)  # advance only the synthetic clock
-    qtbot.waitUntil(lambda: len(service.safety_requests) == count + 1, timeout=1000)
-    assert window._dashboard_analysis_safety_allowed is False
-    new_request = service.safety_requests[-1]
-    window._dashboard_display_safety_reply(new_request, [])
-    assert window._dashboard_analysis_safety_allowed is True
+    assert window._dashboard_metric_values["analysis"].text() == "1/1"
+    assert window._dashboard_metric_values["accuracy"].text() == "90%"
+    assert not window.safety_retry_button.isVisible()
+    assert not window._dashboard_safety_retry_timer.isActive()
     window.close()
 
 
@@ -240,8 +235,8 @@ def test_new_account_home_scope_never_falls_back_to_all_accounts(qtbot, tmp_path
     assert window.dashboard_account.currentData() == "lichess:syntheticb"
     assert window._latest_dashboard_snapshot is None
     assert window._dashboard_metric_values["games"].text() in {"—", "0", "н/д"}
-    qtbot.waitUntil(lambda: window._dashboard_thread is None, timeout=5000)
-    qtbot.wait(30)
+    qtbot.waitUntil(lambda: window._latest_dashboard_snapshot is not None,
+                    timeout=5000)
     assert window._latest_dashboard_snapshot is not None
     assert window._latest_dashboard_snapshot["filter"]["account_id"] == "lichess:syntheticb"
     assert window._dashboard_metric_values["games"].text() == "0"
@@ -367,7 +362,7 @@ def test_auto_puzzle_history_sync_is_opt_in_to_existing_credential_only():
     assert service.puzzle_username is None
 
 
-def test_safe_tooltip_has_source_only_after_preflight(qtbot, tmp_path):
+def test_safe_tooltip_exposes_source_for_saved_history_without_preflight(qtbot, tmp_path):
     window = _window(qtbot, tmp_path, name="provenance-tooltip")
     window.offline_mode = False
     window._dashboard_analysis_safety_allowed = False
@@ -379,8 +374,8 @@ def test_safe_tooltip_has_source_only_after_preflight(qtbot, tmp_path):
     coverage = window._recent_games_layout.itemAt(0).widget().findChild(
         __import__("PySide6.QtWidgets", fromlist=["QLabel"]).QLabel,
         "dashboardAnalysisCoverage")
-    assert "Stockfish" not in coverage.toolTip()
-    assert "2/4" not in coverage.toolTip()
+    assert "Stockfish" in coverage.toolTip()
+    assert "2/4" in coverage.toolTip()
     window._dashboard_analysis_safety_allowed = True
     window._render_dashboard_snapshot({"metrics": [], "recent_games": [game]})
     coverage = window._recent_games_layout.itemAt(0).widget().findChild(

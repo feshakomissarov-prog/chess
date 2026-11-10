@@ -71,12 +71,29 @@ def stylesheet(t: Theme = TOKENS) -> str:
         border-radius: 8px; padding: 9px 14px; min-height: 22px;
     }}
     QPushButton:hover, QToolButton:hover {{ background: {t.hover}; }}
+    QToolButton#positionPiece:checked {{ background: {t.accent}; border-color: {t.accent}; }}
     QWidget#appHeader QPushButton {{ padding-top: 2px; padding-bottom: 2px; }}
     QPushButton:pressed, QToolButton:pressed {{ background: {t.accent_pressed}; color: {t.on_accent}; }}
     QPushButton:focus, QToolButton:focus {{ border: 2px solid {t.accent}; }}
     QPushButton:disabled, QToolButton:disabled {{ color: {t.muted}; background: {t.surface}; }}
     QPushButton#primaryAction {{ background: {t.accent}; color: {t.on_accent}; font-weight: 700; }}
     QPushButton#primaryAction:hover {{ background: {t.accent_hover}; }}
+    QFrame#playModeCard {{ background: {t.surface}; border: 1px solid {t.border}; border-radius: {radius}px; }}
+    QFrame#playModeCard:hover {{ background: {t.hover}; }}
+    QFrame#playModeCard[selected="true"] {{ background: {selected}; border: 2px solid {t.accent}; }}
+    QFrame#playModeCard:focus {{ border: 2px solid {t.accent}; }}
+      QLabel#playModeIcon {{ background: {selected}; color: {t.accent}; border-radius: 12px;
+          font-size: 25px; font-weight: 700; }}
+      QLabel#playModeSelectedMark {{ background: {t.accent}; color: {t.on_accent};
+          border-radius: 17px; font-size: 19px; font-weight: 700; }}
+      QRadioButton {{ background: {t.surface}; border: 1px solid {t.border};
+          padding: 9px 12px; spacing: 6px; }}
+      QRadioButton:first-child {{ border-top-left-radius: 7px; border-bottom-left-radius: 7px; }}
+      QRadioButton:last-child {{ border-top-right-radius: 7px; border-bottom-right-radius: 7px; }}
+      QRadioButton:checked {{ background: {selected}; color: {t.accent}; font-weight: 700; }}
+    QFrame#disabledAnalysisCard {{ background: {t.sidebar}; border: 1px solid {t.border}; border-radius: {radius}px; }}
+    QLabel#analysisCardIcon {{ background: {selected}; color: {t.accent}; border-radius: 10px; font-size: 23px; font-weight: 700; }}
+    QLabel#analysisStatus, QLabel#breadcrumb {{ color: {t.accent}; }}
     QPushButton#navItem {{ text-align: left; padding: 10px 12px; min-height: 22px; border: none; }}
     QPushButton#navItem[active="true"] {{ background: {selected}; border-left: 3px solid {t.accent}; }}
     QLineEdit, QTextEdit, QComboBox, QSpinBox, QListWidget, QTableWidget {{
