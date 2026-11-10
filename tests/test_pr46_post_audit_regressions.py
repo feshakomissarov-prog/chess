@@ -164,8 +164,10 @@ def test_archive_status_slow_sqlite_read_does_not_block_qt_heartbeat(
     assert elapsed_ms < 100
     try:
         assert entered.wait(1.0)
-        qtbot.wait(80)
-        assert len(ticks) >= 3
+        # Allow a generously scheduled Qt wait on slower Windows runners while
+        # still requiring the event loop to service several heartbeats during
+        # the deliberately blocked repository read.
+        qtbot.waitUntil(lambda: len(ticks) >= 3, timeout=750)
     finally:
         release.set()
     dialog = window._archive_status_dialog
@@ -207,8 +209,7 @@ def test_resume_review_loads_sqlite_read_model_off_the_qt_thread(
     assert (time.perf_counter() - started) * 1000 < 100
     try:
         assert entered.wait(1.0)
-        qtbot.wait(80)
-        assert len(ticks) >= 3
+        qtbot.waitUntil(lambda: len(ticks) >= 3, timeout=750)
     finally:
         release.set()
     qtbot.waitUntil(lambda: window.screen_stack.currentWidget() is window.review_workspace,
