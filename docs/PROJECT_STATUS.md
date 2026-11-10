@@ -1,3 +1,14 @@
+## 11.11.2026 — PR #46 объединён в main; post-merge code review
+
+- **Merge:** [PR #46](https://github.com/feshakomissarov-prog/chess/pull/46) закрыт и слит в `main`. Кодовый head `889e04d815578843ad84874a95913f86e56ea061`; merge-коммит [`16ddf1f4`](https://github.com/feshakomissarov-prog/chess/commit/16ddf1f4a41389bb9b45ca4c97bd0bebc767c405).
+- **Обязательный CI до merge:** [Windows run 42898354938](https://github.com/feshakomissarov-prog/chess/actions/runs/42898354938): `test` **1115 passed**, compileall, offline window initialization PASS; `visual-evidence` PASS с 32 состояниями на 100%, 25 на 125%, 25 на 150%. Это не доказательство полного эстетического совпадения.
+- **Что интегрировано:** единый desktop UX Home/Play/Analysis/Library/Review, безопасные игровые операции Lichess, улучшенная SQLite-аналитика и двухуровневый Home cache с last-known-good, фоновые coordinators и визуальные регрессии.
+- **Результат независимого post-merge статического аудита:** новых подтверждённых критических дефектов для отката нет. [Единый технический долг](TECHNICAL_DEBT.md) содержит пять конкретных замечаний: три по достоверному восстановлению Home, лишняя глобальная invalidation, хранение предыдущих установок Stockfish. Функциональные исправления этим документом не выполнялись.
+- **НЕ ПРОВЕРЕНО:** 13 утверждённых экранов side-by-side, физическое тестирование на пользовательской SQLite, живые двухсторонние Lichess-сценарии/реальный Stockfish. Не отмечать их как PASS только на основании Windows synthetic CI.
+- **Установка:** из Python-исходников; будущий DIST-01 (один Windows Setup.exe с зависимостями/Stockfish) ещё не реализован.
+
+---
+
 ## 08.11.2026 — CORR-01…16 corrective gate (локальная приёмка)
 
 Продолжается существующий draft PR #44 на `codex/arch-01-modular-refactor`, от SHA `afb2cc63958da048fcc6683555f909942e94400d`. Исправления опубликованы после локальных проверок: 894 pytest PASS на Python 3.12.10 (worker-thread warnings-as-errors), compileall и diff-check PASS; native synthetic Windows capture — 76/76 состояний при Qt 100/125/150%. Windows CI #407 на итоговом SHA `e955a719999f8368c7db0e5ddeb278f70d3d7362` — SUCCESS, 894 PASS, compileall, offline startup и native visual capture. Скриншотный artifact: https://github.com/feshakomissarov-prog/chess/actions/runs/42418659024#artifacts-13592986202. Рабочая копия содержит пользовательские `.venv312/`, `visual-evidence/` и `vlc-help.txt`; их не изменять и не добавлять.
