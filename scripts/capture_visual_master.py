@@ -413,13 +413,30 @@ def create_fake_active_operations(window, account_id: str):
 def wait_background(window, *, active: bool) -> None:
     page = window._background_operations_page
     if active:
-        wait_for(lambda: page.summary.text().startswith("Сейчас:")
-                 and page.workflow_badges["archive"].text() == "Идёт"
-                 and page.workflow_badges["stockfish"].text() == "Идёт"
-                 and page.workflow_badges["puzzles"].text() == "Готово"
-                 and page.workflow_badges["ready"].text() == "Ожидает"
-                 and page.recent_events.count() >= 3,
-                 "active archive/Stockfish with waiting ready-analysis, completed puzzles and events")
+        try:
+            # The initial status view intentionally performs its SQLite reads
+            # on a worker. On a cold hosted Windows runner, Qt's first native
+            # window and dashboard startup can contend for the same process
+            # resources; allow that production read to finish instead of
+            # treating the normal async loading state as a broken UI.
+            wait_for(lambda: page.summary.text().startswith("Сейчас:")
+                     and page.workflow_badges["archive"].text() == "Идёт"
+                     and page.workflow_badges["stockfish"].text() == "Идёт"
+                     and page.workflow_badges["puzzles"].text() == "Готово"
+                     and page.workflow_badges["ready"].text() == "Ожидает"
+                     and page.recent_events.count() >= 3,
+                     "active archive/Stockfish with waiting ready-analysis, completed puzzles and events",
+                     timeout=60)
+        except AssertionError:
+            print("Background diagnostics:", {
+                "summary": page.summary.text(),
+                "operations": [(item.context.kind, item.status.value)
+                               for item in window.runtime.work_coordinator.snapshots()],
+                "badges": {key: value.text() for key, value in page.workflow_badges.items()},
+                "statuses": {key: value.text() for key, value in page.workflow_status.items()},
+                "events": page.recent_events.count(),
+            }, flush=True)
+            raise
     else:
         try:
             wait_for(lambda: page.summary.text() == "Сейчас активных задач нет"
