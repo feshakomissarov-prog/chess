@@ -273,3 +273,22 @@ Codex не должен заявлять «исправлено» на базе 
 5. Отчёт Codex должен явно сослаться на прошлый неуспех [#42845359065](https://github.com/feshakomissarov-prog/chess/actions/runs/42845359065), его фактическую причину, red/green evidence и новый SHA. Не изменять UI/игровую логику вне причинного пути. Не открывать другой PR, не сливать в main.
 
 **Отдельный продуктовый нюанс:** прямая независимая source-level проверка кэша на `e1ea4be` подтверждает, что прежний механизм затирания Tier B при добавлении партии заменён. Реальный пользовательский архив, live Lichess и UX-эталоны остаются вне этой проверки. Исторические некритичные недочёты, обнаруженные позже исходного пакета, **по требованию владельца вынесены в [технический долг](../reviews/PR46_POST_E1EA4BE_TECHNICAL_DEBT_2026_11_10.md)**, не расширяют обязательный scope этого CI-gate.
+
+
+## 13. Повторная независимая проверка 889e04d · §12 CI-gate ЗАКРЫТ, USER_ACCEPTANCE_PENDING
+
+**Дата проверки:** 11.11.2026. **PR:** [#46](https://github.com/feshakomissarov-prog/chess/pull/46), head `889e04d815578843ad84874a95913f86e56ea061`, Draft, не слит. Diff относительно `e1ea4be`: ровно 3 файла — `src/chess_coach/window.py`, `tests/test_window.py`, `docs/ux/CHESS_COACH_CODEX_IMPLEMENTATION_REPORT.md`. Новых изменений Home cache/Stockfish/Lichess transport нет.
+
+**Независимо изученные исходники:** [window.py:1314–1447](https://github.com/feshakomissarov-prog/chess/blob/889e04d815578843ad84874a95913f86e56ea061/src/chess_coach/window.py#L1314-L1447), [tests/test_window.py:753–900](https://github.com/feshakomissarov-prog/chess/blob/889e04d815578843ad84874a95913f86e56ea061/tests/test_window.py#L753-L900), финальный отчёт реализации, CI job logs. Состояния и гонки scope/generation, delayed reader/follow-up, account change, failure payload, Qt event loop просмотрены по исходникам. Проверен изолированный read worker с stop checkpoints, same-scope single inflight, coalescing pending, сохранение ранее подтверждённого summary и повторный запуск после worker callback. Фатальных новых регрессий в изменённом пути **не подтверждено**.
+
+**CI:** [Windows run #42898354938](https://github.com/feshakomissarov-prog/chess/actions/runs/42898354938), **точный HEAD**: job `test` SUCCESS — **1115 passed in 675.32s**, compileall и изолированная инициализация окна SUCCESS; job `visual-evidence` SUCCESS — **32 native synthetic states на 100%, 25 на 125%, 25 на 150%** с подтверждением logical/pixel sizes, artifact uploaded. Источник — GitHub Actions job logs, не только сообщение Codex. Следовательно, **единственный обязательный §12 exact-head Windows CI gate выполнен**. Это **не** утверждает, что все экраны соответствуют утверждённым эталонам.
+
+**Принцип отсутствия бесконечных исправительных циклов:** дополнительные некритические наблюдения не расширяют §12; продолжают учитываться только в [technical debt](../reviews/PR46_POST_E1EA4BE_TECHNICAL_DEBT_2026_11_10.md). Нет необходимости давать Codex новую задачу до ручной проверки.
+
+**НЕЗАКРЫТЫЕ OWNER-ACCEPTANCE GATES:**
+- Реальная пользовательская база: Home после закрытия/перезапуска показывает исторические точность, рейтинг, 3 карточки быстро, в том числе после новой партии, при повторной навигации Play→Home; показ stale truthfully; окно не подвисает.
+- Нативный визуальный side-by-side против **UX-01…UX-13**, включая мелкий экран и масштаб 125/150%.
+- Реальные online Lichess (предложения ничьей, takeback, reconnect/429, игра против человека) и реальный Stockfish не проверялись независимым ревьюером; те сценарии тестируются владельцем по возможностям, а непроверенные отмечаются, без мнимого PASS.
+- Без явного подтверждения владельца **НЕ мерджить main и НЕ утверждать «PR принят»**.
+
+**Текущий статус:** **SOURCE REVIEW + EXACT-HEAD CI: PASS; UX/REAL-DATA ACCEPTANCE: PENDING.** Этот §13 отменяет только прежний временный blocker §12 «красный CI» и не переписывает исторические результаты/технический долг.
