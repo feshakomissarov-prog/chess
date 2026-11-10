@@ -38,6 +38,22 @@ class MemoryStore:
         self.value = None
 
 
+def _admit_live_game_actions(service, game_id, *, color="white", state=None):
+    """Seed the service gate with a synthetic accepted gameFull snapshot."""
+    generation = service.auth_generation
+    assert service.mark_event_stream_ready(generation)
+    snapshot_state = {"status": "started", "moves": "e2e4",
+                      "wdraw": False, "bdraw": False}
+    if state:
+        snapshot_state.update(state)
+    service.reconcile_game_actions(
+        game_id, {"type": "gameFull", "state": snapshot_state}, generation,
+        color=color, snapshot_sequence=1)
+    sequence = service._game_authoritative_sequence[(generation, str(game_id))]
+    assert service.authorize_game_actions(
+        game_id, generation, sequence, color=color)
+
+
 class AccountClient:
     def __init__(self, result=None, error=None):
         self.result = result or {"username": "TestUser"}
@@ -458,6 +474,7 @@ def test_queued_game_action_does_not_read_replacement_account_token():
                              personal_token_store=personal, auth_method="oauth")
     service.username = "AccountA"
     service._thread = lambda target, _name: queued.append(target)
+    _admit_live_game_actions(service, "game-a")
     service.abort("game-a")
     service.set_auth_method("personal_token")
     service.username = "AccountB"
@@ -609,6 +626,7 @@ def test_duplicate_game_action_is_posted_once_while_first_request_is_pending(qtb
     completed = []
     service.session_action_started.connect(lambda *args: started.append(args))
     service.session_action_completed.connect(lambda *args: completed.append(args))
+    _admit_live_game_actions(service, "game-1")
     first_id = service.abort("game-1")
     second_id = service.abort("game-1")
     assert second_id == first_id
@@ -632,6 +650,7 @@ def test_successful_game_action_stays_one_shot_until_authoritative_reconciliatio
                              personal_token_store=MemoryStore("pat"))
     completed = []
     service.session_action_completed.connect(lambda *args: completed.append(args))
+    _admit_live_game_actions(service, "game-uncertain")
     first_id = service.abort("game-uncertain")
     qtbot.waitUntil(lambda: bool(completed), timeout=1000)
     second_id = service.abort("game-uncertain")
@@ -776,6 +795,7 @@ def test_429_game_action_is_not_reposted_until_authoritative_effect(qtbot):
     reconciled = []
     service.session_action_completed.connect(lambda *args: completed.append(args))
     service.session_action_reconciled.connect(lambda *args: reconciled.append(args))
+    _admit_live_game_actions(service, "game-429")
     first_id = service.resign("game-429")
     qtbot.waitUntil(lambda: bool(completed), timeout=1000)
     for _ in range(3):
@@ -808,6 +828,7 @@ def test_draw_offer_and_acceptance_have_distinct_authoritative_effects(qtbot):
     completed = []
     service.session_action_completed.connect(lambda *args: completed.append(args))
 
+    _admit_live_game_actions(service, "draw-game")
     offer_id = service.draw("draw-game", True)
     qtbot.waitUntil(lambda: len(completed) == 1, timeout=1000)
     assert client.draw_posts == [("token", "draw-game", True)]
@@ -853,7 +874,7 @@ def test_draw_offer_pending_lifecycle_never_reposts_and_resolves_on_fresh_absenc
     service.session_action_completed.connect(lambda *args: completed.append(args))
     baseline = {"type": "gameState", "status": "started", "moves": "e2e4",
                 "wdraw": False, "bdraw": False}
-    service.reconcile_game_actions("draw-game", baseline)
+    _admit_live_game_actions(service, "draw-game", state=baseline)
 
     request_id = service.draw("draw-game", True)
     qtbot.waitUntil(lambda: len(completed) == 1, timeout=1000)
@@ -889,7 +910,7 @@ def test_draw_offer_same_authoritative_fingerprint_replay_cannot_clear_pending(
     service.session_action_completed.connect(lambda *args: completed.append(args))
     baseline = {"type": "gameState", "status": "started", "moves": "e2e4",
                 "wdraw": False, "bdraw": False, "turns": 1}
-    service.reconcile_game_actions("draw-game", baseline)
+    _admit_live_game_actions(service, "draw-game", state=baseline)
     request_id = service.draw("draw-game", True)
     qtbot.waitUntil(lambda: len(completed) == 1, timeout=1000)
     for _ in range(replays):
@@ -920,8 +941,10 @@ def test_two_fake_clients_exchange_draw_offer_continue_then_receive_later_offer(
     game_id = "two-fake-clients"
     baseline = {"type": "gameFull", "state": {"status": "started", "moves": "e2e4",
                 "wdraw": False, "bdraw": False, "turns": 1}}
-    account_a.reconcile_game_actions(game_id, baseline, color="white")
-    account_b.reconcile_game_actions(game_id, baseline, color="black")
+    _admit_live_game_actions(account_a, game_id, color="white",
+                             state=baseline["state"])
+    _admit_live_game_actions(account_b, game_id, color="black",
+                             state=baseline["state"])
 
     account_a.draw(game_id, True)
     qtbot.waitUntil(lambda: len(completed_a) == 1, timeout=1000)
@@ -972,9 +995,9 @@ def test_incoming_draw_response_is_independent_of_stale_offer_but_not_opposite_r
                              personal_token_store=MemoryStore("pat"))
     completed = []
     service.session_action_completed.connect(lambda *args: completed.append(args))
-    service.reconcile_game_actions("draw-game", {
-        "type": "gameState", "status": "started", "moves": "e2e4 e7e5",
-        "wdraw": False, "bdraw": True}, color="white")
+    _admit_live_game_actions(service, "draw-game", color="white", state={
+        "status": "started", "moves": "e2e4 e7e5",
+        "wdraw": False, "bdraw": True})
 
     offer_id = service.draw("draw-game", True)
     qtbot.waitUntil(lambda: len(completed) == 1, timeout=1000)
@@ -990,7 +1013,7 @@ def test_incoming_draw_response_is_independent_of_stale_offer_but_not_opposite_r
 
 def test_game_action_conflict_table_preserves_only_explicit_safe_exceptions():
     all_actions = {"offer_draw", "accept_draw", "decline_draw", "resign", "abort",
-                   "claim_draw", "takeback"}
+                   "claim_draw", "claim_victory", "takeback"}
     assert set(GAME_ACTION_CONFLICTS) == all_actions
     assert "resign" not in GAME_ACTION_CONFLICTS["offer_draw"]
     assert {"accept_draw", "decline_draw"}.isdisjoint(
@@ -1021,6 +1044,7 @@ def test_pending_resign_atomically_rejects_conflicting_game_posts(qtbot):
     client = Client()
     service = LichessService(client=client, token_store=MemoryStore("token"),
                              personal_token_store=MemoryStore("pat"))
+    _admit_live_game_actions(service, "game")
     service.resign("game")
     assert entered.wait(1)
     assert service.draw("game", True) is None
@@ -1172,6 +1196,7 @@ def test_rv2_transport_event_cannot_reconcile_unvalidated_position(qtbot):
     done = []
     service.session_action_completed.connect(lambda *args: done.append(args))
     try:
+        _admit_live_game_actions(service, "game")
         service.resign("game")
         qtbot.waitUntil(lambda: bool(done))
         service._emit_session_game_event(service.auth_generation, "game", {
@@ -1354,6 +1379,7 @@ def test_rv2_authoritative_offer_during_http_is_retained_until_completion(qtbot)
     client = Client()
     service = LichessService(client=client, token_store=MemoryStore("fake"))
     try:
+        _admit_live_game_actions(service, "draw")
         request_id = service.draw("draw", True)
         assert entered.wait(1)
         service.reconcile_game_actions("draw", {

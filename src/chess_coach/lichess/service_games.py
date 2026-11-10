@@ -8,6 +8,9 @@ import time
 import uuid
 
 from .api import LichessError, RateLimitError
+from .game_status import ACTIONABLE_GAME_STATUSES, TERMINAL_GAME_STATUSES
+
+_TERMINAL_GAME_STATUSES = TERMINAL_GAME_STATUSES
 
 
 GAME_ACTION_CONFLICTS = {
@@ -15,26 +18,113 @@ GAME_ACTION_CONFLICTS = {
     # incoming offer may be answered while an outgoing offer is stale.
     "offer_draw": frozenset({"offer_draw", "abort", "claim_draw", "takeback"}),
     "accept_draw": frozenset({"offer_draw", "accept_draw", "decline_draw", "resign",
-                               "abort", "claim_draw", "takeback"}),
+                               "abort", "claim_draw", "claim_victory", "takeback"}),
     "decline_draw": frozenset({"offer_draw", "accept_draw", "decline_draw", "resign",
-                                "abort", "claim_draw", "takeback"}),
+                                "abort", "claim_draw", "claim_victory", "takeback"}),
     "resign": frozenset({"offer_draw", "accept_draw", "decline_draw", "resign",
-                          "abort", "claim_draw", "takeback"}),
+                          "abort", "claim_draw", "claim_victory", "takeback"}),
     "abort": frozenset({"offer_draw", "accept_draw", "decline_draw", "resign",
-                        "abort", "claim_draw", "takeback"}),
+                        "abort", "claim_draw", "claim_victory", "takeback"}),
     "claim_draw": frozenset({"offer_draw", "accept_draw", "decline_draw", "resign",
-                             "abort", "claim_draw", "takeback"}),
+                             "abort", "claim_draw", "claim_victory", "takeback"}),
+    "claim_victory": frozenset({"offer_draw", "accept_draw", "decline_draw", "resign",
+                                 "abort", "claim_draw", "claim_victory", "takeback"}),
     "takeback": frozenset({"offer_draw", "accept_draw", "decline_draw", "resign",
-                           "abort", "claim_draw", "takeback"}),
+                           "abort", "claim_draw", "claim_victory", "takeback"}),
 }
-_TERMINAL_GAME_STATUSES = frozenset({
-    "aborted", "mate", "resign", "stalemate", "timeout", "draw", "outoftime",
-    "cheat", "noStart", "unknownFinish", "variantEnd", "repetition", "50moves",
-    "insufficientMaterial", "finished",
-})
 
 
 class LichessGameActionsMixin:
+    def _invalidate_actions_after_rate_limit(self, generation: int) -> None:
+        self.invalidate_game_action_admission(generation)
+        try:
+            remaining = max(1, int(getattr(self.client, "rate_limit_remaining", 0)))
+        except (TypeError, ValueError):
+            remaining = 60
+        self._emit_session_status(
+            generation,
+            f"Ограничение Lichess (429): повтор через {remaining} с; "
+            "ожидаем свежий подтверждённый снимок партии.")
+
+    def mark_event_stream_ready(self, generation: int) -> bool:
+        """Record current transport readiness and require fresh game snapshots."""
+        generation = int(generation)
+        if not self.is_auth_generation_current(generation):
+            return False
+        with self._pending_action_lock:
+            if generation != self._auth_generation or self._connection_stop.is_set():
+                return False
+            self._event_stream_ready_generation = generation
+            # A reconnect does not restore per-game action admission.
+            self._game_action_admissions.clear()
+            self._accepted_game_full_sequence.clear()
+        return True
+
+    def invalidate_game_action_admission(self, generation: int,
+                                         game_id: str | None = None, *,
+                                         event_stream: bool = False) -> None:
+        """Close service-side action admission after transport/safety loss."""
+        generation = int(generation)
+        with self._pending_action_lock:
+            if event_stream and self._event_stream_ready_generation == generation:
+                self._event_stream_ready_generation = None
+            if game_id is None:
+                for key in tuple(self._game_action_admissions):
+                    if key[0] == generation:
+                        self._game_action_admissions.pop(key, None)
+                for key in tuple(self._accepted_game_full_sequence):
+                    if key[0] == generation:
+                        self._accepted_game_full_sequence.pop(key, None)
+            else:
+                self._game_action_admissions.pop((generation, str(game_id)), None)
+                self._accepted_game_full_sequence.pop((generation, str(game_id)), None)
+
+    def authorize_game_actions(self, game_id: str, generation: int,
+                               snapshot_sequence: int, *, color: str) -> bool:
+        """Admit commands only after MainWindow accepted a fresh gameFull."""
+        generation = int(generation)
+        if (color not in {"white", "black"} or int(snapshot_sequence) <= 0
+                or not self.is_auth_generation_current(generation)):
+            return False
+        key = (generation, str(game_id))
+        with self._pending_action_lock:
+            authoritative = self._game_authoritative_state.get(key) or {}
+            if (generation != self.auth_generation
+                    or self._event_stream_ready_generation != generation
+                    or self._connection_stop.is_set()
+                    or authoritative.get("status") not in ACTIONABLE_GAME_STATUSES
+                    or self._accepted_game_full_sequence.get(key) != int(snapshot_sequence)):
+                return False
+            self._game_action_admissions[key] = {
+                "snapshot_sequence": int(snapshot_sequence), "color": color,
+            }
+            return True
+
+    def _game_action_admission_ready_locked(self, generation: int,
+                                            game_id: str) -> bool:
+        admission = self._game_action_admissions.get((generation, str(game_id)))
+        authoritative = self._game_authoritative_state.get((generation, str(game_id))) or {}
+        try:
+            cooldown = max(0, int(getattr(self.client, "rate_limit_remaining", 0)))
+        except (TypeError, ValueError):
+            cooldown = 1
+        return bool(
+            generation == self._auth_generation
+            and self._event_stream_ready_generation == generation
+            and admission is not None
+            and admission.get("snapshot_sequence", 0) > 0
+            and authoritative.get("status") in ACTIONABLE_GAME_STATUSES
+            and cooldown == 0
+            and not self._connection_stop.is_set()
+        )
+
+    @staticmethod
+    def _own_draw_offer_is_set(authoritative: dict, admission: dict | None) -> bool:
+        if not admission:
+            return False
+        own_key = "wdraw" if admission.get("color") == "white" else "bdraw"
+        return authoritative.get(own_key) is True
+
     def claim_draw(self, game_id: str):
         self._action(lambda token: self.client.claim_draw(token, game_id),
                      game_id=game_id, command="claim_draw")
@@ -71,7 +161,9 @@ class LichessGameActionsMixin:
                 return None
             authoritative = self._game_authoritative_state.get(
                 (context.generation, str(game_id)), {})
-            if authoritative.get("status") in _TERMINAL_GAME_STATUSES:
+            if (authoritative.get("status") in TERMINAL_GAME_STATUSES
+                    or not self._game_action_admission_ready_locked(
+                        context.generation, str(game_id))):
                 self.session_takeback_action_completed.emit(
                     context.generation, str(game_id), request_id, -2)
                 return None
@@ -97,13 +189,19 @@ class LichessGameActionsMixin:
 
         def work():
             status = 0
+            token = self.operation_token(context)
+            with self._pending_action_lock:
+                admitted = self._game_action_admission_ready_locked(
+                    context.generation, str(game_id))
             try:
-                token = self.operation_token(context)
-                if not token:
-                    return
-                self.client.handle_takeback(token, game_id, accept)
+                if not token or not admitted:
+                    status = -2
+                else:
+                    self.client.handle_takeback(token, game_id, accept)
             except Exception as exc:
                 status = exc.status if isinstance(exc, LichessError) and exc.status else -1
+                if status == 429:
+                    self._invalidate_actions_after_rate_limit(context.generation)
             definitive = status in {-2, 400, 401, 403, 404, 422}
             with self._pending_action_lock:
                 state = self._pending_action_states.get(key)
@@ -157,7 +255,14 @@ class LichessGameActionsMixin:
                 return self._pending_actions[key]
             authoritative = self._game_authoritative_state.get(
                 (context.generation, str(game_id or "")), {})
-            if authoritative.get("status") in _TERMINAL_GAME_STATUSES:
+            admission = self._game_action_admissions.get(
+                (context.generation, str(game_id or "")))
+            if (authoritative.get("status") in TERMINAL_GAME_STATUSES
+                    or not self._game_action_admission_ready_locked(
+                        context.generation, str(game_id or ""))):
+                return None
+            if command == "offer_draw" and self._own_draw_offer_is_set(
+                    authoritative, admission):
                 return None
             blocked_by_pending = any(
                 pending_key[0] == context.generation
@@ -179,13 +284,18 @@ class LichessGameActionsMixin:
             token = None
             result_status = 0
             try:
-                token = self.operation_token(context)
-                if not token:
+                with self._pending_action_lock:
+                    admitted = self._game_action_admission_ready_locked(
+                        context.generation, str(game_id or ""))
+                token = self.operation_token(context) if admitted else None
+                if not token or not admitted:
                     result_status = -2
                 else:
                     action(token)
             except Exception as exc:
                 result_status = exc.status if isinstance(exc, LichessError) and exc.status else -1
+                if result_status == 429:
+                    self._invalidate_actions_after_rate_limit(context.generation)
                 self._emit_operation_failure(context, exc)
             definitive_rejection = result_status in {-2, 400, 401, 403, 404, 422}
             with self._pending_action_lock:
@@ -220,7 +330,10 @@ class LichessGameActionsMixin:
                        for key in self._pending_actions)
 
     def reconcile_game_actions(self, game_id: str, event: dict,
-                               generation: int | None = None, *, color: str = "white") -> None:
+                               generation: int | None = None, *, color: str = "white",
+                               resync: bool = False,
+                               accepted_line_change: bool = False,
+                               snapshot_sequence: int | None = None) -> None:
         """Resolve one-shot POSTs only after a newer authoritative game snapshot."""
         generation = self.auth_generation if generation is None else int(generation)
         state = event.get("state", event) if isinstance(event, dict) else {}
@@ -243,6 +356,36 @@ class LichessGameActionsMixin:
             if (previous.get("status") in _TERMINAL_GAME_STATUSES
                     and fingerprint.get("status") not in _TERMINAL_GAME_STATUSES):
                 return
+            old_moves = tuple(str(previous.get("moves") or "").split())
+            new_moves = tuple(str(fingerprint.get("moves") or "").split())
+            for flag in ("wdraw", "bdraw"):
+                anchor_key = f"_{flag}_anchor_moves"
+                previous_anchor = previous.get(anchor_key)
+                if previous.get(flag) is True:
+                    anchor = (tuple(previous_anchor) if previous_anchor is not None
+                              else old_moves)
+                    line_progressed_from_offer = (
+                        len(new_moves) > len(anchor) and new_moves[:len(anchor)] == anchor)
+                    if fingerprint.get(flag) is None:
+                        # Missing is unknown. Keep the latch and its original
+                        # line anchor so a later explicit false can reconcile.
+                        fingerprint[flag] = True
+                    elif fingerprint.get(flag) is False and not (
+                            line_progressed_from_offer or accepted_line_change or resync):
+                        fingerprint[flag] = True
+                    fingerprint[anchor_key] = anchor if fingerprint.get(flag) is True else None
+                elif fingerprint.get(flag) is True:
+                    fingerprint[anchor_key] = new_moves
+                elif fingerprint.get(flag) is None and previous.get(flag) is not None:
+                    # Preserve a known value only for an unchanged line. On a
+                    # later line, the missing field remains explicitly unknown.
+                    if new_moves == old_moves:
+                        fingerprint[flag] = previous.get(flag)
+                        fingerprint[anchor_key] = previous.get(anchor_key)
+                    else:
+                        fingerprint[anchor_key] = None
+                else:
+                    fingerprint[anchor_key] = None
             previous_fingerprint = {key: value for key, value in previous.items()
                                     if key != "sequence"}
             fresh = previous_fingerprint != fingerprint
@@ -253,6 +396,12 @@ class LichessGameActionsMixin:
             fingerprint["sequence"] = sequence
             if fresh or not previous:
                 self._game_authoritative_state[game_key] = fingerprint
+            if (event.get("type") == "gameFull"
+                    and type(snapshot_sequence) is int and snapshot_sequence > 0):
+                # MainWindow supplies this only after apply_event accepted the
+                # full snapshot. Reconnect clears it, so a stale lease cannot be
+                # reactivated by a later direct service call.
+                self._accepted_game_full_sequence[game_key] = snapshot_sequence
             resolved = []
             for key, action_state in tuple(self._pending_action_states.items()):
                 context = action_state.get("context")
@@ -294,9 +443,7 @@ class LichessGameActionsMixin:
     @staticmethod
     def _action_effect_reconciled(command: str, before: dict, after: dict) -> bool:
         status = str(after.get("status") or "")
-        terminal = status in {"aborted", "mate", "resign", "stalemate", "timeout",
-                              "draw", "outoftime", "cheat", "noStart",
-                              "unknownFinish", "variantEnd"}
+        terminal = status in TERMINAL_GAME_STATUSES
         if command in {"abort", "resign", "claim_draw", "claim_victory", "accept_draw"}:
             return terminal
         if command == "offer_draw":
@@ -522,6 +669,7 @@ class LichessGameActionsMixin:
                     except RateLimitError as exc:
                         if not self.is_auth_generation_current(auth_generation):
                             break
+                        self.invalidate_game_action_admission(auth_generation, game_id)
                         with self._event_lock:
                             final_sync = game_id in self._final_sync_game_ids
                         if final_sync and final_attempts >= 1:
@@ -541,6 +689,7 @@ class LichessGameActionsMixin:
                             connection_stop.set()
                             self._emit_session_error(auth_generation, str(exc))
                             break
+                        self.invalidate_game_action_admission(auth_generation, game_id)
                         with self._event_lock:
                             final_sync = game_id in self._final_sync_game_ids
                         if final_sync and final_attempts >= 1:

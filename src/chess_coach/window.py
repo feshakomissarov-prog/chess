@@ -77,6 +77,7 @@ from .application.library import GameLibraryQueryCoordinator
 from .application.dashboard import (DashboardQueryCoordinator, dashboard_options,
                                     dashboard_preview_snapshot, dashboard_snapshot)
 from .lichess.session import LichessGameSession, classify_lichess_opponent
+from .lichess.game_status import TERMINAL_GAME_STATUSES
 from .lichess.game_review import load_game_review
 from .lichess.statistics import StatisticsService
 from .diagnostics import anonymized_report, log_event, logs_directory
@@ -4051,10 +4052,8 @@ class MainWindow(QMainWindow):
     def _is_live_online_session(self) -> bool:
         if self.online_session is None:
             return False
-        return self.online_session.status not in {
-            "mate", "resign", "stalemate", "timeout", "outoftime", "draw",
-            "cheat", "noStart", "variantEnd", "unknownFinish", "aborted",
-        }
+        # Unknown future statuses stay fail-closed as live for Fair Play.
+        return self.online_session.status not in TERMINAL_GAME_STATUSES
 
     def _sync_position_eval_controls(self, available: bool) -> None:
         self.position_eval_button.setVisible(available)
@@ -5940,8 +5939,7 @@ class MainWindow(QMainWindow):
             return False
         if self.online_session is not None:
             return self._screen_mode == "review" and self.online_session.status in {
-                "mate", "resign", "stalemate", "timeout", "outoftime", "draw",
-                "cheat", "noStart", "variantEnd", "unknownFinish", "aborted",
+                *TERMINAL_GAME_STATUSES,
             }
         return (self._screen_mode == "local" and self._local_board_mode == "free")
 
@@ -7772,6 +7770,7 @@ class MainWindow(QMainWindow):
         previous_moves = tuple(session.moves.split())
         previous_board = session.board.copy(stack=True)
         previous_status = session.status
+        was_awaiting_authoritative_snapshot = session.awaiting_authoritative_snapshot
         previous_view_ply = self.online_view_ply if (
             game_id == self._selected_live_game_id and self.online_session is session
         ) else None
@@ -7802,6 +7801,19 @@ class MainWindow(QMainWindow):
             if isinstance(state.get("status"), str):
                 reconcile(
                     game_id, event, generation,
+                    color="white" if session.color == chess.WHITE else "black",
+                    resync=(event.get("type") == "gameFull"
+                            and was_awaiting_authoritative_snapshot),
+                    accepted_line_change=tuple(session.moves.split()) != previous_moves,
+                    snapshot_sequence=(session.accepted_snapshot_sequence
+                                       if event.get("type") == "gameFull" else None))
+        if (reconcile and generation is not None and event.get("type") == "gameFull"
+                and session.accepted_snapshot_sequence != snapshot_sequence
+                and session.status in {"started", "playing"}):
+            authorize = getattr(self.lichess, "authorize_game_actions", None)
+            if authorize:
+                authorize(
+                    game_id, generation, session.accepted_snapshot_sequence,
                     color="white" if session.color == chess.WHITE else "black")
         if (session.status in {"started", "playing"} and not session.is_ai_opponent):
             # Covers snapshots that omit status but follow an accepted active
@@ -7894,11 +7906,7 @@ class MainWindow(QMainWindow):
         self.board.set_position(shown)
         self.board.set_annotation_context(session.game_id, shown)
         server_game_active = session.status in {"started", "playing"}
-        terminal_statuses = {"mate", "resign", "draw", "stalemate", "repetition",
-                             "50moves", "insufficientMaterial", "timeout", "outoftime",
-                             "cheat", "noStart", "variantEnd", "unknownFinish",
-                             "finished", "aborted"}
-        finished_view = session.status in terminal_statuses
+        finished_view = session.status in TERMINAL_GAME_STATUSES
         active = bool(server_game_active and self._screen_mode != "review"
                       and not session.awaiting_authoritative_snapshot
                       and not self._event_stream_recovery_pending
@@ -8123,10 +8131,7 @@ class MainWindow(QMainWindow):
             self.opponent_clock_label.setStyleSheet("font-size: 28px; font-weight: 700; padding: 2px 8px;")
             self.you_clock_label.setStyleSheet("font-size: 28px; font-weight: 700; padding: 2px 8px;")
             return
-        terminal_statuses = {"mate", "resign", "draw", "stalemate", "repetition", "50moves",
-                             "insufficientMaterial", "timeout", "outoftime", "cheat",
-                             "noStart", "variantEnd", "finished", "aborted"}
-        finished = session.status in terminal_statuses
+        finished = session.status in TERMINAL_GAME_STATUSES
         no_regular_clock = session.speed in {"correspondence", "unlimited"}
         if session.clock_state_valid is False and no_regular_clock:
             text = "Завершена · без обычных часов" if finished else "Без обычных часов"
@@ -8208,7 +8213,8 @@ class MainWindow(QMainWindow):
                 f"font-size: 28px; font-weight: 600; padding: 2px 8px; color: {TOKENS.secondary};")
             return
         history_view = self._screen_mode != "online" or self.online_view_ply is not None
-        status_unknown = session.status not in {"started", "playing", *terminal_statuses}
+        status_unknown = session.status not in {"started", "playing",
+                                                *TERMINAL_GAME_STATUSES}
         paused = bool(session.awaiting_authoritative_snapshot or history_view
                       or session.status not in {"started", "playing"})
         syncing = bool(session.awaiting_authoritative_snapshot or

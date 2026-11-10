@@ -2884,6 +2884,12 @@ def test_fresh_game_full_after_reconnect_can_authoritatively_shorten_line(tmp_pa
     session = LichessGameSession("reconnect-takeback", GameRepository(tmp_path / "reconnect.sqlite3"))
     session.apply_event({"type": "gameFull", "initialFen": "startpos",
                          "state": {"moves": "e2e4 e7e5 g1f3", "status": "started"}})
+    # A same-generation old gameFull replay is not enough evidence for a
+    # rewind; a reconnect explicitly closes the session until a fresh snapshot.
+    session.apply_event({"type": "gameFull", "initialFen": "startpos",
+                        "state": {"moves": "e2e4 e7e5", "status": "started"}})
+    assert session.moves == "e2e4 e7e5 g1f3"
+    session.awaiting_authoritative_snapshot = True
     session.apply_event({"type": "gameFull", "initialFen": "startpos",
                         "state": {"moves": "e2e4 e7e5", "status": "started"}})
     assert session.moves == "e2e4 e7e5"

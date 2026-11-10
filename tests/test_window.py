@@ -2819,6 +2819,9 @@ def test_selected_takeback_clears_marks_but_rejected_pending_move_preserves_them
     actions = []
     window.board.annotation_action.connect(actions.append)
     window.board._annotation_squares.add(chess.D4)
+    # A shorter full snapshot is authoritative only in explicit takeback or
+    # reconnect-resync context; a free-standing replay must not rewind the line.
+    session.takeback_requested_by_me = True
     window._lichess_game_event(session.game_id, {
         "type": "gameFull", "initialFen": "startpos",
         "state": {"moves": "e2e4", "status": "started"}
@@ -4842,6 +4845,7 @@ def test_online_history_refresh_is_incremental_and_handles_takeback(qtbot, tmp_p
     assert not removed
     assert window.moves.count() == 6
 
+    session.takeback_requested_by_me = True
     window._lichess_game_event(session.game_id, {
         "type": "gameFull", "initialFen": "startpos",
         "state": {"moves": "e2e4 e7e5 g1f3 b8c6", "status": "started"}
@@ -6433,11 +6437,14 @@ def test_rv2_game_post_reconciles_only_applied_owner_snapshot(qtbot, tmp_path):
     service.session_game_event_received.connect(window._lichess_session_game_event)
     generation = service.auth_generation
 
-    def state(moves, **data):
-        service._emit_session_game_event(generation, "draw-test", {
-            "type": "gameState", "status": "started", "moves": moves, **data})
+    service.mark_event_stream_ready(generation)
 
-    state("e2e4")
+    def state(moves, *, kind="gameState", **data):
+        service._emit_session_game_event(generation, "draw-test", {
+            "type": kind, "initialFen": "startpos",
+            "state": {"status": "started", "moves": moves, **data}})
+
+    state("e2e4", kind="gameFull", wdraw=False, bdraw=False)
     with qtbot.waitSignal(service.session_action_completed):
         first = service.draw("draw-test", True)
     state("e2e5", wdraw=True)
@@ -6496,8 +6503,10 @@ def test_live_draw_offer_does_not_disable_resign_or_conflict_with_incoming_offer
     session.apply_event({"type": "gameState", "moves": "e2e4 e7e5",
                          "status": "started", "wdraw": True, "bdraw": False})
     window._refresh_online()
-    assert not window.draw_button.isEnabled()
-    assert "ожидаем ответ соперника" in window.game_status.text()
+    # Same-line false is a stale replay; it cannot revoke either confirmed offer.
+    assert window.draw_button.isEnabled()  # Still offers the incoming acceptance.
+    assert session.draw_offered_by_me and session.draw_offered_by_opponent
+    assert "Соперник предлагает ничью" in window.game_status.text()
 
     session.apply_event({"type": "gameState", "moves": "e2e4 e7e5",
                          "status": "started", "wdraw": True, "bdraw": True})
