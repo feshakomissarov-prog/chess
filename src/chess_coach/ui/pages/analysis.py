@@ -246,11 +246,10 @@ class AnalysisLandingPage(QWidget):
         if self.archive_layout.indexOf(widget) >= 0:
             return
         for index in reversed(range(self.archive_layout.count())):
-            item = self.archive_layout.itemAt(index)
+            item = self.archive_layout.takeAt(index)
             child = item.widget()
             if child is not None:
                 child.setParent(None)
-            self.archive_layout.removeItem(item)
         widget.setParent(self.archive_tab)
         self.archive_layout.addWidget(widget, 1)
 

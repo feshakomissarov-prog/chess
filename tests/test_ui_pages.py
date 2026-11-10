@@ -43,6 +43,23 @@ def test_analysis_landing_has_four_cards_and_one_three_tab_breakdown(qtbot):
     assert page.position_setup.open_button.isVisible()
 
 
+def test_analysis_archive_widget_replacement_removes_layout_item_before_detach(qtbot):
+    page = AnalysisLandingPage({
+        "games": lambda: None, "openings": lambda: None,
+        "open_text": lambda _text: None, "open_file": lambda: None,
+    })
+    qtbot.addWidget(page)
+    old_widget = page.archive_layout.itemAt(0).widget()
+    replacement = QWidget()
+
+    page.set_archive_widget(replacement)
+
+    assert old_widget.parentWidget() is None
+    assert page.archive_layout.count() == 1
+    assert page.archive_layout.itemAt(0).widget() is replacement
+    assert replacement.parentWidget() is page.archive_tab
+
+
 def test_play_preferences_are_saved_per_mode_and_restored(qtbot, tmp_path):
     settings = QSettings(str(tmp_path / "play-modes.ini"), QSettings.Format.IniFormat)
     page = PlayPage({}, settings=settings)
