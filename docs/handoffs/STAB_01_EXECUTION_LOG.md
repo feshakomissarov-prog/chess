@@ -58,6 +58,7 @@
 ## Автоматические проверки
 
 - `QT_QPA_PLATFORM=offscreen .venv312/Scripts/python.exe -m pytest -q` — финальный запуск достиг `[100%]`, ошибок/traceback в завершившемся выводе нет. В финальном прогоне исправлен cache-regression, который привязывал retained accuracy к индексу вместо `game_id`.
+- Один последующий exact-head Windows CI прогон дал `1140 passed, 1 failed`: у регрессионного теста preview worker проверял успешный `close()` пока отдельный startup aggregate ещё выполнялся. Тест уточнён — перед проверкой закрытия ждёт завершения независимого aggregate; целевой тест на Windows/Python 3.12 локально прошёл три последовательных запуска. Полный CI после этого изменения ожидается на текущем HEAD.
 - `QT_QPA_PLATFORM=offscreen .venv312/Scripts/python.exe -m compileall -q src scripts` — выполнено после правок, синтаксических ошибок нет.
 - `git diff --check` — выполнено после правок, whitespace ошибок нет. Git выдал только предупреждение об автоматической смене LF→CRLF для перечисленных изменённых файлов.
 - Native Windows run `scripts/capture_visual_master.py` при 100% — 33 synthetic состояния PASS.

@@ -179,6 +179,9 @@ def test_dashboard_preview_fast_worker_does_not_need_post_start_handle(
     assert args[3]
     window._dashboard_preview_result_ready(*args)
     assert window._dashboard_preview_thread is None
+    # The startup aggregate is independent of this preview-handle regression.
+    # Let it release before asserting that a normal close is accepted.
+    qtbot.waitUntil(lambda: window._dashboard_thread is None, timeout=5000)
     assert window.close() is True
 
 
