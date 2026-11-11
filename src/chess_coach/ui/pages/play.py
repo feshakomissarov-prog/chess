@@ -8,7 +8,7 @@ import chess
 from PySide6.QtCore import Qt, Signal, QSignalBlocker, QSettings
 from PySide6.QtWidgets import (QCheckBox, QComboBox, QApplication, QFrame, QGridLayout, QHBoxLayout,
                                QLabel, QLineEdit, QListWidget, QListWidgetItem, QPushButton, QScrollArea,
-                               QSpinBox, QVBoxLayout, QWidget, QButtonGroup, QRadioButton)
+                               QSizePolicy, QSpinBox, QVBoxLayout, QWidget, QButtonGroup, QRadioButton)
 from ...board_view import BoardView
 
 
@@ -98,6 +98,11 @@ class PlayPage(QWidget):
         self.content_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self.content_scroll.setFrameShape(QFrame.Shape.NoFrame)
         self.content = QWidget()
+        # Active-game text and mode-card labels can otherwise keep the content
+        # wider than the available viewport at high DPI; the CTA stays outside
+        # this scroll area, so allow the cards themselves to use the page width.
+        self.content.setSizePolicy(QSizePolicy.Policy.Ignored,
+                                   QSizePolicy.Policy.Preferred)
         layout = QVBoxLayout(self.content)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(8)
@@ -209,7 +214,6 @@ class PlayPage(QWidget):
         form_layout.addLayout(form_grid)
         form_layout.addWidget(self.custom_clock_row)
         form_layout.addWidget(self.rated)
-        form_layout.addWidget(self.form_status)
         self.invitation_row = QWidget()
         invitation_layout = QHBoxLayout(self.invitation_row)
         invitation_layout.setContentsMargins(0, 0, 0, 0)
@@ -226,11 +230,6 @@ class PlayPage(QWidget):
         self.invitation_row.setVisible(False)
         form_layout.addWidget(self.invitation_row)
         self.start_button.setMinimumWidth(280)
-        action_row = QHBoxLayout()
-        action_row.addStretch(1)
-        action_row.addWidget(self.start_button)
-        form_layout.addLayout(action_row)
-        form_layout.addWidget(self.cancel_pending_button)
         layout.addWidget(form)
         self.active_panel = QFrame()
         self.active_panel.setObjectName("activeGamesPanel")
@@ -268,9 +267,18 @@ class PlayPage(QWidget):
             lambda item, _old: self._set_active_open_enabled(item))
         active_layout.addWidget(self.active_status)
         active_layout.addWidget(preview)
-        active_layout.addWidget(self.active_open)
+        self.active_open.hide()
         self.active_panel.hide()
         layout.addWidget(self.active_panel)
+        self.action_bar = QFrame(self)
+        self.action_bar.setObjectName("metricCard")
+        action_row = QHBoxLayout(self.action_bar)
+        action_row.setContentsMargins(10, 6, 10, 6)
+        action_row.addWidget(self.form_status, 1)
+        action_row.addWidget(self.cancel_pending_button)
+        action_row.addWidget(self.active_open)
+        action_row.addWidget(self.start_button)
+        root_layout.addWidget(self.action_bar)
         stored_mode = str(settings.value("play/last_selected_mode", "ai", type=str)) if settings else "ai"
         mode_index = self.mode_selector.findData(stored_mode)
         if mode_index < 0 or stored_mode == "active":
@@ -565,6 +573,7 @@ class PlayPage(QWidget):
             "Выберите партию для продолжения." if self.active_games.count()
             else "Активных партий нет."))
         self.active_panel.setVisible(self.active_games.count() > 0)
+        self.active_open.setVisible(self.active_games.count() > 0)
         self._update_form()
 
     def _show_active_preview(self, item, _previous=None) -> None:
@@ -645,6 +654,13 @@ class PlayPage(QWidget):
             return
         self._columns = columns
         self._place_cards()
+
+    def resizeEvent(self, event) -> None:  # noqa: N802 - Qt override
+        super().resizeEvent(event)
+        # The workspace sidebar and native DPI scaling reduce the page width
+        # below the top-level window width. Base the grid on the actual page.
+        if hasattr(self, "content_scroll"):
+            self.layout_modes(self.content_scroll.viewport().width())
 
     def _place_cards(self) -> None:
         while self.grid.count():

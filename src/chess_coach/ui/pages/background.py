@@ -4,7 +4,8 @@ from __future__ import annotations
 
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
-    QFrame, QHBoxLayout, QLabel, QListWidget, QProgressBar, QPushButton, QVBoxLayout, QWidget,
+    QFrame, QHBoxLayout, QLabel, QListWidget, QProgressBar, QPushButton, QScrollArea,
+    QVBoxLayout, QWidget,
 )
 
 
@@ -17,7 +18,18 @@ class BackgroundOperationsPage(QWidget):
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
-        root = QVBoxLayout(self)
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.setSpacing(0)
+        self.content_scroll = QScrollArea(self)
+        self.content_scroll.setObjectName("backgroundContentScroll")
+        self.content_scroll.setWidgetResizable(True)
+        self.content_scroll.setFrameShape(QFrame.Shape.NoFrame)
+        self.content = QWidget(self.content_scroll)
+        self.content.setObjectName("backgroundContent")
+        self.content_scroll.setWidget(self.content)
+        outer.addWidget(self.content_scroll)
+        root = QVBoxLayout(self.content)
         self._root_layout = root
         root.setSpacing(12)
         banner = QFrame()
@@ -180,6 +192,10 @@ class BackgroundOperationsPage(QWidget):
             f"font-size: {17 if tight else 19 if compact else 23}px; font-weight: 700;")
         self.details_toggle.setMaximumHeight(22 if tight else 25 if compact else 30)
         self._render_workflow_statuses()
+        # Updating row minimum heights here can happen while the page is being
+        # resized inside the stacked workspace. Re-activate the vertical layout
+        # so Qt does not retain the prior compact geometry and overlap cards.
+        self._root_layout.activate()
 
     @staticmethod
     def _compact_ready_status(text: str) -> str:

@@ -18,7 +18,7 @@ import uuid
 import weakref
 import PySide6
 import shiboken6
-from PySide6.QtCore import QEvent, QProcess, QSettings, Qt, QTimer, Signal, qVersion, QUrl
+from PySide6.QtCore import QEvent, QProcess, QRect, QSettings, Qt, QTimer, Signal, qVersion, QUrl
 from PySide6.QtGui import (QKeySequence, QShortcut, QColor, QPainter, QPen,
                            QDesktopServices, QGuiApplication, QFontMetrics)
 from PySide6.QtWidgets import (
@@ -72,6 +72,7 @@ from .application.game_finalization import GameFinalizationCoordinator, Finaliza
 from .application.routes import WorkspaceNavigator, WorkspaceRoute
 from .application.background_work import OperationHandle, OperationLane
 from .application.fair_play import playing_snapshot_allows_analysis
+from .domain.material_balance import material_balance, format_material_balance
 from .application.archive_sync import ArchiveSyncCoordinator
 from .application.library import GameLibraryQueryCoordinator
 from .application.dashboard import (DashboardQueryCoordinator, dashboard_options,
@@ -415,6 +416,7 @@ class MainWindow(QMainWindow):
     archive_account_ready_finished = Signal(int, str, object, object)
     external_study_finished = Signal(int, object, object)
     background_status_finished = Signal(int, object)
+    home_cache_preload_ready = Signal(object, object)
     batch_live_progress = Signal(str, int, int, int)
     legacy_metrics_finished = Signal(int, object)
     puzzle_history_finished = Signal(str, object, object)
@@ -656,6 +658,7 @@ class MainWindow(QMainWindow):
         self.position_eval_finished.connect(self._position_eval_finished)
         self.position_eval_update.connect(self._position_eval_update)
         self.dashboard_finished.connect(self._dashboard_result_ready)
+        self.home_cache_preload_ready.connect(self._home_cache_preload_result_ready)
         self.dashboard_preview_ready.connect(self._dashboard_preview_result_ready)
         self.archive_status_ready.connect(self._archive_status_result_ready)
         self.saved_review_ready.connect(self._saved_review_result_ready)
@@ -674,6 +677,21 @@ class MainWindow(QMainWindow):
         self.archive_account_ready_finished.connect(self._archive_account_ready_result)
         self.external_study_finished.connect(self._external_study_parse_finished)
         self.background_status_finished.connect(self._background_operations_result_ready)
+        self._dashboard_cache_preload_result: tuple[str | None, dict | None] | None = None
+        self._play_readiness_log_state: tuple | None = None
+        preferred_scope = str(self.settings.value(
+            "workspace/selected_account", "", type=str)).strip() or None
+        initial_account = (preferred_scope if preferred_scope and
+                           preferred_scope.startswith("lichess:") else None)
+
+        def preload_home_cache() -> None:
+            snapshot = self._dashboard_snapshot_cache.load_last_good(initial_account, None)
+            self._dashboard_cache_preload_result = (initial_account, snapshot)
+            self.home_cache_preload_ready.emit(initial_account, snapshot)
+
+        self._dashboard_cache_preload_handle = self._start_registered_work(
+            preload_home_cache, kind="dashboard_cache_preload", lane=OperationLane.INTERACTIVE,
+            thread_name="chess-coach-dashboard-cache-preload")
         self.batch_live_progress.connect(self._show_batch_live_progress)
         self.legacy_metrics_finished.connect(self._legacy_metrics_batch_finished)
         self.puzzle_history_finished.connect(self._puzzle_history_result_ready)
@@ -703,11 +721,24 @@ class MainWindow(QMainWindow):
         )
         self._build_ui()
         self.focus_mode_button.setChecked(self._board_focus_mode)
-        self._set_sidebar_collapsed(
-            self.settings.value("workspace/sidebar_collapsed", self.width() < 1160, type=bool),
-            explicit=self.settings.value("workspace/sidebar_explicit", False, type=bool))
+        sidebar_explicit = self.settings.value(
+            "workspace/sidebar_explicit", False, type=bool)
+        sidebar_collapsed = (
+            self.settings.value("workspace/sidebar_collapsed", False, type=bool)
+            if sidebar_explicit else self.width() < 1160)
+        self._set_sidebar_collapsed(sidebar_collapsed, explicit=sidebar_explicit)
         self._workspace_state_restoring = False
+        # Paint the last validated Home scope into the widgets before the first
+        # visible frame. This bounded JSON read is independent of SQLite/auth
+        # startup and is refreshed asynchronously immediately after routing.
+        initial_account = self.dashboard_account.currentData()
+        preloaded = self._dashboard_cache_preload_result
+        initial_home = (preloaded[1] if preloaded and preloaded[0] == initial_account else None)
+        if initial_home is not None:
+            self._render_dashboard_snapshot(initial_home)
         self.show_home()
+        if initial_home is not None:
+            self._refresh_home_dashboard()
         self.clock_timer = QTimer(self)
         self.clock_timer.timeout.connect(self._update_clock)
         self.clock_timer.start(250)
@@ -2042,6 +2073,10 @@ class MainWindow(QMainWindow):
         self.turn_label = QLabel()
         self.turn_label.setStyleSheet("font-size: 16px; font-weight: 700;")
         status_layout.addWidget(self.turn_label)
+        self.material_balance_label = QLabel("Материал: 0 · Белые − Чёрные")
+        self.material_balance_label.setAccessibleName("Баланс материала")
+        self.material_balance_label.setStyleSheet("font-size: 14px; font-weight: 600;")
+        status_layout.addWidget(self.material_balance_label)
         self.game_status = QLabel("Локальная тренировочная доска")
         self.game_status.setStyleSheet("color: #77766f;")
         status_layout.addWidget(self.game_status)
@@ -3300,9 +3335,33 @@ class MainWindow(QMainWindow):
         mode = str(self._play_mode_page.mode_selector.currentData() or "ai")
         can_start = mode == "local" or (online and mode in {"ai", "friend", "challenge"})
         self._play_mode_page.start_button.setEnabled(can_start and not self._awaiting_game_start)
-        self._play_mode_page.start_button.setToolTip(
-            "Подключите Lichess, чтобы начать сетевую игру."
-            if not online and mode != "local" else "")
+        readiness_reason = (
+            "Сейчас нельзя начать сетевую игру: подключите Lichess и дождитесь готовности "
+            "игрового потока. Свободная доска доступна без сети."
+            if not online and mode != "local" else
+            "Ожидаем подтверждение Lichess. Повторное нажатие не создаст второй запрос."
+            if can_start and self._awaiting_game_start else "")
+        self._play_mode_page.start_button.setToolTip(readiness_reason)
+        if readiness_reason and not self._pending_play_request_mode:
+            self._play_mode_page.set_status(readiness_reason)
+        elif can_start and not self._play_mode_page._request_pending:
+            self._play_mode_page.form_status.hide()
+        button = self._play_mode_page.start_button
+        rect = button.rect()
+        viewport = self._play_mode_page.content_scroll.viewport()
+        button_rect = QRect(button.mapTo(viewport, rect.topLeft()), rect.size())
+        safe_state = "local" if mode == "local" else (
+            "ready" if online else "not_ready")
+        state = (mode, button.isVisible(), button.isEnabled(),
+                 button_rect.x(), button_rect.y(), button_rect.width(), button_rect.height(),
+                 safe_state, bool(self._awaiting_game_start),
+                 self._pending_play_request_generation or 0)
+        if state != self._play_readiness_log_state:
+            self._play_readiness_log_state = state
+            log_event("play_readiness", "play", mode=mode,
+                      visible=state[1], enabled=state[2],
+                      geometry=list(state[3:7]), safe_state=safe_state,
+                      request_generation=state[-1])
         if self._pending_play_request_mode:
             self._render_play_pending()
         else:
@@ -3319,6 +3378,24 @@ class MainWindow(QMainWindow):
             pending = self._awaiting_game_start and button is not self.active_games_button
             button.setEnabled(online and not pending)
             button.setToolTip("Ожидаем подтверждение Lichess." if pending else reason)
+
+    def _home_cache_preload_result_ready(self, account_id: object,
+                                         snapshot: object) -> None:
+        if (self._shutdown_requested or not isinstance(account_id, (str, type(None)))
+                or not isinstance(snapshot, dict)
+                or self.dashboard_account.currentData() != account_id
+                or self._screen_mode != "home"):
+            return
+        current = self._latest_dashboard_snapshot
+        current_scope = (current or {}).get("filter") or {}
+        if current and current_scope.get("account_id") == account_id:
+            if not current.get("is_preview"):
+                return
+            from .application.dashboard_cache import merge_last_good
+            snapshot = merge_last_good(current, snapshot, stale=True)
+        self._render_dashboard_snapshot(snapshot)
+        log_event("dashboard_cache", "dashboard", stage="async_last_good_paint",
+                  status="ok")
 
     def _refresh_home_dashboard(self) -> None:
         if not hasattr(self, "_dashboard_metric_values"):
@@ -3375,7 +3452,7 @@ class MainWindow(QMainWindow):
                 for attempt in range(3):
                     if stop_event.is_set():
                         raise RuntimeError("dashboard preview superseded")
-                    revision = self.game_repository.dashboard_data_revision()
+                    revision = self.game_repository.dashboard_data_revision(account_id)
                     cached = self._dashboard_snapshot_cache.load(
                         account_id, clock, expected_revision=revision)
                     cache_has_tier_b = bool(cached is not None and
@@ -3396,20 +3473,20 @@ class MainWindow(QMainWindow):
                             candidate = merge_last_good(
                                 candidate, cached,
                                 stale=(cached.get("_dashboard_tier_b_revision") != revision))
-                    current_revision = self.game_repository.dashboard_data_revision()
+                    current_revision = self.game_repository.dashboard_data_revision(account_id)
                     if current_revision != revision:
                         if attempt < 2:
                             continue
                         candidate = dashboard_preview_snapshot(
                             self.game_repository, account_id=account_id, clock=clock,
                             stop_event=stop_event)
-                        revision = self.game_repository.dashboard_data_revision()
+                        revision = self.game_repository.dashboard_data_revision(account_id)
                         cache_hit = False
                     candidate["_dashboard_revision"] = revision
                     candidate["_dashboard_cache_hit"] = cache_hit
                     preview = candidate
                     if (not cache_hit and not stop_event.is_set()
-                            and self.game_repository.dashboard_data_revision() == revision):
+                            and self.game_repository.dashboard_data_revision(account_id) == revision):
                         saved = self._dashboard_snapshot_cache.save_tier_a(
                             account_id, clock, revision, preview)
                         log_event("dashboard_cache", "dashboard", stage="tier_a_save",
@@ -3495,7 +3572,7 @@ class MainWindow(QMainWindow):
             result = error = None
             source_revision = None
             for attempt in range(4):
-                source_revision = self.game_repository.dashboard_data_revision()
+                source_revision = self.game_repository.dashboard_data_revision(account_id)
                 try:
                     candidate = self.dashboard_queries.snapshot(
                         account_id=account_id, clock=clock, query=dashboard_snapshot)
@@ -3505,7 +3582,7 @@ class MainWindow(QMainWindow):
                 if not isinstance(candidate, dict):
                     result = candidate
                     break
-                completed_revision = self.game_repository.dashboard_data_revision()
+                completed_revision = self.game_repository.dashboard_data_revision(account_id)
                 if completed_revision == source_revision:
                     cache_value = {key: value for key, value in candidate.items()
                                    if not key.startswith("_dashboard_")}
@@ -3652,10 +3729,25 @@ class MainWindow(QMainWindow):
             return
         if self.dashboard_queries.is_current(generation):
             if error is not None:
-                for value in self._dashboard_metric_values.values():
-                    value.setText("н/д")
-                for detail in self._dashboard_metric_details.values():
-                    detail.setText("Не удалось прочитать локальные данные. Повторите обновление.")
+                last_good = self._latest_dashboard_snapshot or {}
+                last_good_scope = last_good.get("filter") or {}
+                has_saved_summary = (
+                    last_good_scope.get("account_id") == self.dashboard_account.currentData()
+                    and last_good.get("_dashboard_tier_b_saved_at")
+                    and not last_good.get("is_preview"))
+                if has_saved_summary:
+                    for detail in self._dashboard_metric_details.values():
+                        text = detail.text()
+                        if "обновление временно недоступно" not in text.casefold():
+                            detail.setText(
+                                f"{text}\nОбновление временно недоступно; "
+                                "показана сохранённая сводка.")
+                else:
+                    for value in self._dashboard_metric_values.values():
+                        value.setText("н/д")
+                    for detail in self._dashboard_metric_details.values():
+                        detail.setText(
+                            "Не удалось прочитать локальные данные. Повторите обновление.")
             elif isinstance(snapshot, dict):
                 result_scope = snapshot.get("filter") or {}
                 account_id, clock = result_scope.get("account_id"), result_scope.get("clock")
@@ -3814,7 +3906,8 @@ class MainWindow(QMainWindow):
                     detail_text = f"С оценками: {analyzed if analyzed is not None else '—'}\n{parts[2]} · {parts[3]}"
             self._dashboard_metric_details[metric["key"]].setText(
                 "Проверка безопасности Lichess не подтверждена." if masked else detail_text)
-            if snapshot.get("_dashboard_stale") and metric["key"] in {"accuracy", "analysis", "errors"}:
+            if snapshot.get("_dashboard_stale") and metric["key"] in {
+                    "games", "accuracy", "analysis", "errors"}:
                 freshness = f"Данные на {saved_at_label} · обновляется" if saved_at_label else \
                     "Сохранённые данные · обновляется"
                 detail_text = f"{freshness}\n{detail_text}"
@@ -4374,6 +4467,12 @@ class MainWindow(QMainWindow):
             self.position_eval_label.setText(
                 "Нажмите «Анализировать позицию»: перед UCI проверим активные партии Lichess.")
 
+    def _update_material_balance(self, board: chess.Board | None, *,
+                                 player_color: chess.Color | None) -> None:
+        value = material_balance(board, player_color) if board is not None else None
+        self.material_balance_label.setText(
+            format_material_balance(value, player_color=player_color))
+
     def refresh(self, message: str | None = None) -> None:
         if self.online_session is not None:
             self.undo_local_button.setVisible(False)
@@ -4393,6 +4492,7 @@ class MainWindow(QMainWindow):
         self.undo_local_button.setVisible(local_game_visible and self.controller.ply > 0)
         self.undo_local_button.setEnabled(local_game_visible and self.controller.ply > 0)
         self.board.set_position(snapshot.board)
+        self._update_material_balance(snapshot.board, player_color=None)
         self.board.set_annotation_context("__local__", snapshot.board)
         self.board.set_interaction_enabled(snapshot.live)
         is_local_mode = self._screen_mode == "local" and local_game_visible
@@ -8303,6 +8403,14 @@ class MainWindow(QMainWindow):
             for move in board.move_stack[:ply]:
                 shown.push(move)
         self.board.set_position(shown)
+        material_color = session.color if session.owner_username is not None else None
+        if session.awaiting_authoritative_snapshot or self._event_stream_recovery_pending:
+            self._update_material_balance(None, player_color=material_color)
+        else:
+            # session.board contains only server-confirmed moves; render_board
+            # may include a speculative move awaiting acknowledgement.
+            self._update_material_balance(board if live else shown,
+                                          player_color=material_color)
         self.board.set_annotation_context(session.game_id, shown)
         server_game_active = session.status in {"started", "playing"}
         finished_view = session.status in TERMINAL_GAME_STATUSES

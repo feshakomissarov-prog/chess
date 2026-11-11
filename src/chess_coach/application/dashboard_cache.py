@@ -17,6 +17,9 @@ from ..infrastructure.sqlite.constants import SCHEMA_VERSION
 
 _CACHE_FORMAT = 3
 _COMPATIBLE_CACHE_FORMATS = {2, 3}
+# Cache payloads are independent of SQLite layout; preserve the last-good
+# Home facts across one additive database migration while the worker refreshes.
+_COMPATIBLE_SCHEMA_VERSIONS = {SCHEMA_VERSION, SCHEMA_VERSION - 1}
 _MAX_SCOPES = 12
 _MAX_CACHE_BYTES = 8 * 1024 * 1024
 _MAX_GRAPH_POINTS = 64
@@ -51,7 +54,7 @@ def _document_scope_key(key: object, account_id: str | None,
         return False
     return (isinstance(value, dict) and value.get("account") == account_id
             and value.get("clock") == clock and value.get("formula") == FORMULA_ID
-            and value.get("schema") == SCHEMA_VERSION
+            and value.get("schema") in _COMPATIBLE_SCHEMA_VERSIONS
             and value.get("format") in _COMPATIBLE_CACHE_FORMATS)
 
 
@@ -91,6 +94,11 @@ def _valid_game_shell(game: object) -> bool:
         value = game.get(key)
         if value is not None and (not isinstance(value, str) or len(value) > 500):
             return False
+    if game.get("last_move_at") is not None and (
+            type(game["last_move_at"]) is not int or game["last_move_at"] < 0):
+        return False
+    if game.get("game_time_precision") not in {None, "timestamp", "date_only", "unknown"}:
+        return False
     if game.get("line_revision") is not None and (
             type(game.get("line_revision")) is not int or game["line_revision"] < 0):
         return False
@@ -199,7 +207,8 @@ def _split_snapshot(snapshot: dict) -> tuple[dict, dict]:
             "game_id", "status", "winner", "color", "account_color", "account_id",
             "account_opponent", "opponent", "account_player_name", "player_name",
             "started_at", "clock", "opening_eco", "opening_name", "source",
-            "source_game_id", "line_revision", "line_hash")}
+            "source_game_id", "line_revision", "line_hash", "last_move_at",
+            "game_time_precision")}
         if isinstance(review_metrics, dict):
             recent_metrics.append({
                 "game_id": str(shell.get("game_id") or ""),
@@ -362,6 +371,32 @@ class DashboardSnapshotCache:
                     fcntl.flock(stream.fileno(), fcntl.LOCK_UN)
 
     def _read_document(self, expected_revision: int | None = None) -> dict | None:
+        for document in self._read_documents():
+            valid = True
+            for key, entry in document["scopes"].items():
+                scope = None
+                try:
+                    scope = json.loads(key)
+                except (TypeError, ValueError):
+                    valid = False
+                    break
+                if not isinstance(scope, dict):
+                    valid = False
+                    break
+                account_id, clock = scope.get("account"), scope.get("clock")
+                if (not _document_scope_key(key, account_id, clock)
+                        or not isinstance(entry, dict)
+                        or not _valid_tier_a(entry.get("tier_a"), account_id, clock)
+                        or (entry.get("tier_b") is not None
+                            and not _valid_tier_b(entry.get("tier_b")))):
+                    valid = False
+                    break
+            if valid:
+                return document
+        return None
+
+    def _read_documents(self) -> list[dict]:
+        documents = []
         for candidate in (self.path, self.previous_path):
             try:
                 if not candidate.is_file() or candidate.stat().st_size > _MAX_CACHE_BYTES:
@@ -369,7 +404,7 @@ class DashboardSnapshotCache:
                 document = json.loads(candidate.read_text(encoding="utf-8"))
                 if (not isinstance(document, dict)
                         or document.get("format") not in _COMPATIBLE_CACHE_FORMATS
-                        or document.get("schema_version") != SCHEMA_VERSION
+                        or document.get("schema_version") not in _COMPATIBLE_SCHEMA_VERSIONS
                         or document.get("formula_id") != FORMULA_ID
                         or not isinstance(document.get("scopes"), dict)):
                     continue
@@ -387,55 +422,88 @@ class DashboardSnapshotCache:
                         if not _document_scope_key(old_key, account_id, clock):
                             continue
                         scopes[_scope_key(account_id, clock)] = {
-                            **old_entry,
-                            "tier_a_revision": saved_revision,
-                            "tier_b_revision": saved_revision,
-                            "tier_b_saved_at": None,
-                        }
+                            **old_entry, "tier_a_revision": saved_revision,
+                            "tier_b_revision": saved_revision, "tier_b_saved_at": None}
                     document = {**document, "format": _CACHE_FORMAT, "scopes": scopes}
                 else:
+                    migrated_scopes = {}
+                    for old_key, entry in document["scopes"].items():
+                        try:
+                            old_scope = json.loads(old_key)
+                        except (TypeError, ValueError):
+                            continue
+                        if (not isinstance(old_scope, dict)
+                                or not _document_scope_key(
+                                    old_key, old_scope.get("account"), old_scope.get("clock"))):
+                            continue
+                        new_key = _scope_key(old_scope.get("account"), old_scope.get("clock"))
+                        migrated_scopes[new_key] = entry
                     for entry in document["scopes"].values():
                         if isinstance(entry, dict):
                             entry.setdefault("tier_a_revision", saved_revision)
                             entry.setdefault("tier_b_revision", saved_revision)
                             entry.setdefault("tier_b_saved_at", None)
-                return document
+                    document = {**document, "schema_version": SCHEMA_VERSION,
+                                "scopes": migrated_scopes}
+                documents.append(document)
             except (OSError, ValueError, TypeError):
                 continue
-        return None
+        return documents
 
-    def load(self, account_id: str | None, clock: str | None, *,
-             expected_revision: int | None = None) -> dict | None:
-        try:
-            revision = (self.repository.dashboard_data_revision()
-                        if expected_revision is None else int(expected_revision))
-            with self._lock, self._process_lock():
-                document = self._read_document()
-            if (document is None
-                    or self.repository.dashboard_data_revision() != revision):
-                return None
-            entry = document["scopes"].get(_scope_key(account_id, clock))
+    @staticmethod
+    def _load_from_documents(documents: list[dict], account_id: str | None,
+                             clock: str | None) -> dict | None:
+        scope_key = _scope_key(account_id, clock)
+        for document in documents:
+            entry = document["scopes"].get(scope_key)
             if entry is None:
                 entry = next((value for key, value in document["scopes"].items()
                               if _document_scope_key(key, account_id, clock)), None)
             if not isinstance(entry, dict):
-                return None
-            tier_a = entry.get("tier_a")
-            tier_b = entry.get("tier_b")
-            if not _valid_tier_a(tier_a, account_id, clock):
-                return None
-            if tier_b is not None and not _valid_tier_b(tier_b):
-                return None
+                continue
+            tier_a, tier_b = entry.get("tier_a"), entry.get("tier_b")
+            if (not _valid_tier_a(tier_a, account_id, clock)
+                    or (tier_b is not None and not _valid_tier_b(tier_b))):
+                continue
+            saved_revision = int(document.get("revision", -1))
             result = _merge_tiers(tier_a, tier_b)
-            tier_a_revision = int(entry.get("tier_a_revision", document.get("revision", -1)))
-            tier_b_revision = int(entry.get("tier_b_revision", document.get("revision", -1)))
-            result["_dashboard_revision"] = revision
-            result["_dashboard_tier_a_revision"] = tier_a_revision
-            result["_dashboard_tier_b_revision"] = tier_b_revision
-            result["_dashboard_stale"] = tier_b is not None and tier_b_revision != revision
+            result["_dashboard_revision"] = saved_revision
+            result["_dashboard_tier_a_revision"] = int(
+                entry.get("tier_a_revision", saved_revision))
+            result["_dashboard_tier_b_revision"] = int(
+                entry.get("tier_b_revision", saved_revision))
+            result["_dashboard_stale"] = False
             result["_dashboard_tier_b_saved_at"] = entry.get("tier_b_saved_at")
-            if self.repository.dashboard_data_revision() != revision:
+            return result
+        return None
+
+    def load_last_good(self, account_id: str | None, clock: str | None) -> dict | None:
+        """Return the validated saved scope without waiting for SQLite or a file lock."""
+        try:
+            result = self._load_from_documents(self._read_documents(), account_id, clock)
+            if result is not None and result.get("_dashboard_tier_b_revision") is not None:
+                result["_dashboard_stale"] = True
+            return result
+        except Exception:
+            return None
+
+    def load(self, account_id: str | None, clock: str | None, *,
+             expected_revision: int | None = None) -> dict | None:
+        try:
+            revision = (self.repository.dashboard_data_revision(account_id)
+                        if expected_revision is None else int(expected_revision))
+            with self._lock, self._process_lock():
+                documents = self._read_documents()
+            if (not documents
+                    or self.repository.dashboard_data_revision(account_id) != revision):
                 return None
+            result = self._load_from_documents(documents, account_id, clock)
+            if result is None or self.repository.dashboard_data_revision(account_id) != revision:
+                return None
+            result["_dashboard_revision"] = revision
+            result["_dashboard_stale"] = (
+                result.get("_dashboard_tier_b_revision") is not None and
+                result.get("_dashboard_tier_b_revision") != revision)
             return result
         except Exception:
             return None
@@ -467,12 +535,12 @@ class DashboardSnapshotCache:
                 if size > _MAX_CACHE_BYTES:
                     self.last_save_status = "oversized"
                     return False
-                if self.repository.dashboard_data_revision() != int(revision):
+                if self.repository.dashboard_data_revision(account_id) != int(revision):
                     self.last_save_status = "revision_changed"
                     return False
                 self._atomic_write(encoded)
             self.last_save_status = "saved"
-            return self.repository.dashboard_data_revision() == int(revision)
+            return self.repository.dashboard_data_revision(account_id) == int(revision)
         except (OSError, TypeError, ValueError, AttributeError):
             self.last_save_status = "io_error"
             return False
@@ -495,7 +563,7 @@ class DashboardSnapshotCache:
 
     def _save_tier(self, account_id, clock, revision, tier_name, tier) -> bool:
         try:
-            if self.repository.dashboard_data_revision() != int(revision):
+            if self.repository.dashboard_data_revision(account_id) != int(revision):
                 self.last_save_status = "revision_changed"
                 return False
             with self._lock, self._process_lock():
@@ -520,12 +588,12 @@ class DashboardSnapshotCache:
                 if size > _MAX_CACHE_BYTES:
                     self.last_save_status = "oversized"
                     return False
-                if self.repository.dashboard_data_revision() != int(revision):
+                if self.repository.dashboard_data_revision(account_id) != int(revision):
                     self.last_save_status = "revision_changed"
                     return False
                 self._atomic_write(encoded)
             self.last_save_status = "saved"
-            current = self.repository.dashboard_data_revision() == int(revision)
+            current = self.repository.dashboard_data_revision(account_id) == int(revision)
             if not current:
                 self.last_save_status = "revision_changed"
             return current

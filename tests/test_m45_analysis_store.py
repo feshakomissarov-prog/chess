@@ -55,7 +55,7 @@ def test_schema_v16_includes_openings_and_date_precision_without_copying_game_fa
     path = tmp_path / "synthetic.sqlite3"
     repository, line_hash = _seed_repository(path)
     try:
-        assert SCHEMA_VERSION == 25
+        assert SCHEMA_VERSION == 26
         with repository._connection() as db:
             version = db.execute("PRAGMA user_version").fetchone()[0]
             game = db.execute("SELECT game_id,pgn,moves FROM games WHERE game_id=?",
@@ -169,7 +169,10 @@ def test_v10_database_with_preexisting_analysis_jobs_is_upgraded_additively(tmp_
     with sqlite3.connect(path) as db:
         # This fixture simulates an actual v10 file. Runtime dashboard triggers
         # are introduced after that version and must not constrain the schema edit.
-        db.execute("DROP TRIGGER IF EXISTS dashboard_revision_analysis_jobs_update")
+        dashboard_triggers = db.execute(
+            "SELECT name FROM sqlite_master WHERE type='trigger' AND name LIKE 'dashboard_%'").fetchall()
+        for (trigger_name,) in dashboard_triggers:
+            db.execute(f'DROP TRIGGER "{trigger_name}"')
         db.execute("ALTER TABLE analysis_jobs DROP COLUMN result_run_id")
         db.execute("ALTER TABLE analysis_jobs DROP COLUMN lease_until")
         db.execute("ALTER TABLE analysis_jobs DROP COLUMN lease_owner")

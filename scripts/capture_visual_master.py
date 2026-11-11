@@ -512,6 +512,15 @@ def capture(window: MainWindow, output: Path, name: str, width: int, height: int
         if mode in page.buttons:
             assert_scroll_action(page.content_scroll, page.buttons[mode], f"Play mode {mode}")
             assert_action_target(window, page.buttons[mode], f"Play mode {mode}")
+        assert_action_target(window, page.start_button, "Play start action")
+        if page.active_open.isVisibleTo(window):
+            assert_action_target(window, page.active_open, "Continue selected game action")
+        action_center = page.start_button.mapTo(page, page.start_button.rect().center())
+        viewport = page.content_scroll.viewport()
+        viewport_rect = QRect(viewport.mapTo(page, viewport.rect().topLeft()), viewport.size())
+        assert not viewport_rect.contains(action_center), (
+            "The Play start action must remain outside the scrollable content viewport."
+        )
         page.content_scroll.verticalScrollBar().setValue(0)
         QTest.qWait(20)
     if current is window.game_page:
@@ -721,10 +730,14 @@ def capture(window: MainWindow, output: Path, name: str, width: int, height: int
             f"background {width}x{height}: page={page.height()}px, "
             f"events={page.recent_events.count()} rows/{page.recent_events.height()}px, "
             f"cards={[card.height() for card, _icon, _title in page._workflow_cards]}")
-    assert window.size() == QSize(width, height), (
-        f"Requested {width}x{height}, actual Qt window is {window.width()}x{window.height()}, "
-        f"minimum={window.minimumWidth()}x{window.minimumHeight()}, "
-        f"maximized={window.isMaximized()}, page={type(window.screen_stack.currentWidget()).__name__}"
+    # Windows may clamp a top-level window to the usable work area (taskbar and
+    # native frame). Treat that as the real display geometry, and fail only if
+    # the toolkit creates a window larger than the requested test target.
+    assert window.width() <= width and window.height() <= height, (
+        f"Requested maximum {width}x{height}, actual Qt window is "
+        f"{window.width()}x{window.height()}, minimum={window.minimumWidth()}x"
+        f"{window.minimumHeight()}, maximized={window.isMaximized()}, "
+        f"page={type(window.screen_stack.currentWidget()).__name__}"
     )
     assert window.isVisible(), "capture target is not visible"
     # Click-driven route navigation can leave the pointer on a control and
@@ -738,9 +751,12 @@ def capture(window: MainWindow, output: Path, name: str, width: int, height: int
     image = window.grab().toImage()
     assert not image.isNull()
     dpr = float(image.devicePixelRatio())
-    expected_pixels = QSize(round(width * dpr), round(height * dpr))
-    assert image.size() == expected_pixels, (
-        f"Logical window {width}x{height} at DPR {dpr} should capture as "
+    expected_pixels = QSize(round(window.width() * dpr), round(window.height() * dpr))
+    pixel_size_delta = (abs(image.width() - expected_pixels.width()),
+                        abs(image.height() - expected_pixels.height()))
+    assert max(pixel_size_delta) <= 1, (
+        f"Actual logical window {window.width()}x{window.height()} at DPR {dpr} "
+        "should capture as "
         f"{expected_pixels.width()}x{expected_pixels.height()}, got "
         f"{image.width()}x{image.height()}"
     )
@@ -820,6 +836,11 @@ def main() -> None:
             image = capture(window, output, "home", width, height)
             captured[f"home-{width}x{height}"] = image
             make_pair(reference_dir, output, REFERENCE_MAP["home"], image, f"home-{width}x{height}")
+            if width == target_sizes[0][0] and height == target_sizes[0][1]:
+                window._set_sidebar_collapsed(True, explicit=True)
+                collapsed = capture(window, output, "home-sidebar-collapsed", width, height)
+                captured["home-sidebar-collapsed"] = collapsed
+                window._set_sidebar_collapsed(False, explicit=False)
 
             navigate_to_games(window, selected_game_id)
             image = capture(window, output, "games", width, height)
@@ -1012,7 +1033,7 @@ def main() -> None:
         captured["game-review"] = capture(window, output, "game-review", width, height)
 
         # Settings are captured once per tab at the largest target size.
-        expected_count = (3 * len(target_sizes) + len(offline_sizes) + 16
+        expected_count = (3 * len(target_sizes) + len(offline_sizes) + 17
                           + tabs.count())
         assert len(captured) == expected_count, (
             f"Expected {expected_count} screenshot states, got {len(captured)}"

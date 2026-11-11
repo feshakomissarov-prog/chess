@@ -10,6 +10,7 @@ import tempfile
 import threading
 import time
 import urllib.request
+import uuid
 from urllib.parse import urlparse
 import zipfile
 
@@ -364,7 +365,7 @@ def install_official_stockfish(*, destination: str | os.PathLike[str],
         check_cancelled()
 
         if target.exists():
-            backup = parent / f".{target.name}.previous-{int(time.time())}"
+            backup = parent / f".{target.name}.previous-{time.time_ns()}-{uuid.uuid4().hex[:8]}"
             target.rename(backup)
         try:
             staged.rename(target)
@@ -377,6 +378,21 @@ def install_official_stockfish(*, destination: str | os.PathLike[str],
         verified["path"] = str(installed_engine.resolve())
         verified.update(version=STOCKFISH_RELEASE, archive_sha256=digest.hexdigest(),
                         license="GPL-3.0", source_url=STOCKFISH_URL)
+        retained = 0
+        for previous in parent.glob(f".{target.name}.previous-*"):
+            if backup is not None and previous == backup:
+                retained += 1
+                continue
+            try:
+                if previous.is_dir():
+                    shutil.rmtree(previous)
+                else:
+                    previous.unlink()
+            except OSError:
+                # A Windows process may still have a file open from an older
+                # install. Keep that verified copy and report it for cleanup.
+                retained += 1
+        verified["previous_backups_retained"] = retained
         return verified
     finally:
         shutil.rmtree(work, ignore_errors=True)

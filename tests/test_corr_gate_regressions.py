@@ -4,12 +4,14 @@ import chess
 from datetime import datetime, timedelta, timezone
 import threading
 import pytest
-from PySide6.QtCore import Qt, QSettings, QTimer
+from PySide6.QtCore import Qt, QSettings, QTimer, QRect
+from PySide6.QtTest import QSignalSpy, QTest
 from PySide6.QtTest import QTest
 
 from chess_coach.infrastructure.sqlite.jobs import AnalysisJobsStoreMixin
 from chess_coach.lichess.repository import GameRepository
 from chess_coach.ui.move_table import MoveTable
+from chess_coach.ui.pages.background import BackgroundOperationsPage
 from chess_coach.ui.pages.play import PlayPage
 from chess_coach.window import MainWindow
 
@@ -30,6 +32,19 @@ def test_play_keeps_mode_cards_accessible_in_active_mode(qtbot):
     qtbot.addWidget(page)
     page.mode_selector.setCurrentIndex(page.mode_selector.findData("active"))
     assert all(not card.isHidden() for card in page.cards)
+
+
+def test_play_mode_grid_uses_content_width_after_sidebar_and_dpi(qtbot):
+    page = PlayPage({})
+    qtbot.addWidget(page)
+    page.resize(610, 430)
+    page.set_active_games([{"gameId": "synthetic", "fen": chess.STARTING_FEN}],
+                          status="synthetic active game")
+    page.show()
+    qtbot.wait(30)
+    assert page._columns == 1
+    assert all(button.width() <= page.content_scroll.viewport().width()
+               for button in page.cards)
 
 
 def test_compact_play_mode_cards_can_be_reached_and_selected_by_mouse(qtbot):
@@ -84,6 +99,77 @@ def test_active_games_remain_visible_after_switching_play_mode(qtbot):
     assert all(not card.isHidden() for card in page.cards)
 
 
+@pytest.mark.parametrize(("width", "height", "active_count"), [
+    (1280, 720, 0), (1280, 720, 1), (1280, 720, 3),
+    (1366, 768, 0), (1366, 768, 1), (1366, 768, 3),
+    (1920, 1080, 0), (1920, 1080, 1), (1920, 1080, 3),
+])
+def test_play_start_and_continue_actions_stay_clickable_outside_scroll_area(
+        qtbot, width, height, active_count):
+    page = PlayPage({})
+    qtbot.addWidget(page)
+    page.resize(width, height)
+    page.set_active_games([{"gameId": f"active-{index}", "color": "white",
+                            "fen": chess.STARTING_FEN} for index in range(active_count)])
+    created = QSignalSpy(page.create_requested)
+    opened = QSignalSpy(page.active_game_requested)
+    page.show()
+    qtbot.wait(30)
+
+    buttons = [page.start_button] + ([page.active_open] if active_count else [])
+    for button in buttons:
+        center = button.mapTo(page, button.rect().center())
+        viewport = page.content_scroll.viewport()
+        viewport_rect = QRect(viewport.mapTo(page, viewport.rect().topLeft()), viewport.size())
+        assert page.rect().contains(center)
+        assert not viewport_rect.contains(center)
+        assert button.isVisible() and button.isEnabled()
+    QTest.mouseClick(page.start_button, Qt.MouseButton.LeftButton)
+    assert created.count() == 1
+    if active_count:
+        QTest.mouseClick(page.active_open, Qt.MouseButton.LeftButton)
+        assert opened.count() == 1
+
+
+def test_sidebar_auto_restore_expands_on_wide_window_but_keeps_explicit_choice(
+        qtbot, tmp_path):
+    automatic = QSettings(str(tmp_path / "sidebar-auto.ini"), QSettings.Format.IniFormat)
+    automatic.setValue("workspace/sidebar_collapsed", True)
+    automatic.setValue("workspace/sidebar_explicit", False)
+    window = MainWindow(automatic, offline_mode=True)
+    qtbot.addWidget(window)
+    # Offscreen Qt may expose an 800px virtual screen. Exercise the wide-window
+    # responsive branch with the same logical width without changing settings.
+    window.width = lambda: 1360
+    window._set_sidebar_collapsed(window.width() < 1160)
+    assert window.sidebar.width() > 60
+    window.game_repository.shutdown()
+    window.close()
+
+    explicit = QSettings(str(tmp_path / "sidebar-explicit.ini"), QSettings.Format.IniFormat)
+    explicit.setValue("workspace/sidebar_collapsed", True)
+    explicit.setValue("workspace/sidebar_explicit", True)
+    collapsed = MainWindow(explicit, offline_mode=True)
+    qtbot.addWidget(collapsed)
+    assert collapsed.sidebar.width() == 60
+    collapsed.game_repository.shutdown()
+    collapsed.close()
+
+
+@pytest.mark.parametrize("size", [(853, 480), (911, 512), (1280, 720),
+                                    (1366, 768), (1920, 1061)])
+def test_background_workflow_cards_do_not_overlap_at_responsive_heights(qtbot, size):
+    page = BackgroundOperationsPage()
+    qtbot.addWidget(page)
+    page.resize(*size)
+    page.show()
+    qtbot.wait(30)
+    cards = [card for card, _icon, _title in page._workflow_cards]
+    assert all(left.geometry().bottom() < right.geometry().top()
+               for left, right in zip(cards, cards[1:])), (
+        size, [card.geometry().getRect() for card in cards])
+
+
 def test_offline_play_modes_remain_selectable_without_sending_network_request(qtbot, tmp_path):
     window = MainWindow(QSettings(str(tmp_path / "offline-play-selectable.ini"),
                                   QSettings.Format.IniFormat), offline_mode=True)
@@ -97,7 +183,8 @@ def test_offline_play_modes_remain_selectable_without_sending_network_request(qt
             assert page.mode_selector.currentData() == mode
         page.select_mode("ai")
         assert not page.start_button.isEnabled()
-        assert "Подключите Lichess" in page.start_button.toolTip()
+        assert "игрового потока" in page.start_button.toolTip()
+        assert not page.form_status.isHidden()
         assert window.lichess is None
         assert window._pending_play_request_id is None
     finally:

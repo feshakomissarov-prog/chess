@@ -66,7 +66,7 @@ def test_last_good_cache_is_available_after_new_game_changes_revision(tmp_path):
     repository = GameRepository(tmp_path / "last-good.sqlite3")
     _seed_profile(repository)
     cache = DashboardSnapshotCache(repository)
-    before_revision = repository.dashboard_data_revision()
+    before_revision = repository.dashboard_data_revision(ACCOUNT)
     prior = dashboard_snapshot(repository, account_id=ACCOUNT, wait_for_writes=False)
     assert _metric(prior, "games") == "3319"
     assert prior["puzzle_player_rating"]["latest"] == 1492
@@ -75,7 +75,7 @@ def test_last_good_cache_is_available_after_new_game_changes_revision(tmp_path):
     repository.save_snapshot("seed-new", "startpos", "e2e4 e7e5", "white", "New opponent",
                              False, "5+0", "mate", "white", started_at="2026-11-10T12:00:00Z",
                              account_username="synthetic-profile")
-    current_revision = repository.dashboard_data_revision()
+    current_revision = repository.dashboard_data_revision(ACCOUNT)
     assert current_revision != before_revision
     # Existing exact-head behavior drops the valid B document when revision advances.
     recovered = cache.load(ACCOUNT, None, expected_revision=current_revision)
@@ -85,11 +85,38 @@ def test_last_good_cache_is_available_after_new_game_changes_revision(tmp_path):
     repository.shutdown()
 
 
+def test_background_aggregate_error_keeps_cached_home_numbers(qtbot, tmp_path):
+    repository = GameRepository(tmp_path / "aggregate-error.sqlite3")
+    _seed_profile(repository)
+    revision = repository.dashboard_data_revision(ACCOUNT)
+    summary = dashboard_snapshot(repository, account_id=ACCOUNT, wait_for_writes=False)
+    cache = DashboardSnapshotCache(repository)
+    assert cache.save(ACCOUNT, None, revision, summary)
+    settings = QSettings(str(tmp_path / "aggregate-error.ini"), QSettings.Format.IniFormat)
+    settings.setValue("workspace/selected_account", ACCOUNT)
+    runtime = ApplicationRuntime(settings, tmp_path, repository, True, False)
+    window = MainWindow(runtime=runtime)
+    qtbot.addWidget(window)
+    before_accuracy = window._dashboard_metric_values["accuracy"].text()
+    before_rating = window._home_view.puzzle_rating.text()
+    assert before_accuracy not in {"—", "н/д"}
+    assert before_rating == "1492"
+
+    generation = window.dashboard_queries.begin_request()
+    window._dashboard_result_ready(generation, None, RuntimeError("database locked"), None)
+    assert window._dashboard_metric_values["accuracy"].text() == before_accuracy
+    assert window._home_view.puzzle_rating.text() == before_rating
+    assert "обновление временно недоступно" in (
+        window._dashboard_metric_details["accuracy"].text().casefold())
+    window.close()
+    runtime.close()
+
+
 def test_real_main_window_first_paint_restores_stale_tier_b_with_fresh_tier_a(
         qtbot, tmp_path):
     repository = GameRepository(tmp_path / "window-restart.sqlite3")
     _seed_profile(repository)
-    initial_revision = repository.dashboard_data_revision()
+    initial_revision = repository.dashboard_data_revision(ACCOUNT)
     full = dashboard_snapshot(repository, account_id=ACCOUNT, wait_for_writes=False)
     assert _metric(full, "games") == "3319"
     assert full["puzzle_player_rating"]["latest"] == 1492
@@ -103,6 +130,8 @@ def test_real_main_window_first_paint_restores_stale_tier_b_with_fresh_tier_a(
     runtime = ApplicationRuntime(settings, tmp_path, repository, True, False)
     window = MainWindow(runtime=runtime)
     qtbot.addWidget(window)
+    assert window._dashboard_metric_values["accuracy"].text() not in {"—", "н/д"}
+    assert window._home_view.puzzle_rating.text() == "1492"
     shown_at = time.perf_counter()
     window.show()
     qtbot.waitUntil(lambda: window._dashboard_first_count_paint, timeout=5000)
@@ -122,7 +151,7 @@ def test_real_main_window_first_paint_restores_stale_tier_b_with_fresh_tier_a(
     # This in-process Qt test can contend with the shared QApplication and the
     # legacy metrics writer; strict startup timing is asserted by the isolated
     # subprocess/native-window smoke test below.
-    assert first_paint_ms <= 5000
+    assert first_paint_ms <= 1000
     qtbot.waitUntil(lambda: window._dashboard_full_rendered_generation is not None, timeout=10000)
     window.close()
     runtime.close()
@@ -162,10 +191,14 @@ def test_3319_to_3320_restart_persists_and_paints_real_ui_in_separate_processes(
     assert changed["first_useful_accuracy"] == "68.0%"
     assert changed["first_useful_rating"] == "1492"
     assert changed["first_useful_stale"] is True
-    assert changed["first_useful_recent_ids"] == [
-        "seed-new", "seed-0", "seed-old-03315"]
+    assert changed["current_summary_ms"] <= 1000
+    assert changed["recent_ids"][:3] == ["seed-new", "seed-0", "seed-old-03315"]
     assert "обновляется" in changed["first_useful_accuracy_detail"]
-    assert "72.0%" in " ".join(changed["first_useful_cards"][1])
+    # First useful paint keeps the previous last-good Tier A; verify the
+    # unchanged seed-0 accuracy card by its identity, not by a guessed offset.
+    seed_zero_card = next(card for card in changed["first_useful_cards"]
+                          if card[1] == "Opponent seed-0")
+    assert "72.0%" in " ".join(seed_zero_card)
     assert "Новая партия" in " ".join(changed["first_useful_cards"][0])
     assert changed["aggregate_calls"] >= 1
     assert changed["full_ready_ms"] is not None
@@ -182,6 +215,7 @@ def test_3319_to_3320_restart_persists_and_paints_real_ui_in_separate_processes(
     assert after["accuracy"] != "—"
     assert after["puzzle_rating"] == "1492"
     assert after["first_useful_ms"] <= 500
+    assert after["first_useful_accuracy"] is not None
     assert after["aggregate_calls"] == 0
 
 

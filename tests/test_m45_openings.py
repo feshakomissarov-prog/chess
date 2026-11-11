@@ -205,7 +205,7 @@ def test_schema_v16_upgrade_preserves_existing_facts_and_backup(tmp_path):
         db.execute("PRAGMA user_version=15")
     upgraded = GameRepository(path)
     try:
-        assert SCHEMA_VERSION == 25
+        assert SCHEMA_VERSION == 26
         assert upgraded.get_game("keep")["moves"] == "e2e4 e7e5"
         with upgraded._connection() as db:
             assert db.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION

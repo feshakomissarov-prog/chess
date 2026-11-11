@@ -58,6 +58,30 @@ def test_dashboard_revision_covers_job_and_position_dependencies_but_ignores_met
     repository.shutdown()
 
 
+def test_dashboard_profile_revision_ignores_other_account_and_noop_writes(tmp_path):
+    repository = GameRepository(tmp_path / "profile-revisions.sqlite3")
+    repository.save_snapshot(
+        "profile-a-game", "startpos", "e2e4", "white", "A opponent", False,
+        "5+0", "mate", "white", account_username="profile-a")
+    before_a = repository.dashboard_data_revision("lichess:profile-a")
+    before_b = repository.dashboard_data_revision("lichess:profile-b")
+    before_global = repository.dashboard_data_revision()
+
+    repository.save_snapshot(
+        "profile-b-game", "startpos", "d2d4", "white", "B opponent", False,
+        "5+0", "mate", "white", account_username="profile-b")
+    after_b_write = repository.dashboard_data_revision("lichess:profile-a")
+    assert after_b_write == before_a
+    assert repository.dashboard_data_revision("lichess:profile-b") > before_b
+    assert repository.dashboard_data_revision() > before_global
+
+    with repository._connection() as db:
+        db.execute("UPDATE account_games SET opponent=opponent "
+                   "WHERE account_id='lichess:profile-b'")
+    assert repository.dashboard_data_revision("lichess:profile-a") == after_b_write
+    repository.shutdown()
+
+
 def test_dashboard_cache_rejects_schema_valid_json_with_wrong_tier_shapes(tmp_path):
     repository = GameRepository(tmp_path / "dashboard-malformed.sqlite3")
     cache = DashboardSnapshotCache(repository)

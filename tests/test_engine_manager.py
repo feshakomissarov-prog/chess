@@ -87,6 +87,29 @@ def test_official_install_verifies_hash_extracts_and_installs_atomically(tmp_pat
     assert (target / "stockfish" / "Copying.txt").exists()
 
 
+def test_reinstall_keeps_only_one_verified_backup_and_preserves_install_on_failure(
+        tmp_path, monkeypatch):
+    payload = _zip_bytes({"stockfish.exe": b"fake-engine"})
+    _patch_asset(monkeypatch, payload)
+    monkeypatch.setattr(em, "verify_uci_engine", lambda path, timeout=5.0: {
+        "path": str(path), "name": "Stockfish 19"})
+    target = tmp_path / "engines" / "19"
+    for _ in range(3):
+        result = em.install_official_stockfish(destination=target)
+    backups = list(target.parent.glob(f".{target.name}.previous-*"))
+    assert len(backups) == 1
+    assert result["previous_backups_retained"] == 1
+    installed = target / "stockfish.exe"
+    original = installed.read_bytes()
+
+    monkeypatch.setattr(em, "verify_uci_engine",
+                        lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("UCI failed")))
+    with pytest.raises(RuntimeError, match="UCI failed"):
+        em.install_official_stockfish(destination=target)
+    assert installed.read_bytes() == original
+    assert len(list(target.parent.glob(f".{target.name}.previous-*"))) == 1
+
+
 @pytest.mark.parametrize("payload", [b"not a zip", _zip_bytes({"../escape.exe": b"x"})])
 def test_invalid_or_zip_slip_archive_never_installs(tmp_path, monkeypatch, payload):
     _patch_asset(monkeypatch, payload)

@@ -15,6 +15,7 @@ from PySide6.QtCore import QSettings, QTimer
 from PySide6.QtWidgets import QApplication
 
 from chess_coach.bootstrap import ApplicationRuntime
+from chess_coach.application.dashboard import dashboard_preview_snapshot
 from chess_coach.diagnostics import configure_logging
 from chess_coach.lichess.repository import GameRepository
 from chess_coach.window import MainWindow
@@ -97,6 +98,10 @@ def launch(database: Path, root: Path, run_seconds: int, navigation_cycles: int,
     settings.sync()
     repository = GameRepository(database)
     runtime = ApplicationRuntime(settings, root, repository, True, False)
+    target_snapshot = dashboard_preview_snapshot(repository, account_id=ACCOUNT)
+    target_count = next(item["value"] for item in target_snapshot["metrics"]
+                        if item["key"] == "games")
+    target_recent_ids = [game["game_id"] for game in target_snapshot["recent_games"]]
     window = MainWindow(runtime=runtime)
     aggregate_calls = 0
     original_snapshot = window.dashboard_queries.snapshot
@@ -113,6 +118,7 @@ def launch(database: Path, root: Path, run_seconds: int, navigation_cycles: int,
     state_path = root / "window-state.json"
     first_count = first_useful = first_recent_cards = full_ready = None
     first_useful_snapshot = None
+    current_summary_ms = None
     count_capture = False
     useful_capture = False
     useful_capture_pending = False
@@ -154,12 +160,17 @@ def launch(database: Path, root: Path, run_seconds: int, navigation_cycles: int,
         nonlocal useful_capture_pending
         nonlocal first_recent_cards
         nonlocal updated_capture, navigation_done
-        nonlocal first_useful_snapshot
+        nonlocal first_useful_snapshot, current_summary_ms
         now = time.perf_counter()
         games = window._dashboard_metric_values["games"].text()
         accuracy = window._dashboard_metric_values["accuracy"].text()
         rating = window._home_view.puzzle_rating.text()
         snapshot = window._latest_dashboard_snapshot or {}
+        visible_recent_ids = [game.get("game_id") for game in snapshot.get("recent_games", [])]
+        if (current_summary_ms is None and games == target_count
+                and visible_recent_ids[:len(target_recent_ids)] == target_recent_ids
+                and accuracy not in {"—", "н/д", "-"} and rating not in {"—", "-"}):
+            current_summary_ms = round((now - shown) * 1000, 2)
         if games not in {"—", "-"} and first_count is None:
             first_count = round((now - shown) * 1000, 2)
         if first_count is not None and not count_capture:
@@ -243,6 +254,9 @@ def launch(database: Path, root: Path, run_seconds: int, navigation_cycles: int,
             "shown_at_monotonic": shown,
             "first_count_ms": first_count,
             "first_useful_ms": first_useful,
+            "current_summary_ms": current_summary_ms,
+            "target_games": target_count,
+            "target_recent_ids": target_recent_ids,
             "first_recent_cards_ms": first_recent_cards,
             "full_ready_ms": full_ready,
             "games": games,
