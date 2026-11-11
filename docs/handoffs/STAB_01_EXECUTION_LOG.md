@@ -53,6 +53,7 @@
 - При 150% узкие physical 1280×720/1366×768 bounds прошли Home/Play/Background, CTA и active-open checks. Дальнейший all-pages visual sweep остановился на существующем clipping `PuzzleHistoryPage.solution` (не TD-01…09/MAT-01; за пределами затронутой страницы). [Active Play 150%](evidence/stab01/play-active-1280x720-150.png).
 - При 125% Home/Play/Background на всех трёх logical bounds прошли, в том числе [active Play 1280×720 physical](evidence/stab01/play-active-1280x720-125.png). Общий visual sweep остановился позднее на `clear_board_annotations` внутри Active Game screen в 1280×720 physical. Остальные responsive строки этот общий sweep не прошёл, поэтому отчет ограничивает вывод целевыми Home/Play сценариями.
 - Артефакты добавляются в `docs/handoffs/evidence/stab01/` только из synthetic DB.
+- Exact-head GitHub Windows `visual-evidence` первоначально выявил, что при 1672×941 три 140 px recent карточки имели `scroll_max=13`. Исправлены только интервалы внутри существующей карточки: межсекционный 20→16 px, между recent rows 12→6 px; размеры карточек, шрифты, цвета и состав не менялись. Повторный native Windows `scripts/capture_visual_master.py` подтвердил `scroll_max=0` на 1672×941 и завершился **33 strict synthetic states PASS**. CI rerun после фикса — ожидается на новом exact HEAD.
 
 ## Автоматические проверки
 
