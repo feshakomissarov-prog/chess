@@ -166,11 +166,11 @@ class HomePage(QWidget):
         # Title, rating, trend graph, wrapped trend label and their margins
         # need roughly 200 logical px; a smaller minimum makes the graph and
         # trend overlap at compact Windows heights.
-        self.home_progress_card.setMinimumHeight(208)
+        self.home_progress_card.setMinimumHeight(200)
         self.home_progress_card.setMaximumHeight(300)
         progress_layout = QVBoxLayout(self.home_progress_card)
-        progress_layout.setContentsMargins(11, 8, 11, 8)
-        progress_layout.setSpacing(4)
+        progress_layout.setContentsMargins(11, 8, 11, 4)
+        progress_layout.setSpacing(2)
         progress_title = QLabel("Рейтинг задач")
         progress_title.setStyleSheet("font-size: 19px; font-weight: 600;")
         progress_title.setWordWrap(True)
