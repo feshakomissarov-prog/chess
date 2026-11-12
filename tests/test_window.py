@@ -3913,11 +3913,13 @@ def test_sidebar_play_opens_mode_picker_without_resetting_local_game(qtbot, tmp_
     assert window.play_local_button.accessibleName() == "Свободная доска"
     assert window.play_ai_button.isEnabled()
     assert window.play_page.buttons.get("active") is None
+    window.show()
     window.setFixedSize(1000, 720)
-    window._layout_play_mode_cards()
+    qtbot.waitUntil(lambda: window.play_page.content_scroll.viewport().width() > 0)
+    qtbot.waitUntil(lambda: window._play_mode_columns == 1)
     assert window._play_mode_columns == 1
     window.setFixedSize(1360, 860)
-    window._layout_play_mode_cards()
+    qtbot.waitUntil(lambda: window._play_mode_columns == 2)
     assert window._play_mode_columns == 2
     window.close()
 

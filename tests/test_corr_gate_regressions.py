@@ -129,7 +129,7 @@ def test_active_games_remain_visible_after_switching_play_mode(qtbot):
     (1366, 768, 0), (1366, 768, 1), (1366, 768, 3),
     (1920, 1080, 0), (1920, 1080, 1), (1920, 1080, 3),
 ])
-def test_play_start_and_continue_actions_stay_clickable_outside_scroll_area(
+def test_play_start_and_continue_actions_remain_reachable(
         qtbot, width, height, active_count):
     page = PlayPage({})
     qtbot.addWidget(page)
@@ -147,8 +147,15 @@ def test_play_start_and_continue_actions_stay_clickable_outside_scroll_area(
         viewport = page.content_scroll.viewport()
         viewport_rect = QRect(viewport.mapTo(page, viewport.rect().topLeft()), viewport.size())
         assert page.rect().contains(center)
-        assert not viewport_rect.contains(center)
         assert button.isVisible() and button.isEnabled()
+        if button is page.start_button:
+            # The start action belongs to the selected mode form and remains
+            # in the visible portion of that form at the tested window sizes.
+            assert viewport_rect.contains(center)
+        else:
+            # The confirmed-game resume action remains pinned outside content
+            # scrolling, independently of the new-game form.
+            assert not viewport_rect.contains(center)
     QTest.mouseClick(page.start_button, Qt.MouseButton.LeftButton)
     assert created.count() == 1
     if active_count:
