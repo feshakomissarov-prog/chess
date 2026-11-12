@@ -381,8 +381,13 @@ class _DashboardGameCard(QFrame):
             self._responsive_layout.setDirection(direction)
         owner = self.window()
         compact_height = owner.height() < 780
-        minimum = 176 if compact else 136 if compact_height else 108
-        maximum = 208 if compact else 144 if compact_height else 118
+        has_graph = self._responsive_graph is not None
+        if compact:
+            minimum, maximum = (176, 208) if has_graph else (112, 144)
+        elif compact_height:
+            minimum, maximum = 136, 144
+        else:
+            minimum, maximum = 108, 118
         if self.minimumHeight() != minimum:
             self.setMinimumHeight(minimum)
         if self.maximumHeight() != maximum:
