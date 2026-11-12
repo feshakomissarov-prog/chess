@@ -2275,6 +2275,11 @@ class MainWindow(QMainWindow):
         side_scroll.setWidgetResizable(True)
         side_scroll.setFrameShape(QFrame.Shape.NoFrame)
         side_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        # QScrollArea's widgetResizable path can compress a tall control layout
+        # to the viewport height when a stretchable move table is present.
+        # Preserve the layout's full minimum height so bottom actions scroll
+        # into view on short/high-DPI windows.
+        side.setMinimumHeight(side_layout.minimumSize().height())
         side_scroll.setWidget(side)
         self.game_controls_scroll = side_scroll
         splitter.addWidget(side_scroll)
