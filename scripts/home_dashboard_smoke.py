@@ -141,6 +141,7 @@ def launch(database: Path, root: Path, run_seconds: int, navigation_cycles: int,
     first_count = first_useful = first_recent_cards = full_ready = None
     first_useful_snapshot = None
     current_summary_ms = None
+    current_summary_cards = None
     count_capture = False
     useful_capture = False
     useful_capture_pending = False
@@ -182,7 +183,7 @@ def launch(database: Path, root: Path, run_seconds: int, navigation_cycles: int,
         nonlocal useful_capture_pending
         nonlocal first_recent_cards
         nonlocal updated_capture, navigation_done
-        nonlocal first_useful_snapshot, current_summary_ms
+        nonlocal first_useful_snapshot, current_summary_ms, current_summary_cards
         now = time.perf_counter()
         games = window._dashboard_metric_values["games"].text()
         accuracy = window._dashboard_metric_values["accuracy"].text()
@@ -210,6 +211,12 @@ def launch(database: Path, root: Path, run_seconds: int, navigation_cycles: int,
                     == expected["accuracy_detail"]
                 and rating == expected["puzzle_rating"]):
             current_summary_ms = round((now - shown) * 1000, 2)
+            from PySide6.QtWidgets import QLabel
+            current_summary_cards = [{
+                "game_id": str(card.property("dashboard_game_id") or ""),
+                "labels": [label.text() for label in card.findChildren(QLabel)
+                           if label.isVisible()],
+            } for card, _rect in painted_cards]
         if games not in {"—", "-"} and first_count is None:
             first_count = round((now - shown) * 1000, 2)
         if first_count is not None and not count_capture:
@@ -305,6 +312,7 @@ def launch(database: Path, root: Path, run_seconds: int, navigation_cycles: int,
             "first_count_ms": first_count,
             "first_useful_ms": first_useful,
             "current_summary_ms": current_summary_ms,
+            "current_summary_cards": current_summary_cards,
             "target_games": target_count,
             "target_recent_ids": target_recent_ids,
             "expected": expected,
