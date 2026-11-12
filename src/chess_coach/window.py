@@ -44,6 +44,7 @@ from PySide6.QtWidgets import (
     QProgressDialog,
     QRadioButton,
     QScrollArea,
+    QSizePolicy,
     QTabWidget,
     QSpinBox,
     QSlider,
@@ -2084,6 +2085,7 @@ class MainWindow(QMainWindow):
 
         side = QWidget()
         side.setMinimumWidth(0)
+        side.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
         side_layout = QVBoxLayout(side)
         side_layout.setContentsMargins(8, 0, 0, 0)
         # Keep the full action row inside the compact high-DPI viewport while
