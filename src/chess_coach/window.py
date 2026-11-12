@@ -4068,7 +4068,7 @@ class MainWindow(QMainWindow):
             heading_label.setStyleSheet(
                 f"color: {outcome_color}; font-size: 20px; font-weight: 700;")
             heading_label.setWordWrap(False)
-            heading_label.setMinimumWidth(80)
+            heading_label.setMinimumWidth(120)
             heading_label.setSizePolicy(QSizePolicy.Policy.Ignored,
                                         QSizePolicy.Policy.Preferred)
             heading_row.addWidget(heading_label)
