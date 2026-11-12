@@ -10,6 +10,7 @@ from PySide6.QtWidgets import (
     QComboBox, QFrame, QGridLayout, QHBoxLayout, QLabel, QPushButton, QScrollArea,
     QSizePolicy, QToolTip, QVBoxLayout, QWidget,
 )
+from ..icons import icon_pixmap
 
 
 class PuzzleRatingSparkline(QWidget):
@@ -81,8 +82,7 @@ class HomePage(QWidget):
         self.home_status.setMaximumHeight(24)
         self.home_status.hide()
         layout.addWidget(self.home_status)
-        # The status row is hidden on Home; retain only a small rhythm gap so
-        # all three approved recent-game cards fit at the reference height.
+        # The status row is hidden on Home; retain the baseline rhythm gap.
         layout.addSpacing(2)
 
         # Account scope is shared with the authenticated profile. Keep the old
@@ -109,7 +109,7 @@ class HomePage(QWidget):
         metrics_grid = QGridLayout()
         self.dashboard_metrics_grid = metrics_grid
         metrics_grid.setContentsMargins(0, 0, 0, 0)
-        metrics_grid.setHorizontalSpacing(16)
+        metrics_grid.setHorizontalSpacing(10)
         metrics_grid.setVerticalSpacing(0)
         self._dashboard_metric_values = {}
         self._dashboard_metric_details = {}
@@ -128,9 +128,11 @@ class HomePage(QWidget):
             caption.setWordWrap(True)
             caption_row = QHBoxLayout()
             if key in {"games", "accuracy"}:
-                icon = QLabel("♟" if key == "games" else "◎")
+                icon = QLabel()
                 icon.setAlignment(Qt.AlignmentFlag.AlignCenter)
                 icon.setFixedSize(42, 42)
+                icon.setPixmap(icon_pixmap("pawn" if key == "games" else "target",
+                                           25, "#D8D0FF", icon.devicePixelRatioF()))
                 icon.setStyleSheet("background: #39365E; color: #C8BBFF;"
                                    "border-radius: 10px; font-size: 25px;")
                 caption_row.addWidget(icon)
@@ -140,6 +142,7 @@ class HomePage(QWidget):
             detail = QLabel("Локальные данные")
             detail.setObjectName("muted")
             detail.setWordWrap(True)
+            detail.setStyleSheet("font-size: 12px;")
             card_layout.addLayout(caption_row)
             card_layout.addWidget(value)
             card_layout.addWidget(detail)
@@ -150,16 +153,16 @@ class HomePage(QWidget):
         # field for compatibility without giving it KPI prominence on Home.
         self.dashboard_metrics["errors"].hide()
         for key in ("games", "accuracy"):
-            self.dashboard_metrics[key].setMinimumHeight(240)
-        layout.addLayout(metrics_grid)
-        layout.addSpacing(10)
+            self.dashboard_metrics[key].setMinimumHeight(178)
+            self.dashboard_metrics[key].setMaximumHeight(190)
 
         top_row = QHBoxLayout()
         self.home_primary_actions = top_row
         top_row.setSpacing(9)
         self.home_progress_card = QFrame(self)
         self.home_progress_card.setObjectName("metricCard")
-        self.home_progress_card.setMinimumHeight(240)
+        self.home_progress_card.setMinimumHeight(150)
+        self.home_progress_card.setMaximumHeight(300)
         progress_layout = QVBoxLayout(self.home_progress_card)
         progress_layout.setContentsMargins(11, 8, 11, 8)
         progress_layout.setSpacing(4)
@@ -199,22 +202,26 @@ class HomePage(QWidget):
 
         self.home_play_card = QFrame(self)
         self.home_play_card.setObjectName("metricCard")
-        self.home_play_card.setMaximumHeight(160)
-        activity_layout = QHBoxLayout(self.home_play_card)
+        self.home_play_card.setMaximumHeight(118)
+        activity_layout = QVBoxLayout(self.home_play_card)
         activity_layout.setContentsMargins(11, 8, 11, 8)
         activity_layout.setSpacing(4)
         activity_title = QLabel("Следующее занятие")
         activity_title.setStyleSheet("font-size: 16px; font-weight: 700;")
         activity_layout.addWidget(activity_title)
+        activity_detail = QHBoxLayout()
+        activity_detail.setSpacing(6)
         self.activity_status = QLabel("Пока нет сохранённых задач для повторения.")
         self.activity_status.setObjectName("secondary")
         self.activity_status.setWordWrap(True)
-        self.activity_status.setMaximumHeight(50)
-        activity_layout.addWidget(self.activity_status, 1)
+        self.activity_status.setMaximumHeight(42)
+        activity_detail.addWidget(self.activity_status, 1)
         self.home_activity_button = QPushButton("Открыть обучение")
         self.home_activity_button.setObjectName("primaryAction")
+        self.home_activity_button.setMaximumHeight(32)
         self.home_activity_button.clicked.connect(actions["open_puzzle_history_local"])
-        activity_layout.addWidget(self.home_activity_button)
+        activity_detail.addWidget(self.home_activity_button)
+        activity_layout.addLayout(activity_detail)
         top_row.addWidget(self.home_play_card, 1)
 
         recent_card = QFrame(self)
@@ -222,10 +229,10 @@ class HomePage(QWidget):
         recent_card.setObjectName("recentGames")
         recent_layout = QVBoxLayout(recent_card)
         recent_layout.setContentsMargins(11, 8, 11, 8)
-        recent_layout.setSpacing(16)
+        recent_layout.setSpacing(8)
         recent_title_row = QHBoxLayout()
         recent_title = QLabel("Последние партии")
-        recent_title.setStyleSheet("font-size: 30px; font-weight: 700;")
+        recent_title.setStyleSheet("font-size: 24px; font-weight: 700;")
         recent_title_row.addWidget(recent_title)
         recent_title_row.addStretch(1)
         self.home_games_button = QPushButton("Все партии")
@@ -246,9 +253,22 @@ class HomePage(QWidget):
         self.recent_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self.recent_scroll.setWidget(recent_rows)
         recent_layout.addWidget(self.recent_scroll, 1)
-        layout.addWidget(recent_card, 1)
-        # Training remains available through the primary sidebar route.
-        self.home_play_card.hide()
+        # Keep progress and the next-lesson action in the center zone and the
+        # three compact recent-game cards visible together in the right zone.
+        # This follows the approved Home layout and avoids a page-level scroll.
+        overview = QWidget(self)
+        overview_layout = QVBoxLayout(overview)
+        overview_layout.setContentsMargins(0, 0, 0, 0)
+        overview_layout.setSpacing(8)
+        overview_layout.addLayout(metrics_grid)
+        overview_layout.addWidget(self.home_progress_card, 1)
+        overview_layout.addLayout(top_row)
+        zones = QHBoxLayout()
+        zones.setContentsMargins(0, 0, 0, 0)
+        zones.setSpacing(12)
+        zones.addWidget(overview, 4)
+        zones.addWidget(recent_card, 6)
+        layout.addLayout(zones, 1)
 
         # Preserve shell callbacks and old tests as hidden compatibility hooks.
         self.home_friend_button = QPushButton("Играть с другом по ссылке")
@@ -333,24 +353,19 @@ class HomePage(QWidget):
 
     def layout_metrics(self, width: int | None = None) -> None:
         grid = self.dashboard_metrics_grid
-        cards = [self.dashboard_metrics["games"], self.dashboard_metrics["accuracy"],
-                 self.home_progress_card]
+        cards = [self.dashboard_metrics["games"], self.dashboard_metrics["accuracy"]]
         if not cards:
             return
         available = int(width if width is not None else self.width())
-        columns = 3 if available >= 980 else 2 if available >= 620 else 1
+        columns = 2 if available >= 620 else 1
         if getattr(self, "_dashboard_metric_columns", None) == columns:
             return
         self._dashboard_metric_columns = columns
         while grid.count():
             grid.takeAt(0)
-        # Match the approved hierarchy: the rating trend receives more space,
-        # while the two numeric summaries remain compact and balanced.
-        visual_stretch = (81, 75, 102)
-        for column in range(3):
+        for column in range(2):
             grid.setColumnStretch(
-                column,
-                visual_stretch[column] if columns == 3 else int(column < columns))
+                column, int(column < columns))
         for index, card in enumerate(cards):
             grid.addWidget(card, index // columns, index % columns)
 

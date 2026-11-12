@@ -34,6 +34,22 @@ def test_play_keeps_mode_cards_accessible_in_active_mode(qtbot):
     assert all(not card.isHidden() for card in page.cards)
 
 
+def test_play_first_screen_places_mode_cards_and_form_before_active_games(qtbot):
+    page = PlayPage({})
+    qtbot.addWidget(page)
+    page.resize(1280, 720)
+    page.set_active_games([{"gameId": "active", "fen": chess.STARTING_FEN}],
+                          status="one active game")
+    page.show()
+    qtbot.wait(30)
+    layout = page.content.layout()
+    assert layout.indexOf(page.grid) == 0
+    assert layout.indexOf(page.form_card) == 1
+    assert layout.indexOf(page.active_panel) == 2
+    assert page._columns == 2
+    assert page.start_button.isVisible() and page.start_button.isEnabled()
+
+
 def test_play_mode_grid_uses_content_width_after_sidebar_and_dpi(qtbot):
     page = PlayPage({})
     qtbot.addWidget(page)
@@ -131,18 +147,24 @@ def test_play_start_and_continue_actions_stay_clickable_outside_scroll_area(
         assert opened.count() == 1
 
 
-def test_sidebar_auto_restore_expands_on_wide_window_but_keeps_explicit_choice(
+def test_sidebar_always_restores_owner_approved_expanded_navigation(
         qtbot, tmp_path):
     automatic = QSettings(str(tmp_path / "sidebar-auto.ini"), QSettings.Format.IniFormat)
     automatic.setValue("workspace/sidebar_collapsed", True)
     automatic.setValue("workspace/sidebar_explicit", False)
     window = MainWindow(automatic, offline_mode=True)
     qtbot.addWidget(window)
-    # Offscreen Qt may expose an 800px virtual screen. Exercise the wide-window
-    # responsive branch with the same logical width without changing settings.
+    # Legacy collapsed preferences are ignored at every viewport size.
     window.width = lambda: 1360
     window._set_sidebar_collapsed(window.width() < 1160)
-    assert window.sidebar.width() > 60
+    assert window.sidebar.width() == 252
+    expected_labels = {
+        "home": "Главная", "play": "Играть", "analysis": "Анализ",
+        "training": "Обучение", "progress": "Прогресс",
+    }
+    assert {key: button.text() for key, button in window._nav_buttons.items()} == expected_labels
+    assert all(not button.icon().isNull() for button in window._nav_buttons.values())
+    assert not window.sidebar_brand.isHidden()
     window.game_repository.shutdown()
     window.close()
 
@@ -151,7 +173,7 @@ def test_sidebar_auto_restore_expands_on_wide_window_but_keeps_explicit_choice(
     explicit.setValue("workspace/sidebar_explicit", True)
     collapsed = MainWindow(explicit, offline_mode=True)
     qtbot.addWidget(collapsed)
-    assert collapsed.sidebar.width() == 60
+    assert collapsed.sidebar.width() == 252
     collapsed.game_repository.shutdown()
     collapsed.close()
 

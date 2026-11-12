@@ -148,36 +148,45 @@ def _valid_tier_a(tier: object, account_id: str | None, clock: str | None) -> bo
 
 
 def _valid_tier_b(tier: object) -> bool:
+    return _tier_b_validation_issue(tier) is None
+
+
+def _tier_b_validation_issue(tier: object) -> str | None:
+    """Return a stable, non-sensitive reason for rejecting a last-good tier."""
     if not isinstance(tier, dict):
-        return False
+        return "tier_b_not_object"
     if not _valid_metrics(tier.get("metrics"), _METRIC_KEYS - {"games"}):
-        return False
+        return "tier_b_metrics"
     rating = tier.get("puzzle_player_rating", {})
     if not isinstance(rating, dict) or set(rating) - {"latest", "date", "points"}:
-        return False
+        return "puzzle_rating_shape"
     if rating.get("latest") is not None and type(rating.get("latest")) not in {int, float}:
-        return False
+        return "puzzle_rating_latest"
     if rating.get("date") is not None and (
             not isinstance(rating.get("date"), str) or len(rating["date"]) > 40):
-        return False
+        return "puzzle_rating_date"
     points = rating.get("points", [])
     if not isinstance(points, list) or len(points) > 90:
-        return False
+        return "puzzle_rating_points"
     for point in points:
+        activity = point.get("attempts") if isinstance(point, dict) else None
         if (not isinstance(point, dict) or
                 not isinstance(point.get("day"), str) or type(point.get("rating")) not in {int, float}
-                or (point.get("attempts") is not None and type(point.get("attempts")) is not int)):
-            return False
+                or (activity is not None and not (
+                    type(activity) is int or
+                    (isinstance(activity, (list, tuple)) and len(activity) == 2
+                     and all(type(value) is int for value in activity))))):
+            return "puzzle_rating_point"
     trend = tier.get("activity_trend", [])
     if not isinstance(trend, list) or len(trend) > 24:
-        return False
+        return "activity_trend_shape"
     for item in trend:
         if (not isinstance(item, dict) or not isinstance(item.get("month"), str)
                 or type(item.get("attempts")) is not int or type(item.get("wins")) is not int):
-            return False
+            return "activity_trend_item"
     recent = tier.get("recent_metrics", [])
     if not isinstance(recent, list) or len(recent) > 3:
-        return False
+        return "recent_metrics_shape"
     for item in recent:
         if (not isinstance(item, dict) or not isinstance(item.get("game_id"), str)
                 or type(item.get("line_revision")) is not int
@@ -189,8 +198,10 @@ def _valid_tier_b(tier: object) -> bool:
                 or not _valid_game_shell({
                     "game_id": item["game_id"], "status": "complete",
                     "review_metrics": item.get("review_metrics")})):
-            return False
-    return isinstance(tier.get("activity_trend_source"), (str, type(None)))
+            return "recent_metrics_item"
+    if not isinstance(tier.get("activity_trend_source"), (str, type(None))):
+        return "activity_trend_source"
+    return None
 
 
 def _split_snapshot(snapshot: dict) -> tuple[dict, dict]:
@@ -258,8 +269,19 @@ def _compact_rating(rating: dict) -> dict:
     points = rating.get("points")
     if not isinstance(points, list):
         points = []
+    compact_points = []
+    for point in points[-90:]:
+        if not isinstance(point, dict):
+            continue
+        compact_point = dict(point)
+        activity = compact_point.get("attempts")
+        # Repository results use a (attempts, wins) tuple; JSON cache restores
+        # it as a list. Normalize before validation and serialization.
+        if isinstance(activity, tuple) and len(activity) == 2:
+            compact_point["attempts"] = list(activity)
+        compact_points.append(compact_point)
     compact = {"latest": rating.get("latest"), "date": rating.get("date"),
-               "points": [dict(point) for point in points[-90:] if isinstance(point, dict)]}
+               "points": compact_points}
     return compact if compact["latest"] is not None or compact["date"] is not None or compact["points"] else {}
 
 
@@ -342,6 +364,7 @@ class DashboardSnapshotCache:
         self._lock = _lock_for(self.path)
         self.last_save_status = "not_saved"
         self.last_save_bytes = 0
+        self.last_validation_issue: str | None = None
 
     @contextmanager
     def _process_lock(self):
@@ -512,7 +535,14 @@ class DashboardSnapshotCache:
              revision: int, snapshot: dict) -> bool:
         try:
             tier_a, tier_b = _split_snapshot(snapshot)
-            if not _valid_tier_a(tier_a, account_id, clock) or not _valid_tier_b(tier_b):
+            tier_a_valid = _valid_tier_a(tier_a, account_id, clock)
+            self.last_validation_issue = (
+                None if tier_a_valid else "tier_a_shape")
+            if not tier_a_valid:
+                self.last_save_status = "invalid_schema"
+                return False
+            self.last_validation_issue = _tier_b_validation_issue(tier_b)
+            if self.last_validation_issue is not None:
                 self.last_save_status = "invalid_schema"
                 return False
             with self._lock, self._process_lock():

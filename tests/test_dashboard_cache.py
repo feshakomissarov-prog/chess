@@ -65,6 +65,34 @@ def test_dashboard_cache_refuses_stale_revision_and_oversized_or_corrupt_payload
     repository.shutdown()
 
 
+def test_dashboard_cache_round_trips_puzzle_attempt_activity_tuple(tmp_path):
+    repository = GameRepository(tmp_path / "puzzle-rating-cache.sqlite3")
+    cache = DashboardSnapshotCache(repository)
+    revision = repository.dashboard_data_revision()
+    snapshot = {
+        "scope": "Все локальные партии · смешанная перспектива",
+        "filter": {"account_id": None, "clock": None},
+        "metrics": [],
+        "recent_games": [],
+        "puzzle_player_rating": {
+            "latest": 1917,
+            "date": "2026-11-10",
+            "points": [{"day": "2026-11-10", "rating": 1917,
+                        "attempts": (5, 3)}],
+        },
+        "activity_trend": [],
+        "activity_trend_source": None,
+    }
+
+    assert cache.save(None, None, revision, snapshot)
+    loaded = DashboardSnapshotCache(repository).load(None, None)
+
+    assert loaded is not None
+    assert loaded["puzzle_player_rating"]["points"] == [
+        {"day": "2026-11-10", "rating": 1917, "attempts": [5, 3]}]
+    repository.shutdown()
+
+
 def test_last_good_loader_skips_sqlite_and_recovers_structurally_corrupt_primary(tmp_path,
                                                                                 monkeypatch):
     repository = GameRepository(tmp_path / "dashboard-fast.sqlite3")

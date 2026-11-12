@@ -448,7 +448,7 @@ def test_live_position_eval_accepts_mate_zero_only_from_terminal_board(
     window.close()
 
 
-def test_collapsed_sidebar_keeps_connection_actions_accessible_at_board_width(qtbot, tmp_path):
+def test_always_expanded_sidebar_keeps_connection_actions_accessible_at_board_width(qtbot, tmp_path):
     window = _window(qtbot, tmp_path, name="collapsed-sidebar")
     window.resize(1280, 720)
     window.offline_mode = False
@@ -458,13 +458,13 @@ def test_collapsed_sidebar_keeps_connection_actions_accessible_at_board_width(qt
     window._set_sidebar_collapsed(True, explicit=True)
     window.show()
     qtbot.wait(20)
-    assert window.sidebar.width() == 60
+    assert window.sidebar.width() == 252
     assert window.connect_button.isVisible()
-    assert window.connect_button.width() == 34
-    assert window.connect_button.text() == "↗"
+    assert window.connect_button.width() == 188
+    assert window.connect_button.text() in {"Подключить", "Подключить Lichess"}
     assert window.connect_button.accessibleName() == "Подключить Lichess"
-    assert window.connect_button.toolTip() == "Подключить Lichess"
-    assert window.disconnect_button.width() == 34
+    assert window.connect_button.toolTip() == ""
+    assert window.disconnect_button.width() == 188
     assert window.disconnect_button.accessibleName() == "Отключить Lichess"
     assert window.sidebar.geometry().right() < window.width()
     window.close()

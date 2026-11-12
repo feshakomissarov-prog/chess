@@ -532,24 +532,24 @@ def test_main_window_smoke_and_game_controller_integration(qtbot, tmp_path) -> N
     assert window.controller.viewing_live_position
 
 
-def test_m46_shell_has_stable_routes_and_collapses_for_board_screens(qtbot, tmp_path):
+def test_m46_shell_keeps_owner_approved_expanded_navigation_on_board_screens(qtbot, tmp_path):
     window = MainWindow(QSettings(str(tmp_path / "m46-shell.ini"),
                                   QSettings.Format.IniFormat), offline_mode=True)
     qtbot.addWidget(window)
-    assert window.sidebar.width() == (60 if window.width() < 1160 else 212)
+    assert window.sidebar.width() == 252
     assert set(window._nav_buttons) == {
         "home", "play", "analysis", "training", "progress"}
     assert window._nav_buttons["home"].property("active") is True
     window.start_local_game()
-    assert window.sidebar.width() == 60
+    assert window.sidebar.width() == 252
     assert window._nav_buttons["play"].property("active") is True
 
     window._set_sidebar_collapsed(False, explicit=True)
-    assert window.sidebar.width() == 212
+    assert window.sidebar.width() == 252
     assert window.screen_stack.currentWidget() is window.game_page
-    assert window.sidebar.width() == 212  # explicit session override is preserved
+    assert window.sidebar.width() == 252  # explicit session override is preserved
     window._set_sidebar_collapsed(True, explicit=True)
-    assert window.sidebar.width() == 60
+    assert window.sidebar.width() == 252
 
 
 def test_m46_shell_uses_expanded_sidebar_at_wide_home_and_compact_board(qtbot, tmp_path):
@@ -559,39 +559,39 @@ def test_m46_shell_uses_expanded_sidebar_at_wide_home_and_compact_board(qtbot, t
     window.resize(1280, 800)
     window._sidebar_explicit_override = False
     window._shell_screen_changed(window.screen_stack.currentIndex())
-    assert window.sidebar.width() == 212
+    assert window.sidebar.width() == 252
     window.start_local_game()
     # The approved live-game workspace keeps all five navigation routes open.
-    assert window.sidebar.width() == 212
+    assert window.sidebar.width() == 252
 
 
-def test_visual_sidebar_recovers_after_wide_resize_and_routes_but_respects_explicit_choice(
+def test_visual_sidebar_stays_expanded_after_restart_resize_and_routes(
         qtbot, tmp_path):
     window = MainWindow(QSettings(str(tmp_path / "visual-sidebar-responsive.ini"),
                                   QSettings.Format.IniFormat), offline_mode=True)
     qtbot.addWidget(window)
     window.resize(1028, 720)
     window.show()
-    qtbot.waitUntil(lambda: window.sidebar.width() == 60)
+    qtbot.waitUntil(lambda: window.sidebar.width() == 252)
 
     # A native window first opened at the compact size must expand when the
     # owner drags it to the approved wide desktop size, without another click.
     window.resize(1672, 941)
-    qtbot.waitUntil(lambda: window.sidebar.width() == 272)
+    qtbot.waitUntil(lambda: window.sidebar.width() == 252)
     window.show_saved_games()
-    assert window.sidebar.width() == 272
+    assert window.sidebar.width() == 252
     window.show_background_analytics()
-    assert window.sidebar.width() == 272
+    assert window.sidebar.width() == 252
     window.show_home()
-    assert window.sidebar.width() == 272
+    assert window.sidebar.width() == 252
 
-    # An explicit collapse is a user preference, not a responsive default.
+    # A stale explicit collapse from older settings can never hide captions.
     window._set_sidebar_collapsed(True, explicit=True)
     window.resize(1280, 860)
     qtbot.wait(20)
     window.resize(1672, 941)
     qtbot.wait(20)
-    assert window.sidebar.width() == 60
+    assert window.sidebar.width() == 252
     window.close()
 
 
@@ -3846,7 +3846,8 @@ def test_home_has_rating_kpi_and_three_recent_game_cards(qtbot, tmp_path):
     # Let that generation finish before installing this test's synthetic data,
     # otherwise its later render can delete the card wrappers retained below.
     qtbot.waitUntil(lambda: window._dashboard_thread is None, timeout=3000)
-    assert window._home_view.dashboard_metrics_grid.indexOf(window.home_progress_card) >= 0
+    assert window._home_view.dashboard_metrics_grid.indexOf(window.home_progress_card) < 0
+    assert window._home_view.home_recent_card.parentWidget() is window.home_page
     assert window.home_primary_actions.itemAt(0).widget() is window.home_play_card
     assert window.home_friend_button.isHidden()
     games = [{
@@ -3862,8 +3863,8 @@ def test_home_has_rating_kpi_and_three_recent_game_cards(qtbot, tmp_path):
                for i in range(window._recent_games_layout.count())) == 3
     cards = [window._recent_games_layout.itemAt(i).widget() for i in range(3)]
     from PySide6.QtWidgets import QLabel, QScrollArea, QWidget
-    headings = [card.findChild(QLabel).text() for card in cards]
-    assert headings == ["♟  Победа"] * 3
+    headings = [card.findChild(QLabel, "dashboardOutcome").text() for card in cards]
+    assert headings == ["Победа"] * 3
     assert all(f"Opponent {index}" in [label.text() for label in card.findChildren(QLabel)]
                for index, card in enumerate(cards))
     assert all("Queen's Pawn Game" not in heading for heading in headings)
@@ -3872,14 +3873,14 @@ def test_home_has_rating_kpi_and_three_recent_game_cards(qtbot, tmp_path):
     window.setFixedSize(1360, 860)
     window.show()
     qtbot.wait(20)
-    assert not window.home_activity_button.isVisible()
+    assert window.home_activity_button.isVisible()
     assert window._nav_buttons["training"].isVisible()
     kpi_widths = [window._home_view.dashboard_metrics[key].width() for key in ("games", "accuracy")]
     kpi_widths.append(window.home_progress_card.width())
-    # The approved reference intentionally gives the rating-history card more
-    # width for its sparkline; the two summary cards need not be equal-sized.
-    assert min(kpi_widths) >= 260
-    assert max(kpi_widths) <= 440
+    # Progress is stacked beneath the compact KPI pair in the approved center
+    # zone; recent games occupy the adjacent right zone.
+    assert min(kpi_widths) >= 150
+    assert max(kpi_widths) <= 560
     assert window.home_activity_button.parentWidget() is window.home_play_card
     assert not isinstance(window.home_page, QScrollArea)
     assert not hasattr(window._home_view, "home_pilot_import_button")

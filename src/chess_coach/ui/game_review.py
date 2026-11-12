@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import chess
 import math
-from PySide6.QtCore import QPointF, QSettings, QTimer, Qt, Signal
+from PySide6.QtCore import QPointF, QRect, QSettings, QTimer, Qt, Signal
 from PySide6.QtGui import QColor, QKeySequence, QPainter, QPen, QPolygonF, QShortcut
 from PySide6.QtWidgets import (
     QAbstractItemView, QCheckBox, QComboBox, QFrame, QGridLayout, QGroupBox,
@@ -345,15 +345,37 @@ class ReviewGraph(QWidget):
                                                   QPointF(x - 4, y), QPointF(x + 4, y)]))
             if any(row[5] for row in coords):
                 painter.setPen(QPen(QColor(TOKENS.warning), 1))
-                painter.drawText(rect.right() - 122, rect.top() + 14,
-                                 "▲ за пределом шкалы")
+                if self.compact and self.width() < 220:
+                    painter.drawText(rect.right() - 14, rect.top() + 14, "▲")
+                    self.setToolTip("▲ Есть оценка за пределами отображаемой шкалы")
+                else:
+                    painter.drawText(rect.right() - 122, rect.top() + 14,
+                                     "▲ за пределом шкалы")
         painter.restore()
         selected_x = rect.left() + round(rect.width() * self.current_ply / max_ply)
         painter.setPen(QPen(QColor(TOKENS.text), 1, Qt.PenStyle.DashLine))
         painter.drawLine(selected_x, rect.top(), selected_x, rect.bottom())
         painter.setPen(QPen(QColor(TOKENS.secondary), 1))
-        painter.drawText(rect.left(), self.height() - 5, "Полуход 0")
-        painter.drawText(rect.right() - 48, self.height() - 5, f"Ход {max_ply}")
+        if self.compact:
+            label_font = painter.font()
+            label_font.setPointSizeF(max(7.0, label_font.pointSizeF() - 2.0))
+            painter.setFont(label_font)
+            short = self.width() < 190
+            left_label = "П/х 0" if short else "Полуход 0"
+            right_label = str(max_ply) if short else f"Ход {max_ply}"
+            text_y = self.height() - 18
+            half_width = max(1, self.width() // 2 - 3)
+            painter.drawText(QRect(2, text_y, half_width, 16),
+                             Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
+                             left_label)
+            painter.drawText(QRect(self.width() // 2, text_y,
+                                   max(1, self.width() // 2 - 2), 16),
+                             Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter,
+                             right_label)
+            self.setToolTip("Подписи сокращены по ширине; график показывает полуходы и оценку")
+        else:
+            painter.drawText(rect.left(), self.height() - 5, "Полуход 0")
+            painter.drawText(rect.right() - 48, self.height() - 5, f"Ход {max_ply}")
 
     def select_ply(self, ply: int):
         self.current_ply = max(0, int(ply))

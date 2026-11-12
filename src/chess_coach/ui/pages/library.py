@@ -14,6 +14,7 @@ from ..display import (
     format_clock_control, format_game_activity_time, format_game_timeline, game_opening_name,
 )
 from ..game_review import ReviewGraph
+from ..icons import icon_pixmap
 
 
 class LibraryRowDelegate(QStyledItemDelegate):
@@ -41,7 +42,8 @@ class LibraryRowDelegate(QStyledItemDelegate):
         outcome = heading.partition(" с ")[0]
         color = {"Победа": "#79E599", "Поражение": "#FF737C", "Ничья": "#E2E5F0"}.get(
             outcome, "#AEB8CF")
-        glyph = {"Победа": "♜", "Поражение": "♛", "Ничья": "="}.get(outcome, "·")
+        outcome_icon = {"Победа": "win", "Поражение": "loss", "Ничья": "draw"}.get(
+            outcome, "games")
         painter.save()
         painter.setClipRect(rect)
 
@@ -55,8 +57,12 @@ class LibraryRowDelegate(QStyledItemDelegate):
             painter.drawText(QRect(x, y, width, height),
                              Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft, content)
 
-        text(f"{glyph}  {outcome}", rect.left(), rect.top(), left - 10, rect.height(),
-             size=18, color=color, bold=True)
+        icon_size = 18
+        icon_y = rect.top() + max(0, (rect.height() - icon_size) // 2)
+        painter.drawPixmap(rect.left(), icon_y,
+                           icon_pixmap(outcome_icon, icon_size, color))
+        text(outcome, rect.left() + icon_size + 7, rect.top(), left - icon_size - 17,
+             rect.height(), size=18, color=color, bold=True)
         half = rect.height() // 2
         text(game.get("account_opponent") or game.get("opponent") or "Соперник",
              first, rect.top(), middle - 12, half, size=16, bold=True)

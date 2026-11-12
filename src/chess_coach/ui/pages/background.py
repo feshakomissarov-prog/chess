@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
-from PySide6.QtCore import Qt, Signal
+from PySide6.QtCore import QSize, Qt, Signal
 from PySide6.QtWidgets import (
     QFrame, QHBoxLayout, QLabel, QListWidget, QProgressBar, QPushButton, QScrollArea,
     QVBoxLayout, QWidget,
 )
+from ..icons import icon_pixmap
 
 
 class BackgroundOperationsPage(QWidget):
@@ -58,18 +59,20 @@ class BackgroundOperationsPage(QWidget):
         self._workflow_rows = {}
         self._workflow_cards = []
         for key, glyph, caption in (
-                ("archive", "⟳", "Синхронизация партий Lichess"),
-                ("ready", "▱", "Готовая аналитика Lichess"),
-                ("puzzles", "✓", "Задачи Lichess"),
-                ("stockfish", "♞", "Фоновый Stockfish")):
+                ("archive", "sync", "Синхронизация партий Lichess"),
+                ("ready", "database", "Готовая аналитика Lichess"),
+                ("puzzles", "puzzle", "Задачи Lichess"),
+                ("stockfish", "analysis", "Фоновый Stockfish")):
             card = QFrame()
             card.setObjectName("metricCard")
             card.setMinimumHeight(112)
             row = QHBoxLayout(card)
             row.setContentsMargins(18, 11, 18, 11)
-            icon = QLabel(glyph)
+            icon = QLabel()
             icon.setFixedSize(43, 43)
             icon.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            icon.setPixmap(icon_pixmap(glyph, 25, "#C8BBFF",
+                                       icon.devicePixelRatioF()))
             icon.setStyleSheet("background: #39365E; color: #C8BBFF;"
                                "border-radius: 10px; font-size: 26px;")
             row.addWidget(icon)
@@ -139,7 +142,9 @@ class BackgroundOperationsPage(QWidget):
         # The shared visual theme gives list rows generous 5px padding. Recent
         # events need a denser, still readable 1px vertical rhythm so four
         # saved rows fit in the approved desktop card without scrolling.
-        self.recent_events.setStyleSheet("QListWidget::item { padding: 1px 8px; }")
+        self.recent_events.setStyleSheet(
+            "QListWidget { font-size: 14px; } "
+            "QListWidget::item { padding: 0px 8px; }")
         root.addWidget(self.recent_events)
         self.source_summary = QLabel("")
         self.source_summary.setWordWrap(True)
@@ -190,6 +195,10 @@ class BackgroundOperationsPage(QWidget):
         self.recent_events.setMaximumHeight(76 if tight else 104 if compact else 170)
         self.recent_events_title.setStyleSheet(
             f"font-size: {17 if tight else 19 if compact else 23}px; font-weight: 700;")
+        self.recent_events.setStyleSheet(
+            f"QListWidget {{ font-size: {12 if tight else 13 if compact else 14}px; }} "
+            "QListWidget::item { padding: 0px 8px; }")
+        self._set_recent_event_row_heights()
         self.details_toggle.setMaximumHeight(22 if tight else 25 if compact else 30)
         self._render_workflow_statuses()
         # Updating row minimum heights here can happen while the page is being
@@ -250,6 +259,7 @@ class BackgroundOperationsPage(QWidget):
                      recent_events=(), states=None, workflow_tooltips=None) -> None:
         self.recent_events.clear()
         self.recent_events.addItems(list(recent_events) or ["Нет сохранённых событий."])
+        self._set_recent_event_row_heights()
         durable_statuses = tuple(durable_statuses)
         self.operation_list.clear()
         for operation in operations:
@@ -313,6 +323,12 @@ class BackgroundOperationsPage(QWidget):
         self.pause_button.setEnabled(bool(can_pause))
         self.manual_check_button.setEnabled(bool(can_check and not self._paused))
         self._render_workflow_statuses()
+
+    def _set_recent_event_row_heights(self) -> None:
+        """Fit four recent rows into compact and tight DPI viewports."""
+        height = 16 if self._tight_status else 21 if self._compact_status else 31
+        for row in range(self.recent_events.count()):
+            self.recent_events.item(row).setSizeHint(QSize(0, height))
 
     def set_workflow_state(self, key: str, state: str) -> None:
         colors = {"Идёт": ("#234B38", "#79E599"), "Готово": ("#234B38", "#79E599"),

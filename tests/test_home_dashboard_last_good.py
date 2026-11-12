@@ -177,15 +177,20 @@ def test_3319_to_3320_restart_persists_and_paints_real_ui_in_separate_processes(
         return None
 
     run("seed", str(database), str(root / "seed"), "--count", "3319")
+    run("expect", str(database), str(root / "first"))
     before = run("launch", str(database), str(root / "first"), "--seconds", "12")
     assert before["games"] == "3319"
-    assert before["accuracy"] == "68.0%"
-    assert before["puzzle_rating"] == "1492"
+    assert before["accuracy"] == before["expected"]["accuracy"] == "68.0%"
+    assert before["puzzle_rating"] == before["expected"]["puzzle_rating"] == "1492"
+    assert before["accuracy_detail"] == before["expected"]["accuracy_detail"]
+    assert before["recent_ids"][:3] == before["expected"]["recent_ids"]
     assert before["aggregate_calls"] >= 1
     assert before["full_ready_ms"] is not None
     run("add", str(database), str(root / "added"))
+    run("expect", str(database), str(root / "second"))
     changed = run("launch", str(database), str(root / "second"), "--seconds", "10")
     assert changed["games"] == "3320"
+    assert changed["games"] == changed["expected"]["games"]
     assert changed["recent_ids"][:3] == ["seed-new", "seed-0", "seed-old-03315"]
     assert changed["first_useful_ms"] <= 500
     assert changed["first_useful_accuracy"] == "68.0%"
@@ -210,10 +215,13 @@ def test_3319_to_3320_restart_persists_and_paints_real_ui_in_separate_processes(
     assert _metric(fresh, "games") == "3320"
     repository.shutdown()
 
+    run("expect", str(database), str(root / "third"))
     after = run("launch", str(database), str(root / "third"), "--seconds", "2")
     assert after["games"] == "3320"
-    assert after["accuracy"] != "—"
-    assert after["puzzle_rating"] == "1492"
+    assert after["accuracy"] == after["expected"]["accuracy"]
+    assert after["accuracy_detail"] == after["expected"]["accuracy_detail"]
+    assert after["puzzle_rating"] == after["expected"]["puzzle_rating"] == "1492"
+    assert after["recent_ids"][:3] == after["expected"]["recent_ids"]
     assert after["first_useful_ms"] <= 500
     assert after["first_useful_accuracy"] is not None
     assert after["aggregate_calls"] == 0

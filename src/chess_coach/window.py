@@ -18,9 +18,9 @@ import uuid
 import weakref
 import PySide6
 import shiboken6
-from PySide6.QtCore import QEvent, QProcess, QRect, QSettings, Qt, QTimer, Signal, qVersion, QUrl
-from PySide6.QtGui import (QKeySequence, QShortcut, QColor, QPainter, QPen,
-                           QDesktopServices, QGuiApplication, QFontMetrics)
+from PySide6.QtCore import QEvent, QProcess, QRect, QSize, QSettings, Qt, QTimer, Signal, qVersion, QUrl
+from PySide6.QtGui import (QKeySequence, QShortcut, QColor, QPainter, QPen, QIcon,
+                           QDesktopServices, QGuiApplication, QFont, QFontMetrics)
 from PySide6.QtWidgets import (
     QCheckBox,
     QButtonGroup,
@@ -84,6 +84,7 @@ from .lichess.game_review import load_game_review
 from .lichess.statistics import StatisticsService
 from .diagnostics import anonymized_report, log_event, logs_directory
 from .ui.theme import TOKENS, VISUAL_TOKENS, stylesheet as desktop_stylesheet
+from .ui.icons import icon_pixmap
 from .ui.dashboard import game_card_text
 from .ui.game_review import GameReviewWorkspace, ReviewGraph
 from .ui.move_table import MoveTable
@@ -683,15 +684,12 @@ class MainWindow(QMainWindow):
             "workspace/selected_account", "", type=str)).strip() or None
         initial_account = (preferred_scope if preferred_scope and
                            preferred_scope.startswith("lichess:") else None)
-
-        def preload_home_cache() -> None:
-            snapshot = self._dashboard_snapshot_cache.load_last_good(initial_account, None)
-            self._dashboard_cache_preload_result = (initial_account, snapshot)
-            self.home_cache_preload_ready.emit(initial_account, snapshot)
-
-        self._dashboard_cache_preload_handle = self._start_registered_work(
-            preload_home_cache, kind="dashboard_cache_preload", lane=OperationLane.INTERACTIVE,
-            thread_name="chess-coach-dashboard-cache-preload")
+        # This is a bounded JSON read (no SQLite, network, or credential access).
+        # Run it before the first visible frame so startup never races the paint
+        # against a worker and the selected profile's last-good snapshot.
+        initial_snapshot = self._dashboard_snapshot_cache.load_last_good(
+            initial_account, None)
+        self._dashboard_cache_preload_result = (initial_account, initial_snapshot)
         self.batch_live_progress.connect(self._show_batch_live_progress)
         self.legacy_metrics_finished.connect(self._legacy_metrics_batch_finished)
         self.puzzle_history_finished.connect(self._puzzle_history_result_ready)
@@ -721,12 +719,10 @@ class MainWindow(QMainWindow):
         )
         self._build_ui()
         self.focus_mode_button.setChecked(self._board_focus_mode)
-        sidebar_explicit = self.settings.value(
-            "workspace/sidebar_explicit", False, type=bool)
-        sidebar_collapsed = (
-            self.settings.value("workspace/sidebar_collapsed", False, type=bool)
-            if sidebar_explicit else self.width() < 1160)
-        self._set_sidebar_collapsed(sidebar_collapsed, explicit=sidebar_explicit)
+        # The owner-approved navigation always shows icon and caption. Ignore
+        # collapsed preferences left by older builds so they cannot shrink it
+        # on restart or when restoring a narrow window geometry.
+        self._set_sidebar_collapsed(False)
         self._workspace_state_restoring = False
         # Paint the last validated Home scope into the widgets before the first
         # visible frame. This bounded JSON read is independent of SQLite/auth
@@ -736,6 +732,12 @@ class MainWindow(QMainWindow):
         initial_home = (preloaded[1] if preloaded and preloaded[0] == initial_account else None)
         if initial_home is not None:
             self._render_dashboard_snapshot(initial_home)
+            log_event(
+                "dashboard_cache", "dashboard", stage="pre_show_home_paint",
+                count=len(initial_home.get("recent_games") or []),
+                status=("complete" if not initial_home.get("is_preview") and
+                        initial_home.get("_dashboard_tier_b_revision") is not None
+                        else "partial"))
         self.show_home()
         if initial_home is not None:
             self._refresh_home_dashboard()
@@ -1125,6 +1127,10 @@ class MainWindow(QMainWindow):
         started = getattr(self, "_archive_account_started_at", time.perf_counter())
         log_event("dashboard_stage", "dashboard", stage="account_restoration",
                   duration_ms=int((time.perf_counter() - started) * 1000), status="ok")
+        # Remember the last confirmed profile so Home can select its cache
+        # before connecting to Lichess on the next launch (including offline).
+        self.settings.setValue("workspace/selected_account", account_id)
+        self.settings.sync()
         self._archive_account_ready_generation = generation
         self._home_view.select_profile(account_id, notify=False)
         self._refresh_home_dashboard()
@@ -1954,8 +1960,18 @@ class MainWindow(QMainWindow):
         self.return_to_game_button.clicked.connect(self.resume_current_game)
         self.return_to_game_button.setVisible(False)
         header.addWidget(self.return_to_game_button)
-        self.header_brand = QLabel("♟  Chess Coach")
-        self.header_brand.setStyleSheet("font-size: 20px; font-weight: 700;")
+        self.header_brand = QWidget()
+        self.header_brand.setAccessibleName("Chess Coach")
+        header_brand_layout = QHBoxLayout(self.header_brand)
+        header_brand_layout.setContentsMargins(0, 0, 0, 0)
+        header_brand_layout.setSpacing(8)
+        header_brand_icon = QLabel()
+        header_brand_icon.setPixmap(icon_pixmap("brand", 22, "#E5E1FF",
+                                                header_brand_icon.devicePixelRatioF()))
+        header_brand_layout.addWidget(header_brand_icon)
+        header_brand_text = QLabel("Chess Coach")
+        header_brand_text.setStyleSheet("font-size: 20px; font-weight: 700;")
+        header_brand_layout.addWidget(header_brand_text)
         header.addWidget(self.header_brand)
         header.addStretch(1)
         self.connection = QLabel("Нет связи")
@@ -1977,7 +1993,11 @@ class MainWindow(QMainWindow):
         self.background_operations_button.clicked.connect(self.show_background_analytics)
         self.background_operations_button.setText("Фон")
         self.background_operations_button.setFixedHeight(30)
+        self.background_operations_button.setAccessibleName("Фоновые операции")
         self.background_operations_button.setToolTip("Статус и управление фоновыми операциями")
+        self.background_operations_button.setIcon(QIcon(icon_pixmap(
+            "more", 18, "#E5E1FF", self.background_operations_button.devicePixelRatioF())))
+        self.background_operations_button.setIconSize(QSize(18, 18))
         header.addWidget(self.background_operations_button)
         self.connect_button = QPushButton("Подключить Lichess")
         self.connect_button.clicked.connect(self.connect_lichess)
@@ -2362,21 +2382,8 @@ class MainWindow(QMainWindow):
 
     def resizeEvent(self, event) -> None:
         super().resizeEvent(event)
-        if (hasattr(self, "sidebar") and hasattr(self, "screen_stack")
-                and not self._sidebar_explicit_override):
-            current = self.screen_stack.currentWidget()
-            should_collapse = self.width() < 1160
-            if (self.sidebar.width() <= 60) != should_collapse:
-                self._set_sidebar_collapsed(should_collapse)
-            elif not should_collapse:
-                # A window enlarged from compact startup must regain the full
-                # approved navigation width without requiring a route click.
-                visual_route = current in (
-                    self.home_page, getattr(self, "library_page", None),
-                    getattr(self, "_background_operations_page", None)) or self._analysis_archive_active()
-                target_width = 272 if visual_route and self.width() >= 1500 else 212
-                if self.sidebar.width() != target_width:
-                    self._set_sidebar_collapsed(False)
+        if hasattr(self, "sidebar") and self.sidebar.width() != 252:
+            self._set_sidebar_collapsed(False)
         self._update_sidebar_profile_label()
         self._apply_board_size()
         if hasattr(self, "game_splitter"):
@@ -2405,7 +2412,13 @@ class MainWindow(QMainWindow):
         compact = width < 940
         sidebar_collapsed = self.sidebar.width() <= 60
         if sidebar_collapsed:
-            connect_text, disconnect_text = "↗", "⏻"
+            connect_text, disconnect_text = "", ""
+            self.connect_button.setIcon(QIcon(icon_pixmap(
+                "link", 18, "#E5E1FF", self.connect_button.devicePixelRatioF())))
+            self.disconnect_button.setIcon(QIcon(icon_pixmap(
+                "power", 18, "#E5E1FF", self.disconnect_button.devicePixelRatioF())))
+            self.connect_button.setIconSize(QSize(18, 18))
+            self.disconnect_button.setIconSize(QSize(18, 18))
             connect_description = ("Подключиться вручную"
                                    if self.manual_connect_mode and not self.lichess
                                    else "Подключить Lichess")
@@ -2418,16 +2431,20 @@ class MainWindow(QMainWindow):
             connect_text = "Подключиться вручную"
             disconnect_text = "Отключить" if compact else "Отключить Lichess"
             self.connect_button.setToolTip("")
+            self.connect_button.setIcon(QIcon())
+            self.disconnect_button.setIcon(QIcon())
         else:
             connect_text = "Подключить" if compact else "Подключить Lichess"
             disconnect_text = "Отключить" if compact else "Отключить Lichess"
             self.connect_button.setToolTip("")
+            self.connect_button.setIcon(QIcon())
+            self.disconnect_button.setIcon(QIcon())
         if not sidebar_collapsed:
             self.connect_button.setFixedWidth(188)
             self.disconnect_button.setFixedWidth(188)
         self.connect_button.setText(connect_text)
         self.disconnect_button.setText(disconnect_text)
-        self.background_operations_button.setText("⋯" if compact else "Фон")
+        self.background_operations_button.setText("" if compact else "Фон")
         self.header_brand.setVisible(self.sidebar.width() <= 60)
         self.connection.setMaximumWidth(150 if compact else 210)
         self._render_connection_header()
@@ -2455,19 +2472,32 @@ class MainWindow(QMainWindow):
     def _build_sidebar(self) -> QWidget:
         sidebar = QFrame()
         sidebar.setObjectName("appSidebar")
-        sidebar.setFixedWidth(212)
+        sidebar.setFixedWidth(252)
         layout = QVBoxLayout(sidebar)
         layout.setContentsMargins(12, 16, 12, 12)
         layout.setSpacing(8)
-        self.sidebar_toggle = QPushButton("☰")
+        self.sidebar_toggle = QPushButton()
         self.sidebar_toggle.setObjectName("navItem")
-        self.sidebar_toggle.setToolTip("Свернуть или развернуть меню")
-        self.sidebar_toggle.setAccessibleName("Свернуть или развернуть боковое меню")
-        self.sidebar_toggle.clicked.connect(lambda: self._set_sidebar_collapsed(
-            self.sidebar.width() > 60, explicit=True))
+        self.sidebar_toggle.setIcon(QIcon(icon_pixmap(
+            "menu", 20, "#E5E1FF", self.sidebar_toggle.devicePixelRatioF())))
+        self.sidebar_toggle.setIconSize(QSize(20, 20))
+        self.sidebar_toggle.setToolTip("Боковое меню всегда раскрыто")
+        self.sidebar_toggle.setAccessibleName("Боковое меню всегда раскрыто")
+        self.sidebar_toggle.clicked.connect(lambda: self._set_sidebar_collapsed(False))
         layout.addWidget(self.sidebar_toggle)
-        self.sidebar_brand = QLabel("♞  Chess Coach")
+        self.sidebar_brand = QWidget()
         self.sidebar_brand.setObjectName("sidebarBrand")
+        self.sidebar_brand.setAccessibleName("Chess Coach")
+        brand_layout = QHBoxLayout(self.sidebar_brand)
+        brand_layout.setContentsMargins(8, 4, 4, 4)
+        brand_layout.setSpacing(10)
+        brand_icon = QLabel()
+        brand_icon.setPixmap(icon_pixmap("brand", 24, "#E5E1FF",
+                                         brand_icon.devicePixelRatioF()))
+        brand_layout.addWidget(brand_icon)
+        brand_text = QLabel("Chess Coach")
+        brand_text.setObjectName("sidebarBrandText")
+        brand_layout.addWidget(brand_text, 1)
         layout.addWidget(self.sidebar_brand)
         self.sidebar_profile_label = QLabel("Локальный профиль")
         self.sidebar_profile_label.setObjectName("sidebarProfile")
@@ -2476,11 +2506,13 @@ class MainWindow(QMainWindow):
         layout.addWidget(self.sidebar_profile_label)
         self.sidebar_connection_label = QLabel("Не подключено")
         self.sidebar_connection_label.setObjectName("muted")
-        self.sidebar_connection_label.setWordWrap(False)
+        self.sidebar_connection_label.setWordWrap(True)
+        self.sidebar_connection_label.setMaximumHeight(48)
         layout.addWidget(self.sidebar_connection_label)
         self.sidebar_safety_label = QLabel("Fair Play: не проверено")
         self.sidebar_safety_label.setObjectName("muted")
-        self.sidebar_safety_label.setWordWrap(False)
+        self.sidebar_safety_label.setWordWrap(True)
+        self.sidebar_safety_label.setMaximumHeight(54)
         layout.addWidget(self.sidebar_safety_label)
         self.safety_retry_button = QPushButton("↻ Проверить безопасность")
         self.safety_retry_button.setObjectName("safetyRetry")
@@ -2492,14 +2524,17 @@ class MainWindow(QMainWindow):
         self.safety_retry_button.hide()
         layout.addWidget(self.safety_retry_button)
         self._nav_buttons: dict[str, QPushButton] = {}
-        items = (("home", "⌂", "Главная", self.show_home),
-                 ("play", "♟", "Играть", self.show_play),
-                 ("analysis", "⌁", "Анализ", self.show_analysis),
-                 ("training", "♞", "Обучение", self.open_puzzle_history_local),
-                 ("progress", "◷", "Прогресс", self.show_statistics))
-        for key, icon, label, callback in items:
-            button = QPushButton(f"{icon}   {label}")
+        items = (("home", "home", "Главная", self.show_home),
+                 ("play", "play", "Играть", self.show_play),
+                 ("analysis", "analysis", "Анализ", self.show_analysis),
+                 ("training", "training", "Обучение", self.open_puzzle_history_local),
+                 ("progress", "progress", "Прогресс", self.show_statistics))
+        for key, icon_name, label, callback in items:
+            button = QPushButton(label)
             button.setObjectName("navItem")
+            button.setIcon(QIcon(icon_pixmap(icon_name, 21, "#E5E1FF",
+                                              button.devicePixelRatioF())))
+            button.setIconSize(QSize(21, 21))
             button.setProperty("route", key)
             button.setProperty("route_label", label)
             button.setMinimumHeight(44)
@@ -2511,8 +2546,11 @@ class MainWindow(QMainWindow):
         divider = QFrame()
         divider.setFrameShape(QFrame.Shape.HLine)
         layout.addWidget(divider)
-        self.sidebar_settings = QPushButton("⚙   Настройки")
+        self.sidebar_settings = QPushButton("Настройки")
         self.sidebar_settings.setObjectName("navItem")
+        self.sidebar_settings.setIcon(QIcon(icon_pixmap(
+            "settings", 20, "#E5E1FF", self.sidebar_settings.devicePixelRatioF())))
+        self.sidebar_settings.setIconSize(QSize(20, 20))
         self.sidebar_settings.setAccessibleName("Настройки")
         self.sidebar_settings.clicked.connect(self.open_settings)
         layout.addWidget(self.sidebar_settings)
@@ -2527,52 +2565,44 @@ class MainWindow(QMainWindow):
                     and page.tabs.currentIndex() == 0)
 
     def _set_sidebar_collapsed(self, collapsed: bool, *, explicit: bool = False) -> None:
-        if explicit:
-            self._sidebar_explicit_override = True
-        collapsed = bool(collapsed)
-        current = self.screen_stack.currentWidget()
-        visual_route = (current in (getattr(self, "home_page", None),
-                                    getattr(self, "library_page", None),
-                                    getattr(self, "_background_operations_page", None))
-                        or self._analysis_archive_active())
-        expanded_width = 272 if visual_route and self.width() >= 1500 else 212
-        self.sidebar.setFixedWidth(60 if collapsed else expanded_width)
-        self.sidebar_brand.setVisible(not collapsed)
-        self.sidebar_profile_label.setVisible(not collapsed)
-        self.sidebar_connection_label.setVisible(not collapsed)
-        self.sidebar_safety_label.setVisible(not collapsed)
+        # Compatibility hook only: the accepted design has one navigation
+        # state. Normalize older QSettings and route/resize calls to it.
+        del collapsed, explicit
+        self._sidebar_explicit_override = False
+        self.sidebar.setFixedWidth(252)
+        self.sidebar_brand.setVisible(True)
+        self.sidebar_profile_label.setVisible(True)
+        self.sidebar_connection_label.setVisible(True)
+        self.sidebar_safety_label.setVisible(True)
         self._update_sidebar_profile_label()
-        self.sidebar_settings.setText("⚙" if collapsed else "⚙   Настройки")
+        self.sidebar_settings.setText("Настройки")
         self.sidebar_settings.setToolTip("Настройки")
         if hasattr(self, "connect_button"):
-            self.connect_button.setText("↗" if collapsed else "Подключить Lichess")
-            self.disconnect_button.setText("⏻" if collapsed else "Отключить Lichess")
+            self.connect_button.setText("Подключить Lichess")
+            self.disconnect_button.setText("Отключить Lichess")
             connect_description = ("Подключиться вручную"
                                    if self.manual_connect_mode and not self.lichess
                                    else "Подключить Lichess")
-            self.connect_button.setToolTip(connect_description if collapsed else "")
+            self.connect_button.setToolTip("")
             self.disconnect_button.setToolTip(
-                "Отключить Lichess" if collapsed else
                 "Остановить текущую Lichess-сессию, сохранив учётные данные.")
             self.connect_button.setAccessibleName(connect_description)
             self.disconnect_button.setAccessibleName("Отключить Lichess")
-            self.connect_button.setFixedWidth(34 if collapsed else 188)
-            self.disconnect_button.setFixedWidth(34 if collapsed else 188)
+            self.connect_button.setFixedWidth(188)
+            self.disconnect_button.setFixedWidth(188)
         if hasattr(self, "safety_retry_button"):
-            self.safety_retry_button.setText("↻" if collapsed else "↻ Проверить безопасность")
+            self.safety_retry_button.setText("↻ Проверить безопасность")
             self.safety_retry_button.setToolTip(
-                "Повторить проверку безопасности" if collapsed else
                 "Повторно проверить список активных партий; оценки до ответа скрыты.")
             self.safety_retry_button.setAccessibleName(
                 "Повторить проверку безопасности Lichess")
-            self.safety_retry_button.setFixedWidth(34 if collapsed else 188)
-        icons = {"home": "⌂", "play": "♟", "games": "▤", "analysis": "⌁",
-                 "training": "♞", "progress": "◷"}
-        for key, button in self._nav_buttons.items():
-            label = button.property("route_label")
-            button.setText(icons[key] if collapsed else f"{icons[key]}   {label}")
-            button.setToolTip(label if collapsed else "")
-        self.header_brand.setVisible(collapsed)
+            self.safety_retry_button.setFixedWidth(188)
+        for _key, button in self._nav_buttons.items():
+            # Keep the QIcon installed by _build_sidebar. The old responsive
+            # branch replaced it with font glyphs, which differed by font and
+            # could regress to the unwanted chess-piece symbols.
+            button.setToolTip("")
+        self.header_brand.setVisible(False)
         self._apply_board_size()
         self._apply_header_responsive()
         self._schedule_workspace_save()
@@ -2702,8 +2732,7 @@ class MainWindow(QMainWindow):
             and route is not WorkspaceRoute.HOME
             and self.workspace_navigator.can_go_back)
         self._update_return_to_game_button()
-        if not self._sidebar_explicit_override:
-            self._set_sidebar_collapsed(self.width() < 1160)
+        self._set_sidebar_collapsed(False)
         self._schedule_workspace_save()
 
     def _restore_window_frame(self) -> None:
@@ -2744,8 +2773,8 @@ class MainWindow(QMainWindow):
         self.workspace_state.save(WorkspaceSnapshot(
             route=self._active_route,
             geometry=self.saveGeometry(),
-            sidebar_collapsed=self.sidebar.width() <= 60,
-            sidebar_explicit=self._sidebar_explicit_override,
+            sidebar_collapsed=False,
+            sidebar_explicit=False,
             board_target_size=int(self.settings.value("board_target_size", 480, type=int)),
             review=resume_target,
         ))
@@ -3594,7 +3623,8 @@ class MainWindow(QMainWindow):
                     log_event("dashboard_cache", "dashboard", stage="tier_b_publish",
                               bytes=self._dashboard_snapshot_cache.last_save_bytes,
                               status=("saved" if saved else
-                                      self._dashboard_snapshot_cache.last_save_status))
+                                      self._dashboard_snapshot_cache.last_save_status),
+                              reason_code=self._dashboard_snapshot_cache.last_validation_issue)
                     result = candidate
                     result["_dashboard_revision"] = source_revision
                     result["_dashboard_stale"] = not saved
@@ -3951,30 +3981,48 @@ class MainWindow(QMainWindow):
             game_analysis_allowed = analysis_allowed and game_color in {"white", "black"}
             card = _DashboardGameCard()
             card.setObjectName("metricCard")
+            card.setProperty("dashboard_game_id", str(game.get("game_id") or ""))
             card.setAccessibleName(f"Открыть разбор партии: {heading}")
             card.setAccessibleDescription("Нажмите Enter или пробел, чтобы открыть разбор.")
             card.setToolTip("Открыть разбор партии")
             row_layout = QHBoxLayout(card)
-            row_layout.setContentsMargins(18, 6, 18, 6)
-            row_layout.setSpacing(18)
+            row_layout.setContentsMargins(12, 4, 12, 4)
+            row_layout.setSpacing(10)
             card_layout = QVBoxLayout()
-            row_layout.addLayout(card_layout, 4)
-            card_layout.setSpacing(4)
-            card.setMinimumHeight(140)
-            card.setMaximumHeight(150)
+            row_layout.addLayout(card_layout, 3)
+            card_layout.setSpacing(2)
+            # A narrower desktop gives the opening/accuracy column fewer
+            # pixels, so the two lines wrap. Keep enough vertical room for
+            # those lines while retaining the compact reference height on
+            # wide screens where the approved card text stays on one line.
+            compact_width = self.width() < 1500
+            compact_height = self.height() < 780
+            card.setMinimumHeight(100 if compact_height else 136 if compact_width else 108)
+            card.setMaximumHeight(108 if compact_height else 144 if compact_width else 118)
             outcome, _, opponent = heading.partition(" с ")
-            heading_label = QLabel(f"♟  {outcome}")
             outcome_color = (VISUAL_TOKENS.success if heading.startswith("Победа")
                              else VISUAL_TOKENS.danger if heading.startswith("Поражение")
                              else VISUAL_TOKENS.text)
+            heading_row = QHBoxLayout()
+            heading_row.setSpacing(8)
+            outcome_icon = QLabel()
+            outcome_icon.setPixmap(icon_pixmap(
+                "win" if heading.startswith("Победа") else
+                "loss" if heading.startswith("Поражение") else "draw",
+                18, outcome_color, outcome_icon.devicePixelRatioF()))
+            heading_row.addWidget(outcome_icon)
+            heading_label = QLabel(outcome)
+            heading_label.setObjectName("dashboardOutcome")
             heading_label.setStyleSheet(
-                f"color: {outcome_color}; font-size: 22px; font-weight: 700;")
+                f"color: {outcome_color}; font-size: 20px; font-weight: 700;")
             heading_label.setWordWrap(False)
-            card_layout.addWidget(heading_label)
+            heading_row.addWidget(heading_label)
+            heading_row.addStretch(1)
+            card_layout.addLayout(heading_row)
             if opponent:
                 opponent_label = QLabel(opponent)
                 opponent_label.setTextFormat(Qt.TextFormat.PlainText)
-                opponent_label.setStyleSheet("font-size: 16px;")
+                opponent_label.setStyleSheet("font-size: 14px;")
                 card_layout.addWidget(opponent_label)
             opening = game_opening_name(game)
             description = QLabel(details.removesuffix(f" · {opening}"))
@@ -4017,19 +4065,24 @@ class MainWindow(QMainWindow):
                 accuracy_group.setAlignment(Qt.AlignmentFlag.AlignVCenter)
                 opening_label = QLabel(opening)
                 opening_label.setWordWrap(True)
-                opening_label.setStyleSheet("font-size: 16px; font-weight: 600;")
+                opening_label.setStyleSheet("font-size: 14px; font-weight: 600;")
                 accuracy_group.addWidget(opening_label)
-                accuracy_label = QLabel(
+                source = metrics.get("accuracy_source")
+                accuracy_text = (
                     "Новая партия · оценка ещё не рассчитана"
                     if snapshot.get("_dashboard_stale") and
                     metrics.get("status") in {"loading", "updating"} else
                     "Сверяем локально сохранённую аналитику…"
                     if metrics.get("status") == "loading" else
-                    f"Точность: {accuracy} · {metrics['accuracy_source']}"
-                    if metrics.get("accuracy_source") else "Нет рассчитанной точности")
+                    (f"Точность: {accuracy}\n{source}" if compact_width else
+                     f"Точность: {accuracy} · {source}")
+                    if source else "Нет рассчитанной точности")
+                accuracy_label = QLabel(accuracy_text)
                 accuracy_label.setWordWrap(True)
+                if (compact_width or compact_height) and source:
+                    accuracy_label.setStyleSheet("font-size: 12px;")
                 accuracy_group.addWidget(accuracy_label)
-                row_layout.addLayout(accuracy_group, 2)
+                row_layout.addLayout(accuracy_group, 3)
                 rows = ["                   Я   Соперник"]
                 for title, key in (("Неточности", "inaccuracies"), ("Ошибки", "mistakes"),
                                    ("Зевки", "blunders")):
@@ -4038,7 +4091,7 @@ class MainWindow(QMainWindow):
                     rows.append(f"{title}:  {own}  /  {other}")
                 statistics = QLabel("\n".join(rows))
                 statistics.setObjectName("dashboardAnalysisMetrics")
-                statistics.setStyleSheet("font-size: 15px; line-height: 1.15;")
+                statistics.setStyleSheet("font-size: 13px; line-height: 1.05;")
                 statistics.setAccessibleDescription(
                     "Показатели ходов отдельно для владельца и соперника. "
                     + coverage.toolTip())
@@ -4050,7 +4103,7 @@ class MainWindow(QMainWindow):
                 if graph_points:
                     graph = ReviewGraph(graph_points, [])
                     graph.compact = True
-                    graph.setMinimumSize(0, 70)
+                    graph.setMinimumSize(0, 58)
                     graph.full_ply_count = int(
                         metrics.get("total_positions") or
                         len(metrics.get("moves") or {}) or len(graph_points))
@@ -4566,7 +4619,7 @@ class MainWindow(QMainWindow):
 
     def show_home(self) -> None:
         if self.sidebar.width() > 60:
-            self.sidebar.setFixedWidth(272 if self.width() >= 1500 else 212)
+            self.sidebar.setFixedWidth(252)
         self._screen_mode = "home"
         self.screen_title.setText("Главная")
         self.screen_stack.setCurrentWidget(self.home_page)

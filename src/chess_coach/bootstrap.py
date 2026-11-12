@@ -104,8 +104,19 @@ def create_runtime(*, settings: QSettings | None = None, offline_mode: bool = Fa
             raise RuntimeError("Windows не сообщил папку данных Chess Coach")
         data_root = Path(location)
         data_root.mkdir(parents=True, exist_ok=True)
+    configured_database = str(active_settings.value(
+        "workspace/database_file", "", type=str)).strip()
+    if configured_database:
+        database_path = Path(configured_database).expanduser()
+        if not database_path.is_absolute():
+            raise RuntimeError("Путь основной базы Chess Coach должен быть абсолютным")
+        if not database_path.is_file():
+            raise FileNotFoundError(
+                "Выбранная основная база Chess Coach недоступна; другая база не открыта")
+    else:
+        database_path = data_root / "games.sqlite3"
     try:
-        repository = GameRepository(data_root / "games.sqlite3", async_writes=asynchronous_storage)
+        repository = GameRepository(database_path, async_writes=asynchronous_storage)
     except Exception:
         if offline_data_dir is not None:
             offline_data_dir.cleanup()

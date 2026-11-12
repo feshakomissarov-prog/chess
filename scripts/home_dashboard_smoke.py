@@ -15,7 +15,7 @@ from PySide6.QtCore import QSettings, QTimer
 from PySide6.QtWidgets import QApplication
 
 from chess_coach.bootstrap import ApplicationRuntime
-from chess_coach.application.dashboard import dashboard_preview_snapshot
+from chess_coach.application.dashboard import dashboard_snapshot
 from chess_coach.diagnostics import configure_logging
 from chess_coach.lichess.repository import GameRepository
 from chess_coach.window import MainWindow
@@ -88,6 +88,26 @@ def add_game(database: Path) -> None:
     repository.shutdown()
 
 
+def write_expected(database: Path, root: Path) -> None:
+    """Prepare an independent expectation before the measured Qt process starts."""
+    root.mkdir(parents=True, exist_ok=True)
+    repository = GameRepository(database)
+    snapshot = dashboard_snapshot(repository, account_id=ACCOUNT, clock="",
+                                  wait_for_writes=True)
+    metrics = {item["key"]: item for item in snapshot["metrics"]}
+    expected = {
+        "games": metrics["games"]["value"],
+        "accuracy": metrics["accuracy"]["value"],
+        "accuracy_detail": metrics["accuracy"]["detail"],
+        "accuracy_source": metrics["accuracy"].get("source"),
+        "puzzle_rating": str((snapshot.get("puzzle_player_rating") or {}).get("latest") or ""),
+        "recent_ids": [game.get("game_id") for game in snapshot.get("recent_games", [])],
+    }
+    (root / "expected.json").write_text(
+        json.dumps(expected, ensure_ascii=False, indent=2), encoding="utf-8")
+    repository.shutdown()
+
+
 def launch(database: Path, root: Path, run_seconds: int, navigation_cycles: int,
            capture_screenshots: bool) -> None:
     root.mkdir(parents=True, exist_ok=True)
@@ -98,10 +118,12 @@ def launch(database: Path, root: Path, run_seconds: int, navigation_cycles: int,
     settings.sync()
     repository = GameRepository(database)
     runtime = ApplicationRuntime(settings, root, repository, True, False)
-    target_snapshot = dashboard_preview_snapshot(repository, account_id=ACCOUNT)
-    target_count = next(item["value"] for item in target_snapshot["metrics"]
-                        if item["key"] == "games")
-    target_recent_ids = [game["game_id"] for game in target_snapshot["recent_games"]]
+    expected_path = root / "expected.json"
+    if not expected_path.is_file():
+        raise RuntimeError("Run the separate 'expect' process before measured 'launch'.")
+    expected = json.loads(expected_path.read_text(encoding="utf-8"))
+    target_count = expected["games"]
+    target_recent_ids = expected["recent_ids"]
     window = MainWindow(runtime=runtime)
     aggregate_calls = 0
     original_snapshot = window.dashboard_queries.snapshot
@@ -169,7 +191,10 @@ def launch(database: Path, root: Path, run_seconds: int, navigation_cycles: int,
         visible_recent_ids = [game.get("game_id") for game in snapshot.get("recent_games", [])]
         if (current_summary_ms is None and games == target_count
                 and visible_recent_ids[:len(target_recent_ids)] == target_recent_ids
-                and accuracy not in {"—", "н/д", "-"} and rating not in {"—", "-"}):
+                and accuracy == expected["accuracy"]
+                and window._dashboard_metric_details["accuracy"].text()
+                    == expected["accuracy_detail"]
+                and rating == expected["puzzle_rating"]):
             current_summary_ms = round((now - shown) * 1000, 2)
         if games not in {"—", "-"} and first_count is None:
             first_count = round((now - shown) * 1000, 2)
@@ -257,6 +282,7 @@ def launch(database: Path, root: Path, run_seconds: int, navigation_cycles: int,
             "current_summary_ms": current_summary_ms,
             "target_games": target_count,
             "target_recent_ids": target_recent_ids,
+            "expected": expected,
             "first_recent_cards_ms": first_recent_cards,
             "full_ready_ms": full_ready,
             "games": games,
@@ -303,7 +329,7 @@ def launch(database: Path, root: Path, run_seconds: int, navigation_cycles: int,
 
 def main() -> None:
     parser = argparse.ArgumentParser()
-    parser.add_argument("mode", choices=("seed", "add", "launch"))
+    parser.add_argument("mode", choices=("seed", "add", "expect", "launch"))
     parser.add_argument("database", type=Path)
     parser.add_argument("root", type=Path)
     parser.add_argument("--count", type=int, default=3319)
@@ -315,6 +341,8 @@ def main() -> None:
         seed(args.database, args.count)
     elif args.mode == "add":
         add_game(args.database)
+    elif args.mode == "expect":
+        write_expected(args.database, args.root)
     else:
         launch(args.database, args.root, args.seconds, args.navigation_cycles,
                not args.no_screenshots)

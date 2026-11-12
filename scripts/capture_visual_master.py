@@ -539,7 +539,10 @@ def capture(window: MainWindow, output: Path, name: str, width: int, height: int
         QTest.qWait(20)
     training_page = (current if isinstance(current, PuzzleHistoryPage)
                      else current.findChild(PuzzleHistoryPage))
-    if training_page is not None:
+    # A hidden PuzzleHistoryPage remains a child of the shell when another
+    # route is active. Its last query need not be populated until Training is
+    # opened, so inspect it only while it contributes pixels to this capture.
+    if training_page is not None and training_page.isVisibleTo(window):
         assert training_page.history.count() > 0
         assert training_page.board.isVisible()
         assert_no_widget_overlap(training_page.board, training_page.solution,
@@ -837,10 +840,13 @@ def main() -> None:
             captured[f"home-{width}x{height}"] = image
             make_pair(reference_dir, output, REFERENCE_MAP["home"], image, f"home-{width}x{height}")
             if width == target_sizes[0][0] and height == target_sizes[0][1]:
-                window._set_sidebar_collapsed(True, explicit=True)
-                collapsed = capture(window, output, "home-sidebar-collapsed", width, height)
-                captured["home-sidebar-collapsed"] = collapsed
-                window._set_sidebar_collapsed(False, explicit=False)
+                QTest.mouseClick(window.sidebar_toggle, Qt.MouseButton.LeftButton)
+                assert window.sidebar.width() == 252
+                assert all(button.text().endswith(str(button.property("route_label")))
+                           for button in window._nav_buttons.values())
+                expanded = capture(
+                    window, output, "home-sidebar-expanded-after-toggle", width, height)
+                captured["home-sidebar-expanded-after-toggle"] = expanded
 
             navigate_to_games(window, selected_game_id)
             image = capture(window, output, "games", width, height)
