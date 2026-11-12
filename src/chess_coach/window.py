@@ -4068,6 +4068,8 @@ class MainWindow(QMainWindow):
             heading_label.setStyleSheet(
                 f"color: {outcome_color}; font-size: 20px; font-weight: 700;")
             heading_label.setWordWrap(False)
+            heading_label.setSizePolicy(QSizePolicy.Policy.Ignored,
+                                        QSizePolicy.Policy.Preferred)
             heading_row.addWidget(heading_label)
             heading_row.addStretch(1)
             card_layout.addLayout(heading_row)
@@ -4075,11 +4077,16 @@ class MainWindow(QMainWindow):
                 opponent_label = QLabel(opponent)
                 opponent_label.setTextFormat(Qt.TextFormat.PlainText)
                 opponent_label.setStyleSheet("font-size: 14px;")
+                opponent_label.setWordWrap(True)
+                opponent_label.setSizePolicy(QSizePolicy.Policy.Ignored,
+                                             QSizePolicy.Policy.Preferred)
                 card_layout.addWidget(opponent_label)
             opening = game_opening_name(game)
             description = QLabel(details.removesuffix(f" · {opening}"))
             description.setObjectName("secondary")
             description.setWordWrap(True)
+            description.setSizePolicy(QSizePolicy.Policy.Ignored,
+                                      QSizePolicy.Policy.Preferred)
             description.setToolTip(opening_tooltip(game.get("opening_name")))
             card_layout.addWidget(description)
             coverage_text = ("Новая партия · оценки обновляются" if
@@ -4118,6 +4125,8 @@ class MainWindow(QMainWindow):
                 opening_label = QLabel(opening)
                 opening_label.setWordWrap(True)
                 opening_label.setStyleSheet("font-size: 14px; font-weight: 600;")
+                opening_label.setSizePolicy(QSizePolicy.Policy.Ignored,
+                                            QSizePolicy.Policy.Preferred)
                 accuracy_group.addWidget(opening_label)
                 source = metrics.get("accuracy_source")
                 accuracy_text = (
@@ -4130,6 +4139,8 @@ class MainWindow(QMainWindow):
                     if source else "Нет рассчитанной точности")
                 accuracy_label = QLabel(accuracy_text)
                 accuracy_label.setWordWrap(True)
+                accuracy_label.setSizePolicy(QSizePolicy.Policy.Ignored,
+                                             QSizePolicy.Policy.Preferred)
                 if (compact_width or compact_height) and source:
                     accuracy_label.setStyleSheet("font-size: 12px;")
                 accuracy_group.addWidget(accuracy_label)
@@ -4144,6 +4155,8 @@ class MainWindow(QMainWindow):
                 statistics.setObjectName("dashboardAnalysisMetrics")
                 statistics.setStyleSheet("font-size: 12px; line-height: 1.05;")
                 statistics.setWordWrap(True)
+                statistics.setSizePolicy(QSizePolicy.Policy.Ignored,
+                                         QSizePolicy.Policy.Preferred)
                 statistics.setAccessibleDescription(
                     "Показатели ходов отдельно для владельца и соперника. "
                     + coverage.toolTip())
