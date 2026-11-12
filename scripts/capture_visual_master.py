@@ -107,7 +107,12 @@ def assert_scroll_action(scroll: QScrollArea, widget: QWidget, description: str)
     assert widget.isVisible(), f"{description} is hidden"
     bounds = QRect(widget.mapTo(scroll.viewport(), QPoint(0, 0)), widget.size())
     assert scroll.viewport().rect().contains(bounds), (
-        f"{description} cannot be fully reached in its local scroll area: {bounds.getRect()}"
+        f"{description} cannot be fully reached in its local scroll area: "
+        f"widget={bounds.getRect()}, viewport={scroll.viewport().rect().getRect()}, "
+        f"content=({scroll.widget().width()}, {scroll.widget().height()}), "
+        f"scroll_range=({scroll.verticalScrollBar().minimum()}"
+        f"..{scroll.verticalScrollBar().maximum()}), "
+        f"scroll_value={scroll.verticalScrollBar().value()}"
     )
     assert bounds.width() >= 24 and bounds.height() >= 24, (
         f"{description} has a truncated click target: {bounds.getRect()}"

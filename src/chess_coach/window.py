@@ -2279,7 +2279,10 @@ class MainWindow(QMainWindow):
         # to the viewport height when a stretchable move table is present.
         # Preserve the layout's full minimum height so bottom actions scroll
         # into view on short/high-DPI windows.
-        side.setMinimumHeight(side_layout.minimumSize().height())
+        side_layout.activate()
+        side.adjustSize()
+        side.setMinimumHeight(max(side_layout.minimumSize().height(),
+                                  side_layout.sizeHint().height()))
         side_scroll.setWidget(side)
         self.game_controls_scroll = side_scroll
         splitter.addWidget(side_scroll)
