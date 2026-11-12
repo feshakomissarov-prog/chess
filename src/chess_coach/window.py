@@ -2088,7 +2088,9 @@ class MainWindow(QMainWindow):
         side_layout = QVBoxLayout(side)
         side_layout.setSizeConstraint(QLayout.SizeConstraint.SetMinimumSize)
         side_layout.setContentsMargins(8, 0, 0, 0)
-        side_layout.setSpacing(10)
+        # Keep the full action row inside the compact high-DPI viewport while
+        # preserving the existing order and control sizes.
+        side_layout.setSpacing(8)
         status_card = QFrame()
         status_card.setObjectName("card")
         status_layout = QVBoxLayout(status_card)
