@@ -196,7 +196,7 @@ def test_3319_to_3320_restart_persists_and_paints_real_ui_in_separate_processes(
     assert changed["first_useful_accuracy"] == "68.0%"
     assert changed["first_useful_rating"] == "1492"
     assert changed["first_useful_stale"] is True
-    assert changed["current_summary_ms"] <= 1000
+    assert changed["current_summary_ms"] <= 1000, changed
     assert changed["recent_ids"][:3] == ["seed-new", "seed-0", "seed-old-03315"]
     assert "обновляется" in changed["first_useful_accuracy_detail"]
     # First useful paint keeps the previous last-good Tier A; verify the
