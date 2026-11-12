@@ -99,7 +99,10 @@ def assert_label_fits(label: QLabel, description: str) -> None:
 
 
 def assert_scroll_action(scroll: QScrollArea, widget: QWidget, description: str) -> None:
-    scroll.ensureWidgetVisible(widget)
+    # Qt defaults to a 50 px margin. At 125%/150% a valid bottom-row action
+    # can be shorter than that extra margin even though the full click target
+    # fits in the viewport; validate reachability with no artificial padding.
+    scroll.ensureWidgetVisible(widget, 0, 0)
     QApplication.processEvents()
     assert widget.isVisible(), f"{description} is hidden"
     bounds = QRect(widget.mapTo(scroll.viewport(), QPoint(0, 0)), widget.size())
