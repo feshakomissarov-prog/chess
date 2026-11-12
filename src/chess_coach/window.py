@@ -4040,10 +4040,8 @@ class MainWindow(QMainWindow):
             card_layout = QVBoxLayout()
             row_layout.addLayout(card_layout, 3)
             card_layout.setSpacing(2)
-            # A narrower desktop gives the opening/accuracy column fewer
-            # pixels, so the two lines wrap. Keep enough vertical room for
-            # those lines while retaining the compact reference height on
-            # wide screens where the approved card text stays on one line.
+            # The accuracy and its source use separate lines so the source is
+            # never clipped into a compact card's lower edge.
             compact_width = self._home_view.recent_scroll.viewport().width() < 900
             compact_height = self.height() < 780
             card.setMinimumHeight(176 if compact_width else 136 if compact_height else 108)
@@ -4131,15 +4129,16 @@ class MainWindow(QMainWindow):
                     accuracy_label.setStyleSheet("font-size: 12px;")
                 accuracy_group.addWidget(accuracy_label)
                 row_layout.addLayout(accuracy_group, 3)
-                rows = ["                   Я   Соперник"]
+                rows = ["Я / соперник"]
                 for title, key in (("Неточности", "inaccuracies"), ("Ошибки", "mistakes"),
                                    ("Зевки", "blunders")):
                     own = metrics.get("owner_" + key, "—")
                     other = metrics.get("opponent_" + key, "—")
-                    rows.append(f"{title}:  {own}  /  {other}")
+                    rows.append(f"{title}: {own} / {other}")
                 statistics = QLabel("\n".join(rows))
                 statistics.setObjectName("dashboardAnalysisMetrics")
-                statistics.setStyleSheet("font-size: 13px; line-height: 1.05;")
+                statistics.setStyleSheet("font-size: 12px; line-height: 1.05;")
+                statistics.setWordWrap(True)
                 statistics.setAccessibleDescription(
                     "Показатели ходов отдельно для владельца и соперника. "
                     + coverage.toolTip())
