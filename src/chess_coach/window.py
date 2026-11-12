@@ -2102,6 +2102,7 @@ class MainWindow(QMainWindow):
         self.material_balance_label.setStyleSheet("font-size: 14px; font-weight: 600;")
         status_layout.addWidget(self.material_balance_label)
         self.game_status = QLabel("Локальная тренировочная доска")
+        self.game_status.setWordWrap(True)
         self.game_status.setStyleSheet("color: #77766f;")
         status_layout.addWidget(self.game_status)
         side_layout.addWidget(status_card)
