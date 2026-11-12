@@ -82,6 +82,14 @@ def test_play_preferences_are_saved_per_mode_and_restored(qtbot, tmp_path):
     page.rated.setChecked(True)
     page.select_mode("challenge")
     page.username.setText("ExampleOpponent")
+    opponent_row = page._form_grid_widgets["Соперник"]
+    assert page._form_grid.getItemPosition(page._form_grid.indexOf(opponent_row)) == (
+        0, 0, 1, page._form_columns)
+    challenge_color_position = page._form_grid.getItemPosition(
+        page._form_grid.indexOf(page._form_grid_widgets["Цвет фигур"]))
+    challenge_clock_position = page._form_grid.getItemPosition(
+        page._form_grid.indexOf(page._form_grid_widgets["Контроль времени"]))
+    assert challenge_color_position[0] == challenge_clock_position[0] == 1
     page.select_mode("ai")
     assert page.color.currentData() == "black"
     assert page.clock.currentData() == (300, 0)

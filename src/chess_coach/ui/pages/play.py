@@ -101,8 +101,9 @@ class PlayPage(QWidget):
         self.content_scroll.viewport().installEventFilter(self)
         self.content = QWidget()
         # Active-game text and mode-card labels can otherwise keep the content
-        # wider than the available viewport at high DPI; the CTA stays outside
-        # this scroll area, so allow the cards themselves to use the page width.
+        # wider than the available viewport at high DPI. Start controls stay
+        # with their selected form; the confirmed-game resume action is pinned
+        # outside this scroll area.
         self.content.setSizePolicy(QSizePolicy.Policy.Ignored,
                                    QSizePolicy.Policy.Preferred)
         layout = QVBoxLayout(self.content)
@@ -247,7 +248,8 @@ class PlayPage(QWidget):
         self.active_status.setWordWrap(True)
         self.active_games = QListWidget()
         self.active_games.setAccessibleName("Активные партии Lichess")
-        self.active_games.setMinimumHeight(112)
+        self.active_games.setMinimumHeight(56)
+        self.active_games.setMaximumHeight(144)
         self.active_games.currentItemChanged.connect(self._show_active_preview)
         preview = QWidget(self.active_panel)
         preview_row = QHBoxLayout(preview)
@@ -260,7 +262,7 @@ class PlayPage(QWidget):
         self.active_preview_status.setObjectName("secondary")
         self.active_preview_board = BoardView(chess.Board(), self.active_panel)
         self.active_preview_board.setMinimumSize(0, 0)
-        self.active_preview_board.setFixedSize(176, 176)
+        self.active_preview_board.setFixedSize(144, 144)
         self.active_preview_board.set_interaction_enabled(False)
         self.active_preview_board.set_annotations_enabled(False)
         self.active_preview_board.set_premove_allowed(False)
@@ -532,6 +534,21 @@ class PlayPage(QWidget):
         self._form_columns = columns
         for column in range(3):
             grid.setColumnStretch(column, int(column < columns))
+        if (self.mode_selector.currentData() == "challenge"
+                and "Соперник" in field_order):
+            # UX-03 gives the opponent name a full row; party options follow
+            # beneath it instead of forcing a narrow third-column input.
+            grid.addWidget(self._form_grid_widgets["Соперник"], 0, 0, 1, columns)
+            remaining = [label for label in field_order if label != "Соперник"]
+            for index, label in enumerate(remaining):
+                grid.addWidget(self._form_grid_widgets[label], 1 + index // columns,
+                               index % columns)
+            inactive = [label for label in self._form_grid_widgets
+                        if label not in field_order]
+            for index, label in enumerate(inactive):
+                grid.addWidget(self._form_grid_widgets[label], 2 + index // columns,
+                               index % columns)
+            return
         for index, label in enumerate(field_order):
             grid.addWidget(self._form_grid_widgets[label], index // columns,
                            index % columns)

@@ -55,6 +55,8 @@ def test_play_first_screen_places_mode_cards_and_form_before_active_games(qtbot)
     assert page.form_card.isAncestorOf(page.start_button)
     assert page.active_open.isVisible() and page.active_open.isEnabled()
     assert page.action_bar.isVisible()
+    assert page.active_games.maximumHeight() == 144
+    assert page.active_preview_board.size().width() == 144
 
 
 def test_play_mode_grid_uses_content_width_after_sidebar_and_dpi(qtbot):
