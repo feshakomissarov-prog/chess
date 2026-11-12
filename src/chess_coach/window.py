@@ -383,7 +383,7 @@ class _DashboardGameCard(QFrame):
         compact_height = owner.height() < 780
         has_graph = self._responsive_graph is not None
         if compact:
-            minimum, maximum = (196, 228) if has_graph else (112, 144)
+            minimum, maximum = (200, 232) if has_graph else (112, 144)
         elif compact_height:
             minimum, maximum = 136, 144
         else:
@@ -4051,8 +4051,8 @@ class MainWindow(QMainWindow):
             card_layout.setSpacing(2)
             # The accuracy and its source use separate lines so the source is
             # never clipped into a compact card's lower edge.
-            card.setMinimumHeight(196 if compact_width else 136 if compact_height else 108)
-            card.setMaximumHeight(228 if compact_width else 144 if compact_height else 118)
+            card.setMinimumHeight(200 if compact_width else 136 if compact_height else 108)
+            card.setMaximumHeight(232 if compact_width else 144 if compact_height else 118)
             outcome, _, opponent = heading.partition(" с ")
             outcome_color = (VISUAL_TOKENS.success if heading.startswith("Победа")
                              else VISUAL_TOKENS.danger if heading.startswith("Поражение")
@@ -4158,7 +4158,8 @@ class MainWindow(QMainWindow):
                     rows.append(f"{title}: {own} / {other}")
                 statistics = QLabel("\n".join(rows))
                 statistics.setObjectName("dashboardAnalysisMetrics")
-                statistics.setStyleSheet("font-size: 12px; line-height: 1.05;")
+                statistics.setStyleSheet(
+                    f"font-size: {11 if narrow_width else 12}px; line-height: 1.05;")
                 statistics.setWordWrap(True)
                 statistics.setSizePolicy(QSizePolicy.Policy.Ignored,
                                          QSizePolicy.Policy.Preferred)
