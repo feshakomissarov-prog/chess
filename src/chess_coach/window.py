@@ -383,7 +383,7 @@ class _DashboardGameCard(QFrame):
         compact_height = owner.height() < 780
         has_graph = self._responsive_graph is not None
         if compact:
-            minimum, maximum = (192, 224) if has_graph else (112, 144)
+            minimum, maximum = (196, 228) if has_graph else (112, 144)
         elif compact_height:
             minimum, maximum = 136, 144
         else:
@@ -4029,6 +4029,10 @@ class MainWindow(QMainWindow):
             metrics = game.get("review_metrics") or {}
             game_color = game.get("account_color") or game.get("color")
             game_analysis_allowed = analysis_allowed and game_color in {"white", "black"}
+            recent_width = self._home_view.recent_scroll.viewport().width()
+            compact_width = recent_width < 900
+            narrow_width = recent_width < 650
+            compact_height = self.height() < 780
             card = _DashboardGameCard()
             card.setObjectName("metricCard")
             card.setProperty("dashboard_game_id", str(game.get("game_id") or ""))
@@ -4043,14 +4047,12 @@ class MainWindow(QMainWindow):
             row_layout.setSpacing(10)
             card_root_layout.addLayout(row_layout)
             card_layout = QVBoxLayout()
-            row_layout.addLayout(card_layout, 3)
+            row_layout.addLayout(card_layout, 1 if narrow_width else 3)
             card_layout.setSpacing(2)
             # The accuracy and its source use separate lines so the source is
             # never clipped into a compact card's lower edge.
-            compact_width = self._home_view.recent_scroll.viewport().width() < 900
-            compact_height = self.height() < 780
-            card.setMinimumHeight(192 if compact_width else 136 if compact_height else 108)
-            card.setMaximumHeight(224 if compact_width else 144 if compact_height else 118)
+            card.setMinimumHeight(196 if compact_width else 136 if compact_height else 108)
+            card.setMaximumHeight(228 if compact_width else 144 if compact_height else 118)
             outcome, _, opponent = heading.partition(" с ")
             outcome_color = (VISUAL_TOKENS.success if heading.startswith("Победа")
                              else VISUAL_TOKENS.danger if heading.startswith("Поражение")
@@ -4147,7 +4149,7 @@ class MainWindow(QMainWindow):
                 if (compact_width or compact_height) and source:
                     accuracy_label.setStyleSheet("font-size: 12px;")
                 accuracy_group.addWidget(accuracy_label)
-                row_layout.addLayout(accuracy_group, 3)
+                row_layout.addLayout(accuracy_group, 1 if narrow_width else 3)
                 rows = ["Я / соперник"]
                 for title, key in (("Неточности", "inaccuracies"), ("Ошибки", "mistakes"),
                                    ("Зевки", "blunders")):
@@ -4163,7 +4165,10 @@ class MainWindow(QMainWindow):
                 statistics.setAccessibleDescription(
                     "Показатели ходов отдельно для владельца и соперника. "
                     + coverage.toolTip())
-                row_layout.addWidget(statistics, 2)
+                if narrow_width:
+                    accuracy_group.addWidget(statistics)
+                else:
+                    row_layout.addWidget(statistics, 2)
                 graph_points = metrics.get("graph_points")
                 legacy_assessments = metrics.get("assessments") or []
                 if not graph_points and legacy_assessments:
