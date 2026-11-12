@@ -12,7 +12,7 @@ from PySide6.QtWidgets import (
 )
 
 from .position_setup import PositionSetupWidget
-from .icons import icon_pixmap
+from ..icons import icon_pixmap
 
 
 class AnalysisLandingPage(QWidget):
