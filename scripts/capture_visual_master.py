@@ -321,7 +321,10 @@ def wait_home(window, account_id: str) -> None:
         )
         for label_index, label in enumerate(card.findChildren(QLabel), start=1):
             if label.isVisible():
-                assert_label_fits(label, f"Home card {index}, text {label_index}")
+                assert_label_fits(
+                    label,
+                    f"Home card {index}, text {label_index} ({label.text()!r})",
+                )
         graph = card.findChild(ReviewGraph)
         assert graph is not None and graph.width() >= 160, (
             f"Home card {index} evaluation graph is too narrow: "

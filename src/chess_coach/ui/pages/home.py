@@ -153,8 +153,10 @@ class HomePage(QWidget):
         # field for compatibility without giving it KPI prominence on Home.
         self.dashboard_metrics["errors"].hide()
         for key in ("games", "accuracy"):
-            self.dashboard_metrics[key].setMinimumHeight(178)
-            self.dashboard_metrics[key].setMaximumHeight(190)
+            # Leave enough vertical room for the wrapped, source-qualified
+            # summary even when Windows font metrics round a line upward.
+            self.dashboard_metrics[key].setMinimumHeight(186)
+            self.dashboard_metrics[key].setMaximumHeight(198)
 
         top_row = QHBoxLayout()
         self.home_primary_actions = top_row
