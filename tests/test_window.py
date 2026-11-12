@@ -6032,7 +6032,15 @@ def test_connected_analysis_cancel_stops_fake_analyzer_without_saving_complete_r
     qtbot.waitUntil(lambda: window._analysis_stop is None, timeout=3000)
     assert window.game_repository.list_analyses("cancelled-connected-game") == []
     assert window._analysis_safety_phase is None
-    assert window.close() is True
+    # Startup dashboard work may still be draining independently of the
+    # analysis worker. close() correctly defers rather than shutting SQLite
+    # down under that read; the scheduled retry must finish once it drains.
+    closed_immediately = window.close()
+    if not closed_immediately:
+        assert window._close_retry_scheduled
+        qtbot.waitUntil(lambda: window.runtime._closed, timeout=5000)
+    else:
+        assert window.runtime._closed
 
 
 def test_preflight_cancel_ignores_late_empty_snapshot_and_http_429_fails_closed(

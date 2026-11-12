@@ -64,6 +64,9 @@ def test_play_preferences_are_saved_per_mode_and_restored(qtbot, tmp_path):
     settings = QSettings(str(tmp_path / "play-modes.ini"), QSettings.Format.IniFormat)
     page = PlayPage({}, settings=settings)
     qtbot.addWidget(page)
+    page.resize(960, 720)
+    page.show()
+    qtbot.wait(30)
     assert len(page.cards) == 4
     assert page.mode_selector.currentData() == "ai"
     page.color.setCurrentIndex(page.color.findData("black"))

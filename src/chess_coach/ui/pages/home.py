@@ -180,8 +180,8 @@ class HomePage(QWidget):
         self.puzzle_rating.setStyleSheet("font-size: 54px; font-weight: 700;")
         progress_layout.addWidget(self.puzzle_rating)
         self.puzzle_sparkline = PuzzleRatingSparkline(self.home_progress_card)
-        self.puzzle_sparkline.setMinimumHeight(70)
-        self.puzzle_sparkline.setMaximumHeight(80)
+        self.puzzle_sparkline.setMinimumHeight(56)
+        self.puzzle_sparkline.setMaximumHeight(72)
         self.puzzle_sparkline.setMinimumWidth(0)
         self.puzzle_sparkline.setSizePolicy(QSizePolicy.Policy.Ignored,
                                             QSizePolicy.Policy.Preferred)
@@ -189,8 +189,10 @@ class HomePage(QWidget):
         self.progress_trend = QLabel("Нет сохранённых точек тренда.")
         self.progress_trend.setObjectName("secondary")
         self.progress_trend.setWordWrap(True)
-        self.progress_trend.setMaximumHeight(50)
-        progress_layout.addWidget(self.progress_trend, 1)
+        self.progress_trend.setMinimumHeight(30)
+        self.progress_trend.setSizePolicy(QSizePolicy.Policy.Preferred,
+                                          QSizePolicy.Policy.Minimum)
+        progress_layout.addWidget(self.progress_trend)
         self.dashboard_metrics["games"].layout().addWidget(
             self._dashboard_metric_values["analysis"])
         self._dashboard_metric_values["analysis"].setStyleSheet("font-size: 14px;")

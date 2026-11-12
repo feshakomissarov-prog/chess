@@ -314,6 +314,19 @@ def wait_home(window, account_id: str) -> None:
     assert all(card.findChild(ReviewGraph) is not None for card in recent_cards), (
         "All three synthetic Home games require a real rendered evaluation graph."
     )
+    for index, card in enumerate(recent_cards, start=1):
+        assert card.width() <= window._home_view.recent_scroll.viewport().width(), (
+            f"Home card {index} exceeds its scroll viewport width: "
+            f"{card.width()} > {window._home_view.recent_scroll.viewport().width()}"
+        )
+        for label_index, label in enumerate(card.findChildren(QLabel), start=1):
+            if label.isVisible():
+                assert_label_fits(label, f"Home card {index}, text {label_index}")
+        graph = card.findChild(ReviewGraph)
+        assert graph is not None and graph.width() >= 160, (
+            f"Home card {index} evaluation graph is too narrow: "
+            f"{graph.width() if graph is not None else 'missing'}"
+        )
 
 
 def wait_selected_review(page, expected_game_id: str) -> None:
@@ -520,15 +533,13 @@ def capture(window: MainWindow, output: Path, name: str, width: int, height: int
         if mode in page.buttons:
             assert_scroll_action(page.content_scroll, page.buttons[mode], f"Play mode {mode}")
             assert_action_target(window, page.buttons[mode], f"Play mode {mode}")
+        assert page.form_card.isAncestorOf(page.start_button), (
+            "The primary start action belongs to the selected mode form, matching UX-01/02/03."
+        )
+        assert_scroll_action(page.content_scroll, page.start_button, "Play start action")
         assert_action_target(window, page.start_button, "Play start action")
         if page.active_open.isVisibleTo(window):
             assert_action_target(window, page.active_open, "Continue selected game action")
-        action_center = page.start_button.mapTo(page, page.start_button.rect().center())
-        viewport = page.content_scroll.viewport()
-        viewport_rect = QRect(viewport.mapTo(page, viewport.rect().topLeft()), viewport.size())
-        assert not viewport_rect.contains(action_center), (
-            "The Play start action must remain outside the scrollable content viewport."
-        )
         page.content_scroll.verticalScrollBar().setValue(0)
         QTest.qWait(20)
     if current is window.game_page:
@@ -650,6 +661,25 @@ def capture(window: MainWindow, output: Path, name: str, width: int, height: int
         expected_account = window.dashboard_account.currentData()
         if expected_account:
             wait_home(window, str(expected_account))
+        progress = window._home_view
+        graph_rect = QRect(progress.puzzle_sparkline.mapToGlobal(QPoint(0, 0)),
+                           progress.puzzle_sparkline.size())
+        trend_rect = QRect(progress.progress_trend.mapToGlobal(QPoint(0, 0)),
+                           progress.progress_trend.size())
+        assert not graph_rect.intersects(trend_rect), (
+            f"Home puzzle trend label overlaps its graph at {width}x{height}: "
+            f"graph={graph_rect.getRect()}, label={trend_rect.getRect()}"
+        )
+        assert_label_fits(progress.progress_trend, "Home puzzle rating trend label")
+        recent_cards = [window._recent_games_layout.itemAt(i).widget()
+                        for i in range(window._recent_games_layout.count())
+                        if window._recent_games_layout.itemAt(i).widget() is not None
+                        and window._recent_games_layout.itemAt(i).widget().objectName() == "metricCard"]
+        for card_index, card in enumerate(recent_cards, start=1):
+            for label_index, label in enumerate(card.findChildren(QLabel), start=1):
+                if label.isVisible():
+                    assert_label_fits(label, f"Home {width}x{height}, card {card_index}, "
+                                               f"label {label_index}")
         if width >= 1500 and height >= 900:
             recent = window._home_view.recent_scroll
             card_heights = [window._recent_games_layout.itemAt(i).widget().height()

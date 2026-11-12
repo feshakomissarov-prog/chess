@@ -48,6 +48,13 @@ def test_play_first_screen_places_mode_cards_and_form_before_active_games(qtbot)
     assert layout.indexOf(page.active_panel) == 2
     assert page._columns == 2
     assert page.start_button.isVisible() and page.start_button.isEnabled()
+    assert page.form_card.isAncestorOf(page.start_button)
+    assert page.action_bar.isVisible()
+    page.set_active_games([{"gameId": "active", "fen": chess.STARTING_FEN}],
+                          status="one active game")
+    assert page.form_card.isAncestorOf(page.start_button)
+    assert page.active_open.isVisible() and page.active_open.isEnabled()
+    assert page.action_bar.isVisible()
 
 
 def test_play_mode_grid_uses_content_width_after_sidebar_and_dpi(qtbot):

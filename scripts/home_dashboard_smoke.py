@@ -11,7 +11,7 @@ from pathlib import Path
 import sys
 import time
 
-from PySide6.QtCore import QSettings, QTimer
+from PySide6.QtCore import QRect, QSettings, QTimer
 from PySide6.QtWidgets import QApplication
 
 from chess_coach.bootstrap import ApplicationRuntime
@@ -189,8 +189,22 @@ def launch(database: Path, root: Path, run_seconds: int, navigation_cycles: int,
         rating = window._home_view.puzzle_rating.text()
         snapshot = window._latest_dashboard_snapshot or {}
         visible_recent_ids = [game.get("game_id") for game in snapshot.get("recent_games", [])]
+        painted_cards = []
+        viewport = window._home_view.recent_scroll.viewport()
+        for index in range(window._recent_games_layout.count()):
+            widget = window._recent_games_layout.itemAt(index).widget()
+            if widget is not None and widget.objectName() == "metricCard":
+                top_left = widget.mapTo(viewport, widget.rect().topLeft())
+                card_rect = QRect(top_left, widget.size())
+                painted_cards.append((widget, card_rect))
+        painted_ids = [str(card.property("dashboard_game_id") or "")
+                       for card, _rect in painted_cards]
+        cards_fully_visible = (len(painted_cards) == min(int(target_count), 3)
+                               and all(viewport.rect().contains(rect)
+                                       for _card, rect in painted_cards))
         if (current_summary_ms is None and games == target_count
                 and visible_recent_ids[:len(target_recent_ids)] == target_recent_ids
+                and painted_ids == target_recent_ids[:3] and cards_fully_visible
                 and accuracy == expected["accuracy"]
                 and window._dashboard_metric_details["accuracy"].text()
                     == expected["accuracy_detail"]
@@ -219,13 +233,22 @@ def launch(database: Path, root: Path, run_seconds: int, navigation_cycles: int,
                 item = window._recent_games_layout.itemAt(index)
                 widget = item.widget()
                 if widget is not None and widget.objectName() == "metricCard":
-                    recent.append([label.text() for label in widget.findChildren(QLabel)])
+                    recent.append({
+                        "game_id": str(widget.property("dashboard_game_id") or ""),
+                        "labels": [label.text() for label in widget.findChildren(QLabel)
+                                   if label.isVisible()],
+                    })
             try:
                 count_value = int(games.replace(",", ""))
             except ValueError:
                 count_value = -1
             expected_cards = min(count_value, 3) if count_value >= 0 else -1
-            if len(recent) == expected_cards and (expected_cards > 0 or count_value == 0):
+            snapshot_ids = [str(game.get("game_id") or "")
+                            for game in snapshot.get("recent_games", [])]
+            rendered_ids = [card["game_id"] for card in recent]
+            if (len(recent) == expected_cards
+                    and snapshot_ids == rendered_ids[:expected_cards]
+                    and (expected_cards > 0 or count_value == 0)):
                 first_recent_cards = round((now - shown) * 1000, 2)
                 if first_useful_snapshot is not None:
                     first_useful_snapshot["_first_useful_cards"] = recent
@@ -277,6 +300,8 @@ def launch(database: Path, root: Path, run_seconds: int, navigation_cycles: int,
             QTimer.singleShot(250, exercise_home_navigation)
         final_state.update({
             "shown_at_monotonic": shown,
+            "timer_origin": ("immediately_before_window.show(); diagnostic only, "
+                             "not native first-visible-frame timing"),
             "first_count_ms": first_count,
             "first_useful_ms": first_useful,
             "current_summary_ms": current_summary_ms,
@@ -295,6 +320,8 @@ def launch(database: Path, root: Path, run_seconds: int, navigation_cycles: int,
             "snapshot_stale": bool(snapshot.get("_dashboard_stale")),
             "snapshot_revision": snapshot.get("_dashboard_revision"),
             "recent_ids": [game.get("game_id") for game in snapshot.get("recent_games", [])],
+            "painted_recent_ids": painted_ids,
+            "recent_cards_fully_visible": cards_fully_visible,
             "recent_card_labels": (first_useful_snapshot or {}).get("_first_useful_cards", []),
             "first_useful_accuracy": (first_useful_snapshot or {}).get("_first_useful_accuracy"),
             "first_useful_accuracy_detail": (first_useful_snapshot or {}).get(

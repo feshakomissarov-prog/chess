@@ -25,6 +25,7 @@ from PySide6.QtWidgets import (
     QCheckBox,
     QButtonGroup,
     QApplication,
+    QBoxLayout,
     QComboBox,
     QDialog,
     QDialogButtonBox,
@@ -357,10 +358,39 @@ def _archive_row_presentation(game: dict) -> tuple[str, str]:
 class _DashboardGameCard(QFrame):
     activated = Signal()
 
-    def __init__(self, parent=None):
+    def __init__(self, parent=None) -> None:
         super().__init__(parent)
+        self._responsive_layout: QBoxLayout | None = None
+        self._responsive_graph: QWidget | None = None
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
         self.setCursor(Qt.CursorShape.PointingHandCursor)
+
+    def set_responsive_graph(self, layout: QBoxLayout, graph: QWidget | None) -> None:
+        self._responsive_layout = layout
+        self._responsive_graph = graph
+        self._sync_graph_layout()
+
+    def _sync_graph_layout(self) -> None:
+        if self._responsive_layout is None:
+            return
+        compact = self.width() < 900
+        direction = (QBoxLayout.Direction.TopToBottom if compact else
+                     QBoxLayout.Direction.LeftToRight)
+        if (self._responsive_graph is not None
+                and self._responsive_layout.direction() != direction):
+            self._responsive_layout.setDirection(direction)
+        owner = self.window()
+        compact_height = owner.height() < 780
+        minimum = 176 if compact else 136 if compact_height else 108
+        maximum = 208 if compact else 144 if compact_height else 118
+        if self.minimumHeight() != minimum:
+            self.setMinimumHeight(minimum)
+        if self.maximumHeight() != maximum:
+            self.setMaximumHeight(maximum)
+
+    def resizeEvent(self, event) -> None:  # noqa: N802 - Qt override
+        super().resizeEvent(event)
+        self._sync_graph_layout()
 
     def watch_children(self):
         for child in self.findChildren(QWidget):
@@ -2980,7 +3010,9 @@ class MainWindow(QMainWindow):
     def _layout_play_mode_cards(self) -> None:
         page = getattr(self, "_play_mode_page", None)
         if page is not None:
-            page.layout_modes(self.width())
+            # The real card area excludes the sidebar, title and scroll chrome.
+            # Reflow from its viewport instead of the top-level window width.
+            page.layout_modes(page.content_scroll.viewport().width())
             self._play_mode_columns = page._columns
 
     def show_play(self) -> None:
@@ -3998,9 +4030,13 @@ class MainWindow(QMainWindow):
             card.setAccessibleName(f"Открыть разбор партии: {heading}")
             card.setAccessibleDescription("Нажмите Enter или пробел, чтобы открыть разбор.")
             card.setToolTip("Открыть разбор партии")
-            row_layout = QHBoxLayout(card)
-            row_layout.setContentsMargins(12, 4, 12, 4)
+            card_root_layout = QBoxLayout(QBoxLayout.Direction.TopToBottom, card)
+            card_root_layout.setContentsMargins(12, 7, 12, 7)
+            card_root_layout.setSpacing(5)
+            card.set_responsive_graph(card_root_layout, None)
+            row_layout = QHBoxLayout()
             row_layout.setSpacing(10)
+            card_root_layout.addLayout(row_layout)
             card_layout = QVBoxLayout()
             row_layout.addLayout(card_layout, 3)
             card_layout.setSpacing(2)
@@ -4008,10 +4044,10 @@ class MainWindow(QMainWindow):
             # pixels, so the two lines wrap. Keep enough vertical room for
             # those lines while retaining the compact reference height on
             # wide screens where the approved card text stays on one line.
-            compact_width = self.width() < 1500
+            compact_width = self._home_view.recent_scroll.viewport().width() < 900
             compact_height = self.height() < 780
-            card.setMinimumHeight(100 if compact_height else 136 if compact_width else 108)
-            card.setMaximumHeight(108 if compact_height else 144 if compact_width else 118)
+            card.setMinimumHeight(176 if compact_width else 136 if compact_height else 108)
+            card.setMaximumHeight(208 if compact_width else 144 if compact_height else 118)
             outcome, _, opponent = heading.partition(" с ")
             outcome_color = (VISUAL_TOKENS.success if heading.startswith("Победа")
                              else VISUAL_TOKENS.danger if heading.startswith("Поражение")
@@ -4087,8 +4123,7 @@ class MainWindow(QMainWindow):
                     metrics.get("status") in {"loading", "updating"} else
                     "Сверяем локально сохранённую аналитику…"
                     if metrics.get("status") == "loading" else
-                    (f"Точность: {accuracy}\n{source}" if compact_width else
-                     f"Точность: {accuracy} · {source}")
+                    f"Точность: {accuracy}\n{source}"
                     if source else "Нет рассчитанной точности")
                 accuracy_label = QLabel(accuracy_text)
                 accuracy_label.setWordWrap(True)
@@ -4116,14 +4151,19 @@ class MainWindow(QMainWindow):
                 if graph_points:
                     graph = ReviewGraph(graph_points, [])
                     graph.compact = True
-                    graph.setMinimumSize(0, 58)
+                    graph.setMinimumSize(160, 64)
+                    graph.setMaximumHeight(72)
                     graph.full_ply_count = int(
                         metrics.get("total_positions") or
                         len(metrics.get("moves") or {}) or len(graph_points))
                     graph.move_san = metrics.get("moves") or {}
                     graph.analysis_source = str(metrics.get("source") or "")
                     graph.set_safety_gate(True)
-                    row_layout.addWidget(graph, 3)
+                    # The card reflows this layout at its actual width: below
+                    # 900 logical pixels the graph receives a full-width row;
+                    # wide cards keep the approved side-by-side composition.
+                    card_root_layout.addWidget(graph, 1)
+                    card.set_responsive_graph(card_root_layout, graph)
             card.activated.connect(lambda item=dict(game): self._open_home_game_details(item))
             card.watch_children()
             self._recent_games_layout.addWidget(card)

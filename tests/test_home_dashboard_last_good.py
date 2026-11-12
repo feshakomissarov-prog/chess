@@ -202,9 +202,12 @@ def test_3319_to_3320_restart_persists_and_paints_real_ui_in_separate_processes(
     # First useful paint keeps the previous last-good Tier A; verify the
     # unchanged seed-0 accuracy card by its identity, not by a guessed offset.
     seed_zero_card = next(card for card in changed["first_useful_cards"]
-                          if card[1] == "Opponent seed-0")
-    assert "72.0%" in " ".join(seed_zero_card)
-    assert "Новая партия" in " ".join(changed["first_useful_cards"][0])
+                          if card["game_id"] == "seed-0")
+    assert "Opponent seed-0" in " ".join(seed_zero_card["labels"])
+    assert "72.0%" in " ".join(seed_zero_card["labels"])
+    new_game_card = next(card for card in changed["first_useful_cards"]
+                         if card["game_id"] == "seed-new")
+    assert "Новая партия" in " ".join(new_game_card["labels"])
     assert changed["aggregate_calls"] >= 1
     assert changed["full_ready_ms"] is not None
 
