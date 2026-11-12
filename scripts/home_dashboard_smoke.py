@@ -347,7 +347,9 @@ def launch(database: Path, root: Path, run_seconds: int, navigation_cycles: int,
         })
 
     timer.timeout.connect(write_state)
-    timer.start(50)
+    # Use a finer sampling interval so the reported first complete Qt paint is
+    # not rounded late by a 50 ms polling cadence.
+    timer.start(10)
     QTimer.singleShot(run_seconds * 1000, window.close)
     app.exec()
     state_path.write_text(json.dumps(final_state, ensure_ascii=False, indent=2), encoding="utf-8")

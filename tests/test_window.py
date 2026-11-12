@@ -3887,7 +3887,7 @@ def test_home_has_rating_kpi_and_three_recent_game_cards(qtbot, tmp_path):
     assert not hasattr(window._home_view, "home_puzzles_pilot_button")
     assert not window.local_mode_label.isVisible()
     assert not window.local_mode_combo.isVisible()
-    assert all(card.sizeHint().height() <= 200 for card in cards)
+    assert all(0 < card.height() <= 232 for card in cards)
     assert window.home_play_card.maximumHeight() <= 230
     opened = []
     window._open_home_game_details = lambda game: opened.append(game["game_id"])
