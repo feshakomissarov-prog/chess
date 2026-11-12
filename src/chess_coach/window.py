@@ -4163,6 +4163,9 @@ class MainWindow(QMainWindow):
                 statistics.setWordWrap(True)
                 statistics.setSizePolicy(QSizePolicy.Policy.Ignored,
                                          QSizePolicy.Policy.Preferred)
+                if narrow_width:
+                    statistics.setMinimumHeight(
+                        statistics.fontMetrics().lineSpacing() * 4)
                 statistics.setAccessibleDescription(
                     "Показатели ходов отдельно для владельца и соперника. "
                     + coverage.toolTip())
