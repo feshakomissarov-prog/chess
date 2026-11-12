@@ -203,12 +203,16 @@ def launch(database: Path, root: Path, run_seconds: int, navigation_cycles: int,
         cards_fully_visible = (len(painted_cards) == min(int(target_count), 3)
                                and all(viewport.rect().contains(rect)
                                        for _card, rect in painted_cards))
+        accuracy_detail = window._dashboard_metric_details["accuracy"].text()
         if (current_summary_ms is None and games == target_count
                 and visible_recent_ids[:len(target_recent_ids)] == target_recent_ids
                 and painted_ids == target_recent_ids[:3] and cards_fully_visible
                 and accuracy == expected["accuracy"]
-                and window._dashboard_metric_details["accuracy"].text()
-                    == expected["accuracy_detail"]
+                # A valid last-good Tier B may be rendered with an explicit
+                # "updating" prefix while the newer aggregate runs. The saved
+                # source/detail must still be present; don't time the background
+                # replacement as though it were the first complete Home paint.
+                and expected["accuracy_detail"] in accuracy_detail
                 and rating == expected["puzzle_rating"]):
             current_summary_ms = round((now - shown) * 1000, 2)
             from PySide6.QtWidgets import QLabel
