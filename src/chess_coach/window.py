@@ -383,7 +383,7 @@ class _DashboardGameCard(QFrame):
         compact_height = owner.height() < 780
         has_graph = self._responsive_graph is not None
         if compact:
-            minimum, maximum = (176, 208) if has_graph else (112, 144)
+            minimum, maximum = (184, 216) if has_graph else (112, 144)
         elif compact_height:
             minimum, maximum = 136, 144
         else:
@@ -4049,8 +4049,8 @@ class MainWindow(QMainWindow):
             # never clipped into a compact card's lower edge.
             compact_width = self._home_view.recent_scroll.viewport().width() < 900
             compact_height = self.height() < 780
-            card.setMinimumHeight(176 if compact_width else 136 if compact_height else 108)
-            card.setMaximumHeight(208 if compact_width else 144 if compact_height else 118)
+            card.setMinimumHeight(184 if compact_width else 136 if compact_height else 108)
+            card.setMaximumHeight(216 if compact_width else 144 if compact_height else 118)
             outcome, _, opponent = heading.partition(" с ")
             outcome_color = (VISUAL_TOKENS.success if heading.startswith("Победа")
                              else VISUAL_TOKENS.danger if heading.startswith("Поражение")
