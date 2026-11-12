@@ -39,7 +39,6 @@ from PySide6.QtWidgets import (
     QInputDialog,
     QFileDialog,
     QGridLayout,
-    QLayout,
     QLineEdit,
     QPushButton,
     QProgressDialog,
@@ -2086,7 +2085,6 @@ class MainWindow(QMainWindow):
         side = QWidget()
         side.setMinimumWidth(0)
         side_layout = QVBoxLayout(side)
-        side_layout.setSizeConstraint(QLayout.SizeConstraint.SetMinimumSize)
         side_layout.setContentsMargins(8, 0, 0, 0)
         # Keep the full action row inside the compact high-DPI viewport while
         # preserving the existing order and control sizes.
