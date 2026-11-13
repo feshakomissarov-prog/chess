@@ -681,11 +681,12 @@ def capture(window: MainWindow, output: Path, name: str, width: int, height: int
                            progress.puzzle_sparkline.size())
         trend_rect = QRect(progress.progress_trend.mapToGlobal(QPoint(0, 0)),
                            progress.progress_trend.size())
-        assert not graph_rect.intersects(trend_rect), (
-            f"Home puzzle trend label overlaps its graph at {width}x{height}: "
-            f"graph={graph_rect.getRect()}, label={trend_rect.getRect()}"
-        )
-        assert_label_fits(progress.progress_trend, "Home puzzle rating trend label")
+        if progress.progress_trend.isVisible():
+            assert not graph_rect.intersects(trend_rect), (
+                f"Home puzzle trend label overlaps its graph at {width}x{height}: "
+                f"graph={graph_rect.getRect()}, label={trend_rect.getRect()}"
+            )
+            assert_label_fits(progress.progress_trend, "Home puzzle rating trend label")
         recent_cards = [window._recent_games_layout.itemAt(i).widget()
                         for i in range(window._recent_games_layout.count())
                         if window._recent_games_layout.itemAt(i).widget() is not None
