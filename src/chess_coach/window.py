@@ -3885,14 +3885,7 @@ class MainWindow(QMainWindow):
 
     def _render_dashboard_snapshot(self, snapshot: dict) -> None:
         previous_snapshot = self._latest_dashboard_snapshot
-        snapshot = dict(snapshot)
         scope = snapshot.get("filter") or {}
-        scoped_account_id = scope.get("account_id")
-        if scoped_account_id:
-            snapshot["recent_games"] = [
-                ({**game, "account_id": game.get("account_id") or scoped_account_id})
-                for game in snapshot.get("recent_games", [])
-            ]
         previous_scope = (previous_snapshot or {}).get("filter") or {}
         preview = bool(snapshot.get("is_preview"))
         preserve_aggregate = bool(
@@ -4155,7 +4148,9 @@ class MainWindow(QMainWindow):
         heading, _details = game_card_text(game)
         metrics = game.get("review_metrics") or {}
         game_color = game.get("account_color") or game.get("color")
-        has_owner = bool(game.get("account_id") and game_color in {"white", "black"})
+        snapshot_scope = snapshot.get("filter") or {}
+        owner_account_id = game.get("account_id") or snapshot_scope.get("account_id")
+        has_owner = bool(owner_account_id and game_color in {"white", "black"})
         game_analysis_allowed = analysis_allowed and game_color in {"white", "black"}
         coverage_value = str(metrics.get("coverage") or "")
         try:
@@ -4348,6 +4343,9 @@ class MainWindow(QMainWindow):
         elif game_color not in {"white", "black"}:
             coverage_text = "Цвет владельца не подтверждён"
             coverage_reason = "Источник и охват скрыты, потому что цвет владельца неизвестен."
+        elif metrics.get("status") == "loading":
+            coverage_text = "Загружаем сохранённые оценки"
+            coverage_reason = "Сохранённые оценки этой партии загружаются."
         elif can_show_scores:
             coverage_text = f"Охват: {coverage_value or '—'}"
             coverage_reason = ""
@@ -4358,6 +4356,7 @@ class MainWindow(QMainWindow):
         coverage.setObjectName("dashboardAnalysisCoverage")
         coverage.setStyleSheet("font-size: 10px; color: #AEB8D0;")
         coverage.setToolTip((f"Источник: {metrics.get('source') or 'нет данных'} · "
+                             f"Охват позиций: {coverage_value or '—'} · "
                              f"{scope_description} {accuracy_tooltip}")
                             if can_show_scores else coverage_reason or accuracy_tooltip)
         coverage.setAccessibleDescription(coverage.toolTip())

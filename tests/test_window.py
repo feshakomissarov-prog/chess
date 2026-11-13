@@ -21,6 +21,7 @@ from chess_coach.lichess.repository import GameRepository
 from chess_coach.application.fair_play import playing_snapshot_allows_analysis as _batch_safety_from_games
 from chess_coach.ui.workspace_state import geometry_intersects_available, reposition_visible_frame
 from chess_coach.ui.analytics_dialogs import RatingTrendGraph
+from chess_coach.ui.pages.home import HomeEvaluationGraph
 from chess_coach.ui.theme import VISUAL_TOKENS
 
 
@@ -4056,8 +4057,13 @@ def test_home_dashboard_masks_cached_analysis_when_safety_is_pending_or_human_ga
     window._render_dashboard_snapshot(snapshot)
     assert window._dashboard_metric_values["accuracy"].text() == "скрыто"
     assert window._dashboard_metric_values["analysis"].text() == "скрыто"
-    assert window._recent_games_layout.itemAt(0).widget().findChild(
-        QWidget, "dashboardAnalysisMetrics") is None
+    masked_card = window._recent_games_layout.itemAt(0).widget()
+    masked_metrics = masked_card.findChild(QWidget, "dashboardAnalysisMetrics")
+    assert masked_metrics is not None
+    assert "99.0%" not in " ".join(
+        label.text() for label in masked_metrics.findChildren(QLabel))
+    masked_graph = masked_card.findChild(HomeEvaluationGraph)
+    assert masked_graph is not None and not masked_graph.points
     human.status = "mate"
     window.online_sessions.pop(human.game_id)
     window._render_dashboard_snapshot(snapshot)

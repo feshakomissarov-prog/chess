@@ -210,7 +210,7 @@ def test_3319_to_3320_restart_persists_and_paints_real_ui_in_separate_processes(
     assert "72.0%" in " ".join(seed_zero_card["labels"])
     new_game_card = next(card for card in summary_cards
                          if card["game_id"] == "seed-new")
-    assert "Новая партия" in " ".join(new_game_card["labels"])
+    assert "Нет сохранённых оценок" in " ".join(new_game_card["labels"])
     assert changed["aggregate_calls"] >= 1
     assert changed["full_ready_ms"] is not None
 
