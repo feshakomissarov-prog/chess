@@ -7,7 +7,7 @@ import math
 
 import chess
 
-from PySide6.QtCore import QPointF, Qt, Signal
+from PySide6.QtCore import QPointF, QTimer, Qt, Signal
 from PySide6.QtGui import QColor, QPainter, QPainterPath, QPen, QPolygonF
 from PySide6.QtWidgets import (
     QComboBox, QFrame, QGridLayout, QHBoxLayout, QLabel, QPushButton, QScrollArea,
@@ -708,12 +708,17 @@ class HomePage(QWidget):
             return
         self._puzzle_history_action()
 
+    def _layout_metrics_from_viewport(self) -> None:
+        if hasattr(self, "home_overview_scroll"):
+            self.layout_metrics(self.home_overview_scroll.viewport().width())
+
     def resizeEvent(self, event) -> None:  # noqa: N802 - Qt override
         super().resizeEvent(event)
         metric_width = (self.home_overview_scroll.viewport().width()
                         if hasattr(self, "home_overview_scroll")
                         else event.size().width())
         self.layout_metrics(metric_width)
+        QTimer.singleShot(0, self._layout_metrics_from_viewport)
         if hasattr(self, "puzzle_preview_board"):
             content_width = max(0, self.home_puzzle_card.contentsRect().width() - 34)
             min_side = min(210, max(112, round(content_width * .40)))
