@@ -4198,6 +4198,7 @@ class MainWindow(QMainWindow):
         def add_info_row(icon_name: str, text: str, object_name: str,
                          *, color: str = "#C6D1E7", tooltip: str = "") -> QLabel:
             row = QWidget(info)
+            row.setObjectName("dashboardInfoRow")
             row_layout = QHBoxLayout(row)
             row_layout.setContentsMargins(0, 0, 0, 0)
             row_layout.setSpacing(6)

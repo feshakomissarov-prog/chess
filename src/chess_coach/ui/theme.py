@@ -65,7 +65,8 @@ def stylesheet(t: Theme = TOKENS) -> str:
         background: {t.surface}; border: 1px solid {t.border}; border-radius: {radius}px;
     }}
     QWidget#dashboardDetailsColumn, QWidget#dashboardInfoColumn,
-    QWidget#dashboardAnalysisMetrics, QWidget#dashboardGraphColumn,
+    QWidget#dashboardInfoRow, QWidget#dashboardAnalysisMetrics,
+    QWidget#dashboardGraphColumn,
     QWidget#homeEvaluationGraph, QWidget#homePuzzleRatingGraph {{
         background: transparent;
     }}

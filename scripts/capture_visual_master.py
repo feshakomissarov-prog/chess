@@ -282,6 +282,13 @@ def make_window(app: QApplication):
 
 
 def wait_home(window, account_id: str) -> None:
+    def board_fits_preview() -> bool:
+        content_width = max(
+            0, window._home_view.home_puzzle_card.contentsRect().width() - 34)
+        expected_side = min(210, max(112, round(content_width * .40)))
+        board = window._home_view.puzzle_preview_board
+        return board.width() >= expected_side and board.height() >= expected_side
+
     try:
         wait_for(lambda: window._dashboard_options_loaded
                  and window.dashboard_account.currentData() == account_id
@@ -289,8 +296,7 @@ def wait_home(window, account_id: str) -> None:
                  and not window._latest_dashboard_snapshot.get("is_preview")
                  and window._dashboard_metric_values["games"].text() == "8"
                  and window._home_view.puzzle_preview_board.isVisible()
-                 and window._home_view.puzzle_preview_board.width() >= 112
-                 and window._home_view.puzzle_preview_board.height() >= 112
+                 and board_fits_preview()
                  and "visual-puzzle-" in window._home_view.activity_status.text()
                  and len([window._home_view._recent_games_layout.itemAt(i).widget()
                           for i in range(window._home_view._recent_games_layout.count())
@@ -310,6 +316,11 @@ def wait_home(window, account_id: str) -> None:
         })
         raise
     assert window._dashboard_metric_values["accuracy"].text().endswith("%")
+    board_content_width = max(
+        0, window._home_view.home_puzzle_card.contentsRect().width() - 34)
+    expected_board_side = min(210, max(112, round(board_content_width * .40)))
+    assert window._home_view.puzzle_preview_board.width() >= expected_board_side
+    assert window._home_view.puzzle_preview_board.height() >= expected_board_side
     assert "Lichess" in window._dashboard_metric_details["accuracy"].text()
     game_detail = window._dashboard_metric_details["games"].text()
     assert game_detail.count("С оценками:") == 1, (
@@ -892,6 +903,27 @@ def main() -> None:
             window._set_sidebar_collapsed(False)
             image = capture(window, output, "home", width, height)
             captured[f"home-{width}x{height}"] = image
+            if width <= 1280 and height <= 720:
+                scroll = window._home_view.home_overview_scroll.verticalScrollBar()
+                assert scroll.maximum() > 0, (
+                    "Compact Home must expose vertical scrolling for the full left overview."
+                )
+                old_scroll_value = scroll.value()
+                scroll.setValue(scroll.maximum())
+                app.processEvents()
+                button_rect = QRect(
+                    window.home_activity_button.mapToGlobal(QPoint(0, 0)),
+                    window.home_activity_button.size())
+                viewport_rect = QRect(
+                    window._home_view.home_overview_scroll.viewport().mapToGlobal(QPoint(0, 0)),
+                    window._home_view.home_overview_scroll.viewport().size())
+                assert viewport_rect.contains(button_rect), (
+                    "The next-puzzle CTA must be fully visible after scrolling compact Home."
+                )
+                captured[f"home-scroll-bottom-{width}x{height}"] = capture(
+                    window, output, "home-scroll-bottom", width, height)
+                scroll.setValue(old_scroll_value)
+                app.processEvents()
             if width == target_sizes[0][0] and height == target_sizes[0][1]:
                 puzzle_id = window._home_view._puzzle_preview["puzzle_id"]
                 QTest.mouseClick(window.home_activity_button, Qt.MouseButton.LeftButton)
@@ -1112,7 +1144,10 @@ def main() -> None:
         captured["game-review"] = capture(window, output, "game-review", width, height)
 
         # Settings are captured once per tab at the largest target size.
+        compact_size_count = sum(1 for width, height in target_sizes
+                                 if width <= 1280 and height <= 720)
         expected_count = (3 * len(target_sizes) + len(offline_sizes) + 18
+                          + compact_size_count
                           + tabs.count())
         assert len(captured) == expected_count, (
             f"Expected {expected_count} screenshot states, got {len(captured)}"
