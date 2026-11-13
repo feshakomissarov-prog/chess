@@ -701,7 +701,7 @@ def capture(window: MainWindow, output: Path, name: str, width: int, height: int
                 "The approved wide Home reference requires all three recent cards visible "
                 "without an internal scroll bar."
             )
-    elif current is window.library_page:
+    elif current is getattr(window, "library_page", None):
         game = window.library_page._detail_game or {}
         wait_selected_review(window.library_page, str(game.get("game_id") or ""))
         page = window.library_page
