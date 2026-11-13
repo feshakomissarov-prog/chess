@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import date
+import math
 
 import chess
 
@@ -221,14 +222,21 @@ class PuzzleRatingSparkline(QWidget):
             return []
         days = [date.fromisoformat(point["day"]).toordinal() for point in self.points]
         ratings = [point["rating"] for point in self.points]
-        low, high = min(ratings), max(ratings)
-        spread = max(100, high - low)
-        axis_low, axis_high = low - spread * .1, high + spread * .1
+        axis_low, axis_high, _step = self._rating_axis(ratings)
         plot = self.rect().adjusted(38, 8, -8, -24)
         width, height = max(1, plot.width()), max(1, plot.height())
         return [QPointF(plot.left() + width * (day - days[0]) / max(1, days[-1] - days[0]),
                         plot.bottom() - height * (rating - axis_low) / (axis_high - axis_low))
                 for day, rating in zip(days, ratings)]
+
+    @staticmethod
+    def _rating_axis(ratings: list[int]) -> tuple[int, int, int]:
+        low, high = min(ratings), max(ratings)
+        span = max(100, high - low)
+        step = max(50, math.ceil(span / 4 / 50) * 50)
+        axis_low = (low // step) * step - step
+        axis_high = ((high + step - 1) // step) * step + step
+        return axis_low, axis_high, step
 
     def paintEvent(self, _event):
         points = self._vertices()
@@ -238,17 +246,16 @@ class PuzzleRatingSparkline(QWidget):
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
         plot = self.rect().adjusted(38, 8, -8, -24)
         ratings = [int(point["rating"]) for point in self.points]
-        spread = max(100, max(ratings) - min(ratings))
-        axis_low = min(ratings) - spread * .1
-        axis_high = max(ratings) + spread * .1
+        axis_low, axis_high, step = self._rating_axis(ratings)
         painter.setPen(QPen(QColor("#354058"), 1))
         painter.drawRect(plot)
-        for fraction in (0, .5, 1):
+        for rating in range(axis_low, axis_high + 1, step):
+            fraction = (rating - axis_low) / (axis_high - axis_low)
             y = plot.bottom() - round(plot.height() * fraction)
             painter.setPen(QPen(QColor("#354058"), 1))
             painter.drawLine(plot.left(), y, plot.right(), y)
             painter.setPen(QColor("#AEB8D0"))
-            painter.drawText(0, y + 4, str(round(axis_low + (axis_high - axis_low) * fraction)))
+            painter.drawText(0, y + 4, str(rating))
         line = QPainterPath(points[0])
         for point in points[1:]:
             line.lineTo(point)
@@ -341,7 +348,7 @@ class HomePage(QWidget):
             card_layout.setContentsMargins(16, 13, 16, 13)
             card_layout.setSpacing(2)
             caption = QLabel(label)
-            caption.setStyleSheet("font-size: 19px; font-weight: 600;")
+            caption.setStyleSheet("font-size: 16px; font-weight: 600;")
             caption.setWordWrap(True)
             caption_row = QHBoxLayout()
             if key in {"games", "accuracy"}:
@@ -402,6 +409,7 @@ class HomePage(QWidget):
         self.puzzle_rating.setStyleSheet("font-size: 48px; font-weight: 700;")
         progress_layout.addWidget(self.puzzle_rating)
         self.puzzle_sparkline = PuzzleRatingSparkline(self.home_progress_card)
+        self.puzzle_sparkline.setObjectName("homePuzzleRatingGraph")
         self.puzzle_sparkline.setMinimumHeight(112)
         self.puzzle_sparkline.setMaximumHeight(132)
         self.puzzle_sparkline.setMinimumWidth(0)
@@ -421,12 +429,13 @@ class HomePage(QWidget):
         self.dashboard_metrics["games"].layout().addWidget(
             self._dashboard_metric_details["analysis"])
         self._dashboard_metric_values["analysis"].hide()
+        self._dashboard_metric_details["analysis"].hide()
         self.dashboard_metrics["analysis"].hide()
         self.layout_metrics()
 
         self.home_puzzle_card = QFrame(self)
         self.home_play_card = self.home_puzzle_card  # compatibility alias for shell hooks
-        self.home_puzzle_card.setObjectName("nextPuzzleCard")
+        self.home_puzzle_card.setObjectName("metricCard")
         self.home_puzzle_card.setMinimumHeight(250)
         self.home_puzzle_card.setMaximumHeight(292)
         puzzle_layout = QVBoxLayout(self.home_puzzle_card)
@@ -449,10 +458,10 @@ class HomePage(QWidget):
         puzzle_content.setSpacing(12)
         self.puzzle_preview_board = PuzzlePreviewBoard(chess.Board(), self.home_puzzle_card)
         self.puzzle_preview_board.setObjectName("homePuzzleBoard")
-        self.puzzle_preview_board.setMinimumSize(0, 0)
+        self.puzzle_preview_board.setMinimumSize(112, 112)
         self.puzzle_preview_board.setMaximumSize(210, 210)
-        self.puzzle_preview_board.setSizePolicy(QSizePolicy.Policy.Ignored,
-                                                QSizePolicy.Policy.Ignored)
+        self.puzzle_preview_board.setSizePolicy(QSizePolicy.Policy.Preferred,
+                                                QSizePolicy.Policy.Preferred)
         self.puzzle_preview_board.set_interaction_enabled(False)
         self.puzzle_preview_board.set_show_legal_moves(False)
         self.puzzle_preview_board.set_show_last_move(False)

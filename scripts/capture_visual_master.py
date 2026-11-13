@@ -289,6 +289,8 @@ def wait_home(window, account_id: str) -> None:
                  and not window._latest_dashboard_snapshot.get("is_preview")
                  and window._dashboard_metric_values["games"].text() == "8"
                  and window._home_view.puzzle_preview_board.isVisible()
+                 and window._home_view.puzzle_preview_board.width() >= 112
+                 and window._home_view.puzzle_preview_board.height() >= 112
                  and "visual-puzzle-" in window._home_view.activity_status.text()
                  and len([window._home_view._recent_games_layout.itemAt(i).widget()
                           for i in range(window._home_view._recent_games_layout.count())
@@ -309,6 +311,13 @@ def wait_home(window, account_id: str) -> None:
         raise
     assert window._dashboard_metric_values["accuracy"].text().endswith("%")
     assert "Lichess" in window._dashboard_metric_details["accuracy"].text()
+    game_detail = window._dashboard_metric_details["games"].text()
+    assert game_detail.count("С оценками:") == 1, (
+        "The Home completed-games KPI must not repeat its source summary."
+    )
+    assert window._dashboard_metric_details["analysis"].isHidden(), (
+        "The hidden legacy analysis KPI must not duplicate details in the games card."
+    )
     recent_cards = [window._home_view._recent_games_layout.itemAt(i).widget()
                     for i in range(window._home_view._recent_games_layout.count())
                     if window._home_view._recent_games_layout.itemAt(i).widget()

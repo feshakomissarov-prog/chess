@@ -64,6 +64,11 @@ def stylesheet(t: Theme = TOKENS) -> str:
     QFrame#card, QFrame#metricCard, QFrame#gameCard {{
         background: {t.surface}; border: 1px solid {t.border}; border-radius: {radius}px;
     }}
+    QWidget#dashboardDetailsColumn, QWidget#dashboardInfoColumn,
+    QWidget#dashboardAnalysisMetrics, QWidget#dashboardGraphColumn,
+    QWidget#homeEvaluationGraph, QWidget#homePuzzleRatingGraph {{
+        background: transparent;
+    }}
     QLabel#secondary, QLabel#muted, QLabel#connectionStatus {{ color: {t.secondary}; }}
     QLabel#pageTitle {{ font-size: {30 if t is VISUAL_TOKENS else 22}px; font-weight: 700; }}
     QPushButton, QToolButton {{

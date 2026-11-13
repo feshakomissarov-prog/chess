@@ -3648,6 +3648,7 @@ class MainWindow(QMainWindow):
         placeholder.setWordWrap(True)
         self._recent_games_layout.addWidget(placeholder)
         self._home_view.progress_trend.setText("Загружаем историю выбранного профиля…")
+        self._home_view.progress_trend.show()
         self._home_view.puzzle_rating.setText("—")
         self._home_view.puzzle_sparkline.set_points([])
 
@@ -3905,7 +3906,10 @@ class MainWindow(QMainWindow):
                 saved_at_label = ""
         if not preview:
             self._home_view.puzzle_rating.setText(str(puzzle_rating.get("latest", "—")))
-            self._home_view.puzzle_sparkline.set_points(puzzle_rating.get("points") or [])
+            rating_points = puzzle_rating.get("points") or []
+            self._home_view.puzzle_sparkline.set_points(rating_points)
+            self._home_view.progress_trend.setVisible(
+                not bool(rating_points) or bool(snapshot.get("_dashboard_stale")))
         if preserve_aggregate:
             pass
         elif not preview and puzzle_rating:
