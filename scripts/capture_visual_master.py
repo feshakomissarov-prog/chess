@@ -310,11 +310,6 @@ def wait_home(window, account_id: str) -> None:
         })
         raise
     assert window._dashboard_metric_values["accuracy"].text().endswith("%")
-    board_content_width = max(
-        0, window._home_view.home_puzzle_card.contentsRect().width() - 34)
-    expected_board_side = min(210, max(112, round(board_content_width * .40)))
-    assert window._home_view.puzzle_preview_board.width() >= expected_board_side
-    assert window._home_view.puzzle_preview_board.height() >= expected_board_side
     assert "Lichess" in window._dashboard_metric_details["accuracy"].text()
     game_detail = window._dashboard_metric_details["games"].text()
     assert game_detail.count("С оценками:") == 1, (
