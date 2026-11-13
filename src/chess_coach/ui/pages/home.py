@@ -644,7 +644,7 @@ class HomePage(QWidget):
         if not cards:
             return
         available = int(width if width is not None else self.width())
-        columns = 2 if available >= 620 else 1
+        columns = 2 if available >= 440 else 1
         if getattr(self, "_dashboard_metric_columns", None) == columns:
             return
         self._dashboard_metric_columns = columns
@@ -707,7 +707,10 @@ class HomePage(QWidget):
 
     def resizeEvent(self, event) -> None:  # noqa: N802 - Qt override
         super().resizeEvent(event)
-        self.layout_metrics(event.size().width())
+        metric_width = (self.home_overview_scroll.viewport().width()
+                        if hasattr(self, "home_overview_scroll")
+                        else event.size().width())
+        self.layout_metrics(metric_width)
         if hasattr(self, "puzzle_preview_board"):
             content_width = max(0, self.home_puzzle_card.contentsRect().width() - 34)
             min_side = min(210, max(112, round(content_width * .40)))
