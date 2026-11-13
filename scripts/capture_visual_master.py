@@ -1112,7 +1112,7 @@ def main() -> None:
         captured["game-review"] = capture(window, output, "game-review", width, height)
 
         # Settings are captured once per tab at the largest target size.
-        expected_count = (3 * len(target_sizes) + len(offline_sizes) + 17
+        expected_count = (3 * len(target_sizes) + len(offline_sizes) + 18
                           + tabs.count())
         assert len(captured) == expected_count, (
             f"Expected {expected_count} screenshot states, got {len(captured)}"
