@@ -930,6 +930,33 @@ def main() -> None:
                     window, output, "home-scroll-bottom", width, height)
                 scroll.setValue(old_scroll_value)
                 app.processEvents()
+                recent_scroll = window._home_view.recent_scroll.verticalScrollBar()
+                assert recent_scroll.maximum() > 0, (
+                    "Compact Home must expose scrolling through all three recent games."
+                )
+                old_recent_scroll_value = recent_scroll.value()
+                recent_scroll.setValue(recent_scroll.maximum())
+                app.processEvents()
+                recent_cards = [
+                    window._recent_games_layout.itemAt(i).widget()
+                    for i in range(window._recent_games_layout.count())
+                    if window._recent_games_layout.itemAt(i).widget() is not None
+                    and window._recent_games_layout.itemAt(i).widget().objectName() == "metricCard"
+                ]
+                assert len(recent_cards) == 3
+                last_card_rect = QRect(
+                    recent_cards[-1].mapToGlobal(QPoint(0, 0)),
+                    recent_cards[-1].size())
+                recent_viewport = window._home_view.recent_scroll.viewport()
+                recent_viewport_rect = QRect(
+                    recent_viewport.mapToGlobal(QPoint(0, 0)), recent_viewport.size())
+                assert recent_viewport_rect.contains(last_card_rect), (
+                    "The last recent-game card must be fully accessible in compact Home."
+                )
+                captured[f"home-recent-scroll-bottom-{width}x{height}"] = capture(
+                    window, output, "home-recent-scroll-bottom", width, height)
+                recent_scroll.setValue(old_recent_scroll_value)
+                app.processEvents()
             if width == target_sizes[0][0] and height == target_sizes[0][1]:
                 puzzle_id = window._home_view._puzzle_preview["puzzle_id"]
                 QTest.mouseClick(window.home_activity_button, Qt.MouseButton.LeftButton)
@@ -1153,7 +1180,7 @@ def main() -> None:
         compact_size_count = sum(1 for width, height in target_sizes
                                  if width <= 1280 and height <= 720)
         expected_count = (3 * len(target_sizes) + len(offline_sizes) + 18
-                          + compact_size_count
+                          + 2 * compact_size_count
                           + tabs.count())
         assert len(captured) == expected_count, (
             f"Expected {expected_count} screenshot states, got {len(captured)}"
