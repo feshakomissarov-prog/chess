@@ -291,7 +291,9 @@ def wait_home(window, account_id: str) -> None:
                  and window._home_view.puzzle_preview_board.isVisible()
                  and window._home_view.puzzle_preview_board.width() >= 112
                  and window._home_view.puzzle_preview_board.height() >= 112
-                 and "visual-puzzle-" in window._home_view.activity_status.text()
+                 and bool(window._home_view._puzzle_preview)
+                 and str(window._home_view._puzzle_preview.get("puzzle_id", "")).startswith(
+                     "visual-puzzle-")
                  and len([window._home_view._recent_games_layout.itemAt(i).widget()
                           for i in range(window._home_view._recent_games_layout.count())
                           if window._home_view._recent_games_layout.itemAt(i).widget()

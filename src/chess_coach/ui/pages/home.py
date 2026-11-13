@@ -674,7 +674,9 @@ class HomePage(QWidget):
                 f"ход за {'белых' if board.turn == chess.WHITE else 'чёрных'}. Нажмите Enter.")
             self.puzzle_preview_board.setToolTip("Открыть и решить эту сохранённую задачу")
             self.puzzle_preview_board.show()
-            self.activity_status.setText(f"Задача Lichess · {self._puzzle_preview['puzzle_id']}")
+            self.activity_status.setText("Задача Lichess")
+            self.activity_status.setToolTip(
+                f"Сохранённая задача Lichess · ID {self._puzzle_preview['puzzle_id']}")
             self.puzzle_side_to_move.setText(
                 "Найдите лучший ход за белых" if board.turn == chess.WHITE
                 else "Найдите лучший ход за чёрных")
@@ -690,6 +692,7 @@ class HomePage(QWidget):
             self.home_activity_button.setToolTip("Открыть и решить именно эту сохранённую задачу")
         else:
             self.puzzle_preview_board.hide()
+            self.activity_status.setToolTip("")
             self.puzzle_side_to_move.clear()
             self.puzzle_meta.clear()
             self.activity_status.setText(
