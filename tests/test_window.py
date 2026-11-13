@@ -3887,12 +3887,39 @@ def test_home_has_rating_kpi_and_three_recent_game_cards(qtbot, tmp_path):
     assert not hasattr(window._home_view, "home_puzzles_pilot_button")
     assert not window.local_mode_label.isVisible()
     assert not window.local_mode_combo.isVisible()
-    assert all(0 < card.height() <= 232 for card in cards)
-    assert window.home_play_card.maximumHeight() <= 230
+    assert all(0 < card.height() <= 392 for card in cards)
+    assert window.home_play_card.minimumHeight() >= 250
+    assert window.home_play_card.maximumHeight() <= 292
     opened = []
     window._open_home_game_details = lambda game: opened.append(game["game_id"])
     qtbot.mouseClick(cards[1].findChildren(QLabel)[1], Qt.MouseButton.LeftButton)
     assert opened == ["synthetic-1"]
+    window.close()
+
+
+def test_home_saved_puzzle_preview_opens_exact_offline_attempt(qtbot, tmp_path, monkeypatch):
+    monkeypatch.setattr(MainWindow, "_refresh_home_dashboard", lambda _self: None)
+    window = MainWindow(QSettings(str(tmp_path / "home-puzzle-preview.ini"),
+                                  QSettings.Format.IniFormat), offline_mode=True)
+    qtbot.addWidget(window)
+    opened = []
+    window._home_view._puzzle_open_action = lambda account_id, puzzle_id: opened.append(
+        (account_id, puzzle_id))
+    window._home_view.set_puzzle_preview({
+        "account_id": "lichess:owner", "puzzle_id": "saved-puzzle-42",
+        "fen": chess.Board().fen(), "solver_is_white": True,
+        "rating": 1770, "themes": ["fork", "mateIn2"],
+    })
+
+    assert not window._home_view.puzzle_preview_board.isHidden()
+    assert not window._home_view.puzzle_preview_board._interaction_enabled
+    assert "saved-puzzle-42" in window._home_view.activity_status.text()
+    assert "1770" in window._home_view.puzzle_meta.text()
+    window.home_activity_button.click()
+    assert opened == [("lichess:owner", "saved-puzzle-42")]
+    window._home_view.puzzle_preview_board.open_requested.emit()
+    assert opened == [("lichess:owner", "saved-puzzle-42"),
+                      ("lichess:owner", "saved-puzzle-42")]
     window.close()
 
 
@@ -6954,7 +6981,7 @@ def test_home_shows_local_archive_preview_while_full_dashboard_aggregate_is_pend
         qtbot, tmp_path, monkeypatch):
     import threading
     from chess_coach.bootstrap import create_runtime
-    from chess_coach.ui.game_review import ReviewGraph
+    from chess_coach.ui.pages.home import HomeEvaluationGraph
 
     runtime = create_runtime(offline_mode=True)
     window = MainWindow(runtime=runtime)
@@ -6994,7 +7021,9 @@ def test_home_shows_local_archive_preview_while_full_dashboard_aggregate_is_pend
                         and window._home_view._recent_games_layout.itemAt(index).widget().objectName()
                         == "metricCard"]
         assert len(recent_cards) == 3
-        assert all(card.findChild(ReviewGraph) is None for card in recent_cards)
+        assert all(card.findChild(HomeEvaluationGraph) is not None
+                   and not card.findChild(HomeEvaluationGraph).points
+                   for card in recent_cards)
     finally:
         release_aggregate.set()
         qtbot.waitUntil(lambda: window._dashboard_thread is None, timeout=15000)

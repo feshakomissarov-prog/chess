@@ -8,7 +8,7 @@ from PySide6.QtCore import QStandardPaths
 from PySide6.QtWidgets import QInputDialog
 
 from chess_coach.ui.pages.analysis import AnalysisLandingPage
-from chess_coach.ui.game_review import ReviewGraph
+from chess_coach.ui.pages.home import HomeEvaluationGraph
 from chess_coach.window import EphemeralReviewRepository, MainWindow, SettingsDialog
 from chess_coach.lichess.session import LichessGameSession
 
@@ -41,7 +41,7 @@ def test_same_scope_dashboard_preview_preserves_aggregate_review_cards(
     }
     window._render_dashboard_snapshot(full)
     card = window._home_view._recent_games_layout.itemAt(0).widget()
-    assert card.findChild(ReviewGraph) is not None
+    assert card.findChild(HomeEvaluationGraph) is not None
 
     preview = {
         "filter": {"account_id": "lichess:scope", "clock": None},
@@ -55,7 +55,7 @@ def test_same_scope_dashboard_preview_preserves_aggregate_review_cards(
     retained_card = window._home_view._recent_games_layout.itemAt(0).widget()
     assert window._latest_dashboard_snapshot is full
     assert retained_card.accessibleName() == card.accessibleName()
-    assert retained_card.findChild(ReviewGraph) is not None
+    assert retained_card.findChild(HomeEvaluationGraph) is not None
     assert window.close() is True
 
 
@@ -107,8 +107,8 @@ def test_same_scope_preview_uses_fresh_top_three_and_only_reuses_matching_metric
     text = "\n".join(label.text() for card in cards for label in card.findChildren(type(window.screen_title)))
     assert all(name in text for name in ("G4", "G3", "G2"))
     assert "G1" not in text
-    graphs = [card.findChild(ReviewGraph) for card in cards]
-    assert sum(graph is not None for graph in graphs) == 1
+    graphs = [card.findChild(HomeEvaluationGraph) for card in cards]
+    assert sum(graph is not None and bool(graph.points) for graph in graphs) == 1
     assert "Загружаем сохранённые оценки" in text
     assert window._dashboard_metric_values["games"].text() == "4"
     assert window.close() is True
@@ -139,7 +139,8 @@ def test_dashboard_card_with_unknown_owner_color_does_not_reuse_or_expose_analys
                                  "review_metrics": {"status": "loading", "source": "—"}}]}
     window._render_dashboard_snapshot(preview)
     card = window._home_view._recent_games_layout.itemAt(0).widget()
-    assert card.findChild(ReviewGraph) is None
+    graph = card.findChild(HomeEvaluationGraph)
+    assert graph is not None and not graph.points
     assert not any("99.0%" in label.text() or "Точность:" in label.text()
                    for label in card.findChildren(type(window.screen_title)))
     coverage = card.findChild(type(window.screen_title), "dashboardAnalysisCoverage")

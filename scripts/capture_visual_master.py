@@ -26,7 +26,7 @@ from chess_coach.bootstrap import create_runtime
 from chess_coach.application.dashboard import dashboard_snapshot
 from chess_coach.application.background_work import OperationLane
 from chess_coach.lichess.batch_analysis import BatchAnalysisRunner, FastPassOptions
-from chess_coach.ui.game_review import ReviewGraph
+from chess_coach.ui.pages.home import HomeEvaluationGraph
 from chess_coach.ui.pages.background import BackgroundOperationsPage
 from chess_coach.ui.pages.puzzles import PuzzleHistoryPage
 from chess_coach.window import MainWindow
@@ -288,6 +288,8 @@ def wait_home(window, account_id: str) -> None:
                  and bool(window._latest_dashboard_snapshot)
                  and not window._latest_dashboard_snapshot.get("is_preview")
                  and window._dashboard_metric_values["games"].text() == "8"
+                 and window._home_view.puzzle_preview_board.isVisible()
+                 and "visual-puzzle-" in window._home_view.activity_status.text()
                  and len([window._home_view._recent_games_layout.itemAt(i).widget()
                           for i in range(window._home_view._recent_games_layout.count())
                           if window._home_view._recent_games_layout.itemAt(i).widget()
@@ -311,7 +313,7 @@ def wait_home(window, account_id: str) -> None:
                     for i in range(window._home_view._recent_games_layout.count())
                     if window._home_view._recent_games_layout.itemAt(i).widget()
                     and window._home_view._recent_games_layout.itemAt(i).widget().objectName() == "metricCard"]
-    assert all(card.findChild(ReviewGraph) is not None for card in recent_cards), (
+    assert all(card.findChild(HomeEvaluationGraph) is not None for card in recent_cards), (
         "All three synthetic Home games require a real rendered evaluation graph."
     )
     for index, card in enumerate(recent_cards, start=1):
@@ -325,11 +327,12 @@ def wait_home(window, account_id: str) -> None:
                     label,
                     f"Home card {index}, text {label_index} ({label.text()!r})",
                 )
-        graph = card.findChild(ReviewGraph)
+        graph = card.findChild(HomeEvaluationGraph)
         assert graph is not None and graph.width() >= 160, (
             f"Home card {index} evaluation graph is too narrow: "
             f"{graph.width() if graph is not None else 'missing'}"
         )
+        assert graph.points, f"Home card {index} has no source-backed graph points."
 
 
 def wait_selected_review(page, expected_game_id: str) -> None:
@@ -879,8 +882,27 @@ def main() -> None:
             window._set_sidebar_collapsed(False)
             image = capture(window, output, "home", width, height)
             captured[f"home-{width}x{height}"] = image
-            make_pair(reference_dir, output, REFERENCE_MAP["home"], image, f"home-{width}x{height}")
             if width == target_sizes[0][0] and height == target_sizes[0][1]:
+                puzzle_id = window._home_view._puzzle_preview["puzzle_id"]
+                QTest.mouseClick(window.home_activity_button, Qt.MouseButton.LeftButton)
+                wait_for(lambda: window._puzzle_page is not None
+                         and window.screen_stack.currentWidget() is window._puzzle_page
+                         and window._puzzle_page.findChild(PuzzleHistoryPage) is not None,
+                         "exact saved puzzle route from Home", timeout=30)
+                puzzle_page = window._puzzle_page.findChild(PuzzleHistoryPage)
+                wait_for(lambda: puzzle_page.history.count() > 0
+                         and puzzle_page.reset_replay.isEnabled()
+                         and puzzle_page.board._interaction_enabled
+                         and puzzle_page.solution.text().startswith("Офлайн-упражнение"),
+                         "selected Home puzzle in playable local replay", timeout=30)
+                selected_attempt = puzzle_page.history.currentItem().data(Qt.ItemDataRole.UserRole)
+                assert selected_attempt["puzzle_id"] == puzzle_id, (
+                    "Home CTA must open the same saved puzzle ID as the preview."
+                )
+                captured["home-puzzle-exact-replay"] = capture(
+                    window, output, "home-puzzle-exact-replay", width, height)
+                window.show_home()
+                wait_home(window, account_id)
                 QTest.mouseClick(window.sidebar_toggle, Qt.MouseButton.LeftButton)
                 assert window.sidebar.width() == 252
                 assert all(button.text().endswith(str(button.property("route_label")))

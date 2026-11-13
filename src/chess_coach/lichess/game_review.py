@@ -189,6 +189,7 @@ def load_game_review(repository, game: dict[str, Any], *,
         "local_phase_accuracy": local_accuracy.phase_values,
         "phase_by_ply": phase_by_ply,
         "phase_source": boundaries.get("source") if boundaries else None,
+        "phase_boundaries": dict(boundaries) if boundaries else None,
         "local_accuracy_status": analysis.get("local_accuracy_status") if analysis else {
             "status": local_accuracy.status, "reason": local_accuracy.reason,
             "coverage": {"scored": local_accuracy.coverage[0],

@@ -22,7 +22,7 @@ _COMPATIBLE_CACHE_FORMATS = {2, 3}
 _COMPATIBLE_SCHEMA_VERSIONS = {SCHEMA_VERSION, SCHEMA_VERSION - 1}
 _MAX_SCOPES = 12
 _MAX_CACHE_BYTES = 8 * 1024 * 1024
-_MAX_GRAPH_POINTS = 64
+_MAX_GRAPH_POINTS = 256
 _METRIC_KEYS = {"games", "accuracy", "analysis", "errors"}
 _locks_guard = threading.Lock()
 _locks: dict[str, threading.RLock] = {}
@@ -111,6 +111,9 @@ def _valid_game_shell(game: object) -> bool:
                    "owner_accuracy", "opponent_accuracy", "owner_inaccuracies",
                    "owner_mistakes", "owner_blunders", "opponent_inaccuracies",
                    "opponent_mistakes", "opponent_blunders", "opponent_coverage",
+                   "white_inaccuracies", "white_mistakes", "white_blunders",
+                   "black_inaccuracies", "black_mistakes", "black_blunders",
+                   "white_coverage", "black_coverage", "phase_boundaries",
                    "graph_points", "total_positions"}
         if set(metrics) - allowed:
             return False
@@ -128,6 +131,18 @@ def _valid_game_shell(game: object) -> bool:
             elif key == "total_positions":
                 if type(value) is not int or value < 0:
                     return False
+            elif key == "phase_boundaries":
+                if not isinstance(value, dict) or set(value) - {
+                        "middle_start_ply", "end_start_ply", "source", "method_version"}:
+                    return False
+                for boundary in ("middle_start_ply", "end_start_ply"):
+                    if value.get(boundary) is not None and (
+                            type(value.get(boundary)) is not int or value[boundary] < 0):
+                        return False
+                for label in ("source", "method_version"):
+                    if value.get(label) is not None and (
+                            not isinstance(value[label], str) or len(value[label]) > 100):
+                        return False
             elif value is not None and (not isinstance(value, str) or len(value) > 500):
                 return False
     return True
@@ -253,7 +268,9 @@ def _compact_review_metrics(metrics: dict) -> dict:
         "strong", "status", "coverage", "source", "strong_detail", "owner_accuracy",
         "opponent_accuracy", "owner_inaccuracies", "owner_mistakes", "owner_blunders",
         "opponent_inaccuracies", "opponent_mistakes", "opponent_blunders",
-        "opponent_coverage", "total_positions")}
+        "opponent_coverage", "white_inaccuracies", "white_mistakes", "white_blunders",
+        "black_inaccuracies", "black_mistakes", "black_blunders", "white_coverage",
+        "black_coverage", "phase_boundaries", "total_positions")}
     graph = metrics.get("graph_points") or []
     result["graph_points"] = [
         {"ply": int(row["ply"]),

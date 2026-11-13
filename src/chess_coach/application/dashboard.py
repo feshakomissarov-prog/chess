@@ -315,12 +315,18 @@ def dashboard_snapshot(repository, *, account_id: str | None = None,
     assessed = int(summary["own_assessed_moves"] or 0)
     own_total = int(summary["total_own_moves"] or 0)
     error_rate = summary.get("own_error_rate_per_100")
-    scope = "Выбранный аккаунт" if account_id else "Все локальные партии · смешанная перспектива"
+    analyzed_sources = (
+        f"Lichess: {int(coverage['lichess'] or 0)} · "
+        f"Stockfish: {int(coverage['stockfish'] or 0)}"
+    )
+    game_scope = ("Партии выбранного профиля" if account_id else
+                  "Все локальные партии · смешанная перспектива")
     if clock:
-        scope += f" · {clock}"
+        game_scope += f" · {clock}"
     metrics = [
         {"key": "games", "label": "Завершённые партии", "value": str(total),
-         "detail": scope, "source": "SQLite: games + account_games"},
+         "detail": f"С оценками: {analyzed_games}\n{analyzed_sources}",
+         "source": f"SQLite: games + account_games · {game_scope}; оценки источников могут пересекаться"},
         {"key": "accuracy", "label": "Точность", "value":
          f"{float(accuracy):.1f}%" if accuracy is not None else "н/д",
          "detail": (
@@ -378,6 +384,9 @@ def game_card_metrics(repository, game: dict[str, Any]) -> dict[str, Any]:
     side = view["per_side"].get(color, {}) if color in {"white", "black"} else {}
     opponent_color = "black" if color == "white" else "white" if color == "black" else None
     opponent_side = view["per_side"].get(opponent_color, {}) if opponent_color else {}
+    white_side = view["per_side"].get("white", {})
+    black_side = view["per_side"].get("black", {})
+    phase_boundaries = view.get("phase_boundaries") or {}
     own_color_accuracy = view["official_accuracy"].get(color) if color in {"white", "black"} else None
     opponent_accuracy = (view["official_accuracy"].get(opponent_color)
                          if opponent_color else None)
@@ -393,8 +402,10 @@ def game_card_metrics(repository, game: dict[str, Any]) -> dict[str, Any]:
     # Current detectors do not yet implement a verified "strong move" fact.
     # Candidate best_move_confirmed is intentionally not presented as verified.
     raw_assessments = list(analysis.get("assessments") or [])
-    if len(raw_assessments) > 64:
-        indexes = {round(index * (len(raw_assessments) - 1) / 63) for index in range(64)}
+    graph_limit = 256
+    if len(raw_assessments) > graph_limit:
+        indexes = {round(index * (len(raw_assessments) - 1) / (graph_limit - 1))
+                   for index in range(graph_limit)}
         graph_assessments = [raw_assessments[index] for index in sorted(indexes)]
     else:
         graph_assessments = raw_assessments
@@ -411,6 +422,10 @@ def game_card_metrics(repository, game: dict[str, Any]) -> dict[str, Any]:
         # remain in SQLite and are loaded after the user opens a specific game.
         "graph_points": graph_points,
         "total_positions": int((view.get("coverage") or {}).get("total") or 0),
+        "phase_boundaries": {
+            key: phase_boundaries.get(key) for key in (
+                "middle_start_ply", "end_start_ply", "source", "method_version")
+        } if phase_boundaries else None,
         "errors": str(errors) if classified else "н/д",
         "inaccuracies": str(int(side.get("inaccuracy") or 0)) if classified else "н/д",
         "mistakes": str(int(side.get("mistake") or 0)) if classified else "н/д",
@@ -432,4 +447,18 @@ def game_card_metrics(repository, game: dict[str, Any]) -> dict[str, Any]:
         "opponent_blunders": str(int(opponent_side.get("blunder") or 0))
         if opponent_side.get("classified") else "н/д",
         "opponent_coverage": f"{int(opponent_side.get('assessed') or 0)}/{int(opponent_side.get('total') or 0)}",
+        "white_inaccuracies": str(int(white_side.get("inaccuracy") or 0))
+        if white_side.get("classified") else "н/д",
+        "white_mistakes": str(int(white_side.get("mistake") or 0))
+        if white_side.get("classified") else "н/д",
+        "white_blunders": str(int(white_side.get("blunder") or 0))
+        if white_side.get("classified") else "н/д",
+        "black_inaccuracies": str(int(black_side.get("inaccuracy") or 0))
+        if black_side.get("classified") else "н/д",
+        "black_mistakes": str(int(black_side.get("mistake") or 0))
+        if black_side.get("classified") else "н/д",
+        "black_blunders": str(int(black_side.get("blunder") or 0))
+        if black_side.get("classified") else "н/д",
+        "white_coverage": f"{int(white_side.get('assessed') or 0)}/{int(white_side.get('total') or 0)}",
+        "black_coverage": f"{int(black_side.get('assessed') or 0)}/{int(black_side.get('total') or 0)}",
     }

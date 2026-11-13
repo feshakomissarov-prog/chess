@@ -98,7 +98,7 @@ from .ui.sounds import (
 )
 from .ui.workspace_state import reposition_visible_frame
 from .ui.pages import PlayPage, ResultPage
-from .ui.pages.home import HomePage
+from .ui.pages.home import HomeEvaluationGraph, HomePage
 from .ui.pages.library import LibraryPage
 from .ui.pages.puzzles import PuzzleHistoryPage
 from .ui.pages.analysis import AnalysisLandingPage
@@ -108,7 +108,7 @@ from .ui.dialogs import (OnlineGameDialog, BatchAnalysisDialog, ActiveGamesDialo
 from .ui.analytics_dialogs import (EvaluationGraph, RatingTrendGraph,
                                    StatisticsGameDialog, StatisticsDialog)
 from .ui.dialog_support import (_clock_filter_sort_key, _game_date_label, _result_label)
-from .ui.display import (format_clock_control, format_game_date,
+from .ui.display import (format_clock_control, format_game_activity_time, format_game_date,
                          format_game_timeline, game_opening_name,
                          format_remaining_clock, opening_tooltip,
                          source_short)
@@ -373,7 +373,7 @@ class _DashboardGameCard(QFrame):
     def _sync_graph_layout(self) -> None:
         if self._responsive_layout is None:
             return
-        compact = self.width() < 900
+        compact = self.width() < 760
         direction = (QBoxLayout.Direction.TopToBottom if compact else
                      QBoxLayout.Direction.LeftToRight)
         if (self._responsive_graph is not None
@@ -381,13 +381,12 @@ class _DashboardGameCard(QFrame):
             self._responsive_layout.setDirection(direction)
         owner = self.window()
         compact_height = owner.height() < 780
-        has_graph = self._responsive_graph is not None
         if compact:
-            minimum, maximum = (200, 232) if has_graph else (112, 144)
+            minimum, maximum = (376, 392) if compact_height else (332, 350)
         elif compact_height:
-            minimum, maximum = 136, 144
+            minimum, maximum = 208, 222
         else:
-            minimum, maximum = 108, 118
+            minimum, maximum = 198, 216
         if self.minimumHeight() != minimum:
             self.setMinimumHeight(minimum)
         if self.maximumHeight() != maximum:
@@ -459,6 +458,7 @@ class MainWindow(QMainWindow):
     puzzle_history_finished = Signal(str, object, object)
     statistics_filter_options_finished = Signal(int, object, object)
     home_game_read_finished = Signal(int, str, object, object, object, object)
+    home_puzzle_preview_ready = Signal(int, str, object, object)
     archive_status_ready = Signal(str, object)
     saved_review_ready = Signal(str, object)
     batch_preflight_ready = Signal(object)
@@ -679,6 +679,10 @@ class MainWindow(QMainWindow):
             "движок и сеть для этого не запускаются.")
         self._legacy_metrics_complete_revision: int | None = None
         self._puzzle_history_callbacks: dict[str, object] = {}
+        self._home_puzzle_preview_generation = 0
+        self._home_puzzle_preview_handle = None
+        self._home_puzzle_preview_stop = None
+        self._home_puzzle_preview_cache: dict[str, dict | None] = {}
         self._note_save_requests: dict[str, tuple[str, str, object]] = {}
         self._finalization_probe_generation: dict[str, str] = {}
         self._finalization_probe_handles: dict[str, object] = {}
@@ -706,6 +710,7 @@ class MainWindow(QMainWindow):
         self.library_detail_finished.connect(self._library_detail_result_ready)
         self.library_retry_finished.connect(self._library_retry_result_ready)
         self.home_game_read_finished.connect(self._home_game_read_result_ready)
+        self.home_puzzle_preview_ready.connect(self._home_puzzle_preview_result_ready)
         self.note_save_finished.connect(self._note_save_result_ready)
         self.saved_game_analysis_read_finished.connect(
             self._saved_game_analysis_read_ready)
@@ -2968,6 +2973,8 @@ class MainWindow(QMainWindow):
                 "show_statistics": self.show_statistics,
                 "show_batch_analysis": self.show_batch_analysis,
                 "open_puzzle_history_local": self.open_puzzle_history_local,
+                "open_saved_puzzle": lambda account_id, puzzle_id: self.show_puzzle_history(
+                    account_id, target_puzzle_id=puzzle_id),
                 "open_settings": self.open_settings,
             }, self._dashboard_filter_changed)
         self._home_view = view
@@ -2977,7 +2984,8 @@ class MainWindow(QMainWindow):
             "dashboard_metrics_grid", "_dashboard_metric_values", "_dashboard_metric_details",
             "home_recent_card", "_recent_games_layout", "home_primary_actions",
             "home_activity_button", "activity_status",
-            "home_play_card", "home_progress_card", "home_all_progress_button",
+            "home_play_card", "home_puzzle_card", "puzzle_preview_board",
+            "puzzle_side_to_move", "puzzle_meta", "home_progress_card", "home_all_progress_button",
             "progress_trend", "recent_safety_notice",
             "home_ai_button", "home_local_button", "resume_game_button",
             "home_review_button", "resume_review_button", "home_friend_button",
@@ -4025,174 +4033,7 @@ class MainWindow(QMainWindow):
             self._recent_games_layout.addWidget(empty)
             return
         for game in games:
-            heading, details = game_card_text(game)
-            metrics = game.get("review_metrics") or {}
-            game_color = game.get("account_color") or game.get("color")
-            game_analysis_allowed = analysis_allowed and game_color in {"white", "black"}
-            recent_width = self._home_view.recent_scroll.viewport().width()
-            compact_width = recent_width < 900
-            narrow_width = recent_width < 650
-            compact_height = self.height() < 780
-            card = _DashboardGameCard()
-            card.setObjectName("metricCard")
-            card.setProperty("dashboard_game_id", str(game.get("game_id") or ""))
-            card.setAccessibleName(f"Открыть разбор партии: {heading}")
-            card.setAccessibleDescription("Нажмите Enter или пробел, чтобы открыть разбор.")
-            card.setToolTip("Открыть разбор партии")
-            card_root_layout = QBoxLayout(QBoxLayout.Direction.TopToBottom, card)
-            card_root_layout.setContentsMargins(12, 7, 12, 7)
-            card_root_layout.setSpacing(5)
-            card.set_responsive_graph(card_root_layout, None)
-            row_layout = QHBoxLayout()
-            row_layout.setSpacing(10)
-            card_root_layout.addLayout(row_layout)
-            card_layout = QVBoxLayout()
-            row_layout.addLayout(card_layout, 1 if narrow_width else 3)
-            card_layout.setSpacing(2)
-            # The accuracy and its source use separate lines so the source is
-            # never clipped into a compact card's lower edge.
-            card.setMinimumHeight(200 if compact_width else 136 if compact_height else 108)
-            card.setMaximumHeight(232 if compact_width else 144 if compact_height else 118)
-            outcome, _, opponent = heading.partition(" с ")
-            outcome_color = (VISUAL_TOKENS.success if heading.startswith("Победа")
-                             else VISUAL_TOKENS.danger if heading.startswith("Поражение")
-                             else VISUAL_TOKENS.text)
-            heading_row = QHBoxLayout()
-            heading_row.setSpacing(8)
-            outcome_icon = QLabel()
-            outcome_icon.setPixmap(icon_pixmap(
-                "win" if heading.startswith("Победа") else
-                "loss" if heading.startswith("Поражение") else "draw",
-                18, outcome_color, outcome_icon.devicePixelRatioF()))
-            heading_row.addWidget(outcome_icon)
-            heading_label = QLabel(outcome)
-            heading_label.setObjectName("dashboardOutcome")
-            heading_label.setStyleSheet(
-                f"color: {outcome_color}; font-size: 20px; font-weight: 700;")
-            heading_label.setWordWrap(False)
-            heading_label.setMinimumWidth(120)
-            heading_label.setSizePolicy(QSizePolicy.Policy.Ignored,
-                                        QSizePolicy.Policy.Preferred)
-            heading_row.addWidget(heading_label)
-            heading_row.addStretch(1)
-            card_layout.addLayout(heading_row)
-            if opponent:
-                opponent_label = QLabel(opponent)
-                opponent_label.setTextFormat(Qt.TextFormat.PlainText)
-                opponent_label.setStyleSheet("font-size: 14px;")
-                opponent_label.setWordWrap(True)
-                opponent_label.setSizePolicy(QSizePolicy.Policy.Ignored,
-                                             QSizePolicy.Policy.Preferred)
-                card_layout.addWidget(opponent_label)
-            opening = game_opening_name(game)
-            description = QLabel(details.removesuffix(f" · {opening}"))
-            description.setObjectName("secondary")
-            description.setWordWrap(True)
-            description.setSizePolicy(QSizePolicy.Policy.Ignored,
-                                      QSizePolicy.Policy.Preferred)
-            if compact_width or compact_height:
-                description.setStyleSheet("font-size: 13px;")
-            description.setToolTip(opening_tooltip(game.get("opening_name")))
-            card_layout.addWidget(description)
-            coverage_text = ("Новая партия · оценки обновляются" if
-                             snapshot.get("_dashboard_stale") and
-                             metrics.get("status") in {"loading", "updating"} else
-                             "Загружаем сохранённые оценки…" if metrics.get("status") == "loading" else
-                             "оценок пока нет" if metrics.get("status") == "без анализа" else
-                             f"Оценённые ходы: {metrics.get('coverage', '—')}")
-            coverage = QLabel(
-                coverage_text if game_analysis_allowed else
-                "Цвет профиля не подтверждён" if analysis_allowed else
-                "Оценки скрыты до проверки безопасности")
-            coverage.setObjectName("dashboardAnalysisCoverage")
-            coverage.setParent(card)
-            coverage.setWordWrap(False)
-            if game_analysis_allowed:
-                coverage.setToolTip(
-                    f"Источник: {metrics.get('source') or 'нет данных'} · "
-                    f"охват собственной стороны: {metrics.get('coverage') or 'н/д'}. "
-                    "Серверная аналитика и Stockfish отображаются как отдельные источники.")
-            elif analysis_allowed:
-                coverage.setToolTip("Оценки скрыты, потому что цвет владельца не подтверждён.")
-            else:
-                coverage.setToolTip(
-                    "Источник, оценки и охват скрыты до свежего подтверждения Fair Play.")
-            coverage.setAccessibleDescription(coverage.toolTip())
-            # Keep precise provenance accessible without spending one of the
-            # three visual rows on implementation detail. The approved Home
-            # card prioritizes opponent/date, opening/accuracy, and the
-            # side-by-side move table; hover and screen readers retain scope.
-            coverage.hide()
-            if game_analysis_allowed:
-                accuracy = metrics.get("accuracy")
-                accuracy_group = QVBoxLayout()
-                accuracy_group.setAlignment(Qt.AlignmentFlag.AlignVCenter)
-                opening_label = QLabel(opening)
-                opening_label.setWordWrap(True)
-                opening_label.setStyleSheet("font-size: 14px; font-weight: 600;")
-                opening_label.setSizePolicy(QSizePolicy.Policy.Ignored,
-                                            QSizePolicy.Policy.Preferred)
-                accuracy_group.addWidget(opening_label)
-                source = metrics.get("accuracy_source")
-                accuracy_text = (
-                    "Новая партия · оценка ещё не рассчитана"
-                    if snapshot.get("_dashboard_stale") and
-                    metrics.get("status") in {"loading", "updating"} else
-                    "Сверяем локально сохранённую аналитику…"
-                    if metrics.get("status") == "loading" else
-                    f"Точность: {accuracy}\n{source}"
-                    if source else "Нет рассчитанной точности")
-                accuracy_label = QLabel(accuracy_text)
-                accuracy_label.setWordWrap(True)
-                accuracy_label.setSizePolicy(QSizePolicy.Policy.Ignored,
-                                             QSizePolicy.Policy.Preferred)
-                if (compact_width or compact_height) and source:
-                    accuracy_label.setStyleSheet("font-size: 12px;")
-                accuracy_group.addWidget(accuracy_label)
-                row_layout.addLayout(accuracy_group, 1 if narrow_width else 3)
-                rows = ["Я / соперник"]
-                for title, key in (("Неточности", "inaccuracies"), ("Ошибки", "mistakes"),
-                                   ("Зевки", "blunders")):
-                    own = metrics.get("owner_" + key, "—")
-                    other = metrics.get("opponent_" + key, "—")
-                    rows.append(f"{title}: {own} / {other}")
-                statistics = QLabel("\n".join(rows))
-                statistics.setObjectName("dashboardAnalysisMetrics")
-                statistics.setStyleSheet(
-                    f"font-size: {11 if narrow_width else 12}px; line-height: 1.05;")
-                statistics.setWordWrap(True)
-                statistics.setSizePolicy(QSizePolicy.Policy.Ignored,
-                                         QSizePolicy.Policy.Preferred)
-                if narrow_width:
-                    statistics.setMinimumHeight(
-                        statistics.fontMetrics().lineSpacing() * 4)
-                statistics.setAccessibleDescription(
-                    "Показатели ходов отдельно для владельца и соперника. "
-                    + coverage.toolTip())
-                if narrow_width:
-                    accuracy_group.addWidget(statistics)
-                else:
-                    row_layout.addWidget(statistics, 2)
-                graph_points = metrics.get("graph_points")
-                legacy_assessments = metrics.get("assessments") or []
-                if not graph_points and legacy_assessments:
-                    graph_points = legacy_assessments[-64:]
-                if graph_points:
-                    graph = ReviewGraph(graph_points, [])
-                    graph.compact = True
-                    graph.setMinimumSize(160, 64)
-                    graph.setMaximumHeight(72)
-                    graph.full_ply_count = int(
-                        metrics.get("total_positions") or
-                        len(metrics.get("moves") or {}) or len(graph_points))
-                    graph.move_san = metrics.get("moves") or {}
-                    graph.analysis_source = str(metrics.get("source") or "")
-                    graph.set_safety_gate(True)
-                    # The card reflows this layout at its actual width: below
-                    # 900 logical pixels the graph receives a full-width row;
-                    # wide cards keep the approved side-by-side composition.
-                    card_root_layout.addWidget(graph, 1)
-                    card.set_responsive_graph(card_root_layout, graph)
+            card = self._build_home_recent_game_card(game, snapshot, analysis_allowed)
             card.activated.connect(lambda item=dict(game): self._open_home_game_details(item))
             card.watch_children()
             self._recent_games_layout.addWidget(card)
@@ -4280,6 +4121,238 @@ class MainWindow(QMainWindow):
                             "moves", "initial_fen", "line_revision", "account_id"}})
         if not self._open_saved_game(current):
             self.home_status.setText(self._raw_only_game_message(current))
+
+    def _build_home_recent_game_card(self, game: dict, snapshot: dict,
+                                     analysis_allowed: bool) -> _DashboardGameCard:
+        heading, _details = game_card_text(game)
+        metrics = game.get("review_metrics") or {}
+        game_color = game.get("account_color") or game.get("color")
+        has_owner = bool(game.get("account_id") and game_color in {"white", "black"})
+        game_analysis_allowed = analysis_allowed and game_color in {"white", "black"}
+        recent_width = self._home_view.recent_scroll.viewport().width()
+        compact = recent_width < 760
+        compact_height = self.height() < 780
+        card = _DashboardGameCard()
+        card.setObjectName("metricCard")
+        card.setProperty("dashboard_game_id", str(game.get("game_id") or ""))
+        card.setAccessibleName(f"Открыть разбор партии: {heading}")
+        card.setAccessibleDescription("Нажмите Enter или пробел, чтобы открыть разбор.")
+        card.setToolTip("Открыть сохранённую партию и разбор")
+        outcome, _, opponent = heading.partition(" с ")
+        outcome_color = (VISUAL_TOKENS.success if heading.startswith("Победа")
+                         else VISUAL_TOKENS.danger if heading.startswith("Поражение")
+                         else VISUAL_TOKENS.text)
+        root = QBoxLayout(QBoxLayout.Direction.LeftToRight, card)
+        root.setContentsMargins(8, 9, 12, 9)
+        root.setSpacing(12)
+        stripe = QFrame(card)
+        stripe.setObjectName("dashboardResultStripe")
+        stripe.setFixedWidth(4)
+        stripe.setStyleSheet(
+            f"background: {outcome_color}; border: 0; border-radius: 2px;")
+        stripe.setAccessibleName(f"Результат партии: {outcome}")
+        root.addWidget(stripe)
+        if compact:
+            card.setMinimumHeight(260 if compact_height else 238)
+            card.setMaximumHeight(284 if compact_height else 266)
+        else:
+            card.setMinimumHeight(208 if compact_height else 198)
+            card.setMaximumHeight(222 if compact_height else 216)
+
+        info = QWidget(card)
+        info.setObjectName("dashboardInfoColumn")
+        info.setMinimumWidth(176)
+        info_layout = QVBoxLayout(info)
+        info_layout.setContentsMargins(0, 0, 0, 0)
+        info_layout.setSpacing(3)
+        outcome_row = QHBoxLayout()
+        outcome_row.setSpacing(7)
+        outcome_icon = QLabel()
+        outcome_icon.setFixedSize(20, 20)
+        outcome_icon.setPixmap(icon_pixmap(
+            "win" if heading.startswith("Победа") else
+            "loss" if heading.startswith("Поражение") else "draw",
+            18, outcome_color, outcome_icon.devicePixelRatio()))
+        outcome_row.addWidget(outcome_icon)
+        outcome_label = QLabel(outcome)
+        outcome_label.setObjectName("dashboardOutcome")
+        outcome_label.setStyleSheet(
+            f"color: {outcome_color}; font-size: 20px; font-weight: 700;")
+        outcome_label.setWordWrap(False)
+        outcome_label.setSizePolicy(QSizePolicy.Policy.Ignored,
+                                    QSizePolicy.Policy.Preferred)
+        outcome_row.addWidget(outcome_label, 1)
+        info_layout.addLayout(outcome_row)
+        opponent_label = QLabel(opponent or "Соперник неизвестен")
+        opponent_label.setObjectName("dashboardOpponent")
+        opponent_label.setTextFormat(Qt.TextFormat.PlainText)
+        opponent_label.setWordWrap(True)
+        opponent_label.setSizePolicy(QSizePolicy.Policy.Ignored,
+                                     QSizePolicy.Policy.Preferred)
+        info_layout.addWidget(opponent_label)
+
+        def add_info_row(icon_name: str, text: str, object_name: str,
+                         *, color: str = "#C6D1E7", tooltip: str = "") -> QLabel:
+            row = QWidget(info)
+            row_layout = QHBoxLayout(row)
+            row_layout.setContentsMargins(0, 0, 0, 0)
+            row_layout.setSpacing(6)
+            icon = QLabel(row)
+            icon.setFixedSize(16, 16)
+            icon.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            icon.setPixmap(icon_pixmap(icon_name, 14, "#D8D0FF",
+                                       icon.devicePixelRatio()))
+            row_layout.addWidget(icon, 0, Qt.AlignmentFlag.AlignTop)
+            value = QLabel(text, row)
+            value.setObjectName(object_name)
+            value.setWordWrap(True)
+            value.setSizePolicy(QSizePolicy.Policy.Ignored,
+                                QSizePolicy.Policy.Preferred)
+            value.setStyleSheet(f"font-size: 12px; color: {color};")
+            if tooltip:
+                value.setToolTip(tooltip)
+            row_layout.addWidget(value, 1)
+            info_layout.addWidget(row)
+            return value
+
+        opening = game_opening_name(game)
+        if game.get("opening_name") or game.get("opening_eco") or game.get("eco"):
+            opening_label = add_info_row(
+                "book", opening, "dashboardOpening", color="#D7DDF0",
+                tooltip=opening_tooltip(game.get("opening_name")))
+            opening_label.setStyleSheet("font-size: 12px; font-weight: 600; color: #D7DDF0;")
+
+        if game_analysis_allowed and has_owner:
+            source = metrics.get("accuracy_source")
+            accuracy = metrics.get("accuracy")
+            accuracy_text = (f"Точность: {accuracy}" if accuracy and source
+                             else "Точность: —")
+            accuracy_tooltip = (f"Точность: {accuracy}\nИсточник: {source}\n"
+                                f"Охват собственных ходов: {metrics.get('coverage', 'н/д')}"
+                                if accuracy and source else
+                                "Для партии не сохранена подтверждённая точность.")
+        elif not analysis_allowed:
+            accuracy_text = "Оценки скрыты до проверки безопасности"
+            accuracy_tooltip = "Сохранённые оценки скрыты до свежего разрешения Fair Play."
+        else:
+            accuracy_text = "Точность: —"
+            accuracy_tooltip = "Для этой стороны нет подтверждённой точности владельца."
+        accuracy_label = add_info_row(
+            "target", accuracy_text, "dashboardAccuracy", tooltip=accuracy_tooltip)
+
+        activity_time = format_game_activity_time(game)
+        if ": " in activity_time:
+            activity_time = activity_time.partition(": ")[2]
+        total_positions = int(metrics.get("total_positions") or 0)
+        total_plies = max(0, total_positions - 1)
+        moves_count = (total_plies + 1) // 2 if total_positions else None
+        add_info_row("calendar", activity_time, "dashboardGameDate",
+                     color="#AFC5EF")
+        if moves_count is not None:
+            move_count = add_info_row("moves", f"{moves_count} ходов",
+                                      "dashboardMoveCount", color="#AFC5EF")
+            move_count.setToolTip("Число ходов рассчитано по сохранённым позициям партии.")
+        details_host = QWidget(card)
+        details_host.setObjectName("dashboardDetailsColumn")
+        details_layout = QHBoxLayout(details_host)
+        details_layout.setContentsMargins(0, 0, 0, 0)
+        details_layout.setSpacing(10)
+        details_layout.addWidget(info, 56)
+        table_host = QWidget(card)
+        table_host.setObjectName("dashboardAnalysisMetrics")
+        table_host.setMinimumWidth(164)
+        table = QGridLayout(table_host)
+        table.setContentsMargins(0, 4, 0, 0)
+        table.setHorizontalSpacing(7)
+        table.setVerticalSpacing(7)
+        if has_owner:
+            column_labels = ("Я", "Соперник")
+            fields = (("owner_inaccuracies", "opponent_inaccuracies"),
+                      ("owner_mistakes", "opponent_mistakes"),
+                      ("owner_blunders", "opponent_blunders"))
+            scope_description = "Я — выбранный профиль; соперник — другая сторона."
+        else:
+            column_labels = ("Белые", "Чёрные")
+            fields = (("white_inaccuracies", "black_inaccuracies"),
+                      ("white_mistakes", "black_mistakes"),
+                      ("white_blunders", "black_blunders"))
+            scope_description = "Партия не связана с профилем; стороны подписаны по цвету."
+        for column, label_text in enumerate(column_labels, start=1):
+            label = QLabel(label_text)
+            label.setStyleSheet("font-size: 11px; color: #AEB8D0; font-weight: 600;")
+            label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            table.addWidget(label, 0, column)
+        for row, (title, field_pair) in enumerate((
+                ("Неточности", fields[0]), ("Ошибки", fields[1]),
+                ("Зевки", fields[2])), start=1):
+            table.addWidget(QLabel(title), row, 0)
+            for column, field in enumerate(field_pair, start=1):
+                value = str(metrics.get(field, "—")) if game_analysis_allowed else "—"
+                value_label = QLabel(value)
+                value_label.setObjectName("dashboardAnalysisValue")
+                value_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+                value_color = "#AEB8D0"
+                if has_owner and column == 1:
+                    value_color = (VISUAL_TOKENS.success if heading.startswith("Победа")
+                                   else VISUAL_TOKENS.danger if heading.startswith("Поражение")
+                                   else "#E5E1FF")
+                value_label.setStyleSheet(
+                    f"font-size: 13px; font-weight: 600; color: {value_color};")
+                if value == "н/д":
+                    value_label.setToolTip(
+                        "Нет сохранённой классификации; отсутствие анализа не равно нулю.")
+                table.addWidget(value_label, row, column)
+        coverage = QLabel(
+            f"Охват: {metrics.get('coverage', '—')}" if game_analysis_allowed else
+            "Оценки скрыты")
+        coverage.setObjectName("dashboardAnalysisCoverage")
+        coverage.setStyleSheet("font-size: 10px; color: #AEB8D0;")
+        coverage.setToolTip(
+            f"Источник: {metrics.get('source') or 'нет данных'} · "
+            f"{scope_description} {accuracy_tooltip}")
+        coverage.setAccessibleDescription(coverage.toolTip())
+        table.addWidget(coverage, 4, 0, 1, 3)
+        details_layout.addWidget(table_host, 44)
+        root.addWidget(details_host, 50)
+
+        graph_host = QWidget(card)
+        graph_host.setObjectName("dashboardGraphColumn")
+        graph_host.setMinimumWidth(250)
+        graph_layout = QVBoxLayout(graph_host)
+        graph_layout.setContentsMargins(0, 0, 0, 0)
+        graph_layout.setSpacing(2)
+        graph_title = QLabel("Преимущество (в пешках)")
+        graph_title.setObjectName("dashboardGraphTitle")
+        graph_title.setStyleSheet("font-size: 12px; font-weight: 600;")
+        graph_layout.addWidget(graph_title)
+        graph_legend = QLabel("+ белые  /  − чёрные")
+        graph_legend.setObjectName("dashboardGraphLegend")
+        graph_legend.setStyleSheet("font-size: 10px; color: #AEB8D0;")
+        graph_layout.addWidget(graph_legend)
+        graph_points = metrics.get("graph_points") or []
+        graph = HomeEvaluationGraph(
+            graph_points if game_analysis_allowed else [], total_plies=total_plies,
+            phases=metrics.get("phase_boundaries"), parent=graph_host)
+        graph.setObjectName("homeEvaluationGraph")
+        graph.setToolTip(
+            f"Белая перспектива; сохранённая оценка позиции. "
+            f"Источник: {metrics.get('source') or 'нет данных'}")
+        if not game_analysis_allowed:
+            graph.empty_text = ("Оценки скрыты до проверки Fair Play"
+                                if not analysis_allowed else
+                                "Цвет владельца не подтверждён")
+        graph_layout.addWidget(graph, 1)
+        graph_source = QLabel(
+            f"Партия · {metrics.get('source') or 'без анализа'} · "
+            f"{metrics.get('coverage', '—')}")
+        graph_source.setObjectName("dashboardGraphSource")
+        graph_source.setStyleSheet("font-size: 10px; color: #AEB8D0;")
+        graph_source.setWordWrap(False)
+        graph_source.setToolTip(graph.toolTip())
+        graph_layout.addWidget(graph_source)
+        root.addWidget(graph_host, 50)
+        card.set_responsive_graph(root, graph_host)
+        return card
 
     def _refresh_dashboard_analysis_visibility(self) -> None:
         # Stored analysis for completed games is read-only history. Keep its
@@ -4735,6 +4808,106 @@ class MainWindow(QMainWindow):
         self.home_archive_button.setEnabled(self._online_actions_allowed())
         self.home_batch_analysis_button.setEnabled(True)
         self.home_puzzles_button.setEnabled(True)
+        # Load the optional task preview after Home has had an opportunity to
+        # paint its cached KPI and recent-game summary.
+        QTimer.singleShot(0, self._request_home_puzzle_preview)
+
+    def _request_home_puzzle_preview(self) -> None:
+        if (self._shutdown_requested or self.screen_stack.currentWidget() is not self.home_page):
+            return
+        account_id = self.dashboard_account.currentData()
+        if not account_id:
+            self._home_view.set_puzzle_preview(None)
+            return
+        account_id = str(account_id)
+        if account_id in self._home_puzzle_preview_cache:
+            self._home_view.set_puzzle_preview(self._home_puzzle_preview_cache[account_id])
+            return
+        if (self._home_puzzle_preview_handle is not None
+                and self._home_puzzle_preview_handle.is_alive()
+                and getattr(self, "_home_puzzle_preview_account", None) == account_id):
+            return
+        previous_stop = self._home_puzzle_preview_stop
+        if previous_stop is not None:
+            previous_stop.set()
+        self._home_puzzle_preview_generation += 1
+        generation = self._home_puzzle_preview_generation
+        self._home_puzzle_preview_account = account_id
+        stop_event = threading.Event()
+        self._home_puzzle_preview_stop = stop_event
+        self._home_view.set_puzzle_preview(None, loading=True)
+
+        def worker() -> None:
+            preview = None
+            error = None
+            try:
+                result = self.game_repository.puzzle_history_page(
+                    account_id, page=0, page_size=50)
+                for attempt in result.get("items", []):
+                    if stop_event.is_set():
+                        return
+                    try:
+                        puzzle_id = str(attempt.get("puzzle_id") or "").strip()
+                        board = chess.Board(str(attempt.get("fen") or ""))
+                        moves = json.loads(attempt.get("solution_json") or "[]")
+                        if not puzzle_id or not board.is_valid() or not isinstance(moves, list) or len(moves) < 2:
+                            continue
+                        parsed_moves = [chess.Move.from_uci(str(uci)) for uci in moves]
+                        valid = True
+                        for move in parsed_moves:
+                            if move not in board.legal_moves:
+                                valid = False
+                                break
+                            board.push(move)
+                        if not valid:
+                            continue
+                        position = chess.Board(str(attempt["fen"]))
+                        position.push(parsed_moves[0])
+                        if not position.is_valid():
+                            continue
+                        try:
+                            themes = json.loads(attempt.get("themes_json") or "[]")
+                        except (TypeError, json.JSONDecodeError):
+                            themes = []
+                        preview = {
+                            "account_id": account_id,
+                            "puzzle_id": puzzle_id,
+                            "fen": position.fen(),
+                            "solver_is_white": bool(position.turn == chess.WHITE),
+                            "rating": (int(attempt["puzzle_rating"])
+                                       if attempt.get("puzzle_rating") is not None else None),
+                            "themes": [str(theme) for theme in themes[:3]
+                                       if isinstance(theme, str)],
+                        }
+                        break
+                    except (KeyError, TypeError, ValueError, json.JSONDecodeError,
+                            chess.InvalidMoveError):
+                        continue
+            except Exception as exc:
+                error = type(exc).__name__
+            if not stop_event.is_set():
+                self.home_puzzle_preview_ready.emit(generation, account_id, preview, error)
+
+        self._home_puzzle_preview_handle = self._start_registered_work(
+            worker, kind="home_puzzle_preview_read", lane=OperationLane.INTERACTIVE,
+            thread_name="cc-home-puzzle-preview", stop_event=stop_event)
+
+    def _home_puzzle_preview_result_ready(self, generation: int, account_id: str,
+                                          preview: object, error: object) -> None:
+        if generation != self._home_puzzle_preview_generation or self._shutdown_requested:
+            return
+        if account_id != str(self.dashboard_account.currentData() or ""):
+            return
+        if error:
+            self._home_puzzle_preview_cache.pop(account_id, None)
+            self._home_view.set_puzzle_preview(None)
+            return
+        if not isinstance(preview, dict):
+            self._home_puzzle_preview_cache[account_id] = None
+        else:
+            self._home_puzzle_preview_cache[account_id] = dict(preview)
+        if self.screen_stack.currentWidget() is self.home_page:
+            self._home_view.set_puzzle_preview(self._home_puzzle_preview_cache[account_id])
 
     def start_archive_sync(self) -> None:
         if not self._online_actions_allowed():
@@ -5441,12 +5614,16 @@ class MainWindow(QMainWindow):
             self._puzzle_pilot_progress_dialog = None
         account_id = (f"lichess:{self.lichess.puzzle_username.strip().lower()}"
                       if self.lichess and self.lichess.puzzle_username else "")
+        if account_id:
+            self._home_puzzle_preview_cache.pop(account_id, None)
         QMessageBox.information(
             self, "Пробная история задач",
             f"Получено попыток: {received}\nНовых: {new_count}\n"
             "Курсор полной синхронизации не изменён.\n" + message)
         if account_id:
             self.show_puzzle_history(account_id)
+            if self.screen_stack.currentWidget() is self.home_page:
+                self._request_home_puzzle_preview()
 
     def _puzzles_progress(self, count: int) -> None:
         self._puzzles_new_count = count
@@ -5474,6 +5651,9 @@ class MainWindow(QMainWindow):
         if self.lichess and (self.lichess.puzzle_username or self.lichess.username):
             puzzle_username = self.lichess.puzzle_username or self.lichess.username
             account_id = f"lichess:{puzzle_username.strip().lower()}"
+            self._home_puzzle_preview_cache.pop(account_id, None)
+            if self.screen_stack.currentWidget() is self.home_page:
+                self._request_home_puzzle_preview()
             stats = self.game_repository.puzzle_statistics(account_id)
             sync_state = self.game_repository.puzzle_sync_state(account_id)
             rate = stats["success_percent"]
@@ -5521,6 +5701,7 @@ class MainWindow(QMainWindow):
         self.show_puzzle_history("")
 
     def show_puzzle_history(self, account_id: str, *, pilot_run_id: str | None = None,
+                            target_puzzle_id: str | None = None,
                             _accounts: list[dict] | None = None) -> None:
         """Browse a local account's puzzle history; refresh remains a separate action."""
         self.screen_title.setText("Обучение")
@@ -5578,6 +5759,7 @@ class MainWindow(QMainWindow):
                     account_ids = {str(row["account_id"]) for row in accounts}
                     selected = preferred if preferred in account_ids else str(accounts[0]["account_id"])
                 self.show_puzzle_history(selected, pilot_run_id=pilot_run_id,
+                                         target_puzzle_id=target_puzzle_id,
                                          _accounts=accounts)
 
             self._puzzle_history_callbacks[request_id] = (loading, generation, apply_accounts)
@@ -5632,6 +5814,9 @@ class MainWindow(QMainWindow):
         summary = page.summary
         refresh = page.refresh
         search = page.search
+        target_puzzle_id = str(target_puzzle_id or "").strip()
+        if target_puzzle_id:
+            search.setText(target_puzzle_id)
         result_filter = page.result_filter
         history = page.history
         previous = page.previous
@@ -5649,6 +5834,7 @@ class MainWindow(QMainWindow):
                  "replay_board": None, "solution_moves": [], "solution_index": 0,
                  "replay_active": False, "solution_visible": False,
                  "account_id": account_id, "generation": 0,
+                 "target_puzzle_id": target_puzzle_id,
                  "request_id": None, "handle": None}
 
         def refresh_account_summary() -> None:
@@ -5748,7 +5934,22 @@ class MainWindow(QMainWindow):
                     +(f"\nОшибка синхронизации: {sync_state['last_error']}" if sync_state.get("last_error") else ""))
                 summary.setToolTip("\n\n".join(part for part in (sync_tooltip, attempt_tooltip) if part))
                 if state["items"]:
-                    history.setCurrentRow(0)
+                    target = state.get("target_puzzle_id")
+                    target_row = next((index for index, attempt in enumerate(state["items"])
+                                       if target and str(attempt.get("puzzle_id")) == target), None)
+                    if target and target_row is None:
+                        state["selected"] = None
+                        replay.setEnabled(False)
+                        reveal.setEnabled(False)
+                        page_label.setText(
+                            f"Задача {target} больше не найдена в сохранённой истории.")
+                        solution.setText("Выберите сохранённую попытку из списка.")
+                    else:
+                        selected_row = target_row if target_row is not None else 0
+                        history.setCurrentRow(selected_row)
+                        if target_row is not None:
+                            state["target_puzzle_id"] = None
+                            begin_replay()
                 else:
                     state["selected"] = None
                     replay.setEnabled(False)
