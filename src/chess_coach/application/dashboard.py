@@ -368,7 +368,7 @@ def dashboard_snapshot(repository, *, account_id: str | None = None,
             "puzzle_player_rating": repository.puzzle_player_rating(account_id) if account_id else {},
             "activity_trend": activity_trend,
             "activity_trend_source": "Lichess puzzle attempts saved locally" if activity_trend else None,
-            "scope": scope, "filter": {"account_id": account_id, "clock": clock}}
+            "scope": game_scope, "filter": {"account_id": account_id, "clock": clock}}
 
 
 def game_card_metrics(repository, game: dict[str, Any]) -> dict[str, Any]:
