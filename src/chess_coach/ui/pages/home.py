@@ -526,7 +526,7 @@ class HomePage(QWidget):
         recent_rows = QWidget()
         self._recent_games_layout = QVBoxLayout(recent_rows)
         self._recent_games_layout.setContentsMargins(0, 0, 0, 0)
-        self._recent_games_layout.setSpacing(6)
+        self._recent_games_layout.setSpacing(10)
         self.recent_scroll = QScrollArea()
         self.recent_scroll.setFrameShape(QFrame.Shape.NoFrame)
         self.recent_scroll.setWidgetResizable(True)

@@ -386,7 +386,7 @@ class _DashboardGameCard(QFrame):
         elif compact_height:
             minimum, maximum = 208, 222
         else:
-            minimum, maximum = 198, 216
+            minimum, maximum = 212, 220
         if self.minimumHeight() != minimum:
             self.setMinimumHeight(minimum)
         if self.maximumHeight() != maximum:
