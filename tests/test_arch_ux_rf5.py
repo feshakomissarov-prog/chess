@@ -149,12 +149,12 @@ def test_home_metric_details_wrap_at_compact_width(qtbot, tmp_path):
         {"key": "errors", "value": "н/д", "detail": "нет данных", "source": "synthetic"},
     ], "recent_games": []})
     qtbot.wait(20)
-    detail = window._dashboard_metric_details["analysis"]
+    detail = window._dashboard_metric_details["games"]
     assert detail.wordWrap()
     assert detail.text() == "С оценками: 8\nStockfish: 6 · Lichess с оценками: 2"
     assert "Stockfish: 6" in detail.toolTip()
     assert "Lichess с оценками: 2" in detail.toolTip()
-    assert detail.geometry().bottom() < window.dashboard_metrics["games"].rect().height()
+    assert detail.geometry().bottom() < detail.parentWidget().height()
     window.close()
 
 

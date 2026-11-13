@@ -366,7 +366,8 @@ def test_safe_tooltip_exposes_source_for_saved_history_without_preflight(qtbot, 
     window = _window(qtbot, tmp_path, name="provenance-tooltip")
     window.offline_mode = False
     window._dashboard_analysis_safety_allowed = False
-    game = {"game_id": "synthetic", "status": "mate", "winner": "white",
+    game = {"game_id": "synthetic", "account_id": "lichess:synthetic",
+            "account_color": "white", "status": "mate", "winner": "white",
             "color": "white", "opponent": "Synthetic", "started_at": "2026-11-05",
             "clock": "300+0", "review_metrics": {"status": "partial", "coverage": "2/4",
             "source": "Stockfish"}}

@@ -7,7 +7,7 @@ from pathlib import Path
 from PySide6.QtCore import QPoint, QSettings, QStandardPaths, QTimer, Qt
 from PySide6.QtGui import QColor, QCloseEvent, QImage, QPainter
 from PySide6.QtWidgets import (QComboBox, QDialog, QDialogButtonBox, QLabel, QInputDialog,
-                               QApplication, QMessageBox, QPushButton)
+                               QApplication, QMessageBox, QPushButton, QWidget)
 
 from chess_coach.board_view import BoardView
 from chess_coach.window import (ActiveGamesDialog, BatchAnalysisDialog, EvaluationGraph, MainWindow,
@@ -3913,7 +3913,8 @@ def test_home_saved_puzzle_preview_opens_exact_offline_attempt(qtbot, tmp_path, 
 
     assert not window._home_view.puzzle_preview_board.isHidden()
     assert not window._home_view.puzzle_preview_board._interaction_enabled
-    assert "saved-puzzle-42" in window._home_view.activity_status.text()
+    assert window._home_view.activity_status.text() == "Задача Lichess"
+    assert "saved-puzzle-42" in window._home_view.activity_status.toolTip()
     assert "1770" in window._home_view.puzzle_meta.text()
     window.home_activity_button.click()
     assert opened == [("lichess:owner", "saved-puzzle-42")]
@@ -4042,7 +4043,7 @@ def test_home_dashboard_masks_cached_analysis_when_safety_is_pending_or_human_ga
     assert window._dashboard_metric_values["analysis"].text() == "1/1"
     assert window._dashboard_metric_details["errors"].text() == "synthetic error count"
     card = window._recent_games_layout.itemAt(0).widget()
-    assert card.findChild(QLabel, "dashboardAnalysisMetrics") is not None
+    assert card.findChild(QWidget, "dashboardAnalysisMetrics") is not None
     assert window.recent_safety_notice.isHidden()
 
     window._dashboard_analysis_safety_allowed = True
@@ -4056,7 +4057,7 @@ def test_home_dashboard_masks_cached_analysis_when_safety_is_pending_or_human_ga
     assert window._dashboard_metric_values["accuracy"].text() == "скрыто"
     assert window._dashboard_metric_values["analysis"].text() == "скрыто"
     assert window._recent_games_layout.itemAt(0).widget().findChild(
-        QLabel, "dashboardAnalysisMetrics") is None
+        QWidget, "dashboardAnalysisMetrics") is None
     human.status = "mate"
     window.online_sessions.pop(human.game_id)
     window._render_dashboard_snapshot(snapshot)
@@ -4741,10 +4742,12 @@ def test_recent_game_card_does_not_show_zero_coverage_when_analysis_is_missing(
             "review_metrics": {"status": "без анализа", "coverage": "0/12",
                                "opponent_coverage": "0/12", "source": "нет данных"}}
     window._render_dashboard_snapshot({"metrics": [], "recent_games": [game]})
-    labels = [label.text() for label in window.home_page.findChildren(QLabel)]
-    card_detail = next(value for value in labels if "оценок пока нет" in value)
-    assert "0/12" not in card_detail
-    assert "охват" not in card_detail
+    card = window._recent_games_layout.itemAt(0).widget()
+    coverage = card.findChild(QLabel, "dashboardAnalysisCoverage")
+    assert coverage is not None
+    assert coverage.text() == "Нет сохранённых оценок"
+    assert "0/12" not in coverage.text()
+    assert "охват" not in coverage.text().casefold()
     window.close()
 
 

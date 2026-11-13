@@ -3885,7 +3885,14 @@ class MainWindow(QMainWindow):
 
     def _render_dashboard_snapshot(self, snapshot: dict) -> None:
         previous_snapshot = self._latest_dashboard_snapshot
+        snapshot = dict(snapshot)
         scope = snapshot.get("filter") or {}
+        scoped_account_id = scope.get("account_id")
+        if scoped_account_id:
+            snapshot["recent_games"] = [
+                ({**game, "account_id": game.get("account_id") or scoped_account_id})
+                for game in snapshot.get("recent_games", [])
+            ]
         previous_scope = (previous_snapshot or {}).get("filter") or {}
         preview = bool(snapshot.get("is_preview"))
         preserve_aggregate = bool(
@@ -3974,6 +3981,18 @@ class MainWindow(QMainWindow):
                 refreshed_games.append(current)
             snapshot = dict(snapshot)
             snapshot["recent_games"] = refreshed_games
+        analysis_detail = next((str(metric.get("detail") or "")
+                                for metric in snapshot.get("metrics", [])
+                                if metric.get("key") == "analysis"), "")
+        analysis_summary = None
+        analysis_parts = analysis_detail.split(" · ")
+        if len(analysis_parts) >= 4 and analysis_parts[0].startswith("Полный охват:"):
+            full = analysis_parts[0].partition(":")[2].strip()
+            partial = analysis_parts[1].partition(":")[2].strip()
+            analyzed = int(full) + int(partial) if full.isdigit() and partial.isdigit() else None
+            if analyzed is not None:
+                analysis_summary = (f"С оценками: {analyzed}\n"
+                                    f"{analysis_parts[2]} · {analysis_parts[3]}")
         self._home_view.recent_safety_notice.setVisible(
             not analysis_allowed and not self.offline_mode)
         for metric in snapshot["metrics"]:
@@ -3983,6 +4002,9 @@ class MainWindow(QMainWindow):
             self._dashboard_metric_values[metric["key"]].setText(
                 "скрыто" if masked else metric["value"])
             detail_text = str(metric["detail"])
+            if (metric["key"] == "games" and analysis_summary
+                    and "С оценками:" not in detail_text):
+                detail_text = analysis_summary
             if preview and metric["key"] not in {"games", "accuracy"}:
                 self._dashboard_metric_values[metric["key"]].setText("—")
                 self._dashboard_metric_details[metric["key"]].setText(detail_text)
@@ -4009,6 +4031,8 @@ class MainWindow(QMainWindow):
                                   if masked else
                                   f"{metric['detail']}\nИсточник: {metric['source']}"
                                   if metric["key"] == "analysis" else str(metric["source"]))
+            if metric["key"] == "games" and analysis_summary:
+                source_description = f"{analysis_summary}\nИсточник: {metric['source']}"
             if not masked and metric["key"] == "accuracy":
                 # Keep the hover hint concise; retain full provenance/formula for
                 # assistive technology without displaying a screen-sized tooltip.
@@ -4133,6 +4157,15 @@ class MainWindow(QMainWindow):
         game_color = game.get("account_color") or game.get("color")
         has_owner = bool(game.get("account_id") and game_color in {"white", "black"})
         game_analysis_allowed = analysis_allowed and game_color in {"white", "black"}
+        coverage_value = str(metrics.get("coverage") or "")
+        try:
+            assessed_positions = int(coverage_value.partition("/")[0])
+        except (TypeError, ValueError):
+            assessed_positions = 0
+        has_saved_position_metrics = bool(
+            metrics.get("graph_points") or metrics.get("assessments") or assessed_positions > 0)
+        has_saved_accuracy = bool(metrics.get("accuracy") and metrics.get("accuracy_source"))
+        can_show_scores = game_analysis_allowed and has_saved_position_metrics
         recent_width = self._home_view.recent_scroll.viewport().width()
         compact = recent_width < 760
         compact_height = self.height() < 780
@@ -4227,18 +4260,18 @@ class MainWindow(QMainWindow):
                 tooltip=opening_tooltip(game.get("opening_name")))
             opening_label.setStyleSheet("font-size: 12px; font-weight: 600; color: #D7DDF0;")
 
-        if game_analysis_allowed and has_owner:
+        if game_analysis_allowed and has_owner and has_saved_accuracy:
             source = metrics.get("accuracy_source")
             accuracy = metrics.get("accuracy")
-            accuracy_text = (f"Точность: {accuracy}" if accuracy and source
-                             else "Точность: —")
+            accuracy_text = f"Точность: {accuracy}"
             accuracy_tooltip = (f"Точность: {accuracy}\nИсточник: {source}\n"
-                                f"Охват собственных ходов: {metrics.get('coverage', 'н/д')}"
-                                if accuracy and source else
-                                "Для партии не сохранена подтверждённая точность.")
+                                f"Охват собственных ходов: {metrics.get('coverage', 'н/д')}")
         elif not analysis_allowed:
             accuracy_text = "Оценки скрыты до проверки безопасности"
             accuracy_tooltip = "Сохранённые оценки скрыты до свежего разрешения Fair Play."
+        elif game_color not in {"white", "black"}:
+            accuracy_text = "Точность: —"
+            accuracy_tooltip = "Цвет владельца не подтверждён; источник точности скрыт."
         else:
             accuracy_text = "Точность: —"
             accuracy_tooltip = "Для этой стороны нет подтверждённой точности владельца."
@@ -4292,7 +4325,9 @@ class MainWindow(QMainWindow):
                 ("Зевки", fields[2])), start=1):
             table.addWidget(QLabel(title), row, 0)
             for column, field in enumerate(field_pair, start=1):
-                value = str(metrics.get(field, "—")) if game_analysis_allowed else "—"
+                value = str(metrics.get(field, "—")) if can_show_scores else "—"
+                if value == "н/д":
+                    value = "—"
                 value_label = QLabel(value)
                 value_label.setObjectName("dashboardAnalysisValue")
                 value_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -4307,14 +4342,24 @@ class MainWindow(QMainWindow):
                     value_label.setToolTip(
                         "Нет сохранённой классификации; отсутствие анализа не равно нулю.")
                 table.addWidget(value_label, row, column)
-        coverage = QLabel(
-            f"Охват: {metrics.get('coverage', '—')}" if game_analysis_allowed else
-            "Оценки скрыты")
+        if not analysis_allowed:
+            coverage_text = "Оценки скрыты"
+            coverage_reason = "Сохранённые оценки скрыты до свежего разрешения Fair Play."
+        elif game_color not in {"white", "black"}:
+            coverage_text = "Цвет владельца не подтверждён"
+            coverage_reason = "Источник и охват скрыты, потому что цвет владельца неизвестен."
+        elif can_show_scores:
+            coverage_text = f"Охват: {coverage_value or '—'}"
+            coverage_reason = ""
+        else:
+            coverage_text = "Нет сохранённых оценок"
+            coverage_reason = "Для этой партии нет сохранённой оценки позиций."
+        coverage = QLabel(coverage_text)
         coverage.setObjectName("dashboardAnalysisCoverage")
         coverage.setStyleSheet("font-size: 10px; color: #AEB8D0;")
-        coverage.setToolTip(
-            f"Источник: {metrics.get('source') or 'нет данных'} · "
-            f"{scope_description} {accuracy_tooltip}")
+        coverage.setToolTip((f"Источник: {metrics.get('source') or 'нет данных'} · "
+                             f"{scope_description} {accuracy_tooltip}")
+                            if can_show_scores else coverage_reason or accuracy_tooltip)
         coverage.setAccessibleDescription(coverage.toolTip())
         table.addWidget(coverage, 4, 0, 1, 3)
         details_layout.addWidget(table_host, 44)
@@ -4336,20 +4381,21 @@ class MainWindow(QMainWindow):
         graph_layout.addWidget(graph_legend)
         graph_points = metrics.get("graph_points") or []
         graph = HomeEvaluationGraph(
-            graph_points if game_analysis_allowed else [], total_plies=total_plies,
+            graph_points if can_show_scores else [], total_plies=total_plies,
             phases=metrics.get("phase_boundaries"), parent=graph_host)
         graph.setObjectName("homeEvaluationGraph")
-        graph.setToolTip(
-            f"Белая перспектива; сохранённая оценка позиции. "
-            f"Источник: {metrics.get('source') or 'нет данных'}")
-        if not game_analysis_allowed:
-            graph.empty_text = ("Оценки скрыты до проверки Fair Play"
-                                if not analysis_allowed else
-                                "Цвет владельца не подтверждён")
+        if can_show_scores:
+            graph.setToolTip(
+                f"Белая перспектива; сохранённая оценка позиции. "
+                f"Источник: {metrics.get('source') or 'нет данных'}")
+        else:
+            graph.setToolTip(coverage.toolTip())
+            graph.empty_text = coverage_text
         graph_layout.addWidget(graph, 1)
-        graph_source = QLabel(
-            f"Партия · {metrics.get('source') or 'без анализа'} · "
-            f"{metrics.get('coverage', '—')}")
+        graph_source_text = (f"Партия · {metrics.get('source') or 'без анализа'} · "
+                             f"{metrics.get('coverage', '—')}" if can_show_scores else
+                             coverage_text)
+        graph_source = QLabel(graph_source_text)
         graph_source.setObjectName("dashboardGraphSource")
         graph_source.setStyleSheet("font-size: 10px; color: #AEB8D0;")
         graph_source.setWordWrap(False)

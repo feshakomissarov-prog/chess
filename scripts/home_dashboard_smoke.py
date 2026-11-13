@@ -203,10 +203,23 @@ def launch(database: Path, root: Path, run_seconds: int, navigation_cycles: int,
         cards_fully_visible = (len(painted_cards) == min(int(target_count), 3)
                                and all(viewport.rect().contains(rect)
                                        for _card, rect in painted_cards))
+        from PySide6.QtWidgets import QLabel
+        required_card_labels = (
+            "dashboardOutcome", "dashboardOpponent", "dashboardAccuracy",
+            "dashboardGameDate", "dashboardAnalysisCoverage",
+            "dashboardGraphTitle", "dashboardGraphLegend", "dashboardGraphSource",
+        )
+        cards_have_visible_content = all(
+            all((label := card.findChild(QLabel, object_name)) is not None
+                and label.isVisibleTo(window) and bool(label.text().strip())
+                for object_name in required_card_labels)
+            for card, _rect in painted_cards
+        )
         accuracy_detail = window._dashboard_metric_details["accuracy"].text()
         if (current_summary_ms is None and games == target_count
                 and visible_recent_ids[:len(target_recent_ids)] == target_recent_ids
                 and painted_ids == target_recent_ids[:3] and cards_fully_visible
+                and cards_have_visible_content
                 and accuracy == expected["accuracy"]
                 # A valid last-good Tier B may be rendered with an explicit
                 # "updating" prefix while the newer aggregate runs. The saved
@@ -215,7 +228,6 @@ def launch(database: Path, root: Path, run_seconds: int, navigation_cycles: int,
                 and expected["accuracy_detail"] in accuracy_detail
                 and rating == expected["puzzle_rating"]):
             current_summary_ms = round((now - shown) * 1000, 2)
-            from PySide6.QtWidgets import QLabel
             current_summary_cards = [{
                 "game_id": str(card.property("dashboard_game_id") or ""),
                 "labels": [label.text() for label in card.findChildren(QLabel)

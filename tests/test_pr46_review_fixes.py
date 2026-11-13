@@ -68,11 +68,13 @@ def test_same_scope_preview_uses_fresh_top_three_and_only_reuses_matching_metric
 
     def game(game_id, revision=1):
         return {
-            "game_id": game_id, "status": "draw", "winner": None,
-            "color": "white", "account_color": "white", "opponent": game_id,
+            "game_id": game_id, "account_id": "lichess:scope",
+            "account_color": "white", "status": "draw", "winner": None,
+            "color": "white", "opponent": game_id,
             "line_revision": revision,
             "review_metrics": {
                 "assessments": [{"ply": 1, "white_cp": 20, "depth": 12}],
+                "graph_points": [{"ply": 1, "white_cp": 20}],
                 "moves": {1: "e4"}, "accuracy": "90.0%",
                 "accuracy_source": "Stockfish · локально", "source": "stockfish",
                 "status": "complete", "coverage": "1/1",
@@ -141,8 +143,9 @@ def test_dashboard_card_with_unknown_owner_color_does_not_reuse_or_expose_analys
     card = window._home_view._recent_games_layout.itemAt(0).widget()
     graph = card.findChild(HomeEvaluationGraph)
     assert graph is not None and not graph.points
-    assert not any("99.0%" in label.text() or "Точность:" in label.text()
-                   for label in card.findChildren(type(window.screen_title)))
+    accuracy = card.findChild(type(window.screen_title), "dashboardAccuracy")
+    assert accuracy is not None and accuracy.text() == "Точность: —"
+    assert "99.0%" not in accuracy.toolTip()
     coverage = card.findChild(type(window.screen_title), "dashboardAnalysisCoverage")
     assert coverage is not None
     assert "не подтверждён" in coverage.text()

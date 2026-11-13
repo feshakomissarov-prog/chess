@@ -113,6 +113,11 @@ def dashboard_preview_snapshot(repository, *, account_id: str | None = None,
     games = []
     for row in rows:
         game = dict(row)
+        if account_id:
+            # The account-scoped query is authoritative for the player's side.
+            # Carry the scope into the read model so Home can label `Я` and
+            # select that side's saved accuracy without guessing.
+            game["account_id"] = account_id
         game["review_metrics"] = {"status": "loading", "coverage": "—", "source": "—"}
         games.append(game)
     scope = "Выбранный аккаунт" if account_id else "Все локальные партии"
@@ -360,6 +365,8 @@ def dashboard_snapshot(repository, *, account_id: str | None = None,
     games = [dict(game) for game in recent["items"]]
     cards_started = time.perf_counter()
     for game in games:
+        if account_id:
+            game["account_id"] = account_id
         game["review_metrics"] = game_card_metrics(repository, game)
     log_event("dashboard_aggregate_sql", "dashboard", stage="recent_game_metrics",
               duration_ms=int((time.perf_counter() - cards_started) * 1000),
