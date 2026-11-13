@@ -64,6 +64,9 @@ jobs:
           foreach ($scale in @("1", "1.25", "1.5")) {
             $env:QT_SCALE_FACTOR = $scale
             $env:CC_VISUAL_OUTPUT = "visual-evidence/scale-$scale"
+            # Side-by-side images include approved reference artwork; keep them
+            # outside the synthetic-only public visual-evidence artifact.
+            $env:CC_VISUAL_COMPARE_OUTPUT = "visual-pairs/scale-$scale"
             if ($scale -eq "1") {
               Remove-Item Env:CC_VISUAL_TARGET_SIZES -ErrorAction SilentlyContinue
             } elseif ($scale -eq "1.25") {
@@ -73,6 +76,10 @@ jobs:
             }
             python -X faulthandler scripts/capture_visual_master.py
             if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          }
+          $referencePairs = Get-ChildItem -LiteralPath "visual-evidence" -Filter "pair-*.png" -Recurse -ErrorAction SilentlyContinue
+          if ($referencePairs) {
+            throw "Public visual-evidence must not include side-by-side reference images."
           }
       - uses: actions/upload-artifact@v4
         if: always()
