@@ -282,13 +282,6 @@ def make_window(app: QApplication):
 
 
 def wait_home(window, account_id: str) -> None:
-    def board_fits_preview() -> bool:
-        content_width = max(
-            0, window._home_view.home_puzzle_card.contentsRect().width() - 34)
-        expected_side = min(210, max(112, round(content_width * .40)))
-        board = window._home_view.puzzle_preview_board
-        return board.width() >= expected_side and board.height() >= expected_side
-
     try:
         wait_for(lambda: window._dashboard_options_loaded
                  and window.dashboard_account.currentData() == account_id
@@ -296,7 +289,8 @@ def wait_home(window, account_id: str) -> None:
                  and not window._latest_dashboard_snapshot.get("is_preview")
                  and window._dashboard_metric_values["games"].text() == "8"
                  and window._home_view.puzzle_preview_board.isVisible()
-                 and board_fits_preview()
+                 and window._home_view.puzzle_preview_board.width() >= 112
+                 and window._home_view.puzzle_preview_board.height() >= 112
                  and "visual-puzzle-" in window._home_view.activity_status.text()
                  and len([window._home_view._recent_games_layout.itemAt(i).widget()
                           for i in range(window._home_view._recent_games_layout.count())
@@ -688,6 +682,21 @@ def capture(window: MainWindow, output: Path, name: str, width: int, height: int
         if expected_account:
             wait_home(window, str(expected_account))
         progress = window._home_view
+        board_minimum = 176 if width >= 1500 else 112
+        assert progress.puzzle_preview_board.width() >= board_minimum
+        assert progress.puzzle_preview_board.height() >= board_minimum
+        overview_viewport = progress.home_overview_scroll.viewport()
+        viewport_left = overview_viewport.mapToGlobal(QPoint(0, 0)).x()
+        viewport_right = viewport_left + overview_viewport.width()
+        for key in ("games", "accuracy"):
+            metric = progress.dashboard_metrics[key]
+            metric_left = metric.mapToGlobal(QPoint(0, 0)).x()
+            metric_right = metric_left + metric.width()
+            assert metric_left >= viewport_left and metric_right <= viewport_right, (
+                f"Home {key} KPI is horizontally clipped at {width}x{height}: "
+                f"metric={metric_left}:{metric_right}, "
+                f"viewport={viewport_left}:{viewport_right}"
+            )
         graph_rect = QRect(progress.puzzle_sparkline.mapToGlobal(QPoint(0, 0)),
                            progress.puzzle_sparkline.size())
         trend_rect = QRect(progress.progress_trend.mapToGlobal(QPoint(0, 0)),
