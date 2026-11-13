@@ -55,13 +55,31 @@ Exact-head SHA #543: `97f3671be489c36af2363c2c8eb6b41b20130011`. Windows test **
 | HIMG-05 | «Последние партии»/«Все партии» и ровно три завершённые игры; пустое место справа использовано. | Capture #543; wide viewport/card-count assertions. | Windows CI PASS (synthetic) |
 | HIMG-06 | Тема и локальные иконки сохранены; sidebar/header остаются вне области редизайна. | Capture #543; shell geometry inspected against private reference. | Windows CI PASS (synthetic); owner acceptance pending |
 | HIMG-07 | В games KPI убрано «Выбранный аккаунт»; account scope and sources retained. | Capture #543; account/scope fixture assertions passed. | Windows CI PASS (synthetic); owner profile pending |
-| HIMG-08 | Каждая карта: информация, таблица `Я/Соперник`, сохранённый график; unknown/missing metrics do not show invented zero. | Capture #543; actual Qt label-bound and 3-card assertions. | Windows CI PASS (synthetic) |
-| HIMG-09 | График использует сохранённую white-perspective оценку и легенду `+ белые / − чёрные`; без маркеров. | Capture #543; chart fixture/widget assertions. | Windows CI PASS (synthetic); live games not evaluated |
+| HIMG-08 | Каждая карта: информация, таблица `Я/Соперник`, сохранённый график; unknown/missing metrics do not show invented zero. | Capture #543; actual Qt label-bound and 3-card assertions. | **VERIFY / FIX required:** HIMG-08.A/B; ordinary synthetic CI PASS |
+| HIMG-09 | График использует сохранённую white-perspective оценку и легенду `+ белые / − чёрные`; без маркеров. | Capture #543; chart fixture/widget assertions. | **NOT ACCEPTED (owner screenshot)**: HIMG-09.A/B/C; synthetic CI PASS remains recorded |
 | HIMG-10 | На 1672×941 3 карты сразу; при 1280×720 контент доступен в правом scroll area без clip. | Capture matrix #543; viewport QRect assertions. | Windows CI PASS (synthetic); compact scroll is required |
 | HIMG-11 | Rating/trend retain saved values, real scale and CTA. | Capture #543; graph/label fit assertions. | Windows CI PASS (synthetic) |
 | HIMG-12 | Fixture saved puzzle has legal board and exact solving route; CTA is reachable when compact. | Capture #543; exact puzzle ID click test passed. | Windows CI PASS (synthetic); owner profile/offline flow pending |
 
 Сравнение: структура соответствует двум KPI, левым рейтингу/задаче и трём правым карточкам. На кадре #543 текущая sidebar шире эталонной (~252 против ~221 px), поэтому Home сдвинут вправо; sidebar не изменялся, как требует ТЗ. Основные карточки близки по композиции, отличия сохраняются в плотности текста/размере доски и унаследованной ширине shell. На 1280×720 левая и правая области прокручиваются независимо; данные доступны без обрезки, но три карточки не видны одновременно. Public artifact #543 содержит только synthetic data и не содержит reference pixels. Полный exact-head CI подтверждён на SHA #543, но реальная основная база, системный DPI и пользовательская приёмка остаются OPEN: R47-QA-01, R47-H-05/R47-P-04, P0/TD-06 и R47-SAFE-01.
+
+### B.4. Независимая перепроверка актуального Home (14.11.2026)
+
+**Code baseline:** `6bc32fc24fce91a1d7bcea7cab2dab6d56b52d8f`; [Windows run #43491737486](https://github.com/feshakomissarov-prog/chess/actions/runs/43491737486) **1146 passed**, visual-evidence PASS. Важное уточнение: число зелёных проверок НЕ доказывает читаемость кривой на пользовательском историческом материале. На загруженном пользователем скриншоте 14.11.2026 видны наложения меток mate и частые пограничные/вертикальные артефакты; это **та же ранее заявленная HIMG-09**, а не новая задача с новым ID.
+
+**Связанные остатки по ранее утверждённому Home ТЗ:**
+
+| Открытый ID | Статус | Evidence и следующий шаг |
+|---|---|---|
+| **HIMG-09.A** | **CONFIRMED UI FAIL** | `HomeEvaluationGraph.paintEvent` выводит `M+`/`M−` **для каждой** mate-оценки и отдельный triangle при **каждом** CP за пределом ±600. На реальном скрине есть нагромождение. Сгруппировать отображение интервалов при сохранении достоверных tooltip/сторон/граничных значений. |
+| **HIMG-09.B** | **CONFIRMED LOGIC GAP** | `_summarize_game_review` прореживает >256 points; `HomeEvaluationGraph` рисует отрезок только при `next_ply == previous_ply+1`. Для полной длинной партии может пропасть непрерывная линия. Проверка 320–600 plies с/без реальных gaps. |
+| **HIMG-09.C** | **CONFIRMED TOOLTIP BUG** | `mouseMoveEvent` показывает `Ход {point[0]}`, где `point[0]` — экранный X. Хранить и показывать original ply, при изменении ширины графика подсказка не меняется. |
+| **HIMG-08.A** | **CONFIRMED UNHANDLED DATA PATH; runtime scenario pending** | `game_color` отсутствует → `can_show_scores=False` даже для локальной завершённой проанализированной партии; заголовок таблицы «Белые / Чёрные», а значения скрыты. Проверить safe local scenario; не раскрывать активную human игру. |
+| **HIMG-08.B** | **CONFIRMED DEAD TOOLTIP BRANCH** | Код заменяет `н/д` на `—` до проверки `if value == 'н/д'`; причина отсутствия классификации не отображается. Tooltip/accessible description и тест. |
+
+**Полное ТЗ и критерии** с подробными сценариями остаются **в прежнем документе** [PR47_HOME_APPROVED_IMAGE_IMPLEMENTATION_2026_11_13.md](PR47_HOME_APPROVED_IMAGE_IMPLEMENTATION_2026_11_13.md), раздел 10. Другие ранее известные пункты не переименовывать и не сбрасывать. `R47-H-04` (обрезанный верхний правый служебный текст) по-прежнему виден, но был отмечен **раньше**, и относится к оболочке, не является новой находкой. Новых ранее существовавших в `main` дефектов, доказанных этим ревью, нет; поэтому не дублировать реестр в `TECHNICAL_DEBT.md`.
+
+**Открытые gates, не снятые одобрением макета:** `R47-GATE-01 / TD-06` — покадровый P0 на основной SQLite ≤1000 мс не измерен; `R47-SAFE-01` — причина четырёх локальных crash Qt не установлена. Владелец сообщил, что со своей стороны готов разрешить merge, **если** независимое ревью также примет результат. По указанным HIMG-09 нарушениям независимое ревью **не рекомендует merge на текущем коде**. Только после исправления HIMG-09/08 и полного exact-head CI, пользовательского подтверждения оставшихся gates — повторно рассмотреть merge. Без локальных запусков/изменений Dr.Web или SQLite без отдельного разрешения.
 
 ## C. Зафиксированные падения Windows pytest (6)
 
