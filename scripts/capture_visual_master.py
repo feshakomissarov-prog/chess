@@ -1459,9 +1459,13 @@ def main() -> None:
             1 for index, (width, _height) in enumerate(target_sizes)
             if index == 0 or width <= 1280
         )
+        long_opponent_count = sum(
+            1 for width, _height in target_sizes if width >= 1500 or width <= 1280)
+        play_return_count = int(bool(target_sizes))
         expected_count = (3 * len(target_sizes) + len(offline_sizes) + 18
                           + 2 * compact_size_count
-                          + tabs.count() + graph_case_count)
+                          + tabs.count() + graph_case_count
+                          + long_opponent_count + play_return_count)
         assert len(captured) == expected_count, (
             f"Expected {expected_count} screenshot states, got {len(captured)}"
         )
