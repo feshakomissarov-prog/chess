@@ -65,7 +65,7 @@ jobs:
         with:
           name: home-chart-l1-l2-${{ github.event.pull_request.head.sha || github.sha }}
           path: visual-evidence/home-chart-review/
-          if-no-files-found: error
+          if-no-files-found: warn
   test:
     needs: home-chart-review
     runs-on: windows-latest

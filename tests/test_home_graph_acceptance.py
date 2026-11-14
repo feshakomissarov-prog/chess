@@ -184,7 +184,7 @@ def test_off_axis_curve_is_clipped_without_plateau_gap_bridge_or_marker(qtbot):
     image = QImage(graph.size(), QImage.Format.Format_ARGB32)
     image.fill(Qt.GlobalColor.transparent)
     painter = QPainter(image)
-    graph.render(painter)
+    graph.render(painter, QPoint())
     painter.end()
     outside = []
     for y in range(image.height()):

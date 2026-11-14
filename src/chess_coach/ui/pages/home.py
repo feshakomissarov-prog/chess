@@ -428,7 +428,9 @@ class PuzzleRatingSparkline(QWidget):
             0 if item[0] in (axis_low, axis_high) else
             1 if item[0] == round((axis_low + axis_high) / (2 * step)) * step else 2,
             item[1].top()))
-        y_labels = self._non_overlapping_label_rects(y_candidates)
+        max_y_labels = max(2, min(
+            5, (plot.height() + 3) // (metrics.height() + 3)))
+        y_labels = self._non_overlapping_label_rects(y_candidates)[:max_y_labels]
         painter.setPen(QColor("#AEB8D0"))
         for rating, bounds in sorted(y_labels, key=lambda item: item[1].top()):
             painter.drawText(bounds, Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter,
