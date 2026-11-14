@@ -1330,7 +1330,7 @@ def main() -> None:
                 fork_ply = min(2, len(page.review["moves"]))
                 page.select_ply(fork_ply)
                 board = page.review["positions"][fork_ply]
-                main_move = (page.review["moves"][fork_ply].move
+                main_move = (page.review["moves"][fork_ply].uci
                              if fork_ply < len(page.review["moves"]) else None)
                 alternate = next((move for move in board.legal_moves if move != main_move), None)
                 assert alternate is not None, "Synthetic review position needs an alternate legal move."
