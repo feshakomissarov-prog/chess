@@ -676,26 +676,29 @@ def test_review_layout_has_no_outer_scroll_and_renders_at_desktop_sizes(qtbot, t
             table_x = workspace.moves_list.mapTo(workspace, QPoint(0, 0)).x()
             bar_rect = workspace.advantage_bar.geometry()
             bar_x = workspace.advantage_bar.mapTo(workspace, QPoint(0, 0)).x()
+            bar_right = bar_x + bar_rect.width()
             label_x = workspace.advantage_label.mapTo(workspace, QPoint(0, 0)).x()
+            label_right = label_x + workspace.advantage_label.width()
             inspector_x = workspace.review_inspector.mapTo(workspace, QPoint(0, 0)).x()
-            inspector_width = workspace.review_inspector.width()
-            splitter_handle = workspace.workspace_splitter.handle(2)
-            handle_x = splitter_handle.mapTo(workspace, QPoint(0, 0)).x()
-            print({
-                "size": (width, height),
-                "board": (board_x, board_x + board_rect.width(), board_rect.width(), board_rect.height()),
-                "bar": (bar_x, bar_x + bar_rect.width(), bar_rect.width(), bar_rect.height()),
-                "label_x": label_x,
-                "table_x": table_x,
-                "inspector": (inspector_x, inspector_x + inspector_width),
-                "splitter_handle_x": handle_x,
-                "gap_board_bar": bar_x - (board_x + board_rect.width()),
-                "gap_bar_table": table_x - (bar_x + bar_rect.width()),
-            })
+            inspector_right = inspector_x + workspace.review_inspector.width()
+            board_right = board_x + board_rect.width()
+            table_right = table_x + workspace.moves_list.width()
             assert abs(board_rect.width() - board_rect.height()) <= 1
             assert workspace.board_column.width() - board_rect.width() <= 24
-            assert table_x >= board_x + board_rect.width()
-            assert table_x - (board_x + board_rect.width()) <= 48
+            assert workspace.advantage_bar.isVisible()
+            assert 64 <= bar_rect.width() <= 80
+            assert bar_rect.height() >= 150
+            assert 0 <= bar_x - board_right <= 24, (
+                f"Board-to-AdvantageBar gap should stay within layout spacing: "
+                f"size={(width, height)}, board_right={board_right}, bar_left={bar_x}"
+            )
+            assert 0 <= table_x - bar_right <= 24, (
+                f"AdvantageBar-to-notation gap should stay within layout spacing: "
+                f"size={(width, height)}, bar_right={bar_right}, table_left={table_x}"
+            )
+            assert label_x == bar_x and label_right <= table_x
+            assert table_right <= inspector_right
+            assert bar_x >= inspector_x
             assert workspace.moves_list.table.horizontalScrollBar().maximum() == 0
             metric_headers = workspace.side_metrics_summary.horizontalHeader()
             for column in range(workspace.side_metrics_summary.columnCount()):
