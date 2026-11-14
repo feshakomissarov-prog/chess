@@ -906,6 +906,15 @@ def capture_long_game_graph_cases(window: MainWindow, output: Path,
         long_graph = by_point_count[600]
         gap_graph = by_point_count[580]
         mate_graph = by_point_count[581]
+        print("Graph diagnostics:", [
+            {"points": len(graph.points),
+             "cp": sum(point.get("white_cp") is not None for point in graph.points),
+             "connect_flags": sum(point.get("connect_from_previous") is True
+                                  for point in graph.points),
+             "segments": len(graph._drawn_cp_segments),
+             "first": graph.points[:2], "last": graph.points[-2:]}
+            for graph in graphs
+        ], flush=True)
         assert len(long_graph._drawn_cp_segments) == 599
         assert len(gap_graph._drawn_cp_segments) == 578
         assert not any(start <= 280 < end for start, end in gap_graph._drawn_cp_segments)
