@@ -1047,6 +1047,7 @@ def capture_home_long_opponent_case(window: MainWindow, output: Path,
     long_name = ("Synthetic Opponent With A Deliberately Long Display Name "
                  "For Home Card Wrapping And Geometry 0123456789")
     snapshot["recent_games"][0]["opponent"] = long_name
+    snapshot["recent_games"][0]["account_opponent"] = long_name
     try:
         window._render_dashboard_snapshot(snapshot)
         QApplication.processEvents()
