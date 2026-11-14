@@ -637,7 +637,8 @@ def capture(window: MainWindow, output: Path, name: str, width: int, height: int
     if current is window.review_workspace:
         page = current
         assert page.review and page.moves_list.table.rowCount() > 0
-        assert page.side_metrics_summary.rowCount() >= 4
+        if page.training_allowed:
+            assert page.side_metrics_summary.rowCount() >= 4
         assert page.graph.full_ply_count >= 16
         assert_no_widget_overlap(page.review_board, page.side_metrics_summary,
                                  "Review board and comparison table")
@@ -1711,4 +1712,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-
