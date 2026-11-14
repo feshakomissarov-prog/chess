@@ -10,6 +10,8 @@ from PySide6.QtWidgets import (
     QAbstractItemView, QHeaderView, QTableWidget, QTableWidgetItem, QWidget, QVBoxLayout,
 )
 
+from .theme import VISUAL_TOKENS
+
 
 _SEVERITY = {
     "good": ("✓", "Хороший ход"),
@@ -57,6 +59,7 @@ class MoveTable(QWidget):
     """One row per full move; each SAN cell retains its exact ply identity."""
 
     ply_selected = Signal(int)
+    variation_selected = Signal(str, int)
     wheel_navigate = Signal(int)
 
     def __init__(self, parent=None):
@@ -75,7 +78,8 @@ class MoveTable(QWidget):
         self.table.setWordWrap(False)
         self.table.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self.table.setMinimumWidth(0)
-        self.table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
+        self.table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.Fixed)
+        self.table.setColumnWidth(0, 44)
         self.table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
         self.table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeMode.Stretch)
         for column, label in enumerate(("Номер полного хода", "Белые", "Чёрные")):
@@ -85,15 +89,21 @@ class MoveTable(QWidget):
         self.table.setAccessibleDescription(
             "Одна строка на полный ход; оценка после хода приводится с перспективы белых. "
             "Изменение оценки доступно отдельно для выбранного полухода.")
+        self.table.setStyleSheet(
+            f"QTableWidget::item:selected {{ background: #39365E; "
+            f"border: 1px solid {VISUAL_TOKENS.accent}; }}")
         self.table.cellClicked.connect(self._cell_clicked)
         self._moves = []
         self._selected_ply: int | None = None
+        self._variation_rows: list[int] = []
         layout.addWidget(self.table)
 
-    def set_rows(self, moves, *, scores=None, enabled=True, show_severity=True):
+    def set_rows(self, moves, *, scores=None, enabled=True, show_severity=True,
+                 show_scores=True):
         """Moves contain ply, SAN, mover and optional severity; scores are post-ply dicts."""
         self._moves = list(moves)
         self.table.setRowCount(0)
+        self._variation_rows.clear()
         rows: dict[int, int] = {}
         for move in moves:
             ply = int(move.ply if hasattr(move, "ply") else move["ply"])
@@ -132,7 +142,7 @@ class MoveTable(QWidget):
                     score_text = _score_tenth(cp)
                 else:
                     score_text = None
-                if score_text:
+                if score_text and show_scores:
                     label += f" {score_text}"
             if severity in _SEVERITY:
                 icon, description = _SEVERITY[severity]
@@ -156,8 +166,11 @@ class MoveTable(QWidget):
             item.setData(Qt.ItemDataRole.UserRole, ply)
             item.setData(Qt.ItemDataRole.UserRole + 1, base_label)
             if score is not None:
-                item.setToolTip((item.toolTip() + "\n" if item.toolTip() else "") +
-                                "Оценка позиции после хода; перспектива белых. Δ показана отдельно.")
+                score_detail = (f"Оценка позиции после хода: {score_text} за белых. "
+                                "Δ показана отдельно." if score_text else
+                                "Оценка позиции после хода; перспектива белых. "
+                                "Δ показана отдельно.")
+                item.setToolTip((item.toolTip() + "\n" if item.toolTip() else "") + score_detail)
             if not enabled:
                 item.setToolTip("Оценки и анализ скрыты до проверки безопасности.")
             self.table.setItem(row, column, item)
@@ -262,12 +275,70 @@ class MoveTable(QWidget):
 
     def _cell_clicked(self, row: int, column: int):
         item = self.table.item(row, column)
+        branch_item = self.table.item(row, 0)
+        if branch_item is not None:
+            branch = branch_item.data(Qt.ItemDataRole.UserRole)
+            if isinstance(branch, tuple) and len(branch) == 3 and branch[0] == "variation":
+                self.variation_selected.emit(str(branch[1]), int(branch[2]))
+                return
         if column == 0:
             self.ply_selected.emit(int(item.data(Qt.ItemDataRole.UserRole) or 0))
         elif item is not None:
             ply = item.data(Qt.ItemDataRole.UserRole)
             if ply is not None:
                 self.ply_selected.emit(int(ply))
+
+    def set_variations(self, variations: list[dict]) -> None:
+        """Render session-only branches as selectable nested rows below their fork."""
+        for row in range(self.table.rowCount() - 1, -1, -1):
+            item = self.table.item(row, 0)
+            data = item.data(Qt.ItemDataRole.UserRole) if item is not None else None
+            if isinstance(data, tuple) and len(data) == 3 and data[0] == "variation":
+                self.table.removeRow(row)
+        self._variation_rows.clear()
+        insertions: list[tuple[int, dict]] = []
+        for branch in variations:
+            fork_ply = int(branch.get("fork_ply", 0))
+            anchor = self.item_by_ply(fork_ply) if fork_ply else None
+            anchor_row = self.table.row(anchor) if anchor is not None else -1
+            insertions.append((anchor_row + 1, branch))
+        offset = 0
+        for insertion, branch in sorted(insertions, key=lambda value: value[0]):
+            moves = branch.get("moves") or []
+            sans = branch.get("sans") or []
+            for index, move in enumerate(moves):
+                row = min(insertion + offset, self.table.rowCount())
+                self.table.insertRow(row)
+                self.table.setSpan(row, 0, 1, 3)
+                san = sans[index] if index < len(sans) else "…"
+                score = (branch.get("scores") or {}).get(index + 1, {})
+                cp, mate = score.get("white_cp"), score.get("mate_white")
+                score_text = (f"M{abs(int(mate))}" if mate is not None and int(mate) > 0 else
+                              f"−M{abs(int(mate))}" if mate is not None else
+                              _score_tenth(cp) if cp is not None else None)
+                prefix = "Вариант ·" if index == 0 else "↳"
+                number = int(branch.get("start_move_number", 1))
+                mover = str(branch.get("start_color", "white"))
+                for _ in range(index):
+                    if mover == "black":
+                        mover = "white"
+                        number += 1
+                    else:
+                        mover = "black"
+                notation = f"{number}." if mover == "white" else f"{number}…"
+                label = f"  {prefix}   {notation} {san}"
+                if score_text:
+                    label += f"   {score_text}"
+                item = QTableWidgetItem(label)
+                item.setData(Qt.ItemDataRole.UserRole,
+                             ("variation", str(branch.get("id", "")), index + 1))
+                item.setData(Qt.ItemDataRole.AccessibleDescriptionRole,
+                             f"Временный вариант {number}, {mover}: {san}; исходная партия не изменяется.")
+                item.setToolTip("Временный вариант. Не сохраняется в PGN или SQLite.")
+                item.setForeground(QColor("#c7b3ff"))
+                self.table.setItem(row, 0, item)
+                self._variation_rows.append(row)
+                offset += 1
 
     def select_ply(self, ply: int):
         ply = int(ply)
