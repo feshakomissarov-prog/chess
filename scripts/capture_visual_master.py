@@ -901,12 +901,18 @@ def capture_long_game_graph_cases(window: MainWindow, output: Path,
         assert len(graphs) == 3 and all(graph is not None for graph in graphs)
         for graph in graphs:
             graph.repaint()
-        assert len(graphs[0]._drawn_cp_segments) == 599
-        assert len(graphs[1]._drawn_cp_segments) == 578
-        assert not any(start <= 280 < end for start, end in graphs[1]._drawn_cp_segments)
-        assert len(graphs[2]._mate_markers) == 1
-        assert graphs[2]._mate_markers[0][2:] == (350, 20)
-        assert len(graphs[2]._clipped_markers) == 2
+        by_point_count = {len(graph.points): graph for graph in graphs}
+        assert set(by_point_count) == {580, 581, 600}
+        long_graph = by_point_count[600]
+        gap_graph = by_point_count[580]
+        mate_graph = by_point_count[581]
+        assert len(long_graph._drawn_cp_segments) == 599
+        assert len(gap_graph._drawn_cp_segments) == 578
+        assert not any(start <= 280 < end for start, end in gap_graph._drawn_cp_segments)
+        assert len(mate_graph._drawn_cp_segments) == 578
+        assert len(mate_graph._mate_markers) == 1
+        assert mate_graph._mate_markers[0][2:] == (350, 20)
+        assert len(mate_graph._clipped_markers) == 2
         image = capture(window, output, "home-long-game-graph-cases", width, height)
         print("Long-game graph cases: 600 plies; one 20-ply assessment gap; "
               "20 mate assessments rendered as one interval; two clipped CP intervals.")
