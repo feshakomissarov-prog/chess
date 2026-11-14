@@ -4224,7 +4224,13 @@ class MainWindow(QMainWindow):
         outcome_color = (VISUAL_TOKENS.success if heading.startswith("Победа")
                          else VISUAL_TOKENS.danger if heading.startswith("Поражение")
                          else VISUAL_TOKENS.text)
-        root = QBoxLayout(QBoxLayout.Direction.LeftToRight, card)
+        # Choose the first responsive direction from the viewport's measured
+        # width. The card is initially a default-width QWidget, so waiting for
+        # its first resizeEvent can briefly leave an oversized horizontal
+        # minimum inside a narrower QScrollArea viewport.
+        root = QBoxLayout(
+            QBoxLayout.Direction.TopToBottom if compact else
+            QBoxLayout.Direction.LeftToRight, card)
         root.setContentsMargins(8, 9, 12, 9)
         root.setSpacing(12)
         stripe = QFrame(card)
@@ -4345,6 +4351,8 @@ class MainWindow(QMainWindow):
         details_host = QWidget(card)
         details_host.setObjectName("dashboardDetailsColumn")
         details_layout = QHBoxLayout(details_host)
+        if recent_width < 400:
+            details_layout.setDirection(QBoxLayout.Direction.TopToBottom)
         details_layout.setContentsMargins(0, 0, 0, 0)
         details_layout.setSpacing(10)
         details_layout.addWidget(info, 56)
