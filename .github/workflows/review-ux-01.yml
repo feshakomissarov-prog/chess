@@ -46,6 +46,7 @@ jobs:
           tests/test_game_review.py::test_alternative_board_moves_create_ephemeral_variations_and_evaluate_selected_fen
           tests/test_game_review.py::test_move_table_groups_white_and_black_in_fullmove_rows_and_keeps_ply
           tests/test_game_review.py::test_ephemeral_study_can_explore_legal_branch_undo_and_reset_without_persistence
+          tests/test_game_review.py::test_review_layout_has_no_outer_scroll_and_renders_at_desktop_sizes
       - name: L2 review, board, engine, and Fair Play regression
         env:
           QT_QPA_PLATFORM: offscreen

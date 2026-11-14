@@ -674,6 +674,24 @@ def test_review_layout_has_no_outer_scroll_and_renders_at_desktop_sizes(qtbot, t
             board_rect = workspace.review_board.geometry()
             board_x = workspace.review_board.mapTo(workspace, QPoint(0, 0)).x()
             table_x = workspace.moves_list.mapTo(workspace, QPoint(0, 0)).x()
+            bar_rect = workspace.advantage_bar.geometry()
+            bar_x = workspace.advantage_bar.mapTo(workspace, QPoint(0, 0)).x()
+            label_x = workspace.advantage_label.mapTo(workspace, QPoint(0, 0)).x()
+            inspector_x = workspace.review_inspector.mapTo(workspace, QPoint(0, 0)).x()
+            inspector_width = workspace.review_inspector.width()
+            splitter_handle = workspace.workspace_splitter.handle(2)
+            handle_x = splitter_handle.mapTo(workspace, QPoint(0, 0)).x()
+            print({
+                "size": (width, height),
+                "board": (board_x, board_x + board_rect.width(), board_rect.width(), board_rect.height()),
+                "bar": (bar_x, bar_x + bar_rect.width(), bar_rect.width(), bar_rect.height()),
+                "label_x": label_x,
+                "table_x": table_x,
+                "inspector": (inspector_x, inspector_x + inspector_width),
+                "splitter_handle_x": handle_x,
+                "gap_board_bar": bar_x - (board_x + board_rect.width()),
+                "gap_bar_table": table_x - (bar_x + bar_rect.width()),
+            })
             assert abs(board_rect.width() - board_rect.height()) <= 1
             assert workspace.board_column.width() - board_rect.width() <= 24
             assert table_x >= board_x + board_rect.width()
