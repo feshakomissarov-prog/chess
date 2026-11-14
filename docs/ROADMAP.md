@@ -1,5 +1,16 @@
 # Chess Coach — дорожная карта
 
+## Обновление 14.11.2026 — результат кодовой проверки PR #49
+
+**Блоки POSTMERGE-01 и DATA-01 реализованы и независимо подтверждены synthetic CI на кодовом SHA `97d2a8d`:** [Windows #599](https://github.com/feshakomissarov-prog/chess/actions/runs/43608145277) — L1 62 tests, L2 native 100/125/150 и L3 1167 tests + visual PASS. Ранее зафиксированный RED 640>611 относится к старому `main` до этой правки; история сохраняется в [реестре §I–J](specs/PR47_CONSOLIDATED_REVIEW_REGISTER_2026_11_12.md). Не повторять POSTMERGE-01 / DATA-01 после слияния без нового воспроизводимого дефекта.
+
+**Область незакрытой приёмки не меняется:** реальная рабочая SQLite 3k+, P0 Home ≤1000 мс на профиле владельца, локальные Qt6Core.dll инциденты и настоящие Lichess/Play сценарии не проверялись; user acceptance текущего UI получена, отдельные технические OWNER gates открыты.
+
+**Следующий проектный этап после PR #49:** отдельно утверждаемый релиз/оценка DIST-01 либо образовательная работа M4.7; проектирование будущего нового Game Review UI и «Решение задач» ведётся в отдельной документационной ветке, не является работой Codex в PR #49.
+
+---
+
+
 ## Текущий план после merge PR #47 и #48 — 14.11.2026
 
 **В `main`:** [PR #47](https://github.com/feshakomissarov-prog/chess/pull/47) (STAB-01, MAT-01, согласованный Home, merge `2ab3dde`; 1161 pytest + native CI на code HEAD `4f5fa663`) и [PR #48](https://github.com/feshakomissarov-prog/chess/pull/48) (постоянный процесс CC-VERIFY-01, merge `394ad979`, быстрый spec-contract gate, меньшая стоимость CI). Секции ниже «после merge #46» — **историческое состояние 11.11**, не активная команда Codex.
