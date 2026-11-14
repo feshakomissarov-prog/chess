@@ -139,3 +139,19 @@
 | **R47-SAFE-01** | Нет неразрешённых локальных Qt/Dr.Web запусков | Контракт границ / risk acknowledgement | **OPEN** |
 
 **Финальное решение:** после успешного exact-head L3 и независимого ревью Codex предоставляет результат и останавливается; **no auto merge**, без DIST-01/инсталлятора, без новой массовой синхронизации. Новые реальные дефекты сначала сопоставлять с существующими TD/R47 ID; не дублировать старые находки.
+
+
+## Итог выполнения и независимой проверки — 14.11.2026
+
+**Эта запись закрывает первоначально незавершённые критерии только в пределах изолированного CI**; исторические статусы в разделах выше сохранены как исходные требования. Владелец просмотрел UI и разрешил merge PR #49 при успешной независимой проверке; независимое чтение кода и [Windows CI #599](https://github.com/feshakomissarov-prog/chess/actions/runs/43608145277) выполнены.
+
+| ID | Итог | Проверенные доказательства |
+| --- | --- | --- |
+| `CC-VERIFY-01` | **PASS** | L1: 62 target tests, L2: real native Qt transitions и DPI 100/125/150%, L3: 1167 pytest, compileall, offline smoke, native visual **все PASS** на точном **code SHA `97d2a8d74cf06438f6d6f5e6e33a63cfb2ca9d8d`**. |
+| `PM-01 / R47-H-01 / R47-QA-02` | **FIXED / CI VERIFIED** | До компоновки `_DashboardGameCard` получает начальный размер по `recent_scroll.viewport().width()`, geometry assertion `card.width() <= viewport.width()` сохранён; L2 повторяет Home→Play→Home, narrow↔wide. Баг `640>611` на прежнем main восстановлен в истории. |
+| `DATA-01.A` | **PASS на синтетических snapshot, OWNER REAL DB NOT AUDITED** | Модуль audit без импорта sqlite3 на application-слое, отдельный CLI через `mode=ro`, `query_only`, read transaction и aggregate result без account/game IDs, пересечения/validity/backfill/current-line fixture. |
+| `DATA-01.B` | **PASS** | KPI/detail tooltip объясняют разные знаменатели official accuracy, Lichess evals, Stockfish и checked backfill; UI layout не менялся. |
+| `DATA-01.C` | **NOT RUN / NOT AUTHORIZED** | Реальный запрос Lichess и реальная SQLite не выполнялись; 953/40/244 — объяснение сохранённых ранее чисел по коду, а не внешний live reconciliation. |
+| `R47-GATE-01 / TD-06 / R47-SAFE-01` | **OWNER / OPEN** | Home ≤1с на реальной SQLite не измерен, локальные Qt6Core.dll события не исследованы, запрещённые местные smoke не запускались. |
+
+**Docs-only коммиты после L3:** пересмотрены статусы в `docs/PROJECT_STATUS.md`, `docs/ROADMAP.md`, `docs/TECHNICAL_DEBT.md` и [едином реестре §J](PR47_CONSOLIDATED_REVIEW_REGISTER_2026_11_12.md) без правок `src/`, `tests/` или исполняемых scripts; по CC-VERIFY-01 повторный full L3 не требуется. Обязательна только быстрая проверка spec-contract на финальном документальном HEAD. **Merge только по ранее данному явному согласию владельца.**
