@@ -1264,9 +1264,13 @@ def main() -> None:
         # Settings are captured once per tab at the largest target size.
         compact_size_count = sum(1 for width, height in target_sizes
                                  if width <= 1280 and height <= 720)
+        graph_case_count = sum(
+            1 for index, (width, _height) in enumerate(target_sizes)
+            if index == 0 or width <= 1280
+        )
         expected_count = (3 * len(target_sizes) + len(offline_sizes) + 18
                           + 2 * compact_size_count
-                          + tabs.count())
+                          + tabs.count() + graph_case_count)
         assert len(captured) == expected_count, (
             f"Expected {expected_count} screenshot states, got {len(captured)}"
         )
