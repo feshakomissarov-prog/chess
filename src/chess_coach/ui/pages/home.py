@@ -666,6 +666,7 @@ class HomePage(QWidget):
         # when recent-game cards have a wider desktop size hint.
         recent_rows.setSizePolicy(QSizePolicy.Policy.Ignored,
                                   QSizePolicy.Policy.Preferred)
+        recent_rows.setMinimumSize(0, 0)
         self._recent_games_layout = QVBoxLayout(recent_rows)
         self._recent_games_layout.setContentsMargins(0, 0, 0, 0)
         self._recent_games_layout.setSpacing(10)

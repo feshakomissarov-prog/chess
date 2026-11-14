@@ -378,6 +378,7 @@ class _DashboardGameCard(QFrame):
     def _sync_graph_layout(self) -> None:
         if self._responsive_layout is None:
             return
+        layout_changed = False
         compact = self.width() < 760
         compact_details = self.width() < 680
         if self._responsive_details_layout is not None:
@@ -385,11 +386,14 @@ class _DashboardGameCard(QFrame):
                                 QBoxLayout.Direction.LeftToRight)
             if self._responsive_details_layout.direction() != detail_direction:
                 self._responsive_details_layout.setDirection(detail_direction)
+                self._responsive_details_layout.invalidate()
+                layout_changed = True
         direction = (QBoxLayout.Direction.TopToBottom if compact else
                      QBoxLayout.Direction.LeftToRight)
         if (self._responsive_graph is not None
                 and self._responsive_layout.direction() != direction):
             self._responsive_layout.setDirection(direction)
+            layout_changed = True
         owner = self.window()
         compact_height = owner.height() < 780
         if compact:
@@ -405,6 +409,13 @@ class _DashboardGameCard(QFrame):
             self.setMinimumHeight(minimum)
         if self.maximumHeight() != maximum:
             self.setMaximumHeight(maximum)
+        if layout_changed:
+            self._responsive_layout.invalidate()
+            self.updateGeometry()
+            parent_layout = (self.parentWidget().layout()
+                             if self.parentWidget() is not None else None)
+            if parent_layout is not None:
+                parent_layout.invalidate()
 
     def resizeEvent(self, event) -> None:  # noqa: N802 - Qt override
         super().resizeEvent(event)
@@ -4200,6 +4211,7 @@ class MainWindow(QMainWindow):
         # stale horizontal size hint lets its child layout switch to the
         # compact stacked form instead of overflowing at 1280x720.
         card.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
+        card.setMinimumWidth(0)
         card.setObjectName("metricCard")
         card.setProperty("dashboard_game_id", str(game.get("game_id") or ""))
         card.setAccessibleName(f"Открыть разбор партии: {heading}")
