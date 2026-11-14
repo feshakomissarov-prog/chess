@@ -82,7 +82,7 @@ from .application.dashboard import (DashboardQueryCoordinator, dashboard_options
 from .application.dashboard_cache import DashboardSnapshotCache
 from .lichess.session import LichessGameSession, classify_lichess_opponent
 from .lichess.game_status import TERMINAL_GAME_STATUSES
-from .lichess.game_review import load_game_review
+from .lichess.game_review import ACTIVE_STATUSES, load_game_review
 from .lichess.statistics import StatisticsService
 from .diagnostics import anonymized_report, log_event, logs_directory
 from .ui.theme import TOKENS, VISUAL_TOKENS, stylesheet as desktop_stylesheet
@@ -3955,11 +3955,19 @@ class MainWindow(QMainWindow):
                 current = dict(game)
                 old = old_games.get(str(current.get("game_id")))
                 current_color = current.get("account_color") or current.get("color")
+                old_color = ((old or {}).get("account_color") or
+                             (old or {}).get("color"))
+                same_review_perspective = (
+                    current_color in {"white", "black"}
+                    and current_color == old_color
+                ) or (
+                    current_color not in {"white", "black"}
+                    and old_color not in {"white", "black"}
+                    and str(current.get("status") or "").casefold() not in ACTIVE_STATUSES
+                )
                 if (analysis_allowed and old
                         and current.get("line_revision") == old.get("line_revision")
-                        and current_color in {"white", "black"}
-                        and current_color
-                        == (old.get("account_color") or old.get("color"))):
+                        and same_review_perspective):
                     metrics = old.get("review_metrics") or {}
                     source = str(metrics.get("source") or "").casefold()
                     source_backed = (
@@ -4151,7 +4159,9 @@ class MainWindow(QMainWindow):
         snapshot_scope = snapshot.get("filter") or {}
         owner_account_id = game.get("account_id") or snapshot_scope.get("account_id")
         has_owner = bool(owner_account_id and game_color in {"white", "black"})
-        game_analysis_allowed = analysis_allowed and game_color in {"white", "black"}
+        is_active_game = (str(game.get("status") or "").casefold() in ACTIVE_STATUSES
+                          or game.get("is_live") is True)
+        game_analysis_allowed = analysis_allowed and not is_active_game
         coverage_value = str(metrics.get("coverage") or "")
         try:
             assessed_positions = int(coverage_value.partition("/")[0])
@@ -4160,6 +4170,9 @@ class MainWindow(QMainWindow):
         has_saved_position_metrics = bool(
             metrics.get("graph_points") or metrics.get("assessments") or assessed_positions > 0)
         has_saved_accuracy = bool(metrics.get("accuracy") and metrics.get("accuracy_source"))
+        # A completed local/unowned game may have valid white/black assessments.
+        # Owner color is needed for "me/opponent" metrics, not for white-perspective
+        # historical scores. Active games remain hidden regardless of stale cache.
         can_show_scores = game_analysis_allowed and has_saved_position_metrics
         recent_width = self._home_view.recent_scroll.viewport().width()
         compact = recent_width < 760
@@ -4264,9 +4277,12 @@ class MainWindow(QMainWindow):
         elif not analysis_allowed:
             accuracy_text = "Оценки скрыты до проверки безопасности"
             accuracy_tooltip = "Сохранённые оценки скрыты до свежего разрешения Fair Play."
+        elif is_active_game:
+            accuracy_text = "Оценки скрыты во время партии"
+            accuracy_tooltip = "Оценки исторического разбора недоступны для активной партии."
         elif game_color not in {"white", "black"}:
             accuracy_text = "Точность: —"
-            accuracy_tooltip = "Цвет владельца не подтверждён; источник точности скрыт."
+            accuracy_tooltip = "Точность игрока неизвестна, поскольку партия не привязана к владельцу."
         else:
             accuracy_text = "Точность: —"
             accuracy_tooltip = "Для этой стороны нет подтверждённой точности владельца."
@@ -4320,9 +4336,9 @@ class MainWindow(QMainWindow):
                 ("Зевки", fields[2])), start=1):
             table.addWidget(QLabel(title), row, 0)
             for column, field in enumerate(field_pair, start=1):
-                value = str(metrics.get(field, "—")) if can_show_scores else "—"
-                if value == "н/д":
-                    value = "—"
+                raw_value = metrics.get(field)
+                missing_classification = raw_value in (None, "", "н/д")
+                value = str(raw_value) if can_show_scores and not missing_classification else "—"
                 value_label = QLabel(value)
                 value_label.setObjectName("dashboardAnalysisValue")
                 value_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -4333,16 +4349,22 @@ class MainWindow(QMainWindow):
                                    else "#E5E1FF")
                 value_label.setStyleSheet(
                     f"font-size: 13px; font-weight: 600; color: {value_color};")
-                if value == "н/д":
+                if can_show_scores and missing_classification:
+                    missing_reason = (
+                        "Нет сохранённой классификации; отсутствие оценки не означает 0.")
+                    value_label.setToolTip(missing_reason)
+                    value_label.setAccessibleDescription(missing_reason)
+                elif not can_show_scores:
                     value_label.setToolTip(
-                        "Нет сохранённой классификации; отсутствие анализа не равно нулю.")
+                        "Классификация недоступна; отсутствие оценки не означает 0.")
+                    value_label.setAccessibleDescription(value_label.toolTip())
                 table.addWidget(value_label, row, column)
         if not analysis_allowed:
             coverage_text = "Оценки скрыты"
             coverage_reason = "Сохранённые оценки скрыты до свежего разрешения Fair Play."
-        elif game_color not in {"white", "black"}:
-            coverage_text = "Цвет владельца не подтверждён"
-            coverage_reason = "Источник и охват скрыты, потому что цвет владельца неизвестен."
+        elif is_active_game:
+            coverage_text = "Оценки скрыты во время партии"
+            coverage_reason = "Исторические оценки не отображаются для активной партии."
         elif metrics.get("status") == "loading":
             coverage_text = "Загружаем сохранённые оценки"
             coverage_reason = "Сохранённые оценки этой партии загружаются."

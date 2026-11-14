@@ -22,7 +22,7 @@ _COMPATIBLE_CACHE_FORMATS = {2, 3}
 _COMPATIBLE_SCHEMA_VERSIONS = {SCHEMA_VERSION, SCHEMA_VERSION - 1}
 _MAX_SCOPES = 12
 _MAX_CACHE_BYTES = 8 * 1024 * 1024
-_MAX_GRAPH_POINTS = 256
+_MAX_GRAPH_POINTS = 1024
 _METRIC_KEYS = {"games", "accuracy", "analysis", "errors"}
 _locks_guard = threading.Lock()
 _locks: dict[str, threading.RLock] = {}
@@ -126,7 +126,14 @@ def _valid_game_shell(game: object) -> bool:
                             or (point.get("white_cp") is not None
                                 and type(point.get("white_cp")) is not int)
                             or (point.get("mate_white") is not None
-                                and type(point.get("mate_white")) is not int)):
+                                and type(point.get("mate_white")) is not int)
+                            or (point.get("connect_from_previous") is not None
+                                and type(point.get("connect_from_previous")) is not bool)
+                            or (point.get("mate_start_ply") is not None
+                                and type(point.get("mate_start_ply")) is not int)
+                            or (point.get("mate_sample_count") is not None
+                                and (type(point.get("mate_sample_count")) is not int
+                                     or point["mate_sample_count"] < 1))):
                         return False
             elif key == "total_positions":
                 if type(value) is not int or value < 0:
@@ -275,7 +282,13 @@ def _compact_review_metrics(metrics: dict) -> dict:
     result["graph_points"] = [
         {"ply": int(row["ply"]),
          "white_cp": int(row["white_cp"]) if row.get("white_cp") is not None else None,
-         "mate_white": int(row["mate_white"]) if row.get("mate_white") is not None else None}
+         "mate_white": int(row["mate_white"]) if row.get("mate_white") is not None else None,
+         **({"connect_from_previous": row["connect_from_previous"]}
+            if type(row.get("connect_from_previous")) is bool else {}),
+         **({"mate_start_ply": int(row["mate_start_ply"])}
+            if type(row.get("mate_start_ply")) is int else {}),
+         **({"mate_sample_count": int(row["mate_sample_count"])}
+            if type(row.get("mate_sample_count")) is int else {})}
         for row in graph[-_MAX_GRAPH_POINTS:]
         if isinstance(row, dict) and type(row.get("ply")) is int
     ]

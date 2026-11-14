@@ -5,7 +5,9 @@ import json
 from chess_coach.application.dashboard import dashboard_snapshot
 from chess_coach.application.dashboard_cache import DashboardSnapshotCache
 from chess_coach.application.dashboard import dashboard_preview_snapshot
-from chess_coach.application.dashboard_cache import _split_snapshot
+from chess_coach.application.dashboard_cache import (
+    _compact_review_metrics, _split_snapshot, _valid_game_shell,
+)
 from chess_coach.lichess.repository import GameRepository
 
 
@@ -91,6 +93,31 @@ def test_dashboard_cache_round_trips_puzzle_attempt_activity_tuple(tmp_path):
     assert loaded["puzzle_player_rating"]["points"] == [
         {"day": "2026-11-10", "rating": 1917, "attempts": [5, 3]}]
     repository.shutdown()
+
+
+def test_dashboard_cache_preserves_gap_and_aggregated_mate_chart_metadata():
+    graph_points = [
+        {"ply": 300, "white_cp": 80, "mate_white": None,
+         "connect_from_previous": False},
+        {"ply": 301, "white_cp": 120, "mate_white": None,
+         "connect_from_previous": True},
+        {"ply": 369, "white_cp": None, "mate_white": 6,
+         "connect_from_previous": False, "mate_start_ply": 350,
+         "mate_sample_count": 20},
+    ]
+    compact = _compact_review_metrics({"graph_points": graph_points})
+
+    assert compact["graph_points"] == graph_points
+    assert _valid_game_shell({
+        "game_id": "cached-long-game", "status": "mate",
+        "review_metrics": compact,
+    })
+    assert not _valid_game_shell({
+        "game_id": "bad-connect-flag", "status": "mate",
+        "review_metrics": {"graph_points": [
+            {"ply": 1, "white_cp": 0, "connect_from_previous": 1}],
+        },
+    })
 
 
 def test_last_good_loader_skips_sqlite_and_recovers_structurally_corrupt_primary(tmp_path,

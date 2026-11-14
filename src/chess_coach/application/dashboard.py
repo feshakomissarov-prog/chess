@@ -378,6 +378,152 @@ def dashboard_snapshot(repository, *, account_id: str | None = None,
             "scope": game_scope, "filter": {"account_id": account_id, "clock": clock}}
 
 
+HOME_GRAPH_POINT_LIMIT = 1024
+
+
+def _sample_home_cp_run(run: list[dict[str, Any]], limit: int) -> list[dict[str, Any]]:
+    """Select real values from one uninterrupted CP run, preserving local extrema."""
+    if len(run) <= limit:
+        return run
+    if limit <= 2:
+        return [run[0], run[-1]][:limit]
+
+    selected = {0, len(run) - 1}
+    bucket_count = max(1, (limit - 2) // 2)
+    usable_start, usable_end = 1, len(run) - 1
+    for bucket in range(bucket_count):
+        start = usable_start + (usable_end - usable_start) * bucket // bucket_count
+        end = usable_start + (usable_end - usable_start) * (bucket + 1) // bucket_count
+        if end <= start:
+            continue
+        indices = range(start, end)
+        selected.add(min(indices, key=lambda index: run[index]["white_cp"]))
+        selected.add(max(indices, key=lambda index: run[index]["white_cp"]))
+    ordered = sorted(selected)
+    if len(ordered) > limit:
+        # Keep both ends and uniformly trim only redundant interior extrema.
+        interior = ordered[1:-1]
+        slots = limit - 2
+        keep = {round(index * (len(interior) - 1) / max(1, slots - 1))
+                for index in range(slots)} if slots else set()
+        ordered = [ordered[0], *(interior[index] for index in sorted(keep)), ordered[-1]]
+    return [run[index] for index in ordered]
+
+
+def _home_graph_points(assessments: list[dict[str, Any]],
+                       limit: int = HOME_GRAPH_POINT_LIMIT) -> list[dict[str, Any]]:
+    """Bound Home's saved chart while retaining gaps and honest line continuity."""
+    rows = []
+    for item in assessments:
+        if type(item.get("ply")) is not int:
+            continue
+        cp = item.get("white_cp")
+        mate = item.get("mate_white")
+        if cp is None and mate is None:
+            # Keep explicit unscored rows as separators while building runs.
+            rows.append({"ply": int(item["ply"]), "white_cp": None,
+                         "mate_white": None})
+            continue
+        rows.append({"ply": int(item["ply"]),
+                     "white_cp": int(cp) if cp is not None else None,
+                     "mate_white": int(mate) if mate is not None else None})
+    rows.sort(key=lambda row: row["ply"])
+
+    cp_runs: list[list[dict[str, Any]]] = []
+    mate_runs: list[list[dict[str, Any]]] = []
+    current_cp: list[dict[str, Any]] = []
+    current_mate: list[dict[str, Any]] = []
+
+    def flush_cp() -> None:
+        nonlocal current_cp
+        if current_cp:
+            cp_runs.append(current_cp)
+            current_cp = []
+
+    def flush_mate() -> None:
+        nonlocal current_mate
+        if current_mate:
+            mate_runs.append(current_mate)
+            current_mate = []
+
+    for row in rows:
+        cp, mate = row["white_cp"], row["mate_white"]
+        if cp is not None and mate is None:
+            flush_mate()
+            if current_cp and row["ply"] != current_cp[-1]["ply"] + 1:
+                flush_cp()
+            current_cp.append(row)
+            continue
+        flush_cp()
+        if mate is None:
+            flush_mate()
+            continue
+        mate_sign = (1 if mate > 0 else -1 if mate < 0 else 0)
+        previous_mate = current_mate[-1] if current_mate else None
+        previous_sign = (1 if previous_mate and previous_mate["mate_white"] > 0 else
+                         -1 if previous_mate and previous_mate["mate_white"] < 0 else 0)
+        if (previous_mate is not None and
+                (row["ply"] != previous_mate["ply"] + 1 or mate_sign != previous_sign)):
+            flush_mate()
+        current_mate.append(row)
+    flush_cp()
+    flush_mate()
+
+    # A continuous same-side mate sequence has one visible final marker. Its
+    # tooltip retains the exact endpoint and the span represented by the mark.
+    mate_points = []
+    for run in mate_runs:
+        endpoint = dict(run[-1])
+        endpoint["mate_start_ply"] = run[0]["ply"]
+        endpoint["mate_sample_count"] = len(run)
+        endpoint["connect_from_previous"] = False
+        mate_points.append(endpoint)
+
+    limit = max(2, int(limit))
+    if len(mate_points) > limit:
+        indexes = {round(index * (len(mate_points) - 1) / (limit - 1))
+                   for index in range(limit)}
+        mate_points = [mate_points[index] for index in sorted(indexes)]
+    cp_budget = max(0, limit - len(mate_points))
+    minimums = [min(len(run), 2) for run in cp_runs]
+    if cp_budget <= 0:
+        allocations = [0] * len(cp_runs)
+    elif sum(minimums) > cp_budget:
+        allocations = [0] * len(cp_runs)
+        for index in sorted(range(len(cp_runs)),
+                            key=lambda i: cp_runs[i][-1]["ply"])[-cp_budget:]:
+            allocations[index] = 1
+    else:
+        allocations = list(minimums)
+        remaining = cp_budget - sum(allocations)
+        capacities = [len(run) - allocations[index]
+                      for index, run in enumerate(cp_runs)]
+        capacity_total = sum(capacities)
+        if remaining and capacity_total:
+            shares = [remaining * capacity / capacity_total for capacity in capacities]
+            additions = [min(capacities[index], int(share))
+                         for index, share in enumerate(shares)]
+            allocations = [allocations[index] + additions[index]
+                           for index in range(len(cp_runs))]
+            remaining -= sum(additions)
+            for index in sorted(range(len(cp_runs)),
+                                key=lambda i: shares[i] - int(shares[i]), reverse=True):
+                if remaining <= 0:
+                    break
+                if allocations[index] < len(cp_runs[index]):
+                    allocations[index] += 1
+                    remaining -= 1
+
+    cp_points = []
+    for run, allocation in zip(cp_runs, allocations):
+        sampled = _sample_home_cp_run(run, allocation) if allocation else []
+        for index, row in enumerate(sampled):
+            point = dict(row)
+            point["connect_from_previous"] = index > 0
+            cp_points.append(point)
+    return sorted([*cp_points, *mate_points], key=lambda row: row["ply"])
+
+
 def game_card_metrics(repository, game: dict[str, Any]) -> dict[str, Any]:
     """Summarize one bounded line and its current saved assessment, never UCI."""
     color = game.get("account_color") or game.get("color")
@@ -409,19 +555,7 @@ def game_card_metrics(repository, game: dict[str, Any]) -> dict[str, Any]:
     # Current detectors do not yet implement a verified "strong move" fact.
     # Candidate best_move_confirmed is intentionally not presented as verified.
     raw_assessments = list(analysis.get("assessments") or [])
-    graph_limit = 256
-    if len(raw_assessments) > graph_limit:
-        indexes = {round(index * (len(raw_assessments) - 1) / (graph_limit - 1))
-                   for index in range(graph_limit)}
-        graph_assessments = [raw_assessments[index] for index in sorted(indexes)]
-    else:
-        graph_assessments = raw_assessments
-    graph_points = [
-        {"ply": int(item["ply"]),
-         "white_cp": int(item["white_cp"]) if item.get("white_cp") is not None else None,
-         "mate_white": int(item["mate_white"]) if item.get("mate_white") is not None else None}
-        for item in graph_assessments if type(item.get("ply")) is int
-    ]
+    graph_points = _home_graph_points(raw_assessments)
     return {
         "accuracy": f"{float(own_color_accuracy):.1f}%" if own_color_accuracy is not None else "н/д",
         "accuracy_source": accuracy_source,

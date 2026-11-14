@@ -7,6 +7,7 @@ store, user settings, user database or real engine is opened.
 
 from __future__ import annotations
 
+from copy import deepcopy
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 import os
@@ -24,7 +25,7 @@ from PySide6.QtTest import QSignalSpy, QTest
 from PySide6.QtWidgets import QApplication, QLabel, QListWidgetItem, QScrollArea, QToolTip, QWidget
 
 from chess_coach.bootstrap import create_runtime
-from chess_coach.application.dashboard import dashboard_snapshot
+from chess_coach.application.dashboard import dashboard_snapshot, _home_graph_points
 from chess_coach.application.background_work import OperationLane
 from chess_coach.lichess.batch_analysis import BatchAnalysisRunner, FastPassOptions
 from chess_coach.ui.pages.home import HomeEvaluationGraph
@@ -860,6 +861,60 @@ def make_pair(reference_dir: Path, output: Path, reference_file: str,
     assert canvas.save(str(output / f"pair-{label}.png"))
 
 
+def capture_long_game_graph_cases(window: MainWindow, output: Path,
+                                  width: int, height: int) -> QImage:
+    """Capture production Home cards with structurally realistic saved scores."""
+    original = window._latest_dashboard_snapshot
+    assert original and len(original.get("recent_games") or []) == 3
+    snapshot = deepcopy(original)
+    scenarios = ("continuous-long", "twenty-ply-gap", "mate-and-clipped")
+    for game, scenario in zip(snapshot["recent_games"], scenarios):
+        assessments = []
+        for ply in range(1, 601):
+            if scenario == "twenty-ply-gap" and 281 <= ply <= 300:
+                continue
+            if scenario == "mate-and-clipped" and 350 <= ply <= 369:
+                assessments.append({"ply": ply, "white_cp": None, "mate_white": 25 - (ply - 350)})
+                continue
+            cp = ((ply * 37) % 900) - 450
+            if scenario == "mate-and-clipped" and 40 <= ply <= 59:
+                cp = 800
+            elif scenario == "mate-and-clipped" and 500 <= ply <= 519:
+                cp = -900
+            assessments.append({"ply": ply, "white_cp": cp, "mate_white": None})
+        metrics = dict(game.get("review_metrics") or {})
+        metrics["graph_points"] = _home_graph_points(assessments)
+        metrics["total_positions"] = 601
+        metrics["coverage"] = ("580/600" if scenario == "twenty-ply-gap" else "600/600")
+        metrics["status"] = "complete"
+        metrics["source"] = "synthetic saved assessments"
+        game["review_metrics"] = metrics
+
+    try:
+        window._render_dashboard_snapshot(snapshot)
+        graphs = [
+            window._recent_games_layout.itemAt(index).widget().findChild(HomeEvaluationGraph)
+            for index in range(window._recent_games_layout.count())
+            if window._recent_games_layout.itemAt(index).widget() is not None
+            and window._recent_games_layout.itemAt(index).widget().objectName() == "metricCard"
+        ]
+        assert len(graphs) == 3 and all(graph is not None for graph in graphs)
+        for graph in graphs:
+            graph.repaint()
+        assert len(graphs[0]._drawn_cp_segments) == 599
+        assert len(graphs[1]._drawn_cp_segments) == 578
+        assert not any(start <= 280 < end for start, end in graphs[1]._drawn_cp_segments)
+        assert len(graphs[2]._mate_markers) == 1
+        assert graphs[2]._mate_markers[0][2:] == (350, 20)
+        assert len(graphs[2]._clipped_markers) == 2
+        image = capture(window, output, "home-long-game-graph-cases", width, height)
+        print("Long-game graph cases: 600 plies; one 20-ply assessment gap; "
+              "20 mate assessments rendered as one interval; two clipped CP intervals.")
+        return image
+    finally:
+        window._render_dashboard_snapshot(original)
+
+
 def main() -> None:
     # Hosted Windows may use cp1252 for redirected stdout/stderr even though
     # screenshot labels and test output contain Russian UI text.
@@ -917,6 +972,10 @@ def main() -> None:
             window._set_sidebar_collapsed(False)
             image = capture(window, output, "home", width, height)
             captured[f"home-{width}x{height}"] = image
+            if (width, height) == (target_sizes[0][0], target_sizes[0][1]) or width <= 1280:
+                graph_case_image = capture_long_game_graph_cases(
+                    window, output, width, height)
+                captured[f"home-long-game-graphs-{width}x{height}"] = graph_case_image
             if width <= 1280 and height <= 720:
                 scroll = window._home_view.home_overview_scroll.verticalScrollBar()
                 assert scroll.maximum() > 0, (

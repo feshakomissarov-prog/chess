@@ -30,6 +30,9 @@ class HomeEvaluationGraph(QWidget):
         self.total_plies = max(1, int(total_plies or 1))
         self.phases = phases if isinstance(phases, dict) else {}
         self._hit_targets = []
+        self._drawn_cp_segments = []
+        self._mate_markers = []
+        self._clipped_markers = []
         self.setMinimumSize(230, 108)
         self.setMouseTracking(True)
         self.setAccessibleName("График преимущества по ходам")
@@ -41,7 +44,8 @@ class HomeEvaluationGraph(QWidget):
     def set_points(self, points, *, total_plies: int | None = None,
                    phases: dict | None = None) -> None:
         self.points = sorted((dict(row) for row in (points or [])
-                              if type(row.get("ply")) is int), key=lambda row: row["ply"])
+                              if isinstance(row, dict) and type(row.get("ply")) is int),
+                             key=lambda row: row["ply"])
         if total_plies is not None:
             self.total_plies = max(1, int(total_plies or 1))
         if phases is not None:
@@ -55,16 +59,35 @@ class HomeEvaluationGraph(QWidget):
     def _white_perspective_label(cp: int | None, mate: int | None) -> str:
         if mate is not None:
             side = "белые" if mate > 0 else "чёрные" if mate < 0 else "мат"
-            return f"Мат: {side} через {abs(mate)}"
+            return (f"Мат: {side} через {abs(mate)}" if mate else
+                    "Терминальная матовая оценка; сторона не выводится")
         if cp is None:
             return "Оценки позиции нет"
         return f"Оценка за белых: {cp / 100:+.2f} пешки"
+
+    @staticmethod
+    def _connects(previous: dict, current: dict) -> bool:
+        if current.get("connect_from_previous") is not None:
+            return current.get("connect_from_previous") is True
+        return current["ply"] == previous["ply"] + 1
+
+    @staticmethod
+    def _tooltip_text(ply: int, label: str, *, interval_start: int | None = None,
+                      interval_count: int = 1) -> str:
+        move_number = (ply + 1) // 2
+        interval = (f" · матовые оценки: полуходы {interval_start}–{ply} "
+                    f"({interval_count} позиций)"
+                    if interval_start is not None and interval_count > 1 else "")
+        return f"Полуход {ply} (ход {move_number}) · {label}{interval}"
 
     def paintEvent(self, _event):
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
         plot = self._plot_rect()
         self._hit_targets = []
+        self._drawn_cp_segments = []
+        self._mate_markers = []
+        self._clipped_markers = []
         painter.setPen(QPen(QColor("#354058"), 1))
         painter.drawRect(plot)
         limit = self.AXIS_LIMIT_CP
@@ -118,20 +141,21 @@ class HomeEvaluationGraph(QWidget):
             x = plot.left() + round(plot.width() * ply / self.total_plies)
             clipped = (mate is None and abs(int(cp)) > limit)
             if mate is not None:
-                y = plot.top() + 7 if int(mate) > 0 else plot.bottom() - 7
+                y = (plot.top() + 7 if int(mate) > 0 else
+                     plot.bottom() - 7 if int(mate) < 0 else plot.center().y())
             else:
                 score = max(-limit, min(limit, int(cp)))
                 y = plot.center().y() - round(plot.height() * score / (2 * limit))
             scored.append((ply, x, y, None if mate is not None else int(cp),
-                           None if mate is None else int(mate), clipped))
+                           None if mate is None else int(mate), clipped, row))
 
         painter.save()
         painter.setClipRect(plot.adjusted(1, 1, -1, -1))
-        previous = None
-        for point in scored:
-            ply, x, y, cp, mate, clipped = point
+        for index, point in enumerate(scored):
+            ply, x, y, cp, mate, clipped, row = point
+            previous = scored[index - 1] if index else None
             if (previous is not None and cp is not None and previous[3] is not None
-                    and ply == previous[0] + 1):
+                    and self._connects(previous[6], row)):
                 color = QColor("#38D887" if (cp + previous[3]) >= 0 else "#ED7483")
                 shade = QColor(color)
                 shade.setAlpha(42)
@@ -143,16 +167,70 @@ class HomeEvaluationGraph(QWidget):
                     QPointF(x, y), QPointF(x, baseline)]))
                 painter.setPen(QPen(color, 2))
                 painter.drawLine(previous[1], previous[2], x, y)
+                self._drawn_cp_segments.append((previous[0], ply))
+
             if mate is not None:
-                color = QColor("#38D887" if mate > 0 else "#ED7483")
-                painter.setPen(QPen(color, 2))
-                painter.setBrush(color)
-                painter.drawEllipse(QPointF(x, y), 3, 3)
-                mate_label = "M+" if mate > 0 else "M−" if mate < 0 else "M0"
-                painter.drawText(max(plot.left() + 2, min(plot.right() - 24, x + 3)),
-                                 max(plot.top() + 10, min(plot.bottom() - 2, y - 3)),
-                                 mate_label)
+                mate_sign = 1 if mate > 0 else -1 if mate < 0 else 0
+                previous_mate = (previous[4] if previous is not None else None)
+                previous_sign = (1 if previous_mate is not None and previous_mate > 0 else
+                                 -1 if previous_mate is not None and previous_mate < 0 else 0)
+                joined_to_previous = (previous_mate is not None and
+                                      previous_sign == mate_sign and
+                                      self._connects(previous[6], row))
+                next_point = scored[index + 1] if index + 1 < len(scored) else None
+                next_mate = next_point[4] if next_point is not None else None
+                next_sign = (1 if next_mate is not None and next_mate > 0 else
+                             -1 if next_mate is not None and next_mate < 0 else 0)
+                joined_to_next = (next_mate is not None and next_sign == mate_sign and
+                                  self._connects(row, next_point[6]))
+                is_group_endpoint = not joined_to_next
+                if is_group_endpoint:
+                    group_start = (int(row.get("mate_start_ply", ply)) if
+                                   not joined_to_previous else
+                                   int(previous[6].get("mate_start_ply", previous[0])))
+                    if joined_to_previous:
+                        # Adjacent raw mate points have not been pre-aggregated.
+                        cursor = index - 1
+                        while cursor >= 0:
+                            earlier = scored[cursor]
+                            earlier_mate = earlier[4]
+                            earlier_sign = (1 if earlier_mate is not None and earlier_mate > 0 else
+                                            -1 if earlier_mate is not None and earlier_mate < 0 else 0)
+                            if (earlier_mate is None or earlier_sign != mate_sign or
+                                    not self._connects(earlier[6], scored[cursor + 1][6])):
+                                break
+                            group_start = int(earlier[6].get("mate_start_ply", earlier[0]))
+                            cursor -= 1
+                    color = (QColor("#38D887") if mate > 0 else
+                             QColor("#ED7483") if mate < 0 else QColor("#D8D0FF"))
+                    painter.setPen(QPen(color, 2))
+                    painter.setBrush(color)
+                    painter.drawEllipse(QPointF(x, y), 4, 4)
+                    mate_label = "M+" if mate > 0 else "M−" if mate < 0 else "M"
+                    painter.drawText(max(plot.left() + 2, min(plot.right() - 24, x + 4)),
+                                     max(plot.top() + 10, min(plot.bottom() - 2, y - 3)),
+                                     mate_label)
+                    interval_start = row.get("mate_start_ply", group_start)
+                    interval_count = int(row.get("mate_sample_count") or
+                                          max(1, ply - int(interval_start) + 1))
+                    label = self._white_perspective_label(cp, mate)
+                    tooltip = self._tooltip_text(
+                        ply, label,
+                        interval_start=int(interval_start) if interval_start is not None else None,
+                        interval_count=interval_count)
+                    self._hit_targets.append((x, y, ply, tooltip))
+                    self._mate_markers.append((ply, mate, int(interval_start), interval_count))
             elif clipped:
+                next_point = scored[index + 1] if index + 1 < len(scored) else None
+                same_clipped_run = bool(
+                    next_point is not None and next_point[3] is not None
+                    and next_point[5] and (next_point[3] > 0) == (cp > 0)
+                    and self._connects(row, next_point[6]))
+                if same_clipped_run:
+                    label = self._white_perspective_label(cp, mate)
+                    self._hit_targets.append((x, y, ply,
+                                              self._tooltip_text(ply, label)))
+                    continue
                 color = QColor("#38D887" if cp > 0 else "#ED7483")
                 triangle_y = plot.top() + 2 if cp > 0 else plot.bottom() - 2
                 triangle = QPolygonF([QPointF(x, triangle_y - 4),
@@ -161,8 +239,12 @@ class HomeEvaluationGraph(QWidget):
                 painter.setPen(Qt.PenStyle.NoPen)
                 painter.setBrush(color)
                 painter.drawPolygon(triangle)
-            self._hit_targets.append((x, y, self._white_perspective_label(cp, mate)))
-            previous = point
+                self._clipped_markers.append((ply, cp))
+                label = self._white_perspective_label(cp, mate)
+                self._hit_targets.append((x, y, ply, self._tooltip_text(ply, label)))
+            else:
+                label = self._white_perspective_label(cp, mate)
+                self._hit_targets.append((x, y, ply, self._tooltip_text(ply, label)))
         painter.restore()
         if not scored:
             painter.setPen(QColor("#AEB8D0"))
@@ -172,10 +254,11 @@ class HomeEvaluationGraph(QWidget):
         if not self._hit_targets:
             return
         x, y = event.position().x(), event.position().y()
-        point = min(self._hit_targets, key=lambda item: (item[0] - x) ** 2 + (item[1] - y) ** 2)
+        point = min(self._hit_targets,
+                    key=lambda item: (item[0] - x) ** 2 + (item[1] - y) ** 2)
         if (point[0] - x) ** 2 + (point[1] - y) ** 2 <= 100:
             QToolTip.showText(event.globalPosition().toPoint(),
-                              f"Ход {point[0]} · {point[2]}", self)
+                              point[3], self)
 
 
 class PuzzlePreviewBoard(BoardView):

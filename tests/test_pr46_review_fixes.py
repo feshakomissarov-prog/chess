@@ -116,7 +116,7 @@ def test_same_scope_preview_uses_fresh_top_three_and_only_reuses_matching_metric
     assert window.close() is True
 
 
-def test_dashboard_card_with_unknown_owner_color_does_not_reuse_or_expose_analysis(
+def test_unowned_completed_card_shows_saved_white_black_review_but_live_card_hides_it(
         qtbot, tmp_path, monkeypatch):
     monkeypatch.setattr(MainWindow, "_refresh_home_dashboard", lambda _self: None)
     window = MainWindow(QSettings(str(tmp_path / "unknown-dashboard-color.ini"),
@@ -129,10 +129,31 @@ def test_dashboard_card_with_unknown_owner_color_does_not_reuse_or_expose_analys
                 "account_color": None, "line_revision": 1, "opponent": "Synthetic",
                 "review_metrics": {"source": "stockfish", "accuracy": "99.0%",
                                    "accuracy_source": "Stockfish · локально",
-                                   "assessments": [{"ply": 1, "white_cp": 80}],
+                                   "graph_points": [{"ply": 1, "white_cp": 80}],
+                                   "white_inaccuracies": "2", "white_mistakes": "н/д",
+                                   "white_blunders": "0", "black_inaccuracies": "1",
+                                   "black_mistakes": "0", "black_blunders": "н/д",
                                    "coverage": "1/1", "status": "complete"},
             }]}
     window._render_dashboard_snapshot(full)
+    card = window._home_view._recent_games_layout.itemAt(0).widget()
+    graph = card.findChild(HomeEvaluationGraph)
+    assert graph is not None and graph.points == [{"ply": 1, "white_cp": 80}]
+    accuracy = card.findChild(type(window.screen_title), "dashboardAccuracy")
+    assert accuracy is not None and accuracy.text() == "Точность: —"
+    assert "99.0%" not in accuracy.toolTip()
+    coverage = card.findChild(type(window.screen_title), "dashboardAnalysisCoverage")
+    assert coverage is not None
+    assert coverage.text() == "Охват: 1/1"
+    headers = [label.text() for label in card.findChildren(type(window.screen_title))
+               if label.text() in {"Белые", "Чёрные", "Я", "Соперник"}]
+    assert headers == ["Белые", "Чёрные"]
+    values = [label for label in card.findChildren(type(window.screen_title),
+                                                   "dashboardAnalysisValue")]
+    assert [label.text() for label in values] == ["2", "1", "—", "0", "0", "—"]
+    assert "Нет сохранённой классификации" in values[2].toolTip()
+    assert "отсутствие оценки не означает 0" in values[2].accessibleDescription()
+
     preview = {"filter": dict(full["filter"]), "metrics": [], "activity_trend": [],
                "puzzle_player_rating": {}, "is_preview": True,
                "recent_games": [{"game_id": "unknown-color", "status": "draw",
@@ -140,16 +161,22 @@ def test_dashboard_card_with_unknown_owner_color_does_not_reuse_or_expose_analys
                                  "line_revision": 1, "opponent": "Synthetic",
                                  "review_metrics": {"status": "loading", "source": "—"}}]}
     window._render_dashboard_snapshot(preview)
-    card = window._home_view._recent_games_layout.itemAt(0).widget()
-    graph = card.findChild(HomeEvaluationGraph)
-    assert graph is not None and not graph.points
-    accuracy = card.findChild(type(window.screen_title), "dashboardAccuracy")
-    assert accuracy is not None and accuracy.text() == "Точность: —"
-    assert "99.0%" not in accuracy.toolTip()
-    coverage = card.findChild(type(window.screen_title), "dashboardAnalysisCoverage")
-    assert coverage is not None
-    assert "не подтверждён" in coverage.text()
-    assert "Stockfish" not in coverage.toolTip()
+    preview_card = window._home_view._recent_games_layout.itemAt(0).widget()
+    preview_graph = preview_card.findChild(HomeEvaluationGraph)
+    assert preview_graph is not None and preview_graph.points == [
+        {"ply": 1, "white_cp": 80}]
+
+    active = {
+        **full,
+        "recent_games": [{**full["recent_games"][0], "status": "playing"}],
+    }
+    window._render_dashboard_snapshot(active)
+    live_card = window._home_view._recent_games_layout.itemAt(0).widget()
+    live_graph = live_card.findChild(HomeEvaluationGraph)
+    assert live_graph is not None and not live_graph.points
+    assert live_card.findChild(type(window.screen_title),
+                               "dashboardAnalysisCoverage").text() == (
+                                   "Оценки скрыты во время партии")
     assert window.close() is True
 
 
