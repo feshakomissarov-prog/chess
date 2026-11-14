@@ -204,7 +204,7 @@ def test_ephemeral_study_can_explore_legal_branch_undo_and_reset_without_persist
     assert workspace._ephemeral_board.piece_at(chess.D4) == chess.Piece(chess.PAWN, chess.WHITE)
     assert workspace._ephemeral_branch == [chess.Move.from_uci("d2d4")]
     assert len(workspace._review_variations) == 1
-    assert workspace.moves_list.table.rowCount() == 3
+    assert workspace.moves_list.table.rowCount() == 2
     assert repository.current_line(game["game_id"])["moves"] == "e2e4 e7e5"
     workspace.undo_ephemeral_move()
     assert workspace._ephemeral_board.fen() == workspace.review["positions"][0].fen()

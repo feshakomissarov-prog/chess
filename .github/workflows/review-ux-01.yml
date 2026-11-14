@@ -36,7 +36,7 @@ jobs:
         run: python -m pip install -e ".[dev]"
       - name: L1 diff and compile checks
         run: |
-          git diff --check HEAD^ HEAD
+          git show --check --oneline HEAD
           python -m py_compile src/chess_coach/ui/game_review.py src/chess_coach/ui/move_table.py src/chess_coach/window.py tests/test_game_review.py tests/test_window.py
       - name: L1 targeted game-review behavior
         env:
