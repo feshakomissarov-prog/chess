@@ -28,6 +28,8 @@ jobs:
           fetch-depth: 0
       - name: Compile validator
         run: python3 -m py_compile scripts/check_spec_contract.py
+      - name: Test contract validator (fast, isolated stdlib)
+        run: python3 -m unittest discover -s tests -p test_spec_contract.py -v
       - name: Validate changed task specs and AGENTS anchor
         env:
           PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
