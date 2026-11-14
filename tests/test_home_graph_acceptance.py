@@ -2,7 +2,11 @@ from __future__ import annotations
 
 import math
 
+import chess
+from PySide6.QtCore import Qt
+
 from chess_coach.application.dashboard import _home_graph_points
+from chess_coach.lichess.phases import PHASE_FALLBACK_VERSION, infer_phase_boundaries
 from chess_coach.ui.pages.home import HomeEvaluationGraph
 
 
@@ -37,6 +41,7 @@ def test_long_saved_game_keeps_all_600_consecutive_plies_and_tooltip_ply(qtbot):
     assert graph._drawn_cp_segments[-1] == (599, 600)
     assert graph._hit_targets[-1][2] == 600
     assert "Полуход 600 (ход 300)" in graph._hit_targets[-1][3]
+    assert "Белые +" in graph._hit_targets[-1][3]
 
     graph.resize(420, 190)
     graph.repaint()
@@ -96,6 +101,10 @@ def test_mate_and_out_of_axis_markers_are_aggregated_with_exact_tooltip(qtbot):
         for target in graph._hit_targets)
     assert "350–369 (20 позиций)" in next(
         target[3] for target in graph._hit_targets if target[2] == 369)
+    assert "M+" not in graph._hit_targets[-1][3]
+    graph.setFocus()
+    qtbot.keyPress(graph, Qt.Key.Key_End)
+    assert "Мат: белые через 6" in graph.accessibleDescription()
 
     clipped_rows = [row for row in assessments if row["mate_white"] is None]
     clipped_rows = [dict(row, white_cp=800 if 40 <= row["ply"] <= 59 else
@@ -122,6 +131,47 @@ def test_black_mate_and_terminal_mate_zero_do_not_change_white_perspective(qtbot
     terminal_tooltip = next(target[3] for target in graph._hit_targets if target[2] == 40)
     assert "Мат: чёрные через 3" in black_tooltip
     assert "сторона не выводится" in terminal_tooltip
+
+
+def test_graph_uses_only_source_backed_phases_and_never_invents_endgame(qtbot):
+    # This 18-move Ruy Lopez line reaches the source-backed opening/middlegame
+    # boundary, but its material never qualifies as an endgame.
+    sans = "e4 e5 Nf3 Nc6 Bc4 Bc5 c3 Nf6 d3 d6 O-O O-O Re1 a6 Bb3 Ba7 " \
+        "Nbd2 h6 Nf1 Re8 Ng3 Be6 Bc2 Qd7 Be3 Bxe3 Rxe3 d5 exd5 Nxd5 " \
+        "Re1 Nf4 d4 exd4 cxd4"
+    board = chess.Board()
+    boards = [board.copy(stack=False)]
+    for san in sans.split():
+        board.push_san(san)
+        boards.append(board.copy(stack=False))
+    middle, end = infer_phase_boundaries(boards)
+    assert middle is not None and end is None
+
+    trusted = {"middle_start_ply": middle, "end_start_ply": end,
+               "source": PHASE_FALLBACK_VERSION,
+               "method_version": PHASE_FALLBACK_VERSION}
+    graph = HomeEvaluationGraph(_home_graph_points(_scores(1, len(boards) - 1)),
+                                total_plies=len(boards) - 1, phases=trusted)
+    _paint(qtbot, graph)
+    assert [label for _ply, label in graph._phase_labels] == ["Дебют", "Миттельшпиль"]
+    assert "Эндшпиль" not in {label for _ply, label in graph._phase_labels}
+
+    unknown = HomeEvaluationGraph(_home_graph_points(_scores(1, 38)), total_plies=38,
+                                  phases={"middle_start_ply": 6, "end_start_ply": 30})
+    _paint(qtbot, unknown)
+    assert [label for _ply, label in unknown._phase_labels] == ["Начало", "Конец"]
+    assert not unknown._phase_marks
+
+
+def test_two_source_backed_boundaries_produce_exactly_three_real_phases(qtbot):
+    phases = {"middle_start_ply": 18, "end_start_ply": 44,
+              "source": "material-fallback", "method_version": "v1"}
+    graph = HomeEvaluationGraph(_home_graph_points(_scores(1, 80)),
+                                total_plies=80, phases=phases)
+    _paint(qtbot, graph)
+    assert [label for _ply, label in graph._phase_labels] == [
+        "Дебют", "Миттельшпиль", "Эндшпиль"]
+    assert graph._phase_marks == [18, 44]
 
 
 def test_explicit_unscored_position_breaks_cp_line_even_if_neighbors_are_adjacent():

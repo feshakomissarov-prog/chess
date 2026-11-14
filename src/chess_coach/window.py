@@ -4009,7 +4009,7 @@ class MainWindow(QMainWindow):
             if preview and metric["key"] not in {"games", "accuracy"}:
                 self._dashboard_metric_values[metric["key"]].setText("—")
                 self._dashboard_metric_details[metric["key"]].setText(detail_text)
-                self._dashboard_metric_values[metric["key"]].setToolTip(detail_text)
+                self._dashboard_metric_values[metric["key"]].setToolTip("")
                 self._dashboard_metric_details[metric["key"]].setToolTip(detail_text)
                 continue
             if metric["key"] == "analysis" and not masked:
@@ -4042,7 +4042,11 @@ class MainWindow(QMainWindow):
                            "Охват источников может различаться.")
             else:
                 tooltip = source_description
-            self._dashboard_metric_values[metric["key"]].setToolTip(tooltip)
+            # Large KPI values stay visually unchanged. Their source is exposed
+            # through accessibility and the compact detail-label tooltip so Qt
+            # cannot inherit the 54 px value font for a popup.
+            self._dashboard_metric_values[metric["key"]].setToolTip(
+                "" if metric["key"] in {"games", "accuracy"} else tooltip)
             self._dashboard_metric_details[metric["key"]].setToolTip(tooltip)
             self._dashboard_metric_values[metric["key"]].setAccessibleDescription(source_description)
             self._dashboard_metric_details[metric["key"]].setAccessibleDescription(source_description)
@@ -4391,37 +4395,26 @@ class MainWindow(QMainWindow):
         graph_host.setMinimumWidth(250)
         graph_layout = QVBoxLayout(graph_host)
         graph_layout.setContentsMargins(0, 0, 0, 0)
-        graph_layout.setSpacing(2)
-        graph_title = QLabel("Преимущество (в пешках)")
-        graph_title.setObjectName("dashboardGraphTitle")
-        graph_title.setStyleSheet("font-size: 12px; font-weight: 600;")
-        graph_layout.addWidget(graph_title)
-        graph_legend = QLabel("+ белые  /  − чёрные")
-        graph_legend.setObjectName("dashboardGraphLegend")
-        graph_legend.setStyleSheet("font-size: 10px; color: #AEB8D0;")
-        graph_layout.addWidget(graph_legend)
+        graph_layout.setSpacing(0)
         graph_points = metrics.get("graph_points") or []
         graph = HomeEvaluationGraph(
             graph_points if can_show_scores else [], total_plies=total_plies,
             phases=metrics.get("phase_boundaries"), parent=graph_host)
         graph.setObjectName("homeEvaluationGraph")
         if can_show_scores:
+            graph.set_data_context(
+                str(metrics.get("source") or "нет данных"),
+                str(metrics.get("coverage") or "н/д"))
             graph.setToolTip(
-                f"Белая перспектива; сохранённая оценка позиции. "
-                f"Источник: {metrics.get('source') or 'нет данных'}")
+                f"Оценки в пешках с точки зрения белых: плюс — преимущество белых, "
+                f"минус — преимущество чёрных; ноль — равная позиция. "
+                f"Источник: {metrics.get('source') or 'нет данных'} · "
+                f"охват {metrics.get('coverage') or 'н/д'}.")
         else:
             graph.setToolTip(coverage.toolTip())
             graph.empty_text = coverage_text
+            graph.setAccessibleDescription(coverage.toolTip())
         graph_layout.addWidget(graph, 1)
-        graph_source_text = (f"Партия · {metrics.get('source') or 'без анализа'} · "
-                             f"{metrics.get('coverage', '—')}" if can_show_scores else
-                             coverage_text)
-        graph_source = QLabel(graph_source_text)
-        graph_source.setObjectName("dashboardGraphSource")
-        graph_source.setStyleSheet("font-size: 10px; color: #AEB8D0;")
-        graph_source.setWordWrap(False)
-        graph_source.setToolTip(graph.toolTip())
-        graph_layout.addWidget(graph_source)
         root.addWidget(graph_host, 50)
         card.set_responsive_graph(root, graph_host)
         return card

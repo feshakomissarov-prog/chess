@@ -154,7 +154,8 @@ def load_game_review(repository, game: dict[str, Any], *,
     if analysis and boundaries is None:
         middle, end = infer_phase_boundaries(positions)
         boundaries = {"middle_start_ply": middle, "end_start_ply": end,
-                      "source": PHASE_FALLBACK_VERSION}
+                      "source": PHASE_FALLBACK_VERSION,
+                      "method_version": PHASE_FALLBACK_VERSION}
     phase_by_ply = {
         move.ply: phase_at_ply(boundaries.get("middle_start_ply"),
                                boundaries.get("end_start_ply"), move.ply)

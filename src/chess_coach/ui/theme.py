@@ -134,7 +134,8 @@ def stylesheet(t: Theme = TOKENS) -> str:
     QProgressBar::chunk {{ background: {t.success}; border-radius: 6px; }}
     QScrollBar:vertical {{ background: {t.app}; width: 12px; }}
     QScrollBar::handle:vertical {{ background: {t.hover}; min-height: 24px; border-radius: 5px; }}
-    QToolTip {{ background: {t.raised}; color: {t.text}; border: 1px solid {t.border}; }}
+    QToolTip {{ background: {t.raised}; color: {t.text}; border: 1px solid {t.border};
+        font: 12px "Segoe UI"; max-width: 460px; padding: 4px 6px; }}
     {visual_sidebar}
     """
 

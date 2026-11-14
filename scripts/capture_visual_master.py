@@ -844,6 +844,70 @@ def capture(window: MainWindow, output: Path, name: str, width: int, height: int
     return image
 
 
+def capture_home_metric_hover_evidence(window: MainWindow, output: Path,
+                                       width: int, height: int) -> None:
+    """Capture real pointer hovers over both large Home KPIs and their details."""
+    window.resize(width, height)
+    QTest.qWait(60)
+    original_values = {key: widget.text() for key, widget in
+                       window._dashboard_metric_values.items()}
+    window._dashboard_metric_values["games"].setText("3325")
+    window._dashboard_metric_values["accuracy"].setText("82.8%")
+    assert window._dashboard_metric_values["games"].font().pixelSize() >= 40
+    assert window._dashboard_metric_values["accuracy"].font().pixelSize() >= 40
+    targets = (
+        ("games-value", window._dashboard_metric_values["games"], False),
+        ("games-detail", window._dashboard_metric_details["games"], True),
+        ("accuracy-value", window._dashboard_metric_values["accuracy"], False),
+        ("accuracy-detail", window._dashboard_metric_details["accuracy"], True),
+    )
+    screen = window.screen()
+    assert screen is not None
+    for name, widget, expects_tooltip in targets:
+        assert widget.isVisibleTo(window), f"Home KPI hover target is not visible: {name}"
+        QToolTip.hideText()
+        QTest.mouseMove(widget, widget.rect().center())
+        if expects_tooltip:
+            deadline = time.monotonic() + 1.8
+            while not QToolTip.isVisible() and time.monotonic() < deadline:
+                QTest.qWait(50)
+            assert QToolTip.isVisible(), f"Native Qt hover did not open tooltip: {name}"
+            assert QToolTip.text() == widget.toolTip()
+            popup = next((item for item in QApplication.topLevelWidgets()
+                          if item.isVisible()
+                          and item.windowType() == Qt.WindowType.ToolTip), None)
+            if popup is None:
+                popup = QApplication.activePopupWidget()
+            assert popup is not None and popup.isVisible(), f"No native popup for {name}"
+            popup_font = popup.font()
+            pixel_size = popup_font.pixelSize()
+            assert popup.width() <= 480, (
+                f"Home tooltip exceeds 480 logical px: {name} width={popup.width()}"
+            )
+            assert pixel_size in (-1, 0) or pixel_size <= 14, (
+                f"Home tooltip inherited large KPI font: {name} pixel-size={pixel_size}"
+            )
+            print(f"Home native tooltip {name}: {popup.width()}x{popup.height()} logical px; "
+                  f"font pixel-size={pixel_size}; text={QToolTip.text()!r}", flush=True)
+        else:
+            QTest.qWait(900)
+            assert not QToolTip.isVisible(), (
+                f"Large KPI value must expose detail without a large tooltip: {name}"
+            )
+            print(f"Home KPI value hover {name}: no popup; value font pixel-size="
+                  f"{widget.font().pixelSize()}", flush=True)
+        QApplication.processEvents()
+        image = screen.grabWindow(0).toImage()
+        assert not image.isNull()
+        path = output / f"{width}x{height}-home-tooltip-{name}.png"
+        assert image.save(str(path)), f"Could not save native hover evidence: {path}"
+        QToolTip.hideText()
+    QCursor.setPos(window.mapToGlobal(QPoint(width + 20, height + 20)))
+    QToolTip.hideText()
+    for key, value in original_values.items():
+        window._dashboard_metric_values[key].setText(value)
+
+
 def make_pair(reference_dir: Path, output: Path, reference_file: str,
               actual: QImage, label: str) -> None:
     path = reference_dir / reference_file
@@ -915,6 +979,15 @@ def capture_long_game_graph_cases(window: MainWindow, output: Path,
             and window._recent_games_layout.itemAt(index).widget().objectName() == "metricCard"
         ]
         assert len(graphs) == 3 and all(graph is not None for graph in graphs)
+        for graph in graphs:
+            host = graph.parentWidget()
+            for object_name in ("dashboardGraphTitle", "dashboardGraphLegend",
+                                "dashboardGraphSource"):
+                assert host.findChild(QLabel, object_name) is None, (
+                    f"Home graph must omit permanent density label {object_name}."
+                )
+            assert "Источник: synthetic saved assessments" in graph.accessibleDescription()
+            assert "Охват сохранённых позиций:" in graph.accessibleDescription()
         QApplication.processEvents()
         for graph in graphs:
             graph.repaint()
@@ -939,6 +1012,8 @@ def capture_long_game_graph_cases(window: MainWindow, output: Path,
         assert len(mate_graph._drawn_cp_segments) == 579
         assert len(mate_graph._mate_markers) == 1
         assert mate_graph._mate_markers[0][2:] == (581, 20)
+        assert "Мат: белые через 1" in next(
+            target[3] for target in mate_graph._hit_targets if target[2] == 600)
         assert len(mate_graph._clipped_markers) == 2
         image = capture(window, output, "home-long-game-graph-cases", width, height)
         print("Long-game graph cases: 600 plies; one 20-ply assessment gap; "
@@ -999,12 +1074,16 @@ def main() -> None:
         # Production Home worker owns its query. No snapshot is passed directly
         # to the renderer and no production method is overridden.
         wait_home(window, account_id)
-        for width, height in target_sizes:
+        for target_index, (width, height) in enumerate(target_sizes):
             QTest.mouseClick(window._nav_buttons["home"], Qt.MouseButton.LeftButton)
             wait_home(window, account_id)
             window._set_sidebar_collapsed(False)
             image = capture(window, output, "home", width, height)
             captured[f"home-{width}x{height}"] = image
+            scale_factor = float(os.environ.get("QT_SCALE_FACTOR", "1"))
+            if ((scale_factor == 1.0 and target_index == 0)
+                    or (scale_factor == 1.25 and width <= 1280 and height <= 720)):
+                capture_home_metric_hover_evidence(window, output, width, height)
             if (width, height) == (target_sizes[0][0], target_sizes[0][1]) or width <= 1280:
                 graph_case_image = capture_long_game_graph_cases(
                     window, output, width, height)
@@ -1313,6 +1392,7 @@ def main() -> None:
         "Background active: synthetic archive + Stockfish running; ready-analysis waiting; "
         "puzzle sync complete; three-or-more durable event rows.\n"
         "Background offline: no active operation registry entries; queued/paused durable work remains visible.\n"
+        "Home KPI hover frames use real QTest pointer movement and native Qt popups; large-value popups are suppressed.\n"
         "Window QSize was asserted equal to each logical target; QImage pixel size was asserted as logical size × DPR.\n"
         f"Logical targets: {target_sizes}\n"
         + "\n".join(details) + "\n",

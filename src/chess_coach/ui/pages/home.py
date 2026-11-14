@@ -7,7 +7,7 @@ import math
 
 import chess
 
-from PySide6.QtCore import QPointF, QTimer, Qt, Signal
+from PySide6.QtCore import QPoint, QPointF, QTimer, Qt, Signal
 from PySide6.QtGui import QColor, QPainter, QPainterPath, QPen, QPolygonF
 from PySide6.QtWidgets import (
     QComboBox, QFrame, QGridLayout, QHBoxLayout, QLabel, QPushButton, QScrollArea,
@@ -33,19 +33,45 @@ class HomeEvaluationGraph(QWidget):
         self._drawn_cp_segments = []
         self._mate_markers = []
         self._clipped_markers = []
+        self._phase_labels = []
+        self._phase_marks = []
+        self._keyboard_target_index = None
+        self.source = ""
+        self.coverage = ""
+        self._base_accessible_description = (
+            "Оценки в пешках с точки зрения белых: выше нуля — преимущество белых, "
+            "ниже нуля — преимущество чёрных; ноль означает равную позицию. "
+            "Пропуски оценок не соединяются.")
         self.setMinimumSize(230, 108)
         self.setMouseTracking(True)
+        self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
         self.setAccessibleName("График преимущества по ходам")
-        self.setAccessibleDescription(
-            "Вертикальная шкала в пешках от белой перспективы: плюс — преимущество белых, "
-            "минус — преимущество чёрных. Пропуски оценок не соединяются.")
+        self.setAccessibleDescription(self._base_accessible_description)
         self.set_points(points or [], total_plies=total_plies, phases=phases)
+
+    def set_data_context(self, source: str = "", coverage: str = "") -> None:
+        self.source = str(source or "")
+        self.coverage = str(coverage or "")
+        context = []
+        if self.source:
+            context.append(f"Источник: {self.source}.")
+        if self.coverage:
+            context.append(f"Охват сохранённых позиций: {self.coverage}.")
+        if not (self.phases.get("source") and self.phases.get("method_version")):
+            context.append("Шахматные стадии не установлены; нижняя шкала нейтральная.")
+        self._base_accessible_description = " ".join((
+            "Оценки в пешках с точки зрения белых: выше нуля — преимущество белых, "
+            "ниже нуля — преимущество чёрных; ноль означает равную позицию. "
+            "Пропуски оценок не соединяются.", *context))
+        self.setAccessibleDescription(self._base_accessible_description)
 
     def set_points(self, points, *, total_plies: int | None = None,
                    phases: dict | None = None) -> None:
         self.points = sorted((dict(row) for row in (points or [])
                               if isinstance(row, dict) and type(row.get("ply")) is int),
                              key=lambda row: row["ply"])
+        self._keyboard_target_index = None
+        self.setAccessibleDescription(self._base_accessible_description)
         if total_plies is not None:
             self.total_plies = max(1, int(total_plies or 1))
         if phases is not None:
@@ -53,7 +79,7 @@ class HomeEvaluationGraph(QWidget):
         self.update()
 
     def _plot_rect(self):
-        return self.rect().adjusted(38, 8, -8, -24)
+        return self.rect().adjusted(8, 8, -8, -24)
 
     @staticmethod
     def _white_perspective_label(cp: int | None, mate: int | None) -> str:
@@ -63,7 +89,10 @@ class HomeEvaluationGraph(QWidget):
                     "Терминальная матовая оценка; сторона не выводится")
         if cp is None:
             return "Оценки позиции нет"
-        return f"Оценка за белых: {cp / 100:+.2f} пешки"
+        if cp == 0:
+            return "Равная позиция: 0.00 пешки"
+        side = "Белые" if cp > 0 else "Чёрные"
+        return f"{side} +{abs(cp) / 100:.2f} пешки"
 
     @staticmethod
     def _connects(previous: dict, current: dict) -> bool:
@@ -88,36 +117,44 @@ class HomeEvaluationGraph(QWidget):
         self._drawn_cp_segments = []
         self._mate_markers = []
         self._clipped_markers = []
+        self._phase_labels = []
+        self._phase_marks = []
         painter.setPen(QPen(QColor("#354058"), 1))
         painter.drawRect(plot)
         limit = self.AXIS_LIMIT_CP
         for tick in (limit, 400, 200, 0, -200, -400, -limit):
             y = plot.center().y() - round(plot.height() * tick / (2 * limit))
-            painter.setPen(QPen(QColor("#64708A" if tick == 0 else "#354058"),
-                                1 if tick == 0 else 1))
+            painter.setPen(QPen(QColor("#8792AB" if tick == 0 else "#354058"),
+                                2 if tick == 0 else 1))
             painter.drawLine(plot.left(), y, plot.right(), y)
-            label = f"{tick / 100:+g}" if tick else "0"
-            painter.setPen(QColor("#AEB8D0"))
-            painter.drawText(0, y + 4, label)
 
         middle = self.phases.get("middle_start_ply")
         end = self.phases.get("end_start_ply")
         stage_labels = []
         phase_marks = []
-        if (type(middle) is int and 0 < middle < self.total_plies
-                and type(end) is int and middle < end < self.total_plies):
+        source_backed = bool(self.phases.get("source") and self.phases.get("method_version"))
+        middle_valid = (source_backed and type(middle) is int
+                        and 0 < middle < self.total_plies)
+        end_valid = (source_backed and type(end) is int
+                     and 0 < end < self.total_plies)
+        if middle_valid and end_valid and middle < end:
             phase_marks = [middle, end]
-            stage_labels = [
-                (middle // 2, "Дебют"),
-                ((middle + end) // 2, "Миттельшпиль"),
-                ((end + self.total_plies) // 2, "Эндшпиль"),
-            ]
-        else:
-            # Unknown phase boundaries are marked as neutral progress, not as
-            # invented chess stages.
+            stage_labels = [(middle // 2, "Дебют"),
+                            ((middle + end) // 2, "Миттельшпиль"),
+                            ((end + self.total_plies) // 2, "Эндшпиль")]
+        elif middle_valid:
+            phase_marks = [middle]
+            stage_labels = [(middle // 2, "Дебют"),
+                            ((middle + self.total_plies) // 2, "Миттельшпиль")]
+        elif end_valid:
+            phase_marks = [end]
             stage_labels = [(self.total_plies // 6, "Начало"),
-                            (self.total_plies // 2, "Середина"),
-                            (self.total_plies * 5 // 6, "Конец")]
+                            ((end + self.total_plies) // 2, "Эндшпиль")]
+        else:
+            # Unknown phase boundaries are shown only as neutral time progress.
+            stage_labels = [(0, "Начало"), (self.total_plies, "Конец")]
+        self._phase_labels = list(stage_labels)
+        self._phase_marks = list(phase_marks)
         painter.setPen(QPen(QColor("#59637A"), 1, Qt.PenStyle.DashLine))
         for ply in phase_marks:
             if ply <= 0 or ply >= self.total_plies:
@@ -206,10 +243,6 @@ class HomeEvaluationGraph(QWidget):
                     painter.setPen(QPen(color, 2))
                     painter.setBrush(color)
                     painter.drawEllipse(QPointF(x, y), 4, 4)
-                    mate_label = "M+" if mate > 0 else "M−" if mate < 0 else "M"
-                    painter.drawText(max(plot.left() + 2, min(plot.right() - 24, x + 4)),
-                                     max(plot.top() + 10, min(plot.bottom() - 2, y - 3)),
-                                     mate_label)
                     interval_start = row.get("mate_start_ply", group_start)
                     interval_count = int(row.get("mate_sample_count") or
                                           max(1, ply - int(interval_start) + 1))
@@ -259,6 +292,28 @@ class HomeEvaluationGraph(QWidget):
         if (point[0] - x) ** 2 + (point[1] - y) ** 2 <= 100:
             QToolTip.showText(event.globalPosition().toPoint(),
                               point[3], self)
+
+    def keyPressEvent(self, event):
+        if not self._hit_targets or event.key() not in (
+                Qt.Key.Key_Left, Qt.Key.Key_Right, Qt.Key.Key_Home, Qt.Key.Key_End):
+            super().keyPressEvent(event)
+            return
+        if event.key() == Qt.Key.Key_Home:
+            index = 0
+        elif event.key() == Qt.Key.Key_End:
+            index = len(self._hit_targets) - 1
+        elif self._keyboard_target_index is None:
+            index = 0 if event.key() == Qt.Key.Key_Right else len(self._hit_targets) - 1
+        else:
+            delta = 1 if event.key() == Qt.Key.Key_Right else -1
+            index = max(0, min(len(self._hit_targets) - 1,
+                               self._keyboard_target_index + delta))
+        self._keyboard_target_index = index
+        target = self._hit_targets[index]
+        self.setAccessibleDescription(
+            f"{self._base_accessible_description} Выбрана точка: {target[3]}.")
+        QToolTip.showText(self.mapToGlobal(QPoint(8, 8)), target[3], self)
+        event.accept()
 
 
 class PuzzlePreviewBoard(BoardView):
