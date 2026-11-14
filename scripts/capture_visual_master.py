@@ -997,6 +997,10 @@ def capture_long_game_graph_cases(window: MainWindow, output: Path,
                 assert host.findChild(QLabel, object_name) is None, (
                     f"Home graph must omit permanent density label {object_name}."
                 )
+            card = host.parentWidget()
+            assert card.findChild(QLabel, "dashboardAnalysisCoverage") is None, (
+                "Home recent cards must not show a permanent analysis coverage label."
+            )
             assert "Источник: synthetic saved assessments" in graph.accessibleDescription()
             assert "Охват сохранённых позиций:" in graph.accessibleDescription()
         QApplication.processEvents()
@@ -1032,6 +1036,71 @@ def capture_long_game_graph_cases(window: MainWindow, output: Path,
         return image
     finally:
         window._render_dashboard_snapshot(original)
+
+
+def capture_home_long_opponent_case(window: MainWindow, output: Path,
+                                    width: int, height: int) -> QImage:
+    """Check a real Home card with a long opponent name at this native size."""
+    original = deepcopy(window._latest_dashboard_snapshot)
+    assert original and len(original.get("recent_games") or []) == 3
+    snapshot = deepcopy(original)
+    long_name = ("Synthetic Opponent With A Deliberately Long Display Name "
+                 "For Home Card Wrapping And Geometry 0123456789")
+    snapshot["recent_games"][0]["opponent"] = long_name
+    try:
+        window._render_dashboard_snapshot(snapshot)
+        QApplication.processEvents()
+        card = window._recent_games_layout.itemAt(0).widget()
+        assert card is not None and card.objectName() == "metricCard"
+        opponent = card.findChild(QLabel, "dashboardOpponent")
+        assert opponent is not None and opponent.text() == long_name
+        assert_label_fits(opponent, f"Home long opponent name at {width}x{height}")
+        recent = window._home_view.recent_scroll
+        assert recent.horizontalScrollBar().maximum() == 0, (
+            f"Home recent cards must not create horizontal overflow at {width}x{height}."
+        )
+        viewport = recent.viewport()
+        card_rect = QRect(card.mapTo(viewport, QPoint(0, 0)), card.size())
+        assert card_rect.left() >= 0 and card_rect.right() <= viewport.width(), (
+            f"Home long-name card exceeds its viewport at {width}x{height}: "
+            f"card={card_rect.getRect()} viewport={viewport.rect().getRect()}"
+        )
+        if width >= 1500 and height >= 900:
+            assert recent.verticalScrollBar().maximum() == 0
+            cards = [window._recent_games_layout.itemAt(index).widget()
+                     for index in range(window._recent_games_layout.count())
+                     if window._recent_games_layout.itemAt(index).widget() is not None
+                     and window._recent_games_layout.itemAt(index).widget().objectName()
+                     == "metricCard"]
+            assert len(cards) == 3
+            assert all(viewport.rect().contains(
+                QRect(item.mapTo(viewport, QPoint(0, 0)), item.size())) for item in cards)
+        return capture(window, output, "home-long-opponent-name", width, height)
+    finally:
+        window._render_dashboard_snapshot(original)
+        QApplication.processEvents()
+
+
+def verify_home_play_return(window: MainWindow, account_id: str, output: Path,
+                            width: int, height: int) -> QImage:
+    """Exercise the real sidebar route Home → Play → Home on the native window."""
+    before = [str(game.get("game_id") or "")
+              for game in (window._latest_dashboard_snapshot or {}).get("recent_games", [])]
+    assert len(before) == 3
+    QTest.mouseClick(window._nav_buttons["play"], Qt.MouseButton.LeftButton)
+    assert window.screen_stack.currentWidget() is window.play_page
+    QTest.mouseClick(window._nav_buttons["home"], Qt.MouseButton.LeftButton)
+    wait_home(window, account_id)
+    after = [str(game.get("game_id") or "")
+             for game in (window._latest_dashboard_snapshot or {}).get("recent_games", [])]
+    assert after[:3] == before[:3]
+    assert window._home_view.recent_scroll.horizontalScrollBar().maximum() == 0
+    cards = [window._recent_games_layout.itemAt(index).widget()
+             for index in range(window._recent_games_layout.count())
+             if window._recent_games_layout.itemAt(index).widget() is not None
+             and window._recent_games_layout.itemAt(index).widget().objectName() == "metricCard"]
+    assert len(cards) == 3 and all(card.isVisibleTo(window) for card in cards)
+    return capture(window, output, "home-return-from-play", width, height)
 
 
 def main() -> None:
@@ -1092,6 +1161,14 @@ def main() -> None:
             image = capture(window, output, "home", width, height)
             captured[f"home-{width}x{height}"] = image
             scale_factor = float(os.environ.get("QT_SCALE_FACTOR", "1"))
+            if width >= 1500 or width <= 1280:
+                long_name_image = capture_home_long_opponent_case(
+                    window, output, width, height)
+                captured[f"home-long-opponent-name-{width}x{height}"] = long_name_image
+            if target_index == 0:
+                returned_home = verify_home_play_return(
+                    window, account_id, output, width, height)
+                captured[f"home-return-from-play-{width}x{height}"] = returned_home
             if ((scale_factor == 1.0 and target_index == 0)
                     or (scale_factor == 1.25 and width <= 1280 and height <= 720)):
                 capture_home_metric_hover_evidence(window, output, width, height)

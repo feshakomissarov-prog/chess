@@ -12,6 +12,7 @@ from chess_coach.lichess.archive import ArchiveSync
 from chess_coach.lichess.repository import GameRepository
 from chess_coach.lichess.service import LichessService
 from chess_coach.ui.dialogs import SettingsDialog
+from chess_coach.ui.pages.home import HomeEvaluationGraph
 from chess_coach.window import MainWindow
 
 
@@ -372,18 +373,16 @@ def test_safe_tooltip_exposes_source_for_saved_history_without_preflight(qtbot, 
             "clock": "300+0", "review_metrics": {"status": "partial", "coverage": "2/4",
             "source": "Stockfish"}}
     window._render_dashboard_snapshot({"metrics": [], "recent_games": [game]})
-    coverage = window._recent_games_layout.itemAt(0).widget().findChild(
-        __import__("PySide6.QtWidgets", fromlist=["QLabel"]).QLabel,
-        "dashboardAnalysisCoverage")
-    assert "Stockfish" in coverage.toolTip()
-    assert "2/4" in coverage.toolTip()
+    graph = window._recent_games_layout.itemAt(0).widget().findChild(HomeEvaluationGraph)
+    assert graph is not None
+    assert "Stockfish" in graph.toolTip()
+    assert "2/4" in graph.toolTip()
     window._dashboard_analysis_safety_allowed = True
     window._render_dashboard_snapshot({"metrics": [], "recent_games": [game]})
-    coverage = window._recent_games_layout.itemAt(0).widget().findChild(
-        __import__("PySide6.QtWidgets", fromlist=["QLabel"]).QLabel,
-        "dashboardAnalysisCoverage")
-    assert "Stockfish" in coverage.toolTip()
-    assert "2/4" in coverage.toolTip()
+    graph = window._recent_games_layout.itemAt(0).widget().findChild(HomeEvaluationGraph)
+    assert graph is not None
+    assert "Stockfish" in graph.toolTip()
+    assert "2/4" in graph.toolTip()
     window.close()
 
 

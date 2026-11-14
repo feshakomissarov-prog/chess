@@ -3,7 +3,9 @@ from __future__ import annotations
 import math
 
 import chess
-from PySide6.QtCore import Qt
+from PySide6.QtCore import QPoint, Qt
+from PySide6.QtTest import QTest
+from PySide6.QtWidgets import QToolTip
 
 from chess_coach.application.dashboard import _home_graph_points
 from chess_coach.lichess.phases import PHASE_FALLBACK_VERSION, infer_phase_boundaries
@@ -47,6 +49,24 @@ def test_long_saved_game_keeps_all_600_consecutive_plies_and_tooltip_ply(qtbot):
     graph.repaint()
     assert graph._hit_targets[-1][2] == 600
     assert "Полуход 600 (ход 300)" in graph._hit_targets[-1][3]
+
+
+def test_graph_hover_reports_original_ply_after_resize(qtbot):
+    graph = HomeEvaluationGraph(_home_graph_points(_scores(1, 600)), total_plies=600)
+    _paint(qtbot, graph)
+    for width in (760, 420):
+        graph.resize(width, 190)
+        graph.repaint()
+        qtbot.wait(10)
+        targets = {target[2]: target for target in graph._hit_targets}
+        for ply in (1, 301, 600):
+            target = targets[ply]
+            QToolTip.hideText()
+            QTest.mouseMove(graph, QPoint(round(target[0]), round(target[1])))
+            qtbot.waitUntil(lambda: QToolTip.text() == target[3], timeout=500)
+            assert f"Полуход {ply} " in QToolTip.text()
+            assert f"Ход {round(target[0])}" not in QToolTip.text()
+    QToolTip.hideText()
 
 
 def test_bounded_sampling_keeps_long_run_continuous_and_preserves_extrema():
@@ -140,7 +160,7 @@ def test_black_mate_and_terminal_mate_zero_do_not_change_white_perspective(qtbot
 
 
 def test_graph_uses_only_source_backed_phases_and_never_invents_endgame(qtbot):
-    # This 18-move Ruy Lopez line reaches the source-backed opening/middlegame
+    # This 19-move Ruy Lopez line reaches the source-backed opening/middlegame
     # boundary, but its material never qualifies as an endgame.
     sans = "e4 e5 Nf3 Nc6 Bc4 Bc5 c3 Nf6 d3 d6 O-O O-O Re1 a6 Bb3 Ba7 " \
         "Nbd2 h6 Nf1 Re8 Ng3 Be6 Bc2 Qd7 Be3 Bxe3 Rxe3 d5 exd5 Nxd5 " \
@@ -150,6 +170,16 @@ def test_graph_uses_only_source_backed_phases_and_never_invents_endgame(qtbot):
     for san in sans.split():
         board.push_san(san)
         boards.append(board.copy(stack=False))
+    # Add three quiet, legal knight plies so the completed miniature is exactly
+    # 19 moves. No material change means the source-backed phase result remains
+    # a two-stage game rather than gaining a fabricated endgame.
+    for _ in range(3):
+        move = next(move for move in board.legal_moves
+                    if board.piece_at(move.from_square).piece_type == chess.KNIGHT
+                    and not board.is_capture(move))
+        board.push(move)
+        boards.append(board.copy(stack=False))
+    assert len(boards) - 1 == 38
     middle, end = infer_phase_boundaries(boards)
     assert middle is not None and end is None
 

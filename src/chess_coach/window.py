@@ -4415,15 +4415,11 @@ class MainWindow(QMainWindow):
         else:
             coverage_text = "Нет сохранённых оценок"
             coverage_reason = "Для этой партии нет сохранённой оценки позиций."
-        coverage = QLabel(coverage_text)
-        coverage.setObjectName("dashboardAnalysisCoverage")
-        coverage.setStyleSheet("font-size: 10px; color: #AEB8D0;")
-        coverage.setToolTip((f"Источник: {metrics.get('source') or 'нет данных'} · "
-                             f"Охват позиций: {coverage_value or '—'} · "
-                             f"{scope_description} {accuracy_tooltip}")
-                            if can_show_scores else coverage_reason or accuracy_tooltip)
-        coverage.setAccessibleDescription(coverage.toolTip())
-        table.addWidget(coverage, 4, 0, 1, 3)
+        coverage_tooltip = (
+            f"Источник: {metrics.get('source') or 'нет данных'} · "
+            f"Охват позиций: {coverage_value or '—'} · "
+            f"{scope_description} {accuracy_tooltip}"
+            if can_show_scores else coverage_reason or accuracy_tooltip)
         details_layout.addWidget(table_host, 44)
         root.addWidget(details_host, 50)
 
@@ -4448,9 +4444,9 @@ class MainWindow(QMainWindow):
                 f"Источник: {metrics.get('source') or 'нет данных'} · "
                 f"охват {metrics.get('coverage') or 'н/д'}.")
         else:
-            graph.setToolTip(coverage.toolTip())
+            graph.setToolTip(coverage_tooltip)
             graph.empty_text = coverage_text
-            graph.setAccessibleDescription(coverage.toolTip())
+            graph.setAccessibleDescription(coverage_tooltip)
         graph_layout.addWidget(graph, 1)
         root.addWidget(graph_host, 50)
         card.set_responsive_details(details_layout)

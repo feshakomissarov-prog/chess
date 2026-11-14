@@ -142,9 +142,9 @@ def test_unowned_completed_card_shows_saved_white_black_review_but_live_card_hid
     accuracy = card.findChild(type(window.screen_title), "dashboardAccuracy")
     assert accuracy is not None and accuracy.text() == "Точность: —"
     assert "99.0%" not in accuracy.toolTip()
-    coverage = card.findChild(type(window.screen_title), "dashboardAnalysisCoverage")
-    assert coverage is not None
-    assert coverage.text() == "Охват: 1/1"
+    assert card.findChild(type(window.screen_title), "dashboardAnalysisCoverage") is None
+    assert "Охват позиций: 1/1" in graph.accessibleDescription()
+    assert "Источник: stockfish" in graph.toolTip()
     headers = [label.text() for label in card.findChildren(type(window.screen_title))
                if label.text() in {"Белые", "Чёрные", "Я", "Соперник"}]
     assert headers == ["Белые", "Чёрные"]
@@ -175,8 +175,9 @@ def test_unowned_completed_card_shows_saved_white_black_review_but_live_card_hid
     live_graph = live_card.findChild(HomeEvaluationGraph)
     assert live_graph is not None and not live_graph.points
     assert live_card.findChild(type(window.screen_title),
-                               "dashboardAnalysisCoverage").text() == (
-                                   "Оценки скрыты во время партии")
+                               "dashboardAnalysisCoverage") is None
+    assert live_graph.empty_text == "Оценки скрыты во время партии"
+    assert "Исторические оценки не отображаются" in live_graph.toolTip()
     assert window.close() is True
 
 

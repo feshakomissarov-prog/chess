@@ -4749,11 +4749,12 @@ def test_recent_game_card_does_not_show_zero_coverage_when_analysis_is_missing(
                                "opponent_coverage": "0/12", "source": "нет данных"}}
     window._render_dashboard_snapshot({"metrics": [], "recent_games": [game]})
     card = window._recent_games_layout.itemAt(0).widget()
-    coverage = card.findChild(QLabel, "dashboardAnalysisCoverage")
-    assert coverage is not None
-    assert coverage.text() == "Нет сохранённых оценок"
-    assert "0/12" not in coverage.text()
-    assert "охват" not in coverage.text().casefold()
+    assert card.findChild(QLabel, "dashboardAnalysisCoverage") is None
+    graph = card.findChild(HomeEvaluationGraph, "homeEvaluationGraph")
+    assert graph is not None
+    assert graph.empty_text == "Нет сохранённых оценок"
+    assert "0/12" not in graph.toolTip()
+    assert "оценки позиций" in graph.toolTip().casefold()
     window.close()
 
 

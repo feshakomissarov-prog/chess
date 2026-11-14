@@ -207,7 +207,7 @@ def launch(database: Path, root: Path, run_seconds: int, navigation_cycles: int,
         from chess_coach.ui.pages.home import HomeEvaluationGraph
         required_card_labels = (
             "dashboardOutcome", "dashboardOpponent", "dashboardAccuracy",
-            "dashboardGameDate", "dashboardAnalysisCoverage",
+            "dashboardGameDate",
         )
         labels_have_visible_content = all(
             all((label := card.findChild(QLabel, object_name)) is not None
