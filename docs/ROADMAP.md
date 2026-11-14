@@ -1,5 +1,25 @@
 # Chess Coach — дорожная карта
 
+## Текущий план после merge PR #47 и #48 — 14.11.2026
+
+**В `main`:** [PR #47](https://github.com/feshakomissarov-prog/chess/pull/47) (STAB-01, MAT-01, согласованный Home, merge `2ab3dde`; 1161 pytest + native CI на code HEAD `4f5fa663`) и [PR #48](https://github.com/feshakomissarov-prog/chess/pull/48) (постоянный процесс CC-VERIFY-01, merge `394ad979`, быстрый spec-contract gate, меньшая стоимость CI). Секции ниже «после merge #46» — **историческое состояние 11.11**, не активная команда Codex.
+
+**Важно: на `main` есть новый RED после слияния #47** — [Windows run #43596085647](https://github.com/feshakomissarov-prog/chess/actions/runs/43596085647), `Home card 1 exceeds its scroll viewport width: 640 > 611`. Это R47-H-01/R47-QA-02, ранее проверенные на PR, но нестабильные после изменения контекста/смены размера в runner. Full pytest и native visual в этом `main` run **SKIPPED** после failure; не писать «main зелёный».
+
+| Приоритет | Блок после merge | Текущий статус / что делаем |
+| --- | --- | --- |
+| **Завершено** | **CC-VERIFY-01 / PR #48** | Регламент L1→L2→L3 и автоматическая проверка новых ТЗ в `main`. Не ставить Codex задачу реализовать это повторно. |
+| **P1 · следующий короткий** | **POSTMERGE-01 / Windows Home geometry gate** | Устранить повторяемый overflow recent-card `640>611` без нового редизайна; targeted native Windows RED→GREEN, затем exact-head full CI. [ТЗ](specs/POSTMERGE_01_WINDOWS_GATE_AND_LICHESS_DATA_AUDIT_2026_11_14.md). |
+| **P1/P2 · параллельная аналитика** | **DATA-01 / Lichess read-only coverage** | Пояснить разные знаменатели `953` игр с оценками Lichess, `40` с official accuracy, `244` отдельно проверенных готовых отчётов; read-only synthetic audit + минимально необходимые UI подписи. Не переимпортировать 3k игр «на всякий случай». [ТЗ](specs/POSTMERGE_01_WINDOWS_GATE_AND_LICHESS_DATA_AUDIT_2026_11_14.md). |
+| **OWNER gate, без автоматического запуска на личном ПК** | **R47-GATE-01/02 + R47-SAFE-01** | P0 Home ≤1с на реальной SQLite, Lichess/Play/MAT-01 real scenarios и прежние Qt6Core.dll сбои не подтверждены synthetic CI. Пользователь принял UI; без отдельно согласованных безопасных шагов локально не тестировать. |
+| **Отдельный будущий этап** | **DIST-01** | Установщик/обновления Windows: сначала короткий feasibility/security/license gate, затем отдельное решение владельца и Draft PR. |
+| **После укрепления данных** | **M4.7 / образовательное ядро** | Training Arena из реальных FEN, упражнения на повторяющихся ошибках, далее персональный тренер; дебютный репертуар и анализ соперника — отдельные будущие модули. |
+
+**Процесс:** только [CC-VERIFY-01](process/VERIFICATION_PROTOCOL.md). После конкретного PM-01 и DATA-01 — один final exact-head Windows CI, независимая проверка и решение владельца; не смешивать с DIST-01. Учёт прежних дефектов только по стабильным ID [реестра PR #47](specs/PR47_CONSOLIDATED_REVIEW_REGISTER_2026_11_12.md).
+
+---
+
+
 ## Актуальный статус после merge PR #46 — 11.11.2026
 
 **Выполнено и в `main`:** M0–M4.6 — локальная игра, Lichess-клиент, SQLite/PGN-архив, аналитика Stockfish и Lichess, задачи, статистика, пакетный анализ, модульная архитектурная основа. В [PR #46](https://github.com/feshakomissarov-prog/chess/pull/46) объединён единый desktop UX (Home, Play, Library, Analysis, Training/Progress/Review) и persistent two-tier Home cache. Финальный Windows CI PR #46: [1115 passed, native screenshots 100/125/150%](https://github.com/feshakomissarov-prog/chess/actions/runs/42898354938). **Это не заменяет проверку на реальной БД и полную визуальную приёмку.**
