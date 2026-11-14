@@ -534,7 +534,7 @@ def test_fair_play_revocation_masks_every_rendered_analysis_surface(
         QCoreApplication.processEvents()
 
         assert "1" in _metrics_text(workspace.side_metrics_summary)
-        assert "+2.5" in workspace.moves_list.item_by_ply(2).text()
+        assert "+2.5" in workspace.moves_list.item_by_ply(2).toolTip()
         assert workspace.graph._values()
         assert workspace.review_board._hint_arrows
         assert "Сохранённое продолжение" in workspace.event_detail.text()
@@ -617,7 +617,7 @@ def test_training_preflight_does_not_mask_saved_review_on_entry(qtbot, tmp_path)
         workspace.set_safety_pending("Проверяем активные партии Lichess…")
         assert workspace.evaluation_allowed
         assert workspace.graph._values()
-        assert "+2.5" in workspace.moves_list.item_by_ply(2).text()
+        assert "+2.5" in workspace.moves_list.item_by_ply(2).toolTip()
         assert workspace.training_safety_button.isHidden()
         assert workspace.training_status.isHidden()
     finally:
@@ -657,6 +657,10 @@ def test_review_layout_has_no_outer_scroll_and_renders_at_desktop_sizes(qtbot, t
         workspace = GameReviewWorkspace(repo, training_allowed=True)
         qtbot.addWidget(workspace)
         workspace.load_game(game)
+        selected_score_cell = workspace.moves_list.item_by_ply(2)
+        assert selected_score_cell is not None
+        assert "+2.5" not in selected_score_cell.text()
+        assert "+2.5" in selected_score_cell.toolTip()
         metric_scrolls = workspace.findChildren(QScrollArea, "reviewMetricsScroll")
         assert len(metric_scrolls) == 1
         assert metric_scrolls[0].widget() is not None

@@ -98,7 +98,8 @@ class MoveTable(QWidget):
         self._variation_rows: list[int] = []
         layout.addWidget(self.table)
 
-    def set_rows(self, moves, *, scores=None, enabled=True, show_severity=True):
+    def set_rows(self, moves, *, scores=None, enabled=True, show_severity=True,
+                 show_scores=True):
         """Moves contain ply, SAN, mover and optional severity; scores are post-ply dicts."""
         self._moves = list(moves)
         self.table.setRowCount(0)
@@ -141,7 +142,7 @@ class MoveTable(QWidget):
                     score_text = _score_tenth(cp)
                 else:
                     score_text = None
-                if score_text:
+                if score_text and show_scores:
                     label += f" {score_text}"
             if severity in _SEVERITY:
                 icon, description = _SEVERITY[severity]
@@ -165,8 +166,11 @@ class MoveTable(QWidget):
             item.setData(Qt.ItemDataRole.UserRole, ply)
             item.setData(Qt.ItemDataRole.UserRole + 1, base_label)
             if score is not None:
-                item.setToolTip((item.toolTip() + "\n" if item.toolTip() else "") +
-                                "Оценка позиции после хода; перспектива белых. Δ показана отдельно.")
+                score_detail = (f"Оценка позиции после хода: {score_text} за белых. "
+                                "Δ показана отдельно." if score_text else
+                                "Оценка позиции после хода; перспектива белых. "
+                                "Δ показана отдельно.")
+                item.setToolTip((item.toolTip() + "\n" if item.toolTip() else "") + score_detail)
             if not enabled:
                 item.setToolTip("Оценки и анализ скрыты до проверки безопасности.")
             self.table.setItem(row, column, item)

@@ -1068,7 +1068,8 @@ class GameReviewWorkspace(QWidget):
             self.review["moves"],
             scores=assessment_by_ply if self.evaluation_allowed else {},
             enabled=self.evaluation_allowed or self._ephemeral_study,
-            show_severity=self.evaluation_allowed)
+            show_severity=self.evaluation_allowed,
+            show_scores=False)
         self.moves_list.set_variations([])
         metrics = self.review["per_side"]
         accuracy = self.review["official_accuracy"]
