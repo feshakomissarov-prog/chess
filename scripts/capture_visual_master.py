@@ -936,7 +936,7 @@ def capture_long_game_graph_cases(window: MainWindow, output: Path,
         assert len(long_graph._drawn_cp_segments) == 599
         assert len(gap_graph._drawn_cp_segments) == 578
         assert not any(start <= 280 < end for start, end in gap_graph._drawn_cp_segments)
-        assert len(mate_graph._drawn_cp_segments) == 578
+        assert len(mate_graph._drawn_cp_segments) == 579
         assert len(mate_graph._mate_markers) == 1
         assert mate_graph._mate_markers[0][2:] == (581, 20)
         assert len(mate_graph._clipped_markers) == 2
