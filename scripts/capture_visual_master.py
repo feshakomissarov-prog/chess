@@ -899,8 +899,10 @@ def capture_long_game_graph_cases(window: MainWindow, output: Path,
             and window._recent_games_layout.itemAt(index).widget().objectName() == "metricCard"
         ]
         assert len(graphs) == 3 and all(graph is not None for graph in graphs)
+        QApplication.processEvents()
         for graph in graphs:
             graph.repaint()
+            assert not graph.grab().isNull()
         by_point_count = {len(graph.points): graph for graph in graphs}
         assert set(by_point_count) == {580, 581, 600}
         long_graph = by_point_count[600]
