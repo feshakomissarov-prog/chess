@@ -4196,6 +4196,10 @@ class MainWindow(QMainWindow):
         compact = recent_width < 760
         compact_height = self.height() < 780
         card = _DashboardGameCard()
+        # The scroll-area viewport owns the card width. Ignoring the card's
+        # stale horizontal size hint lets its child layout switch to the
+        # compact stacked form instead of overflowing at 1280x720.
+        card.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
         card.setObjectName("metricCard")
         card.setProperty("dashboard_game_id", str(game.get("game_id") or ""))
         card.setAccessibleName(f"Открыть разбор партии: {heading}")

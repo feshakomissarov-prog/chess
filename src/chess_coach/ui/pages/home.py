@@ -662,6 +662,10 @@ class HomePage(QWidget):
         self.recent_safety_notice.setMaximumHeight(20)
         recent_layout.addWidget(self.recent_safety_notice)
         recent_rows = QWidget()
+        # Keep the resizable scroll content constrained by its viewport even
+        # when recent-game cards have a wider desktop size hint.
+        recent_rows.setSizePolicy(QSizePolicy.Policy.Ignored,
+                                  QSizePolicy.Policy.Preferred)
         self._recent_games_layout = QVBoxLayout(recent_rows)
         self._recent_games_layout.setContentsMargins(0, 0, 0, 0)
         self._recent_games_layout.setSpacing(10)
