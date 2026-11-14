@@ -4256,7 +4256,10 @@ class MainWindow(QMainWindow):
         opponent_label.setWordWrap(True)
         opponent_label.setSizePolicy(QSizePolicy.Policy.Ignored,
                                      QSizePolicy.Policy.Preferred)
-        opponent_label.setMinimumHeight(opponent_label.fontMetrics().height())
+        # QLabel's font metrics omit its vertical layout allowance on the
+        # native Windows style; reserve the actual widget hint to avoid a
+        # one-line baseline clip in the compact recent-game cards.
+        opponent_label.setMinimumHeight(opponent_label.sizeHint().height())
         info_layout.addWidget(opponent_label)
 
         def add_info_row(icon_name: str, text: str, object_name: str,
