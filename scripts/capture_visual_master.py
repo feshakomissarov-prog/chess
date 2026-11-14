@@ -1109,6 +1109,13 @@ def capture_home_rating_review(window: MainWindow, output: Path,
             window.resize(width, height)
             QTest.qWait(30)
             QApplication.processEvents()
+            ancestor = chart
+            while ancestor is not None:
+                layout = ancestor.layout()
+                if layout is not None:
+                    layout.activate()
+                ancestor = ancestor.parentWidget()
+            QApplication.processEvents()
             chart.repaint()
             QApplication.processEvents()
             assert chart.isVisibleTo(window), "Home puzzle-rating chart must be visible."
