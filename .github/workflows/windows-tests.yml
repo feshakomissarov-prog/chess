@@ -2,12 +2,23 @@ name: Windows tests
 
 on:
   pull_request:
+    # Changes limited to Markdown must not start the expensive Windows matrix.
+    paths-ignore:
+      - "**/*.md"
   push:
     branches: [main]
+    paths-ignore:
+      - "**/*.md"
   workflow_dispatch:
 
 permissions:
   contents: read
+
+# Cancel obsolete CI executions when another commit is pushed to the same PR.
+# The final exact-head run is still required before accepting code changes.
+concurrency:
+  group: windows-tests-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   home-chart-review:
