@@ -8,7 +8,6 @@ Lichess, or returns game/profile identifiers.
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
-import sqlite3
 from typing import Any
 
 from ..domain.accuracy import FORMULA_ID
@@ -21,11 +20,11 @@ _ACTIVE = "('created','started','started_soon','playing')"
 _SOURCES = "('stockfish','lichess-pgn','lichess-json')"
 
 
-def _rows(db: sqlite3.Connection, query: str, parameters: tuple[Any, ...] = ()):
+def _rows(db: Any, query: str, parameters: tuple[Any, ...] = ()):
     return db.execute(query, parameters).fetchall()
 
 
-def _scope(db: sqlite3.Connection, account_id: str, cutoff: str | None) -> dict[str, Any]:
+def _scope(db: Any, account_id: str, cutoff: str | None) -> dict[str, Any]:
     date_filter = "" if cutoff is None else " AND COALESCE(g.started_at,'')>=?"
     parameters: tuple[Any, ...] = (account_id,) if cutoff is None else (account_id, cutoff)
     scoped = f"""
@@ -159,7 +158,7 @@ def _scope(db: sqlite3.Connection, account_id: str, cutoff: str | None) -> dict[
     }
 
 
-def _ready_backfill(db: sqlite3.Connection, account_id: str, utc_day: str) -> dict[str, Any]:
+def _ready_backfill(db: Any, account_id: str, utc_day: str) -> dict[str, Any]:
     row = _rows(db, """
         SELECT COUNT(*) AS total,
                SUM(accuracy_checked_at IS NOT NULL OR evals_checked_at IS NOT NULL) AS checked,
@@ -216,7 +215,7 @@ def _ready_backfill(db: sqlite3.Connection, account_id: str, utc_day: str) -> di
     }
 
 
-def audit_lichess_coverage(db: sqlite3.Connection, account_id: str, *,
+def audit_lichess_coverage(db: Any, account_id: str, *,
                            snapshot_time: datetime | None = None) -> dict[str, Any]:
     """Return aggregate Lichess coverage for one account without writing data.
 
