@@ -1116,9 +1116,27 @@ def capture_home_rating_review(window: MainWindow, output: Path,
             assert 2 <= len(chart._y_label_bounds) <= 5
             assert not any("−" in label or label.startswith("-")
                            for label in chart._x_axis_labels)
-            assert all(chart.rect().contains(bounds)
-                       for bounds in chart._x_label_bounds + [
-                           rect for _value, rect in chart._y_label_bounds])
+            label_bounds = chart._x_label_bounds + [
+                rect for _value, rect in chart._y_label_bounds]
+            out_of_bounds = [bounds.getRect() for bounds in label_bounds
+                             if not chart.rect().contains(bounds)]
+            if out_of_bounds:
+                print("Home rating label geometry:", {
+                    "fixture": name, "window": (width, height),
+                    "chart": chart.size().toTuple(),
+                    "chart_rect": chart.rect().getRect(),
+                    "plot_rect": chart._plot_rect().getRect(),
+                    "x_labels": [(label, rect.getRect()) for label, rect in
+                                 zip(chart._x_axis_labels, chart._x_label_bounds)],
+                    "y_labels": [(value, rect.getRect()) for value, rect in
+                                 chart._y_label_bounds],
+                    "out_of_bounds": out_of_bounds,
+                }, flush=True)
+                capture(window, output, f"home-rating-bounds-debug-{name}",
+                        width, height)
+                raise AssertionError(
+                    f"Home rating labels extend beyond chart bounds at {width}x{height}: "
+                    f"{out_of_bounds}")
             assert all(not first.intersects(second)
                        for bounds in (chart._x_label_bounds,
                                       [rect for _value, rect in chart._y_label_bounds])
