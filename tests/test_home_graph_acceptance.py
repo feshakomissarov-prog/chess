@@ -4,12 +4,13 @@ import math
 
 import chess
 from PySide6.QtCore import QPoint, Qt
+from PySide6.QtGui import QImage, QPainter
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QToolTip
 
 from chess_coach.application.dashboard import _home_graph_points
 from chess_coach.lichess.phases import PHASE_FALLBACK_VERSION, infer_phase_boundaries
-from chess_coach.ui.pages.home import HomeEvaluationGraph
+from chess_coach.ui.pages.home import HomeEvaluationGraph, PuzzleRatingSparkline
 
 
 def _scores(first: int, last: int) -> list[dict]:
@@ -100,7 +101,7 @@ def test_long_game_preserves_real_evaluation_gap_without_bridging(qtbot):
     assert (300, 301) not in graph._drawn_cp_segments
 
 
-def test_mate_and_out_of_axis_markers_are_aggregated_with_exact_tooltip(qtbot):
+def test_mate_and_out_of_axis_curve_keeps_exact_values_without_edge_markers(qtbot):
     assessments = [row for row in _scores(1, 600)
                    if not 350 <= row["ply"] <= 369]
     assessments.extend({"ply": ply, "white_cp": None, "mate_white": 25 - (ply - 350)}
@@ -139,8 +140,70 @@ def test_mate_and_out_of_axis_markers_are_aggregated_with_exact_tooltip(qtbot):
     clipped_graph = HomeEvaluationGraph(
         _home_graph_points(clipped_rows), total_plies=600)
     _paint(qtbot, clipped_graph)
-    assert len(clipped_graph._clipped_markers) == 2
-    assert {ply for ply, _cp in clipped_graph._clipped_markers} == {59, 519}
+    assert clipped_graph._clipped_markers == []
+    assert {ply: cp for ply, cp, *_ in clipped_graph._raw_cp_points}[40] == 800
+    assert {ply: cp for ply, cp, *_ in clipped_graph._raw_cp_points}[500] == -900
+    assert all(clipped_graph._plot_rect().top() <= target[1] <=
+               clipped_graph._plot_rect().bottom()
+               for target in clipped_graph._hit_targets)
+
+
+def test_off_axis_curve_is_clipped_without_plateau_gap_bridge_or_marker(qtbot):
+    rows = [
+        {"ply": 1, "white_cp": 800, "mate_white": None},
+        {"ply": 2, "white_cp": 900, "mate_white": None},
+        {"ply": 3, "white_cp": 1200, "mate_white": None},
+        {"ply": 4, "white_cp": 200, "mate_white": None},
+        {"ply": 5, "white_cp": -900, "mate_white": None},
+        {"ply": 6, "white_cp": -900, "mate_white": None},
+        {"ply": 7, "white_cp": -100, "mate_white": None},
+        # Missing plies 8–10 form a genuine gap.
+        {"ply": 11, "white_cp": 1200, "mate_white": None},
+        {"ply": 12, "white_cp": 200, "mate_white": None},
+        {"ply": 13, "white_cp": None, "mate_white": 4},
+        {"ply": 14, "white_cp": -900, "mate_white": None},
+        {"ply": 15, "white_cp": -200, "mate_white": None},
+    ]
+    graph = HomeEvaluationGraph(_home_graph_points(rows), total_plies=15)
+    _paint(qtbot, graph, width=700)
+    plot = graph._plot_rect()
+
+    raw = {ply: (cp, y, tooltip) for ply, cp, _x, y, tooltip in graph._raw_cp_points}
+    assert raw[1][0] == 800 and raw[3][0] == 1200
+    assert raw[5][0] == -900 and raw[14][0] == -900
+    assert raw[1][1] < plot.top() and raw[5][1] > plot.bottom()
+    assert "+8.00 пешки" in raw[1][2]
+    assert graph._clipped_markers == []
+    assert (3, 4) in graph._drawn_cp_segments
+    assert (11, 12) in graph._drawn_cp_segments
+    assert (7, 11) not in graph._drawn_cp_segments
+    assert (12, 14) not in graph._drawn_cp_segments  # mate breaks the CP line
+
+    # Render the real widget. Off-axis runs wholly beyond the viewport have no
+    # colored plateau; only the returning/entering segments can touch the clip.
+    image = QImage(graph.size(), QImage.Format.Format_ARGB32)
+    image.fill(Qt.GlobalColor.transparent)
+    painter = QPainter(image)
+    graph.render(painter)
+    painter.end()
+    outside = []
+    for y in range(image.height()):
+        for x in range(image.width()):
+            color = image.pixelColor(x, y)
+            vivid = (color.green() > color.red() * 1.35 and color.green() > 120) or (
+                color.red() > color.green() * 1.35 and color.red() > 120)
+            if vivid and not (plot.left() <= x <= plot.right() and
+                              plot.top() <= y <= plot.bottom()):
+                outside.append((x, y))
+    assert outside == []
+    first_offscreen_x = next(x for ply, _cp, x, _y, _tip in graph._raw_cp_points
+                             if ply == 3)
+    assert not any(
+        (lambda color: color.green() > color.red() * 1.35 and color.green() > 120)(
+            image.pixelColor(x, y))
+        for x in range(max(plot.left(), first_offscreen_x - 2),
+                       min(plot.right(), first_offscreen_x + 3) + 1)
+        for y in range(plot.top(), min(plot.bottom(), plot.top() + 4) + 1))
 
 
 def test_black_mate_and_terminal_mate_zero_do_not_change_white_perspective(qtbot):

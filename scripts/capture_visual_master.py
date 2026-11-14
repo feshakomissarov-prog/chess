@@ -8,7 +8,7 @@ store, user settings, user database or real engine is opened.
 from __future__ import annotations
 
 from copy import deepcopy
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 import os
 import sys
@@ -951,9 +951,10 @@ def capture_long_game_graph_cases(window: MainWindow, output: Path,
                     (480, 220), (540, 80), (600, 170)]
                    if scenario != "mate-and-clipped" else
                    [(1, -120), (80, 20), (160, 80), (240, 160),
-                    (320, 250), (380, 580), (420, 760), (460, 500),
-                    (500, 100), (520, -650), (540, -780), (560, -450),
-                    (580, -100), (600, 150)])
+                    (320, 250), (360, 800), (380, 900), (400, 1200),
+                    (420, 200), (440, 500), (460, -900), (480, -900),
+                    (500, -200), (520, -780), (540, -450), (580, -100),
+                    (600, 150)])
 
         def score_at(ply: int) -> int:
             for (left_ply, left_cp), (right_ply, right_cp) in zip(anchors, anchors[1:]):
@@ -1029,10 +1030,13 @@ def capture_long_game_graph_cases(window: MainWindow, output: Path,
         assert mate_graph._mate_markers[0][2:] == (581, 20)
         assert "Мат: белые через 1" in next(
             target[3] for target in mate_graph._hit_targets if target[2] == 600)
-        assert len(mate_graph._clipped_markers) == 2
+        assert mate_graph._clipped_markers == []
+        raw_scores = [cp for _ply, cp, _x, _y, _tip in mate_graph._raw_cp_points]
+        assert max(raw_scores) >= 1200 and min(raw_scores) <= -900
+        assert any(cp == 200 for cp in raw_scores)
         image = capture(window, output, "home-long-game-graph-cases", width, height)
         print("Long-game graph cases: 600 plies; one 20-ply assessment gap; "
-              "20 mate assessments rendered as one interval; two clipped CP intervals.")
+              "20 mate assessments rendered as one interval; unbounded CP paths clip cleanly.")
         return image
     finally:
         window._render_dashboard_snapshot(original)
@@ -1080,6 +1084,52 @@ def capture_home_long_opponent_case(window: MainWindow, output: Path,
     finally:
         window._render_dashboard_snapshot(original)
         QApplication.processEvents()
+
+
+def capture_home_rating_review(window: MainWindow, output: Path,
+                               width: int, height: int) -> list[QImage]:
+    """Capture two truthful date/rating shapes through the production Home UI."""
+    chart = window._home_view.puzzle_sparkline
+    original_points = deepcopy(chart.points)
+    today = datetime.now(timezone.utc).date()
+    fixtures = (
+        ("high-amplitude-long-period", (90, 72, 54, 36, 18, 0),
+         (1120, 2700, 1420, 2450, 1690, 2620)),
+        ("low-amplitude-short-period", (6, 4, 2, 1, 0),
+         (1802, 1813, 1806, 1817, 1810)),
+    )
+    images = []
+    try:
+        for name, ages, ratings in fixtures:
+            chart.set_points([
+                {"day": (today - timedelta(days=age)).isoformat(),
+                 "rating": rating, "attempts": (12, 8)}
+                for age, rating in zip(ages, ratings)
+            ])
+            window.resize(width, height)
+            QTest.qWait(30)
+            QApplication.processEvents()
+            chart.repaint()
+            QApplication.processEvents()
+            assert chart.isVisibleTo(window), "Home puzzle-rating chart must be visible."
+            assert 2 <= len(chart._x_label_bounds) <= 4
+            assert 2 <= len(chart._y_label_bounds) <= 5
+            assert not any("−" in label or label.startswith("-")
+                           for label in chart._x_axis_labels)
+            assert all(chart.rect().contains(bounds)
+                       for bounds in chart._x_label_bounds + [
+                           rect for _value, rect in chart._y_label_bounds])
+            assert all(not first.intersects(second)
+                       for bounds in (chart._x_label_bounds,
+                                      [rect for _value, rect in chart._y_label_bounds])
+                       for i, first in enumerate(bounds)
+                       for second in bounds[i + 1:])
+            image = capture(window, output, f"home-rating-{name}", width, height)
+            images.append(image)
+    finally:
+        chart.set_points(original_points)
+        QApplication.processEvents()
+    return images
 
 
 def verify_home_play_return(window: MainWindow, account_id: str, output: Path,
@@ -1155,6 +1205,14 @@ def main() -> None:
         # Production Home worker owns its query. No snapshot is passed directly
         # to the renderer and no production method is overridden.
         wait_home(window, account_id)
+        if os.environ.get("CC_VISUAL_SCOPE", "").strip() == "home-chart-review":
+            for width, height in target_sizes:
+                QTest.mouseClick(window._nav_buttons["home"], Qt.MouseButton.LeftButton)
+                wait_home(window, account_id)
+                capture_home_rating_review(window, output, width, height)
+                capture_long_game_graph_cases(window, output, width, height)
+            print(f"Targeted Home chart review captured {len(target_sizes) * 2} native states.")
+            return
         for target_index, (width, height) in enumerate(target_sizes):
             QTest.mouseClick(window._nav_buttons["home"], Qt.MouseButton.LeftButton)
             wait_home(window, account_id)

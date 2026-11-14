@@ -7,8 +7,8 @@ import math
 
 import chess
 
-from PySide6.QtCore import QPoint, QPointF, QTimer, Qt, Signal
-from PySide6.QtGui import QColor, QPainter, QPainterPath, QPen, QPolygonF
+from PySide6.QtCore import QPoint, QPointF, QRect, QTimer, Qt, Signal
+from PySide6.QtGui import QColor, QFont, QFontMetrics, QPainter, QPainterPath, QPen, QPolygonF
 from PySide6.QtWidgets import (
     QComboBox, QFrame, QGridLayout, QHBoxLayout, QLabel, QPushButton, QScrollArea,
     QSizePolicy, QToolTip, QVBoxLayout, QWidget,
@@ -35,6 +35,7 @@ class HomeEvaluationGraph(QWidget):
         self._clipped_markers = []
         self._phase_labels = []
         self._phase_marks = []
+        self._raw_cp_points = []
         self._keyboard_target_index = None
         self.source = ""
         self.coverage = ""
@@ -119,6 +120,7 @@ class HomeEvaluationGraph(QWidget):
         self._clipped_markers = []
         self._phase_labels = []
         self._phase_marks = []
+        self._raw_cp_points = []
         painter.setPen(QPen(QColor("#354058"), 1))
         painter.drawRect(plot)
         limit = self.AXIS_LIMIT_CP
@@ -176,32 +178,36 @@ class HomeEvaluationGraph(QWidget):
                 continue
             ply = max(0, min(self.total_plies, int(row["ply"])))
             x = plot.left() + round(plot.width() * ply / self.total_plies)
-            clipped = (mate is None and abs(int(cp)) > limit)
             if mate is not None:
                 y = (plot.top() + 7 if int(mate) > 0 else
                      plot.bottom() - 7 if int(mate) < 0 else plot.center().y())
             else:
-                score = max(-limit, min(limit, int(cp)))
-                y = plot.center().y() - round(plot.height() * score / (2 * limit))
+                # Keep the real, unbounded coordinate.  QPainter's clip makes
+                # out-of-axis line segments leave/re-enter without a false flat
+                # run along the border.
+                y = plot.center().y() - round(plot.height() * int(cp) / (2 * limit))
             scored.append((ply, x, y, None if mate is not None else int(cp),
-                           None if mate is None else int(mate), clipped, row))
+                           None if mate is None else int(mate), row))
 
         painter.save()
         painter.setClipRect(plot.adjusted(1, 1, -1, -1))
         for index, point in enumerate(scored):
-            ply, x, y, cp, mate, clipped, row = point
+            ply, x, y, cp, mate, row = point
             previous = scored[index - 1] if index else None
             if (previous is not None and cp is not None and previous[3] is not None
-                    and self._connects(previous[6], row)):
+                    and self._connects(previous[5], row)):
                 color = QColor("#38D887" if (cp + previous[3]) >= 0 else "#ED7483")
                 shade = QColor(color)
                 shade.setAlpha(42)
                 baseline = plot.center().y()
-                painter.setPen(Qt.PenStyle.NoPen)
-                painter.setBrush(shade)
-                painter.drawPolygon(QPolygonF([
-                    QPointF(previous[1], baseline), QPointF(previous[1], previous[2]),
-                    QPointF(x, y), QPointF(x, baseline)]))
+                both_above = cp > limit and previous[3] > limit
+                both_below = cp < -limit and previous[3] < -limit
+                if not (both_above or both_below):
+                    painter.setPen(Qt.PenStyle.NoPen)
+                    painter.setBrush(shade)
+                    painter.drawPolygon(QPolygonF([
+                        QPointF(previous[1], baseline), QPointF(previous[1], previous[2]),
+                        QPointF(x, y), QPointF(x, baseline)]))
                 painter.setPen(QPen(color, 2))
                 painter.drawLine(previous[1], previous[2], x, y)
                 self._drawn_cp_segments.append((previous[0], ply))
@@ -213,18 +219,18 @@ class HomeEvaluationGraph(QWidget):
                                  -1 if previous_mate is not None and previous_mate < 0 else 0)
                 joined_to_previous = (previous_mate is not None and
                                       previous_sign == mate_sign and
-                                      self._connects(previous[6], row))
+                                      self._connects(previous[5], row))
                 next_point = scored[index + 1] if index + 1 < len(scored) else None
                 next_mate = next_point[4] if next_point is not None else None
                 next_sign = (1 if next_mate is not None and next_mate > 0 else
                              -1 if next_mate is not None and next_mate < 0 else 0)
                 joined_to_next = (next_mate is not None and next_sign == mate_sign and
-                                  self._connects(row, next_point[6]))
+                                  self._connects(row, next_point[5]))
                 is_group_endpoint = not joined_to_next
                 if is_group_endpoint:
                     group_start = (int(row.get("mate_start_ply", ply)) if
                                    not joined_to_previous else
-                                   int(previous[6].get("mate_start_ply", previous[0])))
+                                   int(previous[5].get("mate_start_ply", previous[0])))
                     if joined_to_previous:
                         # Adjacent raw mate points have not been pre-aggregated.
                         cursor = index - 1
@@ -234,9 +240,9 @@ class HomeEvaluationGraph(QWidget):
                             earlier_sign = (1 if earlier_mate is not None and earlier_mate > 0 else
                                             -1 if earlier_mate is not None and earlier_mate < 0 else 0)
                             if (earlier_mate is None or earlier_sign != mate_sign or
-                                    not self._connects(earlier[6], scored[cursor + 1][6])):
+                                    not self._connects(earlier[5], scored[cursor + 1][5])):
                                 break
-                            group_start = int(earlier[6].get("mate_start_ply", earlier[0]))
+                            group_start = int(earlier[5].get("mate_start_ply", earlier[0]))
                             cursor -= 1
                     color = (QColor("#38D887") if mate > 0 else
                              QColor("#ED7483") if mate < 0 else QColor("#D8D0FF"))
@@ -253,31 +259,12 @@ class HomeEvaluationGraph(QWidget):
                         interval_count=interval_count)
                     self._hit_targets.append((x, y, ply, tooltip))
                     self._mate_markers.append((ply, mate, int(interval_start), interval_count))
-            elif clipped:
-                next_point = scored[index + 1] if index + 1 < len(scored) else None
-                same_clipped_run = bool(
-                    next_point is not None and next_point[3] is not None
-                    and next_point[5] and (next_point[3] > 0) == (cp > 0)
-                    and self._connects(row, next_point[6]))
-                if same_clipped_run:
-                    label = self._white_perspective_label(cp, mate)
-                    self._hit_targets.append((x, y, ply,
-                                              self._tooltip_text(ply, label)))
-                    continue
-                color = QColor("#38D887" if cp > 0 else "#ED7483")
-                triangle_y = plot.top() + 2 if cp > 0 else plot.bottom() - 2
-                triangle = QPolygonF([QPointF(x, triangle_y - 4),
-                                      QPointF(x - 4, triangle_y + 3),
-                                      QPointF(x + 4, triangle_y + 3)])
-                painter.setPen(Qt.PenStyle.NoPen)
-                painter.setBrush(color)
-                painter.drawPolygon(triangle)
-                self._clipped_markers.append((ply, cp))
-                label = self._white_perspective_label(cp, mate)
-                self._hit_targets.append((x, y, ply, self._tooltip_text(ply, label)))
             else:
                 label = self._white_perspective_label(cp, mate)
-                self._hit_targets.append((x, y, ply, self._tooltip_text(ply, label)))
+                target_y = max(plot.top(), min(plot.bottom(), y))
+                tooltip = self._tooltip_text(ply, label)
+                self._hit_targets.append((x, target_y, ply, tooltip))
+                self._raw_cp_points.append((ply, int(cp), x, y, tooltip))
         painter.restore()
         if not scored:
             painter.setPen(QColor("#AEB8D0"))
@@ -348,6 +335,9 @@ class PuzzleRatingSparkline(QWidget):
         self.setMinimumHeight(112)
         self.setMouseTracking(True)
         self.setAccessibleName("История рейтинга задач Lichess")
+        self._y_label_bounds = []
+        self._x_label_bounds = []
+        self._x_axis_labels = []
         self.hide()
 
     def set_points(self, points):
@@ -361,11 +351,39 @@ class PuzzleRatingSparkline(QWidget):
         days = [date.fromisoformat(point["day"]).toordinal() for point in self.points]
         ratings = [point["rating"] for point in self.points]
         axis_low, axis_high, _step = self._rating_axis(ratings)
-        plot = self.rect().adjusted(38, 8, -8, -24)
+        plot = self._plot_rect(ratings)
         width, height = max(1, plot.width()), max(1, plot.height())
         return [QPointF(plot.left() + width * (day - days[0]) / max(1, days[-1] - days[0]),
                         plot.bottom() - height * (rating - axis_low) / (axis_high - axis_low))
                 for day, rating in zip(days, ratings)]
+
+    def _plot_rect(self, ratings=None):
+        ratings = ratings or [int(point["rating"]) for point in self.points]
+        if ratings:
+            low, high, step = self._rating_axis(ratings)
+            font = QFont(self.font())
+            font.setPointSizeF(max(7.0, font.pointSizeF() - 1.0))
+            metrics = QFontMetrics(font)
+            max_label_width = max(metrics.horizontalAdvance(str(value))
+                                  for value in range(low, high + 1, step))
+            left_margin = max(38, max_label_width + 12)
+        else:
+            left_margin = 38
+        return self.rect().adjusted(left_margin, 8, -8, -24)
+
+    @staticmethod
+    def _non_overlapping_label_rects(candidates, *, min_gap: int = 3):
+        """Keep preferred endpoint/center labels whose measured rects fit."""
+        accepted = []
+        for value, rect in candidates:
+            expanded = rect.adjusted(-min_gap // 2, -min_gap // 2,
+                                     min_gap // 2, min_gap // 2)
+            if any(expanded.intersects(existing.adjusted(
+                    -min_gap // 2, -min_gap // 2, min_gap // 2, min_gap // 2))
+                   for _old_value, existing in accepted):
+                continue
+            accepted.append((value, rect))
+        return accepted
 
     @staticmethod
     def _rating_axis(ratings: list[int]) -> tuple[int, int, int]:
@@ -382,18 +400,40 @@ class PuzzleRatingSparkline(QWidget):
             return
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-        plot = self.rect().adjusted(38, 8, -8, -24)
         ratings = [int(point["rating"]) for point in self.points]
+        plot = self._plot_rect(ratings)
         axis_low, axis_high, step = self._rating_axis(ratings)
+        label_font = QFont(painter.font())
+        label_font.setPointSizeF(max(7.0, label_font.pointSizeF() - 1.0))
+        metrics = QFontMetrics(label_font)
+        painter.setFont(label_font)
+        self._y_label_bounds = []
+        self._x_label_bounds = []
+        self._x_axis_labels = []
         painter.setPen(QPen(QColor("#354058"), 1))
         painter.drawRect(plot)
+        y_candidates = []
         for rating in range(axis_low, axis_high + 1, step):
             fraction = (rating - axis_low) / (axis_high - axis_low)
             y = plot.bottom() - round(plot.height() * fraction)
             painter.setPen(QPen(QColor("#354058"), 1))
             painter.drawLine(plot.left(), y, plot.right(), y)
-            painter.setPen(QColor("#AEB8D0"))
-            painter.drawText(0, y + 4, str(rating))
+            width = metrics.horizontalAdvance(str(rating))
+            bounds = QRect(plot.left() - 7 - width, y - metrics.height() // 2,
+                           width, metrics.height())
+            y_candidates.append((rating, bounds))
+        # Prefer both ends and the middle, then add any remaining ticks that
+        # fit. Grid lines remain at every tick even when a label is omitted.
+        y_candidates.sort(key=lambda item: (
+            0 if item[0] in (axis_low, axis_high) else
+            1 if item[0] == round((axis_low + axis_high) / (2 * step)) * step else 2,
+            item[1].top()))
+        y_labels = self._non_overlapping_label_rects(y_candidates)
+        painter.setPen(QColor("#AEB8D0"))
+        for rating, bounds in sorted(y_labels, key=lambda item: item[1].top()):
+            painter.drawText(bounds, Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter,
+                             str(rating))
+            self._y_label_bounds.append((rating, bounds))
         line = QPainterPath(points[0])
         for point in points[1:]:
             line.lineTo(point)
@@ -410,14 +450,26 @@ class PuzzleRatingSparkline(QWidget):
         span_days = max(1, (dates[-1] - dates[0]).days)
         painter.setPen(QColor("#AEB8D0"))
         last_is_today = dates[-1] == date.today()
-        for fraction in (0, 1 / 3, 2 / 3, 1):
+        x_candidates = []
+        fractions = ((1,) if dates[-1] == dates[0] else (1, 0, 1 / 3, 2 / 3))
+        for fraction in fractions:
             elapsed = round(span_days * fraction)
-            current = dates[0] + (dates[-1] - dates[0]) * fraction
             label = ("сегодня" if fraction == 1 and last_is_today else
-                     current.strftime("%d.%m") if fraction == 1 else
-                     f"−{span_days - elapsed} дн.")
+                     dates[-1].strftime("%d.%m") if fraction == 1 else
+                     f"{span_days - elapsed}д")
             x = plot.left() + round(plot.width() * elapsed / span_days)
-            painter.drawText(max(0, min(self.width() - 48, x - 24)), self.height() - 4, label)
+            label_width = metrics.horizontalAdvance(label)
+            left = (plot.left() if x - label_width // 2 < plot.left() else
+                    plot.right() - label_width if x + label_width // 2 > plot.right() else
+                    x - label_width // 2)
+            bounds = QRect(left, self.height() - metrics.height() - 2,
+                           label_width, metrics.height())
+            x_candidates.append((label, bounds))
+        x_labels = self._non_overlapping_label_rects(x_candidates)
+        for label, bounds in sorted(x_labels, key=lambda item: item[1].left()):
+            painter.drawText(bounds, Qt.AlignmentFlag.AlignCenter, label)
+            self._x_label_bounds.append(bounds)
+            self._x_axis_labels.append(label)
 
     def mouseMoveEvent(self, event):
         vertices = self._vertices()

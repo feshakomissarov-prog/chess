@@ -10,7 +10,64 @@ permissions:
   contents: read
 
 jobs:
+  home-chart-review:
+    name: L1/L2 Home chart review
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+      - uses: actions/setup-python@v7.1.0
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Install application and test dependencies
+        run: python -m pip install -e ".[dev]"
+      - name: L1 diff and compile checks
+        run: |
+          git diff --check HEAD^ HEAD
+          python -m py_compile src/chess_coach/ui/pages/home.py scripts/capture_visual_master.py tests/test_home_graph_acceptance.py tests/test_home_rating_sparkline.py
+      - name: L1 targeted Home graph and rating tests
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: >-
+          python -X faulthandler -m pytest -o addopts= -q
+          tests/test_home_graph_acceptance.py tests/test_home_rating_sparkline.py
+      - name: Configure native display for Home chart captures
+        shell: pwsh
+        run: |
+          Set-DisplayResolution -Width 1920 -Height 1080 -Force
+          Add-Type -AssemblyName System.Windows.Forms
+          $bounds = [System.Windows.Forms.Screen]::PrimaryScreen.Bounds
+          Write-Host "Primary display: $($bounds.Width)x$($bounds.Height)"
+          if ($bounds.Width -lt 1672 -or $bounds.Height -lt 941) {
+            throw "Runner display cannot fit the 1672x941 Home chart capture."
+          }
+      - name: L2 native 100% and compact Home chart captures
+        shell: pwsh
+        run: |
+          $cases = @(
+            @{ Scale = "1"; Sizes = "1672x941,1280x720" },
+            @{ Scale = "1.25"; Sizes = "1280x720" },
+            @{ Scale = "1.5"; Sizes = "1120x640" }
+          )
+          foreach ($case in $cases) {
+            $env:QT_SCALE_FACTOR = $case.Scale
+            $env:CC_VISUAL_SCOPE = "home-chart-review"
+            $env:CC_VISUAL_TARGET_SIZES = $case.Sizes
+            $env:CC_VISUAL_OUTPUT = "visual-evidence/home-chart-review/scale-$($case.Scale)"
+            $env:CC_VISUAL_LOCALAPPDATA = Join-Path $env:RUNNER_TEMP "home-chart-review-localappdata-$($case.Scale)"
+            python -X faulthandler scripts/capture_visual_master.py
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          }
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: home-chart-l1-l2-${{ github.event.pull_request.head.sha || github.sha }}
+          path: visual-evidence/home-chart-review/
+          if-no-files-found: error
   test:
+    needs: home-chart-review
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v7.0.1
@@ -37,6 +94,7 @@ jobs:
         run: >-
           python -X faulthandler -c "from PySide6.QtWidgets import QApplication; from chess_coach.window import MainWindow; app = QApplication([]); window = MainWindow(offline_mode=True); assert window.lichess is None; window.close()"
   visual-evidence:
+    needs: home-chart-review
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v7.0.1
