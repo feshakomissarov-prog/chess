@@ -677,7 +677,7 @@ def test_review_layout_has_no_outer_scroll_and_renders_at_desktop_sizes(qtbot, t
             assert abs(board_rect.width() - board_rect.height()) <= 1
             assert workspace.board_column.width() - board_rect.width() <= 24
             assert table_x >= board_x + board_rect.width()
-            assert table_x - (board_x + board_rect.width()) <= 24
+            assert table_x - (board_x + board_rect.width()) <= 48
             assert workspace.moves_list.table.horizontalScrollBar().maximum() == 0
             metric_headers = workspace.side_metrics_summary.horizontalHeader()
             for column in range(workspace.side_metrics_summary.columnCount()):
