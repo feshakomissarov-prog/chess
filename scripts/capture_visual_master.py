@@ -322,7 +322,7 @@ def wait_home(window, account_id: str) -> None:
         raise
     assert window._dashboard_metric_values["accuracy"].text().endswith("%")
     assert "Lichess" in window._dashboard_metric_details["accuracy"].text()
-    assert "не всех партий с позиционными оценками" in (
+    assert "не равно числу всех партий с позиционными оценками" in (
         window._dashboard_metric_details["accuracy"].toolTip())
     assert "разные показатели с разными знаменателями" in (
         window._dashboard_metric_details["games"].toolTip())

@@ -121,7 +121,7 @@ def _scope(db: sqlite3.Connection, account_id: str, cutoff: str | None) -> dict[
     local_rows = _rows(db, local_query, (*parameters, FORMULA_ID))
     local = {row["game_id"]: row for row in local_rows}
     official_count = sum(value[0] is not None for value in official.values())
-    opposite_only = sum(value[0] is None and value[1] for value in official.values())
+    opposite_only = sum(value[0] is None and bool(value[1]) for value in official.values())
     invalid_official = sum(value[2] == "invalid" for value in official.values())
     unknown_side = sum(value[2] == "unknown_side" for value in official.values())
     stockfish_accuracy = {key for key, row in local.items() if row["stockfish"]}

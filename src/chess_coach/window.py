@@ -4073,15 +4073,16 @@ class MainWindow(QMainWindow):
                     "Партии с позиционными оценками и партии с официальной точностью Lichess — "
                     "разные показатели с разными знаменателями.")
             if not masked and metric["key"] == "accuracy":
+                source_description = (
+                    f"{metric['source']}\nОфициальная точность Lichess берётся только для стороны "
+                    "выбранного профиля; число партий с точностью отличается от числа партий "
+                    "с позиционными оценками. Выборки источников могут пересекаться.")
                 # The large KPI value has no popup. Keep exact source values on
                 # the compact detail-label tooltip and full formula/provenance
                 # in its accessible description.
                 tooltip = (f"{metric['detail']}\n"
-                           "Официальная точность Lichess считается только при сохранённом значении "
-                           "для стороны выбранного профиля (0–100); число в скобках — количество "
-                           "таких партий, а не всех партий с позиционными оценками. "
-                           "Источники Lichess и Stockfish могут пересекаться. "
-                           f"{metric['source']}")
+                           "Официальная точность Lichess — только для стороны выбранного профиля; "
+                           "её число не равно числу всех партий с позиционными оценками.")
             else:
                 tooltip = source_description
             # Large KPI values stay visually unchanged. Their source is exposed
