@@ -322,6 +322,10 @@ def wait_home(window, account_id: str) -> None:
         raise
     assert window._dashboard_metric_values["accuracy"].text().endswith("%")
     assert "Lichess" in window._dashboard_metric_details["accuracy"].text()
+    assert "не всех партий с позиционными оценками" in (
+        window._dashboard_metric_details["accuracy"].toolTip())
+    assert "разные показатели с разными знаменателями" in (
+        window._dashboard_metric_details["games"].toolTip())
     game_detail = window._dashboard_metric_details["games"].text()
     assert game_detail.count("С оценками:") == 1, (
         "The Home completed-games KPI must not repeat its source summary."
@@ -337,9 +341,30 @@ def wait_home(window, account_id: str) -> None:
         "All three synthetic Home games require a real rendered evaluation graph."
     )
     for index, card in enumerate(recent_cards, start=1):
-        assert card.width() <= window._home_view.recent_scroll.viewport().width(), (
+        viewport = window._home_view.recent_scroll.viewport()
+        if card.width() > viewport.width():
+            root = card.layout()
+            details = card.findChild(QWidget, "dashboardDetailsColumn")
+            graph = card.findChild(QWidget, "dashboardGraphColumn")
+            print("Home card geometry at failed settle:", {
+                "card": card.geometry().getRect(),
+                "minimum_width": card.minimumWidth(),
+                "minimum_size_hint": card.minimumSizeHint().width(),
+                "size_hint": card.sizeHint().width(),
+                "viewport": viewport.geometry().getRect(),
+                "viewport_width": viewport.width(),
+                "scroll_widget": (
+                    window._home_view.recent_scroll.widget().width(),
+                    window._home_view.recent_scroll.widget().height()),
+                "root_direction": root.direction() if root else None,
+                "root_minimum": root.minimumSize().width() if root else None,
+                "details_minimum": details.minimumSizeHint().width() if details else None,
+                "graph_minimum": graph.minimumSizeHint().width() if graph else None,
+                "window_size": (window.width(), window.height()),
+            }, flush=True)
+        assert card.width() <= viewport.width(), (
             f"Home card {index} exceeds its scroll viewport width: "
-            f"{card.width()} > {window._home_view.recent_scroll.viewport().width()}"
+            f"{card.width()} > {viewport.width()}"
         )
         if card.width() < 400:
             assert card._responsive_details_layout.direction() == (
@@ -1244,10 +1269,26 @@ def main() -> None:
         wait_home(window, account_id)
         if os.environ.get("CC_VISUAL_SCOPE", "").strip() == "home-chart-review":
             for width, height in target_sizes:
+                window.resize(width, height)
+                QApplication.processEvents()
                 QTest.mouseClick(window._nav_buttons["home"], Qt.MouseButton.LeftButton)
                 wait_home(window, account_id)
                 capture_home_rating_review(window, output, width, height)
                 capture_long_game_graph_cases(window, output, width, height)
+                # Repeat the layout path after each size change so the native
+                # L2 gate catches card-width state retained across navigation.
+                for _repeat in range(2):
+                    QTest.mouseClick(window._nav_buttons["play"], Qt.MouseButton.LeftButton)
+                    QTest.mouseClick(window._nav_buttons["home"], Qt.MouseButton.LeftButton)
+                    wait_home(window, account_id)
+            if len(target_sizes) > 1:
+                # Exercise compact → wide as well as wide → compact without
+                # introducing a timer/sleep into the geometry assertion.
+                width, height = target_sizes[0]
+                window.resize(width, height)
+                QApplication.processEvents()
+                QTest.mouseClick(window._nav_buttons["home"], Qt.MouseButton.LeftButton)
+                wait_home(window, account_id)
             print(f"Targeted Home chart review captured {len(target_sizes) * 2} native states.")
             return
         for target_index, (width, height) in enumerate(target_sizes):
