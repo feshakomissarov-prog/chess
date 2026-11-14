@@ -464,6 +464,7 @@ class PuzzleRatingSparkline(QWidget):
             left = (plot.left() if x - label_width // 2 < plot.left() else
                     plot.right() - label_width if x + label_width // 2 > plot.right() else
                     x - label_width // 2)
+            left = max(0, min(max(0, self.width() - label_width), left))
             bounds = QRect(left, self.height() - metrics.height() - 2,
                            label_width, metrics.height())
             x_candidates.append((label, bounds))
