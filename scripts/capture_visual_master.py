@@ -1134,6 +1134,9 @@ def main() -> None:
                     and window._recent_games_layout.itemAt(i).widget().objectName() == "metricCard"
                 ]
                 assert len(recent_cards) == 3
+                window._home_view.recent_scroll.ensureWidgetVisible(
+                    recent_cards[-1], 0, 0)
+                app.processEvents()
                 last_card_rect = QRect(
                     recent_cards[-1].mapToGlobal(QPoint(0, 0)),
                     recent_cards[-1].size())
