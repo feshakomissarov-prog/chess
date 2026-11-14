@@ -466,6 +466,7 @@ class MainWindow(QMainWindow):
     engine_install_finished = Signal(object)
     position_eval_finished = Signal(int, object, object)
     position_eval_update = Signal(int, object)
+    review_variation_eval_finished = Signal(str, str, int, object, object)
     dashboard_finished = Signal(int, object, object, object)
     dashboard_preview_ready = Signal(int, object, object, str)
     dashboard_options_ready = Signal(object)
@@ -670,6 +671,10 @@ class MainWindow(QMainWindow):
         self._analysis_user_cancelled_request_id: str | None = None
         self._review_safety_request_id: str | None = None
         self._review_safety_context: tuple | None = None
+        self._review_variation_request_id: str | None = None
+        self._review_variation_stop: threading.Event | None = None
+        self._review_variation_active: dict = {}
+        self._review_variation_operations: dict[str, OperationHandle] = {}
         self._analysis_session_generation = 0
         self._saved_game_analysis_generation = 0
         self._saved_game_analysis_handle = None
@@ -726,6 +731,7 @@ class MainWindow(QMainWindow):
         self.engine_install_finished.connect(self._engine_install_finished)
         self.position_eval_finished.connect(self._position_eval_finished)
         self.position_eval_update.connect(self._position_eval_update)
+        self.review_variation_eval_finished.connect(self._review_variation_eval_finished)
         self.dashboard_finished.connect(self._dashboard_result_ready)
         self.home_cache_preload_ready.connect(self._home_cache_preload_result_ready)
         self.dashboard_preview_ready.connect(self._dashboard_preview_result_ready)
@@ -2383,6 +2389,8 @@ class MainWindow(QMainWindow):
         self.review_workspace.analysis_requested.connect(self._request_saved_game_analysis)
         self.review_workspace.open_lichess_game_requested.connect(self._open_lichess_game_page)
         self.review_workspace.safety_requested.connect(self._request_review_training_safety)
+        self.review_workspace.variation_evaluation_requested.connect(
+            self._request_review_variation_evaluation)
         self.review_workspace.position_selected.connect(self._review_position_selected)
         self.review_workspace.tabs.currentChanged.connect(self._schedule_workspace_save)
         self.screen_stack.addWidget(self.review_workspace)
@@ -2863,6 +2871,104 @@ class MainWindow(QMainWindow):
             board_target_size=int(self.settings.value("board_target_size", 480, type=int)),
             review=resume_target,
         ))
+
+    def _request_review_variation_evaluation(self, branch_id: str, ply: int,
+                                             fen: str, request_id: str) -> None:
+        page = getattr(self, "review_workspace", None)
+        identity = self._review_workspace_identity()
+        if (page is None or not page.review or identity is None
+                or self.screen_stack.currentWidget() is not page
+                or not page.evaluation_allowed or not page.training_allowed
+                or self._screen_mode != "review"):
+            return
+        active_human_ids = {session.game_id for session in self._sessions_for_safety()
+                            if session.status in {"started", "playing"}
+                            and not session.is_ai_opponent}
+        if active_human_ids:
+            page.clear_variation_evaluations()
+            page.set_variation_evaluation(branch_id, ply, request_id,
+                                          {"error": "Fair Play blocked"})
+            return
+        engine_path = str(self.settings.value("stockfish_verified_path", "", type=str)).strip()
+        configured_path = str(self.settings.value("stockfish_path", "", type=str)).strip()
+        if not engine_path or engine_path != configured_path or not Path(engine_path).is_file():
+            page.set_variation_evaluation(branch_id, ply, request_id,
+                                          {"error": "Stockfish не проверен"})
+            return
+
+        old_stop = self._review_variation_stop
+        if old_stop is not None:
+            old_stop.set()
+            analysis = self._review_variation_active.get("analysis")
+            if analysis is not None:
+                try:
+                    analysis.stop()
+                except Exception:
+                    pass
+        stop_event = threading.Event()
+        active: dict = {}
+        self._review_variation_request_id = str(request_id)
+        self._review_variation_stop = stop_event
+        self._review_variation_active = active
+        generation = self._analysis_session_generation
+        service = self.lichess
+        token = getattr(service, "token", None) if service else None
+        username = str(getattr(service, "username", "") or "").casefold()
+        isolated_offline = bool(self.offline_mode and service is None
+                                and not self._lichess_connected)
+
+        def safety_check() -> bool:
+            if stop_event.is_set() or active_human_ids:
+                return False
+            if isolated_offline:
+                return (self.offline_mode and self.lichess is None
+                        and not self._lichess_connected
+                        and generation == self._analysis_session_generation)
+            return self.engine_analysis.refresh_fair_play(
+                service, token, username,
+                is_current=lambda: (
+                    not stop_event.is_set() and self.lichess is service
+                    and self._lichess_connected
+                    and generation == self._analysis_session_generation
+                    and self._online_actions_allowed()
+                    and not any(session.status in {"started", "playing"}
+                                and not session.is_ai_opponent
+                                for session in self._sessions_for_safety())),
+                active_human_session=False)
+
+        def work() -> None:
+            try:
+                result = self.engine_analysis.evaluate_position(
+                    engine_path, chess.Board(fen), stop_event, active,
+                    safety_check=safety_check)
+            except Exception as exc:
+                result = {"error": str(exc)}
+            worker = threading.current_thread()
+            active["worker_thread"] = worker
+            self.review_variation_eval_finished.emit(
+                str(branch_id), str(request_id), int(ply), result, worker)
+
+        handle = self._start_registered_work(
+            work, kind="review_variation_evaluation", lane=OperationLane.ENGINE,
+            stop_event=stop_event, thread_name="chess-coach-review-variation")
+        self._review_variation_active["handle"] = handle
+        self._review_variation_operations[str(request_id)] = handle
+        self._statistics_workers.add(handle)
+
+    def _review_variation_eval_finished(self, branch_id: str, request_id: str, ply: int,
+                                        result: object, worker: threading.Thread) -> None:
+        worker.join(timeout=0.05)
+        self._statistics_workers.discard(worker)
+        handle = self._review_variation_operations.pop(str(request_id), None)
+        if handle is not None:
+            self._statistics_workers.discard(handle)
+        if request_id == self._review_variation_request_id:
+            self._review_variation_active = {}
+            self._review_variation_stop = None
+            self._review_variation_request_id = None
+        page = getattr(self, "review_workspace", None)
+        if page is not None and isinstance(result, dict):
+            page.set_variation_evaluation(branch_id, ply, request_id, result)
 
     def _review_position_selected(self, _game_id: str, _ply: int) -> None:
         self._schedule_workspace_save()
@@ -6638,8 +6744,18 @@ class MainWindow(QMainWindow):
         self._review_safety_context = None
         if preserve_offline and self.offline_mode:
             return
+        if self._review_variation_stop is not None:
+            self._review_variation_stop.set()
+            analysis = self._review_variation_active.get("analysis")
+            if analysis is not None:
+                try:
+                    analysis.stop()
+                except Exception:
+                    pass
+            self._review_variation_request_id = None
         workspace = getattr(self, "review_workspace", None)
         if workspace is not None:
+            workspace.clear_variation_evaluations()
             # Revoke interactive training while retaining read-only stored
             # evaluations when no human game is currently active.
             workspace.set_training_safety_result(

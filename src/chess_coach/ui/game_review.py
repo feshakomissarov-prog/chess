@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import chess
 import math
+import copy
+import uuid
 from PySide6.QtCore import QPointF, QRect, QSettings, QTimer, Qt, Signal
 from PySide6.QtGui import QColor, QKeySequence, QPainter, QPen, QPolygonF, QShortcut
 from PySide6.QtWidgets import (
@@ -19,7 +21,7 @@ from ..lichess.game_review import (
 )
 from ..domain.accuracy import win_percent_cp
 from .display import (
-    evaluation_label, format_clock_control, format_game_timeline, game_opening_name,
+    evaluation_label, format_clock_control, format_game_date, format_game_timeline, game_opening_name,
     opening_tooltip, phase_label,
     severity_label, source_short,
 )
@@ -469,6 +471,7 @@ class GameReviewWorkspace(QWidget):
     safety_requested = Signal(str)
     analysis_requested = Signal(str)
     open_lichess_game_requested = Signal(str)
+    variation_evaluation_requested = Signal(str, int, str, str)
 
     def __init__(self, repository, *, training_allowed: bool = False,
                  training_block_reason: str = "", settings=None, parent=None):
@@ -495,6 +498,9 @@ class GameReviewWorkspace(QWidget):
         self._ephemeral_board: chess.Board | None = None
         self._ephemeral_branch: list[chess.Move] = []
         self._ephemeral_undo: list[chess.Board] = []
+        self._review_variations: list[dict] = []
+        self._selected_variation_id: str | None = None
+        self._selected_variation_ply = 0
         self._build_ui()
 
     def _build_ui(self):
@@ -513,8 +519,14 @@ class GameReviewWorkspace(QWidget):
         back.clicked.connect(self.return_requested.emit)
         self.export_button = QPushButton("Экспорт PGN")
         self.export_button.clicked.connect(self._export)
+        self.repeat_analysis_button = QPushButton("Повторить анализ")
+        self.repeat_analysis_button.setObjectName("primaryAction")
+        self.repeat_analysis_button.clicked.connect(
+            lambda: self.review and self.analysis_requested.emit(
+                str(self.review["game"]["game_id"])))
         header.addWidget(back)
         header.addWidget(self.export_button)
+        header.addWidget(self.repeat_analysis_button)
         root.addLayout(header)
         self.subtitle = QLabel()
         self.subtitle.setObjectName("secondary")
@@ -574,6 +586,11 @@ class GameReviewWorkspace(QWidget):
         board_layout.addWidget(self.white_name)
         board_layout.addWidget(self.review_board, 0,
                                Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        self.explore_opening_button = QPushButton("Изучить дебют")
+        self.explore_opening_button.setEnabled(False)
+        self.explore_opening_button.setToolTip("Раздел изучения дебютов появится позже.")
+        self.explore_opening_button.setAccessibleName("Изучить дебют — появится позже")
+        board_layout.addWidget(self.explore_opening_button)
         board_layout.addWidget(self.black_name)
 
         self.left_metrics = QScrollArea()
@@ -659,18 +676,21 @@ class GameReviewWorkspace(QWidget):
         inspector.setMinimumWidth(0)
         inspector_layout = QVBoxLayout(inspector)
         self.advantage_bar = AdvantageBar()
-        inspector_layout.addWidget(self.advantage_bar, 0, Qt.AlignmentFlag.AlignLeft)
+        self.advantage_bar.setMinimumHeight(150)
+        self.advantage_bar.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Expanding)
         self.selected_move_summary = QLabel("Выберите ход, чтобы увидеть его оценку.")
         self.selected_move_summary.setWordWrap(True)
         self.selected_move_summary.setMaximumHeight(62)
-        inspector_layout.addWidget(self.selected_move_summary)
+        self.selected_move_summary.hide()
         right_row = QHBoxLayout()
         self.advantage_label = QLabel("н/д")
         self.advantage_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.moves_list = MoveTable()
         self.moves_list.setAccessibleName("Список ходов партии")
         self.moves_list.ply_selected.connect(self.select_ply)
+        self.moves_list.variation_selected.connect(self.select_variation_ply)
         self.moves_list.wheel_navigate.connect(self._navigate_wheel)
+        right_row.addWidget(self.advantage_bar, 0)
         right_row.addWidget(self.moves_list, 1)
         inspector_layout.addLayout(right_row, 1)
         inspector_layout.addWidget(self.advantage_label)
@@ -726,24 +746,25 @@ class GameReviewWorkspace(QWidget):
         root.addWidget(split, 1)
 
         self.graph_title = QLabel("Оценка позиции за белых · Δ — изменение оценки, не качество хода")
-        self.graph_title.setText("Анализ")
-        self.graph_title.setStyleSheet("font-size: 12px; font-weight: 700;")
+        self.graph_title.setText("Оценка позиции")
+        self.graph_title.setStyleSheet("font-size: 15px; font-weight: 700;")
         graph_controls = QHBoxLayout()
         graph_controls.addWidget(self.graph_title, 1)
         self.graph_mode = QComboBox()
         self.graph_mode.addItem("Оценка позиции", "evaluation")
         self.graph_mode.addItem("Изменение за ход", "delta")
         self.graph_mode.currentIndexChanged.connect(self._graph_mode_changed)
-        graph_controls.addWidget(self.graph_mode)
+        self.metrics_layout.addWidget(self.graph_mode)
         self.error_markers_toggle = QCheckBox("Маркеры ошибок")
         self.error_markers_toggle.setChecked(
             self.settings.value("review/error_markers", False, type=bool))
         self.error_markers_toggle.toggled.connect(self._error_markers_changed)
-        graph_controls.addWidget(self.error_markers_toggle)
+        self.metrics_layout.addWidget(self.error_markers_toggle)
         root.addLayout(graph_controls)
         self.graph_legend = QLabel("● хороший ход   ◆ неточность   ■ ошибка   ▲ зевок   · неизвестно — источник не классифицировал ход")
         self.graph_legend.setObjectName("secondary")
         root.addWidget(self.graph_legend)
+        self.graph_legend.hide()
         self.graph = ReviewGraph([], [])
         self.graph.set_markers_visible(self.error_markers_toggle.isChecked())
         mode_index = self.graph_mode.findData(
@@ -785,6 +806,7 @@ class GameReviewWorkspace(QWidget):
         self.analysis_button.clicked.connect(
             lambda: self.review and self.analysis_requested.emit(str(self.review["game"]["game_id"])))
         self.open_lichess_button = QPushButton("Открыть партию на Lichess для запроса анализа")
+        self.open_lichess_button.setText("Открыть на Lichess")
         self.open_lichess_button.setToolTip(
             "Откроет подтверждённую страницу партии; запрос анализа остаётся только действием пользователя на сайте.")
         self.open_lichess_button.clicked.connect(
@@ -797,6 +819,7 @@ class GameReviewWorkspace(QWidget):
                        self.skip_button, self.continue_button, self.return_review_button):
             actions.addWidget(button)
             button.setVisible(False)
+        self.analysis_button.hide()
         actions.addWidget(self.repeat_button)
         self.repeat_button.setVisible(False)
         self.training_button.setVisible(True)
@@ -885,7 +908,10 @@ class GameReviewWorkspace(QWidget):
         self._ephemeral_board = None
         self._ephemeral_branch.clear()
         self._ephemeral_undo.clear()
-        self.ephemeral_controls.setVisible(self._ephemeral_study)
+        self._review_variations.clear()
+        self._selected_variation_id = None
+        self._selected_variation_ply = 0
+        self.ephemeral_controls.setVisible(False)
         self.ephemeral_status.setText(
             "Временная ветка."
             if self._ephemeral_study else "")
@@ -932,6 +958,7 @@ class GameReviewWorkspace(QWidget):
         self.phase_selector.setVisible(has_summary_metrics and self.position_evaluations_available)
         self.side_metrics_summary.setVisible(has_summary_metrics)
         self.phase_summary.setVisible(has_summary_metrics and self.position_evaluations_available)
+        self.phase_summary.hide()
         self.graph_title.setText("Оценка позиции за белых · Δ — изменение оценки, не качество хода"
                                  if self.position_evaluations_available else "Анализ")
         self.graph_mode.setVisible(self.position_evaluations_available)
@@ -951,7 +978,7 @@ class GameReviewWorkspace(QWidget):
             "Интерактивный график сохранённых оценок по полуходам.")
         self.advantage_bar.setVisible(self.position_evaluations_available)
         self.advantage_label.setVisible(self.position_evaluations_available)
-        self.selected_move_summary.setVisible(self.position_evaluations_available)
+        self.selected_move_summary.hide()
         game_finished = game.get("status") not in {
             "created", "started", "started_soon", "playing"}
         has_engine_analysis = (self.evaluation_allowed and
@@ -977,12 +1004,22 @@ class GameReviewWorkspace(QWidget):
                   else "1–0" if game.get("winner") == "white"
                   else "0–1" if game.get("winner") == "black" else "результат н/д")
         source = analysis.get("source") or ""
-        game_details = (f"{format_game_timeline(game)} · "
-                        f"{format_clock_control(game.get('clock'))} · "
-                        f"{game_opening_name(game)}")
+        date_value = game.get("started_at") or game.get("date")
+        date_text = format_game_date(date_value, precision=game.get("game_time_precision"))
+        opening = game_opening_name(game)
+        clock = format_clock_control(game.get("clock"))
+        chips = [result]
+        if not date_text.startswith(("Дата неизвестна", "Время неизвестно")):
+            chips.append(date_text)
+        if opening not in {"Дебют не определён", "Неизвестный дебют", ""}:
+            chips.append(opening)
+        if clock != "Контроль не указан":
+            chips.append(clock)
+        game_details = " · ".join(chips)
         self.title.setText("Разбор партии")
-        self.title.setToolTip(f"{white} — {black} · {result}\n{game_details}")
-        self.subtitle.setText(f"{white} — {black} · {result} · {game_details}")
+        self.title.setToolTip(
+            f"{white} — {black}\n{format_game_timeline(game)} · {clock} · {opening}")
+        self.subtitle.setText(game_details)
         self.subtitle.setToolTip(opening_tooltip(game.get("opening_name")))
         self.white_name.setText(f"♔  {white}")
         self.black_name.setText(f"♚  {black}")
@@ -992,13 +1029,15 @@ class GameReviewWorkspace(QWidget):
             else ("Показатель", "Белые", "Чёрные"))
         self.review_board.set_flipped(color == "black")
         self.review_board.set_position(self.review["positions"][0])
+        self._ephemeral_board = self.review["positions"][0].copy(stack=True)
         if self._ephemeral_study:
-            self._ephemeral_board = self.review["positions"][0].copy(stack=True)
-            self.review_board.set_interaction_enabled(True)
             self.ephemeral_undo_button.setEnabled(False)
             self.ephemeral_reset_button.setEnabled(False)
-        else:
-            self.review_board.set_interaction_enabled(False)
+        game_finished = game.get("status") not in {
+            "created", "started", "started_soon", "playing"}
+        self.review_board.set_interaction_enabled(bool(game_finished))
+        self.repeat_analysis_button.setVisible(bool(game_finished))
+        self.repeat_analysis_button.setEnabled(bool(game_finished))
         assessment_by_ply = {int(item["ply"]): dict(item)
                              for item in analysis.get("assessments", [])}
         for move in self.review["moves"]:
@@ -1016,6 +1055,7 @@ class GameReviewWorkspace(QWidget):
             scores=assessment_by_ply if self.evaluation_allowed else {},
             enabled=self.evaluation_allowed or self._ephemeral_study,
             show_severity=self.evaluation_allowed)
+        self.moves_list.set_variations([])
         metrics = self.review["per_side"]
         accuracy = self.review["official_accuracy"]
         def percent(value):
@@ -1147,9 +1187,14 @@ class GameReviewWorkspace(QWidget):
         eligible = eligible_error_moves(self.review) if self.evaluation_allowed else []
         self.previous_error_button.setVisible(self.evaluation_allowed and bool(eligible))
         self.next_error_button.setVisible(self.evaluation_allowed and bool(eligible))
-        self.training_button.setText(
-            f"Разобрать мои ошибки · {len(eligible)}" if self.evaluation_allowed
-            else "Разобрать мои ошибки")
+        self.training_button.setText("Разобрать мои ошибки")
+        self.training_button.setToolTip(
+            (f"Разобрать мои ошибки · найдено {len(eligible)}. "
+             "Перед упражнением потребуется проверка Fair Play."
+             if eligible and not self.training_allowed else
+             f"Разобрать мои ошибки · найдено {len(eligible)}"
+             if self.evaluation_allowed else
+             "Оценки и ошибки скрыты до безопасной проверки."))
         reason = self.training_block_reason
         has_errors = bool(eligible)
         has_saved_analysis = bool(self.evaluation_allowed and analysis and (
@@ -1344,6 +1389,9 @@ class GameReviewWorkspace(QWidget):
                                    evaluation_allowed: bool | None = None):
         ephemeral = bool(getattr(self, "_ephemeral_study", False))
         selected_ply = self.selected_ply
+        variations = copy.deepcopy(self._review_variations)
+        selected_variation = self._selected_variation_id
+        selected_variation_ply = self._selected_variation_ply
         self.training_allowed = bool(allowed)
         if evaluation_allowed is not None:
             self.evaluation_allowed = bool(evaluation_allowed)
@@ -1364,10 +1412,26 @@ class GameReviewWorkspace(QWidget):
             self.load_game(game, training_allowed=allowed,
                            training_block_reason=reason, ephemeral=ephemeral,
                            evaluation_allowed=self.evaluation_allowed)
+            if allowed and self.evaluation_allowed and variations:
+                self._review_variations = variations
+                self.moves_list.set_variations(variations)
             self.select_ply(selected_ply)
+            if allowed and self.evaluation_allowed and selected_variation:
+                branch = self._variation_by_id(selected_variation)
+                if branch:
+                    self._selected_variation_id = selected_variation
+                    self._selected_variation_ply = selected_variation_ply
+                    self.select_variation_ply(selected_variation, selected_variation_ply)
+                    self._request_variation_evaluation(branch)
+        if not self.evaluation_allowed:
+            self.clear_variation_evaluations()
         self.training_safety_button.setText("Проверить безопасность")
 
     def set_safety_pending(self, reason: str = "Проверяем активные партии; оценки скрыты."):
+        selected_ply = self.selected_ply
+        selected_variation = self._selected_variation_id
+        selected_variation_ply = self._selected_variation_ply
+        variations = copy.deepcopy(self._review_variations)
         self.training_allowed = False
         self.training_block_reason = reason
         self.training_safety_button.setEnabled(False)
@@ -1379,6 +1443,11 @@ class GameReviewWorkspace(QWidget):
                            training_block_reason=reason,
                            ephemeral=self._ephemeral_study,
                            evaluation_allowed=True)
+            self._review_variations = variations
+            self.moves_list.set_variations(variations)
+            self.select_ply(selected_ply)
+            if selected_variation and self._variation_by_id(selected_variation):
+                self.select_variation_ply(selected_variation, selected_variation_ply)
 
     def revoke_safety(self, reason: str) -> None:
         self.set_training_safety_result(False, reason)
@@ -1392,7 +1461,10 @@ class GameReviewWorkspace(QWidget):
             return
         ply = max(0, min(len(self.review["moves"]), int(ply)))
         self.selected_ply = ply
-        if self._ephemeral_study:
+        self._selected_variation_id = None
+        self._selected_variation_ply = 0
+        self.moves_list.set_variations(self._review_variations)
+        if self.review_board.isEnabled() or self._ephemeral_study:
             self._ephemeral_board = self.review["positions"][ply].copy(stack=True)
             self._ephemeral_branch.clear()
             self._ephemeral_undo.clear()
@@ -1563,27 +1635,149 @@ class GameReviewWorkspace(QWidget):
         if self.training_mode:
             self._training_move_intent(move)
             return
-        if not self._ephemeral_study or self._ephemeral_board is None:
+        if not self.review or self._ephemeral_board is None:
             return
         if move not in self._ephemeral_board.legal_moves:
+            return
+        active_branch = self._variation_by_id(self._selected_variation_id)
+        if active_branch is None:
+            next_ply = self.selected_ply + 1
+            if (next_ply <= len(self.review["moves"])
+                    and self.review["moves"][next_ply - 1].move == move):
+                self.select_ply(next_ply)
+                return
+            active_branch = {
+                "id": uuid.uuid4().hex,
+                "fork_ply": self.selected_ply,
+                "fork_fen": self.review["positions"][self.selected_ply].fen(),
+                "moves": [], "sans": [], "scores": {}, "pending": {},
+                "request_ids": {},
+                "start_move_number": self._ephemeral_board.fullmove_number,
+                "start_color": "white" if self._ephemeral_board.turn == chess.WHITE else "black",
+            }
+            self._review_variations.append(active_branch)
+            self._selected_variation_id = active_branch["id"]
+        elif self._ephemeral_board.fen() != active_branch["board"].fen():
+            active_branch = None
+        if active_branch is None:
             return
         san = self._ephemeral_board.san(move)
         self._ephemeral_undo.append(self._ephemeral_board.copy(stack=True))
         self._ephemeral_board.push(move)
         self._ephemeral_branch.append(move)
+        active_branch["moves"].append(move)
+        active_branch["sans"].append(san)
+        active_branch["board"] = self._ephemeral_board.copy(stack=True)
+        self._selected_variation_ply = len(active_branch["moves"])
         self.review_board.set_position(self._ephemeral_board)
         self.ephemeral_undo_button.setEnabled(True)
         self.ephemeral_reset_button.setEnabled(True)
+        self.moves_list.set_variations(self._review_variations)
+        self.select_variation_ply(active_branch["id"], self._selected_variation_ply)
+        self._request_variation_evaluation(active_branch)
         self.ephemeral_status.setText(
-            f"Временная ветка: {len(self._ephemeral_branch)} ход(а) · последний ход {san}. "
-            "Она не изменяет исходную линию и не запускает движок.")
+            f"Временный вариант · {len(active_branch['moves'])} полуходов · {san}. "
+            "Исходная партия не изменяется.")
+
+    def _variation_by_id(self, branch_id: str | None) -> dict | None:
+        if not branch_id:
+            return None
+        return next((branch for branch in self._review_variations
+                     if branch.get("id") == branch_id), None)
+
+    def _request_variation_evaluation(self, branch: dict) -> None:
+        if not self.evaluation_allowed:
+            return
+        if not self.training_allowed:
+            if self.review:
+                self.safety_requested.emit(str(self.review["game"]["game_id"]))
+            return
+        ply = len(branch["moves"])
+        request_id = uuid.uuid4().hex
+        branch["request_ids"][ply] = request_id
+        branch["pending"][ply] = True
+        branch["scores"].pop(ply, None)
+        self.variation_evaluation_requested.emit(
+            str(branch["id"]), ply, branch["board"].fen(), request_id)
+        self.moves_list.set_variations(self._review_variations)
+
+    def set_variation_evaluation(self, branch_id: str, ply: int, request_id: str,
+                                 result: dict | None) -> None:
+        branch = self._variation_by_id(branch_id)
+        if (branch is None or branch["request_ids"].get(int(ply)) != str(request_id)
+                or not branch["pending"].get(int(ply))):
+            return
+        branch["pending"].pop(int(ply), None)
+        if isinstance(result, dict) and not result.get("cancelled"):
+            branch["scores"][int(ply)] = {
+                "white_cp": result.get("score_white_cp"),
+                "mate_white": result.get("mate_white"),
+                "depth": result.get("depth"),
+                "source": "stockfish",
+            }
+        self.moves_list.set_variations(self._review_variations)
+        if self._selected_variation_id == branch_id and self._selected_variation_ply == int(ply):
+            self.select_variation_ply(branch_id, ply)
+
+    def clear_variation_evaluations(self) -> None:
+        for branch in self._review_variations:
+            branch["scores"].clear()
+            branch["pending"].clear()
+            branch["request_ids"].clear()
+        self.moves_list.set_variations(self._review_variations)
+        if self._selected_variation_id:
+            self.select_variation_ply(self._selected_variation_id,
+                                      max(1, self._selected_variation_ply))
+
+    def select_variation_ply(self, branch_id: str, ply: int) -> None:
+        branch = self._variation_by_id(branch_id)
+        if not branch:
+            return
+        ply = max(1, min(len(branch["moves"]), int(ply)))
+        board = self.review["positions"][int(branch["fork_ply"])].copy(stack=True)
+        for move in branch["moves"][:ply]:
+            if move not in board.legal_moves:
+                return
+            board.push(move)
+        self._selected_variation_id = str(branch_id)
+        self._selected_variation_ply = ply
+        self._ephemeral_board = board
+        self.review_board.set_position(board)
+        score = branch["scores"].get(ply)
+        self.advantage_bar.set_evaluation(
+            score.get("white_cp") if score else None,
+            allowed=bool(score and self.evaluation_allowed),
+            mate_white=score.get("mate_white") if score else None)
+        self.advantage_label.setText(
+            evaluation_label(score.get("white_cp"), score.get("mate_white"))
+            if score and self.evaluation_allowed else
+            "Оцениваем…" if branch["pending"].get(ply) and self.evaluation_allowed else
+            "Оценка ожидает проверки безопасности" if self.evaluation_allowed
+            and not self.training_allowed else
+            "Оценка скрыта правилами Fair Play" if not self.evaluation_allowed else
+            "Оценка недоступна")
+        self.selected_move_summary.setText(
+            "Временная позиция · оценка Stockfish не изменяет исторический график.")
+        self.graph.select_ply(int(branch["fork_ply"]))
+        self.moves_list.set_variations(self._review_variations)
+        self.position_selected.emit(str(self.review["game"]["game_id"]),
+                                    int(branch["fork_ply"]))
 
     def undo_ephemeral_move(self) -> None:
-        if not self._ephemeral_study or not self._ephemeral_undo:
+        if not self._ephemeral_undo:
             return
         self._ephemeral_board = self._ephemeral_undo.pop()
+        branch = self._variation_by_id(self._selected_variation_id)
+        if branch and branch["moves"]:
+            branch["moves"].pop()
+            branch["sans"].pop()
+            branch["board"] = self._ephemeral_board.copy(stack=True)
+            branch["scores"].pop(len(branch["moves"]) + 1, None)
+            branch["pending"].pop(len(branch["moves"]) + 1, None)
+            self._selected_variation_ply = len(branch["moves"])
         if self._ephemeral_branch:
             self._ephemeral_branch.pop()
+        self.moves_list.set_variations(self._review_variations)
         self.review_board.set_position(self._ephemeral_board)
         self.ephemeral_undo_button.setEnabled(bool(self._ephemeral_undo))
         self.ephemeral_reset_button.setEnabled(bool(self._ephemeral_branch))
@@ -1591,11 +1785,18 @@ class GameReviewWorkspace(QWidget):
             f"Временная ветка: {len(self._ephemeral_branch)} полуходов · исходный PGN не меняется.")
 
     def reset_ephemeral_branch(self) -> None:
-        if not self._ephemeral_study or not self.review:
+        if not self.review:
             return
-        self._ephemeral_board = self.review["positions"][self.selected_ply].copy(stack=True)
+        branch = self._variation_by_id(self._selected_variation_id)
+        fork_ply = int(branch["fork_ply"]) if branch else self.selected_ply
+        self._ephemeral_board = self.review["positions"][fork_ply].copy(stack=True)
         self._ephemeral_branch.clear()
         self._ephemeral_undo.clear()
+        if branch:
+            self._review_variations.remove(branch)
+        self._selected_variation_id = None
+        self._selected_variation_ply = 0
+        self.moves_list.set_variations(self._review_variations)
         self.review_board.set_position(self._ephemeral_board)
         self.ephemeral_undo_button.setEnabled(False)
         self.ephemeral_reset_button.setEnabled(False)
@@ -1740,6 +1941,7 @@ class GameReviewWorkspace(QWidget):
             self.training_status.setText("Нет пригодных собственных ошибок с проверенным улучшением.")
             return
         self.training_mode = True
+        self.repeat_analysis_button.hide()
         self.training_checked = self.training_improved = 0
         self.training_skipped = self.training_unverified = 0
         self._current_training_improved = False
@@ -1887,6 +2089,9 @@ class GameReviewWorkspace(QWidget):
         if not self.training_mode:
             return
         self.training_mode = False
+        game_status = (self.review or {}).get("game", {}).get("status")
+        self.repeat_analysis_button.setVisible(
+            game_status not in {"created", "started", "started_soon", "playing"})
         self.review_board.set_hint_arrows(())
         self.training_candidate = None
         self.review_board.set_interaction_enabled(False)

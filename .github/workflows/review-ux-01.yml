@@ -1,0 +1,88 @@
+name: REVIEW-UX-01 targeted verification
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - "src/chess_coach/ui/game_review.py"
+      - "src/chess_coach/ui/move_table.py"
+      - "src/chess_coach/window.py"
+      - "tests/test_game_review.py"
+      - "tests/test_window.py"
+      - "scripts/capture_visual_master.py"
+      - ".github/workflows/review-ux-01.yml"
+      - ".github/workflows/windows-tests.yml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: review-ux-01-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  l1-l2-review:
+    if: github.event.pull_request.head.ref == 'codex/review-ux-01-game-analysis-2026-11-14'
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+      - uses: actions/setup-python@v7.1.0
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Install app and test dependencies
+        run: python -m pip install -e ".[dev]"
+      - name: L1 diff and compile checks
+        run: |
+          git diff --check HEAD^ HEAD
+          python -m py_compile src/chess_coach/ui/game_review.py src/chess_coach/ui/move_table.py src/chess_coach/window.py tests/test_game_review.py tests/test_window.py
+      - name: L1 targeted game-review behavior
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: >-
+          python -X faulthandler -m pytest -o addopts= -q
+          tests/test_game_review.py::test_alternative_board_moves_create_ephemeral_variations_and_evaluate_selected_fen
+          tests/test_game_review.py::test_move_table_groups_white_and_black_in_fullmove_rows_and_keeps_ply
+          tests/test_game_review.py::test_ephemeral_study_can_explore_legal_branch_undo_and_reset_without_persistence
+      - name: L2 review, board, engine, and Fair Play regression
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: >-
+          python -X faulthandler -m pytest -o addopts= -q
+          tests/test_game_review.py tests/test_board_view.py tests/test_engine_manager.py
+          tests/test_application_fair_play.py
+      - name: Configure isolated native Windows display
+        shell: pwsh
+        run: |
+          Set-DisplayResolution -Width 1920 -Height 1080 -Force
+          Add-Type -AssemblyName System.Windows.Forms
+          $bounds = [System.Windows.Forms.Screen]::PrimaryScreen.Bounds
+          if ($bounds.Width -lt 1672 -or $bounds.Height -lt 941) {
+            throw "Runner display cannot fit the 1672x941 capture."
+          }
+      - name: L2 native Qt game-review screenshots
+        shell: pwsh
+        env:
+          CC_VISUAL_SCOPE: review-ux-01
+          CC_VISUAL_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          foreach ($case in @(
+            @{ Scale = "1"; Sizes = "1672x941,1280x720" },
+            @{ Scale = "1.25"; Sizes = "1280x720" },
+            @{ Scale = "1.5"; Sizes = "1120x640" }
+          )) {
+            $env:QT_SCALE_FACTOR = $case.Scale
+            $env:CC_VISUAL_TARGET_SIZES = $case.Sizes
+            $env:CC_VISUAL_OUTPUT = "visual-evidence/review-ux-01/scale-$($case.Scale)"
+            $env:CC_VISUAL_LOCALAPPDATA = Join-Path $env:RUNNER_TEMP "review-ux-01-localappdata-$($case.Scale)"
+            python -X faulthandler scripts/capture_visual_master.py
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          }
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: review-ux-01-native-${{ github.event.pull_request.head.sha }}
+          path: visual-evidence/review-ux-01/
+          if-no-files-found: warn

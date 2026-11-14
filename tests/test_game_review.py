@@ -164,7 +164,7 @@ def test_review_moves_graph_and_training_share_position_without_mutating_saved_p
         assert not workspace.training_status.isHidden()
         assert workspace.previous_error_button.isHidden()
         assert workspace.next_error_button.isHidden()
-        assert workspace.analysis_button.isHidden()
+        assert workspace.repeat_analysis_button.isHidden()
         assert "Найди улучшение" in workspace.training_prompt.text()
         assert workspace.review_board._board.fen() == workspace.review["moves"][1].before_fen
         workspace._training_move_intent(chess.Move.from_uci("c7c5"))
@@ -196,13 +196,15 @@ def test_ephemeral_study_can_explore_legal_branch_undo_and_reset_without_persist
     workspace = GameReviewWorkspace(repository, training_allowed=False)
     qtbot.addWidget(workspace)
     workspace.load_game(game, training_allowed=False, ephemeral=True)
-    assert not workspace.ephemeral_controls.isHidden()
+    assert workspace.ephemeral_controls.isHidden()
     assert workspace.review_board._interaction_enabled
-    assert not workspace.analysis_button.isHidden()
+    assert not workspace.repeat_analysis_button.isHidden()
     assert workspace.analysis_button.text() == "Проанализировать внешнюю партию"
     workspace.review_board.move_intent.emit(chess.Move.from_uci("d2d4"))
     assert workspace._ephemeral_board.piece_at(chess.D4) == chess.Piece(chess.PAWN, chess.WHITE)
     assert workspace._ephemeral_branch == [chess.Move.from_uci("d2d4")]
+    assert len(workspace._review_variations) == 1
+    assert workspace.moves_list.table.rowCount() == 3
     assert repository.current_line(game["game_id"])["moves"] == "e2e4 e7e5"
     workspace.undo_ephemeral_move()
     assert workspace._ephemeral_board.fen() == workspace.review["positions"][0].fen()
@@ -242,12 +244,32 @@ def test_move_table_groups_white_and_black_in_fullmove_rows_and_keeps_ply(qtbot)
     table._cell_clicked(0, 2)
     table._cell_clicked(1, 1)
     assert selected == [2, 3]
+    table.select_ply(2)
+    assert table.table.selectedItems() == [table.item_by_ply(2)]
+    table.select_ply(0)
+    assert table.table.selectedItems() == []
     assert table.table.item(1, 1).toolTip() == "Зевок"
     assert table.set_score(3, white_cp=75, source="Stockfish", depth=18)
     assert table.item_by_ply(3).text().endswith("+0.8")
     assert table.set_score(3, mate_white=-2, source="Stockfish", depth=20)
     assert "Δб" not in table.item_by_ply(3).text()
     assert table.item_by_ply(3).text().endswith("−M2")
+
+
+def test_move_table_black_to_move_fen_does_not_select_a_phantom_white_ply(qtbot):
+    from types import SimpleNamespace
+    table = MoveTable()
+    qtbot.addWidget(table)
+    before_fen = "8/8/8/8/8/8/4k3/6K1 b - - 0 27"
+    row = SimpleNamespace(ply=1, mover="black", san="Kd3", before_fen=before_fen)
+    table.set_rows([row])
+    assert table.table.item(0, 0).text() == "27"
+    assert table.table.item(0, 1).text() == ""
+    assert table.table.item(0, 2).text() == "Kd3"
+    table.select_ply(0)
+    assert table.table.selectedItems() == []
+    table.select_ply(1)
+    assert table.table.selectedItems() == [table.table.item(0, 2)]
 
 
 def test_move_table_black_to_move_fen_uses_fullmove_number_and_handles_empty_side(qtbot):
@@ -329,12 +351,70 @@ def test_saved_finished_review_exposes_explicit_stockfish_request(qtbot, tmp_pat
         workspace = GameReviewWorkspace(repo, training_allowed=False)
         qtbot.addWidget(workspace)
         workspace.load_game(game)
-        assert not workspace.analysis_button.isHidden()
+        assert not workspace.repeat_analysis_button.isHidden()
         assert workspace.analysis_button.text() == "Проанализировать Stockfish"
         requested = []
         workspace.analysis_requested.connect(requested.append)
-        workspace.analysis_button.click()
+        workspace.repeat_analysis_button.click()
         assert requested == [game["game_id"]]
+    finally:
+        repo.shutdown()
+
+
+def test_alternative_board_moves_create_ephemeral_variations_and_evaluate_selected_fen(
+        qtbot, tmp_path):
+    repo, game = _review_repo(tmp_path / "review-variations.sqlite3")
+    try:
+        before_pgn = repo.export_pgn(game["game_id"])
+        with repo._connection() as db:
+            before_runs = db.execute(
+                "SELECT COUNT(*) FROM analysis_runs WHERE game_id=?",
+                (game["game_id"],)).fetchone()[0]
+        workspace = GameReviewWorkspace(repo, training_allowed=True)
+        qtbot.addWidget(workspace)
+        workspace.load_game(game, training_allowed=True, evaluation_allowed=True)
+        requested = []
+        workspace.variation_evaluation_requested.connect(
+            lambda *args: requested.append(args))
+
+        workspace.review_board.move_intent.emit(chess.Move.from_uci("e2e4"))
+        assert workspace.selected_ply == 1
+        assert workspace._review_variations == []
+        workspace.review_board.move_intent.emit(chess.Move.from_uci("e2e5"))
+        assert workspace._review_variations == []
+
+        workspace.select_ply(0)
+        workspace.review_board.move_intent.emit(chess.Move.from_uci("d2d4"))
+        first = workspace._review_variations[0]
+        assert first["sans"] == ["d4"]
+        assert first["fork_fen"] == chess.Board().fen()
+        assert requested[-1][0] == first["id"]
+        assert requested[-1][2] == first["board"].fen()
+        workspace.set_variation_evaluation(first["id"], 1, requested[-1][3],
+                                            {"score_white_cp": 42, "depth": 16})
+        workspace.select_variation_ply(first["id"], 1)
+        assert workspace.review_board._board.fen() == first["board"].fen()
+        assert "0.42" in workspace.advantage_label.text()
+
+        workspace.select_ply(0)
+        workspace.review_board.move_intent.emit(chess.Move.from_uci("c2c4"))
+        assert len(workspace._review_variations) == 2
+        ids = {branch["id"] for branch in workspace._review_variations}
+        assert len(ids) == 2
+        branch_item = next(
+            workspace.moves_list.table.item(row, 0)
+            for row in range(workspace.moves_list.table.rowCount())
+            if isinstance(workspace.moves_list.table.item(row, 0).data(Qt.ItemDataRole.UserRole), tuple))
+        workspace.moves_list._cell_clicked(workspace.moves_list.table.row(branch_item), 0)
+        assert workspace.selected_ply == 0
+        assert workspace._selected_variation_id in ids
+
+        assert repo.export_pgn(game["game_id"]) == before_pgn
+        with repo._connection() as db:
+            after_runs = db.execute(
+                "SELECT COUNT(*) FROM analysis_runs WHERE game_id=?",
+                (game["game_id"],)).fetchone()[0]
+        assert after_runs == before_runs
     finally:
         repo.shutdown()
 
@@ -556,12 +636,12 @@ def test_ephemeral_review_keeps_identity_and_selected_ply_across_safety_changes(
         workspace.set_training_safety_result(False, "Доступ не разрешён")
         assert workspace._ephemeral_study
         assert workspace.selected_ply == 2
-        assert not workspace.analysis_button.isVisible()
+        assert not workspace.repeat_analysis_button.isVisible()
         assert not workspace.training_button.isVisible()
         workspace.set_training_safety_result(True)
         assert workspace._ephemeral_study
         assert workspace.selected_ply == 2
-        assert not workspace.analysis_button.isVisible()
+        assert not workspace.repeat_analysis_button.isVisible()
         assert not workspace.training_button.isVisible()
         assert repo.get_game(game["game_id"])["pgn"] == before["pgn"]
     finally:
@@ -642,8 +722,8 @@ def test_review_without_engine_data_shows_honest_summary_and_no_fake_metrics(qtb
         assert workspace.graph_mode.isHidden()
         assert workspace.graph.empty_title == "Оценка отсутствует"
         assert workspace.graph.empty_detail.startswith("Здесь появится график")
-        assert workspace.analysis_button.isVisible()
-        assert workspace.analysis_button.isEnabled()
+        assert workspace.repeat_analysis_button.isVisible()
+        assert workspace.repeat_analysis_button.isEnabled()
         assert not workspace.advantage_bar.isVisible()
         assert workspace.moves_list.table.rowCount() == 2
     finally:
