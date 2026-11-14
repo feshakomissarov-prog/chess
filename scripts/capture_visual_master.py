@@ -1126,8 +1126,17 @@ def capture_home_rating_review(window: MainWindow, output: Path,
             image = capture(window, output, f"home-rating-{name}", width, height)
             images.append(image)
             QApplication.processEvents()
-            chart.repaint()
-            QApplication.processEvents()
+            chart_dpr = float(chart.devicePixelRatioF())
+            chart_image = QImage(
+                round(chart.width() * chart_dpr), round(chart.height() * chart_dpr),
+                QImage.Format.Format_ARGB32)
+            chart_image.setDevicePixelRatio(chart_dpr)
+            chart_image.fill(Qt.GlobalColor.transparent)
+            chart_painter = QPainter(chart_image)
+            chart.render(chart_painter, QPoint())
+            chart_painter.end()
+            assert chart_image.save(str(
+                output / f"{width}x{height}-home-rating-{name}-chart.png"))
             label_bounds = chart._x_label_bounds + [
                 rect for _value, rect in chart._y_label_bounds]
             out_of_bounds = [bounds.getRect() for bounds in label_bounds
