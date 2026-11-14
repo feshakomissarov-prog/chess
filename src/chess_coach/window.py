@@ -380,7 +380,10 @@ class _DashboardGameCard(QFrame):
             return
         layout_changed = False
         compact = self.width() < 760
-        compact_details = self.width() < 680
+        # The details columns need roughly 350 px together; stack only below
+        # that real fit threshold, not at 680 px, so compact cards do not grow
+        # taller than the visible scroll area unnecessarily.
+        compact_details = self.width() < 400
         if self._responsive_details_layout is not None:
             detail_direction = (QBoxLayout.Direction.TopToBottom if compact_details else
                                 QBoxLayout.Direction.LeftToRight)

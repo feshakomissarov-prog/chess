@@ -341,10 +341,10 @@ def wait_home(window, account_id: str) -> None:
             f"Home card {index} exceeds its scroll viewport width: "
             f"{card.width()} > {window._home_view.recent_scroll.viewport().width()}"
         )
-        if card.width() < 680:
+        if card.width() < 400:
             assert card._responsive_details_layout.direction() == (
                 QBoxLayout.Direction.TopToBottom), (
-                    "Very narrow Home cards must stack the detail table below game text."
+                    "Home details should stack only below their measured fit width."
                 )
         for label_index, label in enumerate(card.findChildren(QLabel), start=1):
             if label.isVisible():
