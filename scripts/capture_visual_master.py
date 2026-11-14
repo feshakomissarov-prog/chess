@@ -1144,7 +1144,11 @@ def main() -> None:
                 recent_viewport_rect = QRect(
                     recent_viewport.mapToGlobal(QPoint(0, 0)), recent_viewport.size())
                 assert recent_viewport_rect.contains(last_card_rect), (
-                    "The last recent-game card must be fully accessible in compact Home."
+                    "The last recent-game card must be fully accessible in compact Home: "
+                    f"card={last_card_rect.getRect()} viewport={recent_viewport_rect.getRect()} "
+                    f"card_size={recent_cards[-1].size().width()}x{recent_cards[-1].size().height()} "
+                    f"viewport_size={recent_viewport.size().width()}x{recent_viewport.size().height()} "
+                    f"scroll={recent_scroll.value()}/{recent_scroll.maximum()}"
                 )
                 captured[f"home-recent-scroll-bottom-{width}x{height}"] = capture(
                     window, output, "home-recent-scroll-bottom", width, height)
