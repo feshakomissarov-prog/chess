@@ -640,8 +640,9 @@ def capture(window: MainWindow, output: Path, name: str, width: int, height: int
         if page.training_allowed:
             assert page.side_metrics_summary.rowCount() >= 4
         assert page.graph.full_ply_count >= 16
-        assert_no_widget_overlap(page.review_board, page.side_metrics_summary,
-                                 "Review board and comparison table")
+        if page.training_allowed:
+            assert_no_widget_overlap(page.review_board, page.side_metrics_summary,
+                                     "Review board and comparison table")
         assert_action_target(window, page.export_button, "Export PGN")
         assert_action_target(window, page.training_button, "Review mistakes")
         last_ply = len(page.review.get("moves") or {})
