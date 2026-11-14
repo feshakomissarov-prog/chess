@@ -249,3 +249,19 @@ Exact-head SHA #543: `97f3671be489c36af2363c2c8eb6b41b20130011`. Windows test **
 | DATA-01 | Локальный аудит метрик без доступа к личной SQLite/токенам, ясно различает знаменатели | Новое [ТЗ](POSTMERGE_01_WINDOWS_GATE_AND_LICHESS_DATA_AUDIT_2026_11_14.md), пока **NOT IMPLEMENTED** |
 | TD-06 / R47-GATE-01 | Home ≤1000 мс на реальной базе и сохранённом Tier B | **OWNER NOT MEASURED**, synthetic CI недостаточен |
 | R47-SAFE-01 | Никаких неразрешённых Qt/pytest/Dr.Web операций на компьютере владельца | **OPEN**, безопасность не симулировать |
+
+
+## J. Итоговая независимая проверка PR #49 — 14.11.2026
+
+Этот раздел **обновляет текущие статусы** после исторической записи §I (RED после merge #47), не стирая историю или стабильные ID. Зафиксировано отдельное пользовательское одобрение изменений PR #49 и независимое чтение кода/логов на [code SHA `97d2a8d74cf06438f6d6f5e6e33a63cfb2ca9d8d`](https://github.com/feshakomissarov-prog/chess/commit/97d2a8d74cf06438f6d6f5e6e33a63cfb2ca9d8d).
+
+| ID | Текущий статус (сверху истории §I) | Доказательство и ограничение |
+| --- | --- | --- |
+| **R47-H-01 / R47-QA-02 / POSTMERGE-01** | **FIXED · CI VERIFIED на PR #49 code SHA** | Устранена начальная ширина QFrame 640px до расчёта узкого viewport; `card.resize(recent_width, card.height())` до QBoxLayout; **строгое** `card.width() <= viewport.width()` не удалено. [Windows #599](https://github.com/feshakomissarov-prog/chess/actions/runs/43608145277): L1 62 passed, L2 native Qt 100/125/150% PASS, L3 1167 passed + visual PASS. После merge main-run — дополнительное подтверждение, не подмена. |
+| **DATA-01.A** | **IMPLEMENTED · SYNTHETIC CI VERIFIED, real account not audited** | Новая функция read-only coverage на соединении к стабильному SQLite snapshot, CLI `mode=ro` + `query_only`, без импорта сервера/движка и без перечисления private game IDs. Тесты пересечения источников, статусов backfill, validity и current line. Числа 953 / 40 / 244 объяснены по разным знаменателям; реальная SQLite пользователя не открывалась. |
+| **DATA-01.B** | **IMPLEMENTED · CI VERIFIED** | Compact KPI/фоновые tooltips различают Lichess evals, official player-side accuracy, backfill checked и перекрытие источников. |
+| **DATA-01.C** | **НЕ ВЫПОЛНЯЛСЯ И НЕ ТРЕБОВАЛСЯ** | Не было разрешения на серверную/пользовательскую реконcиляцию. Никакой массовой повторной загрузки. |
+| **R47-GATE-01 / TD-06** | **OWNER NOT MEASURED (P0 остаётся открытым)** | Нет замера ≤1000ms на реальной SQLite 3k+ и пользовательском профиле; зелёные synthetic тесты не доказывают P0. |
+| **R47-SAFE-01 / R47-GATE-02** | **OWNER / OPEN** | Ранее обнаруженные Qt6Core.dll и реальные Lichess/Play/MAT-01 не проверены на рабочем Windows. Не проводить самовольный local Qt/DB smoke. |
+
+**Качество CI и тестовый контракт:** единственный финальный успешный кодовый [run #599](https://github.com/feshakomissarov-prog/chess/actions/runs/43608145277) на `97d2a8d` содержит три зелёных job (L1/L2 Home chart review, Windows test, native visual). Промежуточный архитектурный import-boundary FAIL исправлен до финального L3. После этой записи изменяются **только Markdown**; для не изменившегося исполняемого кода не нужно заново запускать полный L3. Не повышать статус P0 и локальных owner gates.
