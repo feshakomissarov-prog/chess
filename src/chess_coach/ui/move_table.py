@@ -78,7 +78,8 @@ class MoveTable(QWidget):
         self.table.setWordWrap(False)
         self.table.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self.table.setMinimumWidth(0)
-        self.table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
+        self.table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.Fixed)
+        self.table.setColumnWidth(0, 48)
         self.table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
         self.table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeMode.Stretch)
         for column, label in enumerate(("Номер полного хода", "Белые", "Чёрные")):
@@ -311,7 +312,7 @@ class MoveTable(QWidget):
                 score_text = (f"M{abs(int(mate))}" if mate is not None and int(mate) > 0 else
                               f"−M{abs(int(mate))}" if mate is not None else
                               _score_tenth(cp) if cp is not None else None)
-                prefix = "Временный вариант" if index == 0 else "↳"
+                prefix = "Вариант ·" if index == 0 else "↳"
                 number = int(branch.get("start_move_number", 1))
                 mover = str(branch.get("start_color", "white"))
                 for _ in range(index):
