@@ -1,5 +1,7 @@
 # PR #47 — консолидированное ревью и единый реестр приёмки (12.11.2026)
 
+<!-- verification-contract: docs/process/VERIFICATION_PROTOCOL.md -->
+
 **Ревизия проверенного кода:** `97127e8091b068f05668033ab249092613d7b145`
 **Последняя перепроверка:** `ca4373f942ea1b3cb3b60132d6f8221db80534f4` (12.11.2026); ниже сохранён исторический снимок 97127e8, последующие результаты вынесены в раздел B.1.  
 **Репозиторий / PR:** [feshakomissarov-prog/chess, Draft PR #47](https://github.com/feshakomissarov-prog/chess/pull/47)  
@@ -221,3 +223,29 @@ Exact-head SHA #543: `97f3671be489c36af2363c2c8eb6b41b20130011`. Windows test **
 **DATA-01 не трактовать как найденную массовую потерю данных Lichess.** Исторические числа на пользовательском экране `953` (игры с оценками источника Lichess), `40` (игры с official accuracy выбранной стороны), `244` (проверенные ready-analytics строки) относятся к **разным знаменателям**. Достоверного сопоставления полного списка на сервере и локальной SQLite пока нет. [Read-only data audit](POSTMERGE_01_WINDOWS_GATE_AND_LICHESS_DATA_AUDIT_2026_11_14.md) нужен как проверка, не как автоматическая пересинхронизация.
 
 **Обновлять статус только по evidence:** `RED → RCA → FIX → isolated L1/L2 GREEN → exact-head L3 GREEN → OWNER gates separately`. Все старые IDs и их историю сохранять.
+
+
+## План проверок и стоимость CI
+
+**Контракт CC-VERIFY-01 действует для обновления этого исторического реестра начиная с 14.11.2026**; прежние записи §A–H — артефакт истории и не требуют ретроактивного повтора всех CI. Основная конкретика находится в [POSTMERGE-01 + DATA-01](POSTMERGE_01_WINDOWS_GATE_AND_LICHESS_DATA_AUDIT_2026_11_14.md). Каждая новая правка требований ссылается на тот же протокол и не заводит новый дублирующий реестр.
+
+### Уровень 1
+
+**Адресно:** проверить источники актуального `main` и исходного CI RED, тест `R47-H-01` с `QRect.width <= viewport.width`; для DATA-01 сначала без сети на временной SQLite. Команды, тестовые пути, статусы и исходные SHA перечислены в ТЗ, § «План проверок…». Использовать `git diff --check`, targeted pytest и Python compile только изменённых файлов.
+
+### Уровень 2
+
+**Тематически:** изолированный Windows Qt Home wide→compact/Play→Home, подходящие 125%/150%, экраны с 3 recent cards и полный скролл; DATA-01 synthetic контроль source overlap/current line/backfill. Не повторять все штатные ~113 screenshots после каждого `QLabel`.
+
+### Уровень 3
+
+**Финальный exact-head:** одна полная Windows регрессия pytest/compileall/offline smoke/native visual после исправлений на точном кодовом SHA, с артефактами. Изменения **docs-only** в этом реестре не требуют новой ручной полной регрессии исполняемого кода, но быстрый spec gate должен быть зелёным. Личные Qt/SQLite/сетевые проверки остаются OWNER gates.
+
+## Критерии приёмки и доказательства
+
+| ID | Критерий | Evidence / действующий статус |
+| --- | --- | --- |
+| R47-H-01 / QA-02 | Home card не выходит за scroll viewport на main после последовательного resize | [RED main CI](https://github.com/feshakomissarov-prog/chess/actions/runs/43596085647); будущий L1/L2/L3 GREEN, пока **OPEN** |
+| DATA-01 | Локальный аудит метрик без доступа к личной SQLite/токенам, ясно различает знаменатели | Новое [ТЗ](POSTMERGE_01_WINDOWS_GATE_AND_LICHESS_DATA_AUDIT_2026_11_14.md), пока **NOT IMPLEMENTED** |
+| TD-06 / R47-GATE-01 | Home ≤1000 мс на реальной базе и сохранённом Tier B | **OWNER NOT MEASURED**, synthetic CI недостаточен |
+| R47-SAFE-01 | Никаких неразрешённых Qt/pytest/Dr.Web операций на компьютере владельца | **OPEN**, безопасность не симулировать |
