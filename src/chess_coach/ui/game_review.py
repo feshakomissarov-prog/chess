@@ -1643,7 +1643,7 @@ class GameReviewWorkspace(QWidget):
         if active_branch is None:
             next_ply = self.selected_ply + 1
             if (next_ply <= len(self.review["moves"])
-                    and self.review["moves"][next_ply - 1].move == move):
+                    and chess.Move.from_uci(self.review["moves"][next_ply - 1].uci) == move):
                 self.select_ply(next_ply)
                 return
             active_branch = {
