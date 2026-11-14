@@ -100,20 +100,26 @@
 
 **CC-VERIFY-01** уже в `main`; не придумывать иной процесс. Время — ориентиры; `docs-only` PR не требует дорогих Windows runs и не является новым code evidence.
 
-### Уровень 1 — быстрый адресный
+### Уровень 1
+
+**Адресные проверки (L1).**
 
 - **POSTMERGE:** `git diff --check`; `python -m py_compile src/chess_coach/ui/pages/home.py scripts/capture_visual_master.py`; `python -m pytest -o addopts= -q tests/test_visual_master_final_regressions.py tests/test_ui_pages.py` **или точные node IDs** нового geometry RED-теста. Изолированная native Windows с одним переходом 1672×941→1280×720; не весь 100/125/150 visual suite.
 - **DATA:** `python -m pytest -o addopts= -q tests/test_dashboard.py tests/test_m46_lichess_analytics_backfill.py` либо **только новые** `tests/test_lichess_coverage_audit.py`; `python -m py_compile <изменённые файлы>`. Вся сеть/движок mocked, тесты создают временную SQLite. CI проверяет отсутствие user identifiers в stdout.
 - **RED→GREEN:** старое assertion card ≤ viewport остаётся строгим. Для счетчиков независимый ожидаемый ручной dataset с перекрывающимися источниками.
 - **Стоимость:** L1 только затронутые тесты; при невозможности native Windows targeted runner собрать тематический минимальный сценарий, не выполнять full regression на каждый двухстрочный фикс.
 
-### Уровень 2 — тематическая регрессия
+### Уровень 2
+
+**Тематическая регрессия (L2).**
 
 - Изолированный native Qt Windows: повторный Home 1672×941, компакт 1280×720 и один высоко-DPI случай; 3 recent карточки, длинный соперник, Play→Home, после scroll третья карточка, предотвращённый overflow, текущая корректность графиков и popup.
 - Data fixtures: 0/1/3k games (последний — **синтетические** масштабные данные), два аккаунта, отсутствие токена/интернета, реальные backfill статус-кейсы `queued / has_data / no_server_data / partial / retry / 429`, смена профиля, safety gate. Уточнить denominator и цвет.
 - Проверить, что PR #48 workflow отменяет старые PR runs и Markdown-only изменения не запускают полный Windows suite, **но** не отключает обязательный L3. Никаких изменений шифрования, SQLite migration, Fair Play или Lichess authentication без нового явного объёма.
 
-### Уровень 3 — полный exact-head CI
+### Уровень 3
+
+**Финальный exact-head CI (L3).**
 
 - **Один** окончательный Windows pytest, compileall, offline-window smoke, native visual matrix для нового **code SHA**. Если Windows job на PR не дошёл до test из-за home-chart-review — исправить сначала L1/L2, потом проверять полный L3.
 - В отчёте: `code SHA`, `L1 evidence`, `L2 real Qt captures`, `L3 exact-head run URL / job statuses`, `DATA audit expected/actual synthetic counts`, privacy statement, explicit `OWNER acceptance pending`.
