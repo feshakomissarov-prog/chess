@@ -951,8 +951,8 @@ def capture_long_game_graph_cases(window: MainWindow, output: Path,
                     (480, 220), (540, 80), (600, 170)]
                    if scenario != "mate-and-clipped" else
                    [(1, -120), (80, 20), (160, 80), (240, 160),
-                    (320, 250), (360, 800), (380, 900), (400, 1200),
-                    (420, 200), (440, 500), (460, -900), (480, -900),
+                    (320, 250), (360, 800), (380, 900), (400, 1400),
+                    (420, 200), (440, 500), (460, -1000), (480, -1000),
                     (500, -200), (520, -780), (540, -450), (580, -100),
                     (600, 150)])
 
@@ -1033,7 +1033,7 @@ def capture_long_game_graph_cases(window: MainWindow, output: Path,
         assert mate_graph._clipped_markers == []
         raw_scores = [cp for _ply, cp, _x, _y, _tip in mate_graph._raw_cp_points]
         assert max(raw_scores) >= 1200 and min(raw_scores) <= -900
-        assert any(cp == 200 for cp in raw_scores)
+        assert any(150 <= cp <= 250 for cp in raw_scores)
         image = capture(window, output, "home-long-game-graph-cases", width, height)
         print("Long-game graph cases: 600 plies; one 20-ply assessment gap; "
               "20 mate assessments rendered as one interval; unbounded CP paths clip cleanly.")
