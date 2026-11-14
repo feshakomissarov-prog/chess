@@ -530,6 +530,111 @@ class SQLiteMigrationMixin:
                     if existing is None or normalize(existing[0]) != normalize(sql):
                         db.execute(f"DROP TRIGGER IF EXISTS {trigger}")
                         db.execute(sql)
+            # A profile-scoped revision prevents another Lichess account's
+            # sync/analysis writes from invalidating this account's Home cache.
+            db.execute("""CREATE TABLE IF NOT EXISTS dashboard_profile_revision (
+                account_id TEXT PRIMARY KEY REFERENCES accounts(account_id) ON DELETE CASCADE,
+                revision INTEGER NOT NULL DEFAULT 0
+            )""")
+            db.execute("""INSERT OR IGNORE INTO dashboard_profile_revision(account_id,revision)
+                SELECT account_id,0 FROM accounts""")
+            account_trigger = "dashboard_profile_revision_account_insert"
+            if not db.execute(
+                    "SELECT 1 FROM sqlite_master WHERE type='trigger' AND name=?",
+                    (account_trigger,)).fetchone():
+                db.execute(f"""CREATE TRIGGER {account_trigger} AFTER INSERT ON accounts
+                    BEGIN INSERT OR IGNORE INTO dashboard_profile_revision(account_id,revision)
+                    VALUES(NEW.account_id,0); END""")
+            profile_relations = {
+                "games": "SELECT account_id FROM account_games WHERE game_id IN ({ids})",
+                "account_games": "SELECT account_id FROM dashboard_profile_revision "
+                    "WHERE account_id IN ({ids})",
+                "game_revisions": "SELECT account_id FROM account_games WHERE game_id IN ({ids})",
+                "analysis_runs": "SELECT account_id FROM account_games WHERE game_id IN ({ids})",
+                "analysis_game_accuracy": "SELECT account_id FROM account_games WHERE game_id IN "
+                    "(SELECT game_id FROM analysis_runs WHERE run_id IN ({ids}))",
+                "position_assessments": "SELECT account_id FROM account_games WHERE game_id IN "
+                    "(SELECT game_id FROM analysis_runs WHERE run_id IN ({ids}))",
+                "move_classifications": "SELECT account_id FROM account_games WHERE game_id IN "
+                    "(SELECT game_id FROM analysis_runs WHERE run_id IN ({ids}))",
+                "move_metrics": "SELECT account_id FROM account_games WHERE game_id IN "
+                    "(SELECT game_id FROM analysis_runs WHERE run_id IN ({ids}))",
+                "analysis_events": "SELECT account_id FROM account_games WHERE game_id IN "
+                    "(SELECT game_id FROM analysis_runs WHERE run_id IN ({ids}))",
+                "event_tags": "SELECT account_id FROM account_games WHERE game_id IN "
+                    "(SELECT game_id FROM analysis_runs WHERE run_id IN "
+                    "(SELECT run_id FROM analysis_events WHERE event_key IN ({ids})))",
+                "analysis_alternatives": "SELECT account_id FROM account_games WHERE game_id IN "
+                    "(SELECT game_id FROM analysis_runs WHERE run_id IN ({ids}))",
+                "analysis_jobs": "SELECT account_id FROM account_games WHERE game_id IN ({ids})",
+                "lichess_ready_analysis_metadata": "SELECT account_id FROM account_games "
+                    "WHERE game_id IN ({ids})",
+                "game_positions": "SELECT account_id FROM account_games WHERE game_id IN ({ids})",
+                "puzzle_attempts": "SELECT account_id FROM accounts WHERE account_id IN ({ids})",
+                "puzzle_player_rating_history": "SELECT account_id FROM accounts WHERE account_id IN ({ids})",
+                "puzzle_dashboard_snapshots": "SELECT account_id FROM accounts WHERE account_id IN ({ids})",
+            }
+            row_key = {
+                "games": "game_id", "account_games": "account_id",
+                "game_revisions": "game_id", "analysis_runs": "game_id",
+                "analysis_game_accuracy": "run_id", "position_assessments": "run_id",
+                "move_classifications": "run_id", "move_metrics": "run_id",
+                "analysis_events": "run_id", "event_tags": "event_key",
+                "analysis_alternatives": "run_id",
+                "analysis_jobs": "game_id", "lichess_ready_analysis_metadata": "game_id",
+                "game_positions": "game_id", "puzzle_attempts": "account_id",
+                "puzzle_player_rating_history": "account_id",
+                "puzzle_dashboard_snapshots": "account_id",
+            }
+            profile_watched = {
+                "games": dashboard_columns["games"],
+                "account_games": dashboard_columns["account_games"],
+                "game_revisions": dashboard_columns["game_revisions"],
+                "analysis_runs": dashboard_columns["analysis_runs"],
+                "analysis_game_accuracy": dashboard_columns["analysis_game_accuracy"],
+                "position_assessments": dashboard_columns["position_assessments"],
+                "move_classifications": dashboard_columns["move_classifications"],
+                "move_metrics": dashboard_columns["move_metrics"],
+                "analysis_events": dashboard_columns["analysis_events"],
+                "event_tags": ("event_key", "tag", "confidence_state", "detector_version"),
+                "analysis_alternatives": dashboard_columns["analysis_alternatives"],
+                "analysis_jobs": dashboard_columns["analysis_jobs"],
+                "lichess_ready_analysis_metadata": dashboard_columns[
+                    "lichess_ready_analysis_metadata"],
+                "game_positions": dashboard_columns["game_positions"],
+                "puzzle_attempts": dashboard_columns["puzzle_attempts"],
+                "puzzle_player_rating_history": dashboard_columns[
+                    "puzzle_player_rating_history"],
+                "puzzle_dashboard_snapshots": dashboard_columns[
+                    "puzzle_dashboard_snapshots"],
+            }
+            for table, relation in profile_relations.items():
+                columns = {row[1] for row in db.execute(f"PRAGMA table_info({table})")}
+                watched = [name for name in profile_watched[table] if name in columns]
+                if not watched:
+                    continue
+                safe_table = table.replace("'", "")
+                for operation in ("INSERT", "UPDATE", "DELETE"):
+                    trigger = f"dashboard_profile_revision_{safe_table}_{operation.casefold()}"
+                    key = row_key[table]
+                    ids = (f"SELECT NEW.{key}" if operation == "INSERT" else
+                           f"SELECT OLD.{key}" if operation == "DELETE" else
+                           f"SELECT OLD.{key} UNION SELECT NEW.{key}")
+                    update_of = (f" OF {','.join(watched)}" if operation == "UPDATE" else "")
+                    changed = (" OR ".join(f"OLD.{name} IS NOT NEW.{name}" for name in watched)
+                               if operation == "UPDATE" else "1")
+                    when = f" WHEN {changed}" if operation == "UPDATE" else ""
+                    lookup = relation.format(ids=ids)
+                    sql = (f"CREATE TRIGGER {trigger} AFTER {operation}{update_of} ON {safe_table}"
+                           f"{when} BEGIN UPDATE dashboard_profile_revision SET revision=revision+1 "
+                           f"WHERE account_id IN ({lookup}); END")
+                    existing = db.execute(
+                        "SELECT sql FROM sqlite_master WHERE type='trigger' AND name=?",
+                        (trigger,)).fetchone()
+                    normalize = lambda value: " ".join(str(value or "").split()).casefold()
+                    if existing is None or normalize(existing[0]) != normalize(sql):
+                        db.execute(f"DROP TRIGGER IF EXISTS {trigger}")
+                        db.execute(sql)
             db.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
 
     @staticmethod

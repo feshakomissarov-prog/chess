@@ -17,9 +17,12 @@ from ..infrastructure.sqlite.constants import SCHEMA_VERSION
 
 _CACHE_FORMAT = 3
 _COMPATIBLE_CACHE_FORMATS = {2, 3}
+# Cache payloads are independent of SQLite layout; preserve the last-good
+# Home facts across one additive database migration while the worker refreshes.
+_COMPATIBLE_SCHEMA_VERSIONS = {SCHEMA_VERSION, SCHEMA_VERSION - 1}
 _MAX_SCOPES = 12
 _MAX_CACHE_BYTES = 8 * 1024 * 1024
-_MAX_GRAPH_POINTS = 64
+_MAX_GRAPH_POINTS = 1024
 _METRIC_KEYS = {"games", "accuracy", "analysis", "errors"}
 _locks_guard = threading.Lock()
 _locks: dict[str, threading.RLock] = {}
@@ -51,7 +54,7 @@ def _document_scope_key(key: object, account_id: str | None,
         return False
     return (isinstance(value, dict) and value.get("account") == account_id
             and value.get("clock") == clock and value.get("formula") == FORMULA_ID
-            and value.get("schema") == SCHEMA_VERSION
+            and value.get("schema") in _COMPATIBLE_SCHEMA_VERSIONS
             and value.get("format") in _COMPATIBLE_CACHE_FORMATS)
 
 
@@ -91,6 +94,11 @@ def _valid_game_shell(game: object) -> bool:
         value = game.get(key)
         if value is not None and (not isinstance(value, str) or len(value) > 500):
             return False
+    if game.get("last_move_at") is not None and (
+            type(game["last_move_at"]) is not int or game["last_move_at"] < 0):
+        return False
+    if game.get("game_time_precision") not in {None, "timestamp", "date_only", "unknown"}:
+        return False
     if game.get("line_revision") is not None and (
             type(game.get("line_revision")) is not int or game["line_revision"] < 0):
         return False
@@ -103,6 +111,9 @@ def _valid_game_shell(game: object) -> bool:
                    "owner_accuracy", "opponent_accuracy", "owner_inaccuracies",
                    "owner_mistakes", "owner_blunders", "opponent_inaccuracies",
                    "opponent_mistakes", "opponent_blunders", "opponent_coverage",
+                   "white_inaccuracies", "white_mistakes", "white_blunders",
+                   "black_inaccuracies", "black_mistakes", "black_blunders",
+                   "white_coverage", "black_coverage", "phase_boundaries",
                    "graph_points", "total_positions"}
         if set(metrics) - allowed:
             return False
@@ -115,11 +126,30 @@ def _valid_game_shell(game: object) -> bool:
                             or (point.get("white_cp") is not None
                                 and type(point.get("white_cp")) is not int)
                             or (point.get("mate_white") is not None
-                                and type(point.get("mate_white")) is not int)):
+                                and type(point.get("mate_white")) is not int)
+                            or (point.get("connect_from_previous") is not None
+                                and type(point.get("connect_from_previous")) is not bool)
+                            or (point.get("mate_start_ply") is not None
+                                and type(point.get("mate_start_ply")) is not int)
+                            or (point.get("mate_sample_count") is not None
+                                and (type(point.get("mate_sample_count")) is not int
+                                     or point["mate_sample_count"] < 1))):
                         return False
             elif key == "total_positions":
                 if type(value) is not int or value < 0:
                     return False
+            elif key == "phase_boundaries":
+                if not isinstance(value, dict) or set(value) - {
+                        "middle_start_ply", "end_start_ply", "source", "method_version"}:
+                    return False
+                for boundary in ("middle_start_ply", "end_start_ply"):
+                    if value.get(boundary) is not None and (
+                            type(value.get(boundary)) is not int or value[boundary] < 0):
+                        return False
+                for label in ("source", "method_version"):
+                    if value.get(label) is not None and (
+                            not isinstance(value[label], str) or len(value[label]) > 100):
+                        return False
             elif value is not None and (not isinstance(value, str) or len(value) > 500):
                 return False
     return True
@@ -140,36 +170,45 @@ def _valid_tier_a(tier: object, account_id: str | None, clock: str | None) -> bo
 
 
 def _valid_tier_b(tier: object) -> bool:
+    return _tier_b_validation_issue(tier) is None
+
+
+def _tier_b_validation_issue(tier: object) -> str | None:
+    """Return a stable, non-sensitive reason for rejecting a last-good tier."""
     if not isinstance(tier, dict):
-        return False
+        return "tier_b_not_object"
     if not _valid_metrics(tier.get("metrics"), _METRIC_KEYS - {"games"}):
-        return False
+        return "tier_b_metrics"
     rating = tier.get("puzzle_player_rating", {})
     if not isinstance(rating, dict) or set(rating) - {"latest", "date", "points"}:
-        return False
+        return "puzzle_rating_shape"
     if rating.get("latest") is not None and type(rating.get("latest")) not in {int, float}:
-        return False
+        return "puzzle_rating_latest"
     if rating.get("date") is not None and (
             not isinstance(rating.get("date"), str) or len(rating["date"]) > 40):
-        return False
+        return "puzzle_rating_date"
     points = rating.get("points", [])
     if not isinstance(points, list) or len(points) > 90:
-        return False
+        return "puzzle_rating_points"
     for point in points:
+        activity = point.get("attempts") if isinstance(point, dict) else None
         if (not isinstance(point, dict) or
                 not isinstance(point.get("day"), str) or type(point.get("rating")) not in {int, float}
-                or (point.get("attempts") is not None and type(point.get("attempts")) is not int)):
-            return False
+                or (activity is not None and not (
+                    type(activity) is int or
+                    (isinstance(activity, (list, tuple)) and len(activity) == 2
+                     and all(type(value) is int for value in activity))))):
+            return "puzzle_rating_point"
     trend = tier.get("activity_trend", [])
     if not isinstance(trend, list) or len(trend) > 24:
-        return False
+        return "activity_trend_shape"
     for item in trend:
         if (not isinstance(item, dict) or not isinstance(item.get("month"), str)
                 or type(item.get("attempts")) is not int or type(item.get("wins")) is not int):
-            return False
+            return "activity_trend_item"
     recent = tier.get("recent_metrics", [])
     if not isinstance(recent, list) or len(recent) > 3:
-        return False
+        return "recent_metrics_shape"
     for item in recent:
         if (not isinstance(item, dict) or not isinstance(item.get("game_id"), str)
                 or type(item.get("line_revision")) is not int
@@ -181,8 +220,10 @@ def _valid_tier_b(tier: object) -> bool:
                 or not _valid_game_shell({
                     "game_id": item["game_id"], "status": "complete",
                     "review_metrics": item.get("review_metrics")})):
-            return False
-    return isinstance(tier.get("activity_trend_source"), (str, type(None)))
+            return "recent_metrics_item"
+    if not isinstance(tier.get("activity_trend_source"), (str, type(None))):
+        return "activity_trend_source"
+    return None
 
 
 def _split_snapshot(snapshot: dict) -> tuple[dict, dict]:
@@ -199,7 +240,8 @@ def _split_snapshot(snapshot: dict) -> tuple[dict, dict]:
             "game_id", "status", "winner", "color", "account_color", "account_id",
             "account_opponent", "opponent", "account_player_name", "player_name",
             "started_at", "clock", "opening_eco", "opening_name", "source",
-            "source_game_id", "line_revision", "line_hash")}
+            "source_game_id", "line_revision", "line_hash", "last_move_at",
+            "game_time_precision")}
         if isinstance(review_metrics, dict):
             recent_metrics.append({
                 "game_id": str(shell.get("game_id") or ""),
@@ -233,12 +275,20 @@ def _compact_review_metrics(metrics: dict) -> dict:
         "strong", "status", "coverage", "source", "strong_detail", "owner_accuracy",
         "opponent_accuracy", "owner_inaccuracies", "owner_mistakes", "owner_blunders",
         "opponent_inaccuracies", "opponent_mistakes", "opponent_blunders",
-        "opponent_coverage", "total_positions")}
+        "opponent_coverage", "white_inaccuracies", "white_mistakes", "white_blunders",
+        "black_inaccuracies", "black_mistakes", "black_blunders", "white_coverage",
+        "black_coverage", "phase_boundaries", "total_positions")}
     graph = metrics.get("graph_points") or []
     result["graph_points"] = [
         {"ply": int(row["ply"]),
          "white_cp": int(row["white_cp"]) if row.get("white_cp") is not None else None,
-         "mate_white": int(row["mate_white"]) if row.get("mate_white") is not None else None}
+         "mate_white": int(row["mate_white"]) if row.get("mate_white") is not None else None,
+         **({"connect_from_previous": row["connect_from_previous"]}
+            if type(row.get("connect_from_previous")) is bool else {}),
+         **({"mate_start_ply": int(row["mate_start_ply"])}
+            if type(row.get("mate_start_ply")) is int else {}),
+         **({"mate_sample_count": int(row["mate_sample_count"])}
+            if type(row.get("mate_sample_count")) is int else {})}
         for row in graph[-_MAX_GRAPH_POINTS:]
         if isinstance(row, dict) and type(row.get("ply")) is int
     ]
@@ -249,8 +299,19 @@ def _compact_rating(rating: dict) -> dict:
     points = rating.get("points")
     if not isinstance(points, list):
         points = []
+    compact_points = []
+    for point in points[-90:]:
+        if not isinstance(point, dict):
+            continue
+        compact_point = dict(point)
+        activity = compact_point.get("attempts")
+        # Repository results use a (attempts, wins) tuple; JSON cache restores
+        # it as a list. Normalize before validation and serialization.
+        if isinstance(activity, tuple) and len(activity) == 2:
+            compact_point["attempts"] = list(activity)
+        compact_points.append(compact_point)
     compact = {"latest": rating.get("latest"), "date": rating.get("date"),
-               "points": [dict(point) for point in points[-90:] if isinstance(point, dict)]}
+               "points": compact_points}
     return compact if compact["latest"] is not None or compact["date"] is not None or compact["points"] else {}
 
 
@@ -333,6 +394,7 @@ class DashboardSnapshotCache:
         self._lock = _lock_for(self.path)
         self.last_save_status = "not_saved"
         self.last_save_bytes = 0
+        self.last_validation_issue: str | None = None
 
     @contextmanager
     def _process_lock(self):
@@ -362,6 +424,32 @@ class DashboardSnapshotCache:
                     fcntl.flock(stream.fileno(), fcntl.LOCK_UN)
 
     def _read_document(self, expected_revision: int | None = None) -> dict | None:
+        for document in self._read_documents():
+            valid = True
+            for key, entry in document["scopes"].items():
+                scope = None
+                try:
+                    scope = json.loads(key)
+                except (TypeError, ValueError):
+                    valid = False
+                    break
+                if not isinstance(scope, dict):
+                    valid = False
+                    break
+                account_id, clock = scope.get("account"), scope.get("clock")
+                if (not _document_scope_key(key, account_id, clock)
+                        or not isinstance(entry, dict)
+                        or not _valid_tier_a(entry.get("tier_a"), account_id, clock)
+                        or (entry.get("tier_b") is not None
+                            and not _valid_tier_b(entry.get("tier_b")))):
+                    valid = False
+                    break
+            if valid:
+                return document
+        return None
+
+    def _read_documents(self) -> list[dict]:
+        documents = []
         for candidate in (self.path, self.previous_path):
             try:
                 if not candidate.is_file() or candidate.stat().st_size > _MAX_CACHE_BYTES:
@@ -369,7 +457,7 @@ class DashboardSnapshotCache:
                 document = json.loads(candidate.read_text(encoding="utf-8"))
                 if (not isinstance(document, dict)
                         or document.get("format") not in _COMPATIBLE_CACHE_FORMATS
-                        or document.get("schema_version") != SCHEMA_VERSION
+                        or document.get("schema_version") not in _COMPATIBLE_SCHEMA_VERSIONS
                         or document.get("formula_id") != FORMULA_ID
                         or not isinstance(document.get("scopes"), dict)):
                     continue
@@ -387,55 +475,88 @@ class DashboardSnapshotCache:
                         if not _document_scope_key(old_key, account_id, clock):
                             continue
                         scopes[_scope_key(account_id, clock)] = {
-                            **old_entry,
-                            "tier_a_revision": saved_revision,
-                            "tier_b_revision": saved_revision,
-                            "tier_b_saved_at": None,
-                        }
+                            **old_entry, "tier_a_revision": saved_revision,
+                            "tier_b_revision": saved_revision, "tier_b_saved_at": None}
                     document = {**document, "format": _CACHE_FORMAT, "scopes": scopes}
                 else:
+                    migrated_scopes = {}
+                    for old_key, entry in document["scopes"].items():
+                        try:
+                            old_scope = json.loads(old_key)
+                        except (TypeError, ValueError):
+                            continue
+                        if (not isinstance(old_scope, dict)
+                                or not _document_scope_key(
+                                    old_key, old_scope.get("account"), old_scope.get("clock"))):
+                            continue
+                        new_key = _scope_key(old_scope.get("account"), old_scope.get("clock"))
+                        migrated_scopes[new_key] = entry
                     for entry in document["scopes"].values():
                         if isinstance(entry, dict):
                             entry.setdefault("tier_a_revision", saved_revision)
                             entry.setdefault("tier_b_revision", saved_revision)
                             entry.setdefault("tier_b_saved_at", None)
-                return document
+                    document = {**document, "schema_version": SCHEMA_VERSION,
+                                "scopes": migrated_scopes}
+                documents.append(document)
             except (OSError, ValueError, TypeError):
                 continue
-        return None
+        return documents
 
-    def load(self, account_id: str | None, clock: str | None, *,
-             expected_revision: int | None = None) -> dict | None:
-        try:
-            revision = (self.repository.dashboard_data_revision()
-                        if expected_revision is None else int(expected_revision))
-            with self._lock, self._process_lock():
-                document = self._read_document()
-            if (document is None
-                    or self.repository.dashboard_data_revision() != revision):
-                return None
-            entry = document["scopes"].get(_scope_key(account_id, clock))
+    @staticmethod
+    def _load_from_documents(documents: list[dict], account_id: str | None,
+                             clock: str | None) -> dict | None:
+        scope_key = _scope_key(account_id, clock)
+        for document in documents:
+            entry = document["scopes"].get(scope_key)
             if entry is None:
                 entry = next((value for key, value in document["scopes"].items()
                               if _document_scope_key(key, account_id, clock)), None)
             if not isinstance(entry, dict):
-                return None
-            tier_a = entry.get("tier_a")
-            tier_b = entry.get("tier_b")
-            if not _valid_tier_a(tier_a, account_id, clock):
-                return None
-            if tier_b is not None and not _valid_tier_b(tier_b):
-                return None
+                continue
+            tier_a, tier_b = entry.get("tier_a"), entry.get("tier_b")
+            if (not _valid_tier_a(tier_a, account_id, clock)
+                    or (tier_b is not None and not _valid_tier_b(tier_b))):
+                continue
+            saved_revision = int(document.get("revision", -1))
             result = _merge_tiers(tier_a, tier_b)
-            tier_a_revision = int(entry.get("tier_a_revision", document.get("revision", -1)))
-            tier_b_revision = int(entry.get("tier_b_revision", document.get("revision", -1)))
-            result["_dashboard_revision"] = revision
-            result["_dashboard_tier_a_revision"] = tier_a_revision
-            result["_dashboard_tier_b_revision"] = tier_b_revision
-            result["_dashboard_stale"] = tier_b is not None and tier_b_revision != revision
+            result["_dashboard_revision"] = saved_revision
+            result["_dashboard_tier_a_revision"] = int(
+                entry.get("tier_a_revision", saved_revision))
+            result["_dashboard_tier_b_revision"] = int(
+                entry.get("tier_b_revision", saved_revision))
+            result["_dashboard_stale"] = False
             result["_dashboard_tier_b_saved_at"] = entry.get("tier_b_saved_at")
-            if self.repository.dashboard_data_revision() != revision:
+            return result
+        return None
+
+    def load_last_good(self, account_id: str | None, clock: str | None) -> dict | None:
+        """Return the validated saved scope without waiting for SQLite or a file lock."""
+        try:
+            result = self._load_from_documents(self._read_documents(), account_id, clock)
+            if result is not None and result.get("_dashboard_tier_b_revision") is not None:
+                result["_dashboard_stale"] = True
+            return result
+        except Exception:
+            return None
+
+    def load(self, account_id: str | None, clock: str | None, *,
+             expected_revision: int | None = None) -> dict | None:
+        try:
+            revision = (self.repository.dashboard_data_revision(account_id)
+                        if expected_revision is None else int(expected_revision))
+            with self._lock, self._process_lock():
+                documents = self._read_documents()
+            if (not documents
+                    or self.repository.dashboard_data_revision(account_id) != revision):
                 return None
+            result = self._load_from_documents(documents, account_id, clock)
+            if result is None or self.repository.dashboard_data_revision(account_id) != revision:
+                return None
+            result["_dashboard_revision"] = revision
+            result["_dashboard_stale"] = (
+                result.get("_dashboard_tier_b_revision") is not None and
+                result.get("_dashboard_tier_b_revision") != revision)
             return result
         except Exception:
             return None
@@ -444,7 +565,14 @@ class DashboardSnapshotCache:
              revision: int, snapshot: dict) -> bool:
         try:
             tier_a, tier_b = _split_snapshot(snapshot)
-            if not _valid_tier_a(tier_a, account_id, clock) or not _valid_tier_b(tier_b):
+            tier_a_valid = _valid_tier_a(tier_a, account_id, clock)
+            self.last_validation_issue = (
+                None if tier_a_valid else "tier_a_shape")
+            if not tier_a_valid:
+                self.last_save_status = "invalid_schema"
+                return False
+            self.last_validation_issue = _tier_b_validation_issue(tier_b)
+            if self.last_validation_issue is not None:
                 self.last_save_status = "invalid_schema"
                 return False
             with self._lock, self._process_lock():
@@ -467,12 +595,12 @@ class DashboardSnapshotCache:
                 if size > _MAX_CACHE_BYTES:
                     self.last_save_status = "oversized"
                     return False
-                if self.repository.dashboard_data_revision() != int(revision):
+                if self.repository.dashboard_data_revision(account_id) != int(revision):
                     self.last_save_status = "revision_changed"
                     return False
                 self._atomic_write(encoded)
             self.last_save_status = "saved"
-            return self.repository.dashboard_data_revision() == int(revision)
+            return self.repository.dashboard_data_revision(account_id) == int(revision)
         except (OSError, TypeError, ValueError, AttributeError):
             self.last_save_status = "io_error"
             return False
@@ -495,7 +623,7 @@ class DashboardSnapshotCache:
 
     def _save_tier(self, account_id, clock, revision, tier_name, tier) -> bool:
         try:
-            if self.repository.dashboard_data_revision() != int(revision):
+            if self.repository.dashboard_data_revision(account_id) != int(revision):
                 self.last_save_status = "revision_changed"
                 return False
             with self._lock, self._process_lock():
@@ -520,12 +648,12 @@ class DashboardSnapshotCache:
                 if size > _MAX_CACHE_BYTES:
                     self.last_save_status = "oversized"
                     return False
-                if self.repository.dashboard_data_revision() != int(revision):
+                if self.repository.dashboard_data_revision(account_id) != int(revision):
                     self.last_save_status = "revision_changed"
                     return False
                 self._atomic_write(encoded)
             self.last_save_status = "saved"
-            current = self.repository.dashboard_data_revision() == int(revision)
+            current = self.repository.dashboard_data_revision(account_id) == int(revision)
             if not current:
                 self.last_save_status = "revision_changed"
             return current

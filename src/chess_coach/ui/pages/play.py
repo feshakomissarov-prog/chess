@@ -5,11 +5,12 @@ from __future__ import annotations
 from collections.abc import Callable
 
 import chess
-from PySide6.QtCore import Qt, Signal, QSignalBlocker, QSettings
+from PySide6.QtCore import QEvent, Qt, Signal, QSignalBlocker, QSettings, QTimer
 from PySide6.QtWidgets import (QCheckBox, QComboBox, QApplication, QFrame, QGridLayout, QHBoxLayout,
                                QLabel, QLineEdit, QListWidget, QListWidgetItem, QPushButton, QScrollArea,
-                               QSpinBox, QVBoxLayout, QWidget, QButtonGroup, QRadioButton)
+                               QSizePolicy, QSpinBox, QVBoxLayout, QWidget, QButtonGroup, QRadioButton)
 from ...board_view import BoardView
+from ..icons import icon_pixmap
 
 
 class _ModeCard(QFrame):
@@ -78,7 +79,7 @@ class PlayPage(QWidget):
         ("Вызвать игрока", "Найдите соперника на Lichess и сыграйте с ним.", "challenge"),
         ("Свободная доска", "Откройте локальную доску для игры за обе стороны.", "local"),
     )
-    _MODE_ICONS = {"ai": "♟", "friend": "↗", "challenge": "♙", "local": "♖"}
+    _MODE_ICONS = {"ai": "ai", "friend": "link", "challenge": "users", "local": "board"}
 
     def __init__(self, actions: dict[str, Callable], parent=None,
                  settings: QSettings | None = None) -> None:
@@ -97,7 +98,14 @@ class PlayPage(QWidget):
         self.content_scroll.setWidgetResizable(True)
         self.content_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self.content_scroll.setFrameShape(QFrame.Shape.NoFrame)
+        self.content_scroll.viewport().installEventFilter(self)
         self.content = QWidget()
+        # Active-game text and mode-card labels can otherwise keep the content
+        # wider than the available viewport at high DPI. Start controls stay
+        # with their selected form; the confirmed-game resume action is pinned
+        # outside this scroll area.
+        self.content.setSizePolicy(QSizePolicy.Policy.Ignored,
+                                   QSizePolicy.Policy.Preferred)
         layout = QVBoxLayout(self.content)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(8)
@@ -175,6 +183,7 @@ class PlayPage(QWidget):
         self.form_status.setWordWrap(True)
         self.form_status.hide()
         form = QFrame()
+        self.form_card = form
         form.setObjectName("metricCard")
         form_layout = QVBoxLayout(form)
         self.form_heading = QLabel()
@@ -189,9 +198,9 @@ class PlayPage(QWidget):
         self.mode_selector.hide()
         form_grid = QGridLayout()
         form_grid.setHorizontalSpacing(16)
-        form_grid.setColumnStretch(0, 1)
-        form_grid.setColumnStretch(1, 1)
-        form_grid.setColumnStretch(2, 1)
+        self._form_columns = 3
+        for column in range(3):
+            form_grid.setColumnStretch(column, 1)
         self._form_grid = form_grid
         self._form_grid_widgets: dict[str, QWidget] = {}
         for index, (label, widget) in enumerate((
@@ -209,7 +218,6 @@ class PlayPage(QWidget):
         form_layout.addLayout(form_grid)
         form_layout.addWidget(self.custom_clock_row)
         form_layout.addWidget(self.rated)
-        form_layout.addWidget(self.form_status)
         self.invitation_row = QWidget()
         invitation_layout = QHBoxLayout(self.invitation_row)
         invitation_layout.setContentsMargins(0, 0, 0, 0)
@@ -225,12 +233,13 @@ class PlayPage(QWidget):
         invitation_layout.addWidget(self.cancel_invitation_button)
         self.invitation_row.setVisible(False)
         form_layout.addWidget(self.invitation_row)
+        form_actions = QHBoxLayout()
+        form_actions.addWidget(self.form_status, 1)
+        form_actions.addWidget(self.cancel_pending_button)
+        form_actions.addStretch(1)
+        form_actions.addWidget(self.start_button)
+        form_layout.addLayout(form_actions)
         self.start_button.setMinimumWidth(280)
-        action_row = QHBoxLayout()
-        action_row.addStretch(1)
-        action_row.addWidget(self.start_button)
-        form_layout.addLayout(action_row)
-        form_layout.addWidget(self.cancel_pending_button)
         layout.addWidget(form)
         self.active_panel = QFrame()
         self.active_panel.setObjectName("activeGamesPanel")
@@ -239,7 +248,8 @@ class PlayPage(QWidget):
         self.active_status.setWordWrap(True)
         self.active_games = QListWidget()
         self.active_games.setAccessibleName("Активные партии Lichess")
-        self.active_games.setMinimumHeight(112)
+        self.active_games.setMinimumHeight(56)
+        self.active_games.setMaximumHeight(144)
         self.active_games.currentItemChanged.connect(self._show_active_preview)
         preview = QWidget(self.active_panel)
         preview_row = QHBoxLayout(preview)
@@ -252,7 +262,7 @@ class PlayPage(QWidget):
         self.active_preview_status.setObjectName("secondary")
         self.active_preview_board = BoardView(chess.Board(), self.active_panel)
         self.active_preview_board.setMinimumSize(0, 0)
-        self.active_preview_board.setFixedSize(176, 176)
+        self.active_preview_board.setFixedSize(144, 144)
         self.active_preview_board.set_interaction_enabled(False)
         self.active_preview_board.set_annotations_enabled(False)
         self.active_preview_board.set_premove_allowed(False)
@@ -268,9 +278,16 @@ class PlayPage(QWidget):
             lambda item, _old: self._set_active_open_enabled(item))
         active_layout.addWidget(self.active_status)
         active_layout.addWidget(preview)
-        active_layout.addWidget(self.active_open)
+        self.active_open.hide()
         self.active_panel.hide()
         layout.addWidget(self.active_panel)
+        self.action_bar = QFrame(self)
+        self.action_bar.setObjectName("metricCard")
+        action_row = QHBoxLayout(self.action_bar)
+        action_row.setContentsMargins(10, 6, 10, 6)
+        action_row.addWidget(self.active_open)
+        root_layout.addWidget(self.action_bar)
+        self.action_bar.hide()
         stored_mode = str(settings.value("play/last_selected_mode", "ai", type=str)) if settings else "ai"
         mode_index = self.mode_selector.findData(stored_mode)
         if mode_index < 0 or stored_mode == "active":
@@ -303,18 +320,22 @@ class PlayPage(QWidget):
             card_layout = QVBoxLayout(card)
             card_layout.setContentsMargins(18, 12, 18, 12)
             heading_row = QHBoxLayout()
-            icon = QLabel(self._MODE_ICONS[key])
+            icon = QLabel()
             icon.setObjectName("playModeIcon")
             icon.setFixedSize(64, 64)
             icon.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            icon.setPixmap(icon_pixmap(self._MODE_ICONS[key], 40, "#C8BBFF",
+                                       icon.devicePixelRatioF()))
             heading_row.addWidget(icon)
             title_label = QLabel(heading)
             title_label.setStyleSheet("font-size: 23px; font-weight: 700;")
             heading_row.addWidget(title_label, 1)
-            selected_mark = QLabel("✓")
+            selected_mark = QLabel()
             selected_mark.setObjectName("playModeSelectedMark")
             selected_mark.setAlignment(Qt.AlignmentFlag.AlignCenter)
             selected_mark.setFixedSize(34, 34)
+            selected_mark.setPixmap(icon_pixmap("check", 18, "#1A1930",
+                                                  selected_mark.devicePixelRatioF()))
             selected_mark.setVisible(False)
             card_layout.addLayout(heading_row)
             heading_row.addWidget(selected_mark)
@@ -335,9 +356,12 @@ class PlayPage(QWidget):
         layout.removeWidget(form)
         layout.removeWidget(self.active_panel)
         layout.removeItem(self.grid)
-        layout.insertWidget(0, self.active_panel)
-        layout.insertLayout(1, self.grid)
-        layout.insertWidget(2, form)
+        # Active games remain available, but the selected mode and its form
+        # are the first-screen workflow. Keep the list/preview below them so
+        # one to three games cannot push the four mode cards out of view.
+        layout.insertLayout(0, self.grid)
+        layout.insertWidget(1, form)
+        layout.insertWidget(2, self.active_panel)
         for card in self.cards:
             card.setMinimumHeight(152)
         layout.addStretch(1)
@@ -487,13 +511,7 @@ class PlayPage(QWidget):
                 field_order.append("Соперник")
         else:
             field_order = []
-        for widget in self._form_grid_widgets.values():
-            self._form_grid.removeWidget(widget)
-        for column, label in enumerate(field_order):
-            self._form_grid.addWidget(self._form_grid_widgets[label], 0, column)
-        inactive = [label for label in self._form_grid_widgets if label not in field_order]
-        for index, label in enumerate(inactive):
-            self._form_grid.addWidget(self._form_grid_widgets[label], 1, index)
+        self._layout_form_fields(field_order)
         self.level.setVisible(mode == "ai")
         self.rated.setVisible(mode in {"friend", "challenge"})
         self.username.setVisible(mode == "challenge")
@@ -506,6 +524,38 @@ class PlayPage(QWidget):
             "active": "Показать активные партии",
         }
         self.start_button.setText(labels.get(mode, "Начать"))
+
+    def _layout_form_fields(self, field_order: list[str]) -> None:
+        grid = self._form_grid
+        for widget in self._form_grid_widgets.values():
+            grid.removeWidget(widget)
+        available_width = max(0, self.content_scroll.viewport().width())
+        columns = 3 if available_width >= 900 else 2 if available_width >= 620 else 1
+        self._form_columns = columns
+        for column in range(3):
+            grid.setColumnStretch(column, int(column < columns))
+        if (self.mode_selector.currentData() == "challenge"
+                and "Соперник" in field_order):
+            # UX-03 gives the opponent name a full row; party options follow
+            # beneath it instead of forcing a narrow third-column input.
+            grid.addWidget(self._form_grid_widgets["Соперник"], 0, 0, 1, columns)
+            remaining = [label for label in field_order if label != "Соперник"]
+            for index, label in enumerate(remaining):
+                grid.addWidget(self._form_grid_widgets[label], 1 + index // columns,
+                               index % columns)
+            inactive = [label for label in self._form_grid_widgets
+                        if label not in field_order]
+            for index, label in enumerate(inactive):
+                grid.addWidget(self._form_grid_widgets[label], 2 + index // columns,
+                               index % columns)
+            return
+        for index, label in enumerate(field_order):
+            grid.addWidget(self._form_grid_widgets[label], index // columns,
+                           index % columns)
+        inactive = [label for label in self._form_grid_widgets if label not in field_order]
+        for index, label in enumerate(inactive, start=len(field_order)):
+            grid.addWidget(self._form_grid_widgets[label], index // columns,
+                           index % columns)
 
     def _emit_create(self) -> None:
         mode = str(self.mode_selector.currentData() or "local")
@@ -565,6 +615,8 @@ class PlayPage(QWidget):
             "Выберите партию для продолжения." if self.active_games.count()
             else "Активных партий нет."))
         self.active_panel.setVisible(self.active_games.count() > 0)
+        self.active_open.setVisible(self.active_games.count() > 0)
+        self.action_bar.setVisible(self.active_games.count() > 0)
         self._update_form()
 
     def _show_active_preview(self, item, _previous=None) -> None:
@@ -640,11 +692,43 @@ class PlayPage(QWidget):
         self.invitation_row.setVisible(False)
 
     def layout_modes(self, available_width: int) -> None:
-        columns = 1 if int(available_width) < 1100 else 2
+        # Two columns need enough room for the icon, title and description to
+        # remain readable. The shell width is not a reliable proxy because the
+        # sidebar and the scroll viewport reduce it substantially.
+        columns = 1 if int(available_width) < 960 else 2
         if columns == self._columns:
             return
         self._columns = columns
         self._place_cards()
+
+    def eventFilter(self, watched, event) -> bool:  # noqa: N802 - Qt override
+        if (watched is self.content_scroll.viewport()
+                and event.type() == QEvent.Type.Resize):
+            self.layout_modes(watched.width())
+            QTimer.singleShot(0, self._sync_form_layout)
+        return super().eventFilter(watched, event)
+
+    def _sync_form_layout(self) -> None:
+        field_order = [label for label, row in self._form_grid_widgets.items()
+                       if row.isVisible()]
+        if not field_order:
+            mode = str(self.mode_selector.currentData() or "ai")
+            field_order = (["Цвет фигур", "Уровень Lichess AI", "Контроль времени"]
+                           if mode == "ai" else
+                           ["Цвет фигур", "Контроль времени", "Соперник"]
+                           if mode == "challenge" else
+                           ["Цвет фигур", "Контроль времени"]
+                           if mode == "friend" else [])
+        self._layout_form_fields(field_order)
+
+    def resizeEvent(self, event) -> None:  # noqa: N802 - Qt override
+        super().resizeEvent(event)
+        # The workspace sidebar and native DPI scaling reduce the page width
+        # below the top-level window width. Base the grid on the actual page.
+        if hasattr(self, "content_scroll"):
+            available_width = self.content_scroll.viewport().width()
+            self.layout_modes(available_width)
+            self._sync_form_layout()
 
     def _place_cards(self) -> None:
         while self.grid.count():

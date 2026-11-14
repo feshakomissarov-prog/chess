@@ -12,6 +12,7 @@ from PySide6.QtWidgets import (
 )
 
 from .position_setup import PositionSetupWidget
+from ..icons import icon_pixmap
 
 
 class AnalysisLandingPage(QWidget):
@@ -22,13 +23,13 @@ class AnalysisLandingPage(QWidget):
     nested_tool_changed = Signal(int)
 
     _CARDS = (
-        ("♜", "Разбор партии", "Архив, PGN/FEN, редактор позиции и анализ ходов",
+        ("games", "Разбор партии", "Архив, PGN/FEN, редактор позиции и анализ ходов",
          "Доступно", "Открыть разбор", "games", True),
-        ("♞", "Исследование дебютов", "Сохранённая статистика дебютов и фаз",
+        ("analysis", "Исследование дебютов", "Сохранённая статистика дебютов и фаз",
          "Частично доступно", "Открыть статистику", "openings", True),
-        ("◎", "Диагностика слабостей", "Повторяющиеся ошибки и приоритеты развития",
+        ("target", "Диагностика слабостей", "Повторяющиеся ошибки и приоритеты развития",
          "В разработке", "В разработке", "weakness", False),
-        ("♟", "Подготовка к сопернику", "Анализ открытых партий Lichess и дебютов",
+        ("pawn", "Подготовка к сопернику", "Анализ открытых партий Lichess и дебютов",
          "В разработке", "В разработке", "opponent", False),
     )
 
@@ -54,17 +55,19 @@ class AnalysisLandingPage(QWidget):
         self.grid.setVerticalSpacing(14)
         self.cards: list[QFrame] = []
         self.buttons: dict[str, QPushButton] = {}
-        for index, (glyph, heading, description, status, label, key, enabled) in enumerate(self._CARDS):
+        for index, (icon_name, heading, description, status, label, key, enabled) in enumerate(self._CARDS):
             card = QFrame()
             card.setObjectName("metricCard" if enabled else "disabledAnalysisCard")
             card.setMinimumHeight(206)
             card_layout = QVBoxLayout(card)
             card_layout.setContentsMargins(18, 14, 18, 14)
             heading_row = QHBoxLayout()
-            icon = QLabel(glyph)
+            icon = QLabel()
             icon.setObjectName("analysisCardIcon")
             icon.setFixedSize(48, 48)
             icon.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            icon.setPixmap(icon_pixmap(icon_name, 25, "#C8BBFF",
+                                       icon.devicePixelRatioF()))
             heading_row.addWidget(icon)
             name = QLabel(heading)
             name.setStyleSheet("font-size: 20px; font-weight: 700;")

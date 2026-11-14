@@ -3,22 +3,341 @@
 from __future__ import annotations
 
 from datetime import date
+import math
 
-from PySide6.QtCore import QPointF, Qt
-from PySide6.QtGui import QColor, QPainter, QPainterPath, QPen
+import chess
+
+from PySide6.QtCore import QPoint, QPointF, QRect, QTimer, Qt, Signal
+from PySide6.QtGui import QColor, QFont, QFontMetrics, QPainter, QPainterPath, QPen, QPolygonF
 from PySide6.QtWidgets import (
     QComboBox, QFrame, QGridLayout, QHBoxLayout, QLabel, QPushButton, QScrollArea,
     QSizePolicy, QToolTip, QVBoxLayout, QWidget,
 )
+from ..icons import icon_pixmap
+from ...board_view import BoardView
+
+
+class HomeEvaluationGraph(QWidget):
+    """Compact, source-backed score graph in white's point of view."""
+
+    AXIS_LIMIT_CP = 600
+
+    def __init__(self, points=None, total_plies: int = 0,
+                 phases: dict | None = None, parent=None):
+        super().__init__(parent)
+        self.points = []
+        self.empty_text = "Нет сохранённых оценок"
+        self.total_plies = max(1, int(total_plies or 1))
+        self.phases = phases if isinstance(phases, dict) else {}
+        self._hit_targets = []
+        self._drawn_cp_segments = []
+        self._mate_markers = []
+        self._clipped_markers = []
+        self._phase_labels = []
+        self._phase_marks = []
+        self._raw_cp_points = []
+        self._keyboard_target_index = None
+        self.source = ""
+        self.coverage = ""
+        self._base_accessible_description = (
+            "Оценки в пешках с точки зрения белых: выше нуля — преимущество белых, "
+            "ниже нуля — преимущество чёрных; ноль означает равную позицию. "
+            "Пропуски оценок не соединяются.")
+        self.setMinimumSize(230, 108)
+        self.setMouseTracking(True)
+        self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+        self.setAccessibleName("График преимущества по ходам")
+        self.setAccessibleDescription(self._base_accessible_description)
+        self.set_points(points or [], total_plies=total_plies, phases=phases)
+
+    def set_data_context(self, source: str = "", coverage: str = "") -> None:
+        self.source = str(source or "")
+        self.coverage = str(coverage or "")
+        context = []
+        if self.source:
+            context.append(f"Источник: {self.source}.")
+        if self.coverage:
+            context.append(f"Охват сохранённых позиций: {self.coverage}.")
+        if not (self.phases.get("source") and self.phases.get("method_version")):
+            context.append("Шахматные стадии не установлены; нижняя шкала нейтральная.")
+        self._base_accessible_description = " ".join((
+            "Оценки в пешках с точки зрения белых: выше нуля — преимущество белых, "
+            "ниже нуля — преимущество чёрных; ноль означает равную позицию. "
+            "Пропуски оценок не соединяются.", *context))
+        self.setAccessibleDescription(self._base_accessible_description)
+
+    def set_points(self, points, *, total_plies: int | None = None,
+                   phases: dict | None = None) -> None:
+        self.points = sorted((dict(row) for row in (points or [])
+                              if isinstance(row, dict) and type(row.get("ply")) is int),
+                             key=lambda row: row["ply"])
+        self._keyboard_target_index = None
+        self.setAccessibleDescription(self._base_accessible_description)
+        if total_plies is not None:
+            self.total_plies = max(1, int(total_plies or 1))
+        if phases is not None:
+            self.phases = phases if isinstance(phases, dict) else {}
+        self.update()
+
+    def _plot_rect(self):
+        return self.rect().adjusted(8, 8, -8, -24)
+
+    @staticmethod
+    def _white_perspective_label(cp: int | None, mate: int | None) -> str:
+        if mate is not None:
+            side = "белые" if mate > 0 else "чёрные" if mate < 0 else "мат"
+            return (f"Мат: {side} через {abs(mate)}" if mate else
+                    "Терминальная матовая оценка; сторона не выводится")
+        if cp is None:
+            return "Оценки позиции нет"
+        if cp == 0:
+            return "Равная позиция: 0.00 пешки"
+        side = "Белые" if cp > 0 else "Чёрные"
+        return f"{side} +{abs(cp) / 100:.2f} пешки"
+
+    @staticmethod
+    def _connects(previous: dict, current: dict) -> bool:
+        if current.get("connect_from_previous") is not None:
+            return current.get("connect_from_previous") is True
+        return current["ply"] == previous["ply"] + 1
+
+    @staticmethod
+    def _tooltip_text(ply: int, label: str, *, interval_start: int | None = None,
+                      interval_count: int = 1) -> str:
+        move_number = (ply + 1) // 2
+        interval = (f" · матовые оценки: полуходы {interval_start}–{ply} "
+                    f"({interval_count} позиций)"
+                    if interval_start is not None and interval_count > 1 else "")
+        return f"Полуход {ply} (ход {move_number}) · {label}{interval}"
+
+    def paintEvent(self, _event):
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        plot = self._plot_rect()
+        self._hit_targets = []
+        self._drawn_cp_segments = []
+        self._mate_markers = []
+        self._clipped_markers = []
+        self._phase_labels = []
+        self._phase_marks = []
+        self._raw_cp_points = []
+        painter.setPen(QPen(QColor("#354058"), 1))
+        painter.drawRect(plot)
+        limit = self.AXIS_LIMIT_CP
+        for tick in (limit, 400, 200, 0, -200, -400, -limit):
+            y = plot.center().y() - round(plot.height() * tick / (2 * limit))
+            painter.setPen(QPen(QColor("#8792AB" if tick == 0 else "#354058"),
+                                2 if tick == 0 else 1))
+            painter.drawLine(plot.left(), y, plot.right(), y)
+
+        middle = self.phases.get("middle_start_ply")
+        end = self.phases.get("end_start_ply")
+        stage_labels = []
+        phase_marks = []
+        source_backed = bool(self.phases.get("source") and self.phases.get("method_version"))
+        middle_valid = (source_backed and type(middle) is int
+                        and 0 < middle < self.total_plies)
+        end_valid = (source_backed and type(end) is int
+                     and 0 < end < self.total_plies)
+        if middle_valid and end_valid and middle < end:
+            phase_marks = [middle, end]
+            stage_labels = [(middle // 2, "Дебют"),
+                            ((middle + end) // 2, "Миттельшпиль"),
+                            ((end + self.total_plies) // 2, "Эндшпиль")]
+        elif middle_valid:
+            phase_marks = [middle]
+            stage_labels = [(middle // 2, "Дебют"),
+                            ((middle + self.total_plies) // 2, "Миттельшпиль")]
+        elif end_valid:
+            phase_marks = [end]
+            stage_labels = [(self.total_plies // 6, "Начало"),
+                            ((end + self.total_plies) // 2, "Эндшпиль")]
+        else:
+            # Unknown phase boundaries are shown only as neutral time progress.
+            stage_labels = [(0, "Начало"), (self.total_plies, "Конец")]
+        self._phase_labels = list(stage_labels)
+        self._phase_marks = list(phase_marks)
+        painter.setPen(QPen(QColor("#59637A"), 1, Qt.PenStyle.DashLine))
+        for ply in phase_marks:
+            if ply <= 0 or ply >= self.total_plies:
+                continue
+            x = plot.left() + round(plot.width() * ply / self.total_plies)
+            painter.drawLine(x, plot.top(), x, plot.bottom())
+        painter.setPen(QColor("#AEB8D0"))
+        for ply, label in stage_labels:
+            x = plot.left() + round(plot.width() * ply / self.total_plies)
+            label_width = 92 if label == "Миттельшпиль" else 62
+            left = max(0, min(self.width() - label_width, x - label_width // 2))
+            painter.drawText(left, self.height() - 4, label)
+
+        scored = []
+        for row in self.points:
+            cp = row.get("white_cp")
+            mate = row.get("mate_white")
+            if cp is None and mate is None:
+                continue
+            ply = max(0, min(self.total_plies, int(row["ply"])))
+            x = plot.left() + round(plot.width() * ply / self.total_plies)
+            if mate is not None:
+                y = (plot.top() + 7 if int(mate) > 0 else
+                     plot.bottom() - 7 if int(mate) < 0 else plot.center().y())
+            else:
+                # Keep the real, unbounded coordinate.  QPainter's clip makes
+                # out-of-axis line segments leave/re-enter without a false flat
+                # run along the border.
+                y = plot.center().y() - round(plot.height() * int(cp) / (2 * limit))
+            scored.append((ply, x, y, None if mate is not None else int(cp),
+                           None if mate is None else int(mate), row))
+
+        painter.save()
+        painter.setClipRect(plot.adjusted(1, 1, -1, -1))
+        for index, point in enumerate(scored):
+            ply, x, y, cp, mate, row = point
+            previous = scored[index - 1] if index else None
+            if (previous is not None and cp is not None and previous[3] is not None
+                    and self._connects(previous[5], row)):
+                color = QColor("#38D887" if (cp + previous[3]) >= 0 else "#ED7483")
+                shade = QColor(color)
+                shade.setAlpha(42)
+                baseline = plot.center().y()
+                both_above = cp > limit and previous[3] > limit
+                both_below = cp < -limit and previous[3] < -limit
+                if not (both_above or both_below):
+                    painter.setPen(Qt.PenStyle.NoPen)
+                    painter.setBrush(shade)
+                    painter.drawPolygon(QPolygonF([
+                        QPointF(previous[1], baseline), QPointF(previous[1], previous[2]),
+                        QPointF(x, y), QPointF(x, baseline)]))
+                painter.setPen(QPen(color, 2))
+                painter.drawLine(previous[1], previous[2], x, y)
+                self._drawn_cp_segments.append((previous[0], ply))
+
+            if mate is not None:
+                mate_sign = 1 if mate > 0 else -1 if mate < 0 else 0
+                previous_mate = (previous[4] if previous is not None else None)
+                previous_sign = (1 if previous_mate is not None and previous_mate > 0 else
+                                 -1 if previous_mate is not None and previous_mate < 0 else 0)
+                joined_to_previous = (previous_mate is not None and
+                                      previous_sign == mate_sign and
+                                      self._connects(previous[5], row))
+                next_point = scored[index + 1] if index + 1 < len(scored) else None
+                next_mate = next_point[4] if next_point is not None else None
+                next_sign = (1 if next_mate is not None and next_mate > 0 else
+                             -1 if next_mate is not None and next_mate < 0 else 0)
+                joined_to_next = (next_mate is not None and next_sign == mate_sign and
+                                  self._connects(row, next_point[5]))
+                is_group_endpoint = not joined_to_next
+                if is_group_endpoint:
+                    group_start = (int(row.get("mate_start_ply", ply)) if
+                                   not joined_to_previous else
+                                   int(previous[5].get("mate_start_ply", previous[0])))
+                    if joined_to_previous:
+                        # Adjacent raw mate points have not been pre-aggregated.
+                        cursor = index - 1
+                        while cursor >= 0:
+                            earlier = scored[cursor]
+                            earlier_mate = earlier[4]
+                            earlier_sign = (1 if earlier_mate is not None and earlier_mate > 0 else
+                                            -1 if earlier_mate is not None and earlier_mate < 0 else 0)
+                            if (earlier_mate is None or earlier_sign != mate_sign or
+                                    not self._connects(earlier[5], scored[cursor + 1][5])):
+                                break
+                            group_start = int(earlier[5].get("mate_start_ply", earlier[0]))
+                            cursor -= 1
+                    color = (QColor("#38D887") if mate > 0 else
+                             QColor("#ED7483") if mate < 0 else QColor("#D8D0FF"))
+                    painter.setPen(QPen(color, 2))
+                    painter.setBrush(color)
+                    painter.drawEllipse(QPointF(x, y), 4, 4)
+                    interval_start = row.get("mate_start_ply", group_start)
+                    interval_count = int(row.get("mate_sample_count") or
+                                          max(1, ply - int(interval_start) + 1))
+                    label = self._white_perspective_label(cp, mate)
+                    tooltip = self._tooltip_text(
+                        ply, label,
+                        interval_start=int(interval_start) if interval_start is not None else None,
+                        interval_count=interval_count)
+                    self._hit_targets.append((x, y, ply, tooltip))
+                    self._mate_markers.append((ply, mate, int(interval_start), interval_count))
+            else:
+                label = self._white_perspective_label(cp, mate)
+                target_y = max(plot.top(), min(plot.bottom(), y))
+                tooltip = self._tooltip_text(ply, label)
+                self._hit_targets.append((x, target_y, ply, tooltip))
+                self._raw_cp_points.append((ply, int(cp), x, y, tooltip))
+        painter.restore()
+        if not scored:
+            painter.setPen(QColor("#AEB8D0"))
+            painter.drawText(plot, Qt.AlignmentFlag.AlignCenter, self.empty_text)
+
+    def mouseMoveEvent(self, event):
+        if not self._hit_targets:
+            return
+        x, y = event.position().x(), event.position().y()
+        point = min(self._hit_targets,
+                    key=lambda item: (item[0] - x) ** 2 + (item[1] - y) ** 2)
+        if (point[0] - x) ** 2 + (point[1] - y) ** 2 <= 100:
+            QToolTip.showText(event.globalPosition().toPoint(),
+                              point[3], self)
+
+    def keyPressEvent(self, event):
+        if not self._hit_targets or event.key() not in (
+                Qt.Key.Key_Left, Qt.Key.Key_Right, Qt.Key.Key_Home, Qt.Key.Key_End):
+            super().keyPressEvent(event)
+            return
+        if event.key() == Qt.Key.Key_Home:
+            index = 0
+        elif event.key() == Qt.Key.Key_End:
+            index = len(self._hit_targets) - 1
+        elif self._keyboard_target_index is None:
+            index = 0 if event.key() == Qt.Key.Key_Right else len(self._hit_targets) - 1
+        else:
+            delta = 1 if event.key() == Qt.Key.Key_Right else -1
+            index = max(0, min(len(self._hit_targets) - 1,
+                               self._keyboard_target_index + delta))
+        self._keyboard_target_index = index
+        target = self._hit_targets[index]
+        self.setAccessibleDescription(
+            f"{self._base_accessible_description} Выбрана точка: {target[3]}.")
+        QToolTip.showText(self.mapToGlobal(QPoint(8, 8)), target[3], self)
+        event.accept()
+
+
+class PuzzlePreviewBoard(BoardView):
+    """Read-only mini board whose click opens the exact saved exercise."""
+
+    open_requested = Signal()
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+
+    def mousePressEvent(self, event):  # noqa: N802 - Qt API override
+        if event.button() == Qt.MouseButton.LeftButton:
+            self.open_requested.emit()
+            event.accept()
+            return
+        super().mousePressEvent(event)
+
+    def keyPressEvent(self, event):  # noqa: N802 - Qt API override
+        if event.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter, Qt.Key.Key_Space):
+            self.open_requested.emit()
+            event.accept()
+            return
+        super().keyPressEvent(event)
 
 
 class PuzzleRatingSparkline(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.points = []
-        self.setMinimumHeight(46)
+        self.setMinimumHeight(112)
         self.setMouseTracking(True)
         self.setAccessibleName("История рейтинга задач Lichess")
+        self._y_label_bounds = []
+        self._x_label_bounds = []
+        self._x_axis_labels = []
         self.hide()
 
     def set_points(self, points):
@@ -31,11 +350,49 @@ class PuzzleRatingSparkline(QWidget):
             return []
         days = [date.fromisoformat(point["day"]).toordinal() for point in self.points]
         ratings = [point["rating"] for point in self.points]
-        low, high = min(ratings), max(ratings)
-        width, height = max(1, self.width() - 12), max(1, self.height() - 12)
-        return [QPointF(6 + width * (day - days[0]) / max(1, days[-1] - days[0]),
-                        6 + height * (1 - (rating - low + 5) / (high - low + 10)))
+        axis_low, axis_high, _step = self._rating_axis(ratings)
+        plot = self._plot_rect(ratings)
+        width, height = max(1, plot.width()), max(1, plot.height())
+        return [QPointF(plot.left() + width * (day - days[0]) / max(1, days[-1] - days[0]),
+                        plot.bottom() - height * (rating - axis_low) / (axis_high - axis_low))
                 for day, rating in zip(days, ratings)]
+
+    def _plot_rect(self, ratings=None):
+        ratings = ratings or [int(point["rating"]) for point in self.points]
+        if ratings:
+            low, high, step = self._rating_axis(ratings)
+            font = QFont(self.font())
+            font.setPointSizeF(max(7.0, font.pointSizeF() - 1.0))
+            metrics = QFontMetrics(font)
+            max_label_width = max(metrics.horizontalAdvance(str(value))
+                                  for value in range(low, high + 1, step))
+            left_margin = max(38, max_label_width + 12)
+        else:
+            left_margin = 38
+        return self.rect().adjusted(left_margin, 8, -8, -24)
+
+    @staticmethod
+    def _non_overlapping_label_rects(candidates, *, min_gap: int = 3):
+        """Keep preferred endpoint/center labels whose measured rects fit."""
+        accepted = []
+        for value, rect in candidates:
+            expanded = rect.adjusted(-min_gap // 2, -min_gap // 2,
+                                     min_gap // 2, min_gap // 2)
+            if any(expanded.intersects(existing.adjusted(
+                    -min_gap // 2, -min_gap // 2, min_gap // 2, min_gap // 2))
+                   for _old_value, existing in accepted):
+                continue
+            accepted.append((value, rect))
+        return accepted
+
+    @staticmethod
+    def _rating_axis(ratings: list[int]) -> tuple[int, int, int]:
+        low, high = min(ratings), max(ratings)
+        span = max(100, high - low)
+        step = max(50, math.ceil(span / 4 / 50) * 50)
+        axis_low = (low // step) * step - step
+        axis_high = ((high + step - 1) // step) * step + step
+        return axis_low, axis_high, step
 
     def paintEvent(self, _event):
         points = self._vertices()
@@ -43,18 +400,79 @@ class PuzzleRatingSparkline(QWidget):
             return
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        ratings = [int(point["rating"]) for point in self.points]
+        plot = self._plot_rect(ratings)
+        axis_low, axis_high, step = self._rating_axis(ratings)
+        label_font = QFont(painter.font())
+        label_font.setPointSizeF(max(7.0, label_font.pointSizeF() - 1.0))
+        metrics = QFontMetrics(label_font)
+        painter.setFont(label_font)
+        self._y_label_bounds = []
+        self._x_label_bounds = []
+        self._x_axis_labels = []
+        painter.setPen(QPen(QColor("#354058"), 1))
+        painter.drawRect(plot)
+        y_candidates = []
+        for rating in range(axis_low, axis_high + 1, step):
+            fraction = (rating - axis_low) / (axis_high - axis_low)
+            y = plot.bottom() - round(plot.height() * fraction)
+            painter.setPen(QPen(QColor("#354058"), 1))
+            painter.drawLine(plot.left(), y, plot.right(), y)
+            width = metrics.horizontalAdvance(str(rating))
+            bounds = QRect(plot.left() - 7 - width, y - metrics.height() // 2,
+                           width, metrics.height())
+            y_candidates.append((rating, bounds))
+        # Prefer both ends and the middle, then add any remaining ticks that
+        # fit. Grid lines remain at every tick even when a label is omitted.
+        y_candidates.sort(key=lambda item: (
+            0 if item[0] in (axis_low, axis_high) else
+            1 if item[0] == round((axis_low + axis_high) / (2 * step)) * step else 2,
+            item[1].top()))
+        max_y_labels = max(2, min(
+            5, (plot.height() + 3) // (metrics.height() + 3)))
+        y_labels = self._non_overlapping_label_rects(y_candidates)[:max_y_labels]
+        painter.setPen(QColor("#AEB8D0"))
+        for rating, bounds in sorted(y_labels, key=lambda item: item[1].top()):
+            painter.drawText(bounds, Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter,
+                             str(rating))
+            self._y_label_bounds.append((rating, bounds))
         line = QPainterPath(points[0])
         for point in points[1:]:
             line.lineTo(point)
         area = QPainterPath(line)
-        area.lineTo(points[-1].x(), self.height())
-        area.lineTo(points[0].x(), self.height())
+        area.lineTo(points[-1].x(), plot.bottom())
+        area.lineTo(points[0].x(), plot.bottom())
         area.closeSubpath()
         painter.fillPath(area, QColor(92, 226, 130, 40))
         painter.setPen(QPen(QColor("#79E599"), 2))
         painter.drawPath(line)
         painter.setBrush(QColor("#79E599"))
         painter.drawEllipse(points[-1], 3, 3)
+        dates = [date.fromisoformat(point["day"]) for point in self.points]
+        span_days = max(1, (dates[-1] - dates[0]).days)
+        painter.setPen(QColor("#AEB8D0"))
+        last_is_today = dates[-1] == date.today()
+        x_candidates = []
+        fractions = ((1,) if dates[-1] == dates[0] else (1, 0, 1 / 3, 2 / 3))
+        for fraction in fractions:
+            elapsed = round(span_days * fraction)
+            label = ("сегодня" if fraction == 1 and last_is_today else
+                     dates[-1].strftime("%d.%m") if fraction == 1 else
+                     f"{span_days - elapsed}д")
+            x = plot.left() + round(plot.width() * elapsed / span_days)
+            label_width = metrics.horizontalAdvance(label)
+            left = (plot.left() if x - label_width // 2 < plot.left() else
+                    plot.right() - label_width if x + label_width // 2 > plot.right() else
+                    x - label_width // 2)
+            left = max(0, min(max(0, self.width() - label_width), left))
+            bounds = QRect(left, self.height() - metrics.height() - 2,
+                           label_width, metrics.height())
+            x_candidates.append((label, bounds))
+        x_labels = self._non_overlapping_label_rects(x_candidates)
+        for label, bounds in sorted(x_labels, key=lambda item: item[1].left()):
+            painter.drawText(bounds, Qt.AlignmentFlag.AlignCenter, label)
+            self._x_label_bounds.append(bounds)
+            self._x_axis_labels.append(label)
 
     def mouseMoveEvent(self, event):
         vertices = self._vertices()
@@ -81,8 +499,7 @@ class HomePage(QWidget):
         self.home_status.setMaximumHeight(24)
         self.home_status.hide()
         layout.addWidget(self.home_status)
-        # The status row is hidden on Home; retain only a small rhythm gap so
-        # all three approved recent-game cards fit at the reference height.
+        # The status row is hidden on Home; retain the baseline rhythm gap.
         layout.addSpacing(2)
 
         # Account scope is shared with the authenticated profile. Keep the old
@@ -109,7 +526,7 @@ class HomePage(QWidget):
         metrics_grid = QGridLayout()
         self.dashboard_metrics_grid = metrics_grid
         metrics_grid.setContentsMargins(0, 0, 0, 0)
-        metrics_grid.setHorizontalSpacing(16)
+        metrics_grid.setHorizontalSpacing(10)
         metrics_grid.setVerticalSpacing(0)
         self._dashboard_metric_values = {}
         self._dashboard_metric_details = {}
@@ -124,13 +541,15 @@ class HomePage(QWidget):
             card_layout.setContentsMargins(16, 13, 16, 13)
             card_layout.setSpacing(2)
             caption = QLabel(label)
-            caption.setStyleSheet("font-size: 19px; font-weight: 600;")
+            caption.setStyleSheet("font-size: 16px; font-weight: 600;")
             caption.setWordWrap(True)
             caption_row = QHBoxLayout()
             if key in {"games", "accuracy"}:
-                icon = QLabel("♟" if key == "games" else "◎")
+                icon = QLabel()
                 icon.setAlignment(Qt.AlignmentFlag.AlignCenter)
                 icon.setFixedSize(42, 42)
+                icon.setPixmap(icon_pixmap("pawn" if key == "games" else "target",
+                                           25, "#D8D0FF", icon.devicePixelRatioF()))
                 icon.setStyleSheet("background: #39365E; color: #C8BBFF;"
                                    "border-radius: 10px; font-size: 25px;")
                 caption_row.addWidget(icon)
@@ -140,6 +559,7 @@ class HomePage(QWidget):
             detail = QLabel("Локальные данные")
             detail.setObjectName("muted")
             detail.setWordWrap(True)
+            detail.setStyleSheet("font-size: 12px;")
             card_layout.addLayout(caption_row)
             card_layout.addWidget(value)
             card_layout.addWidget(detail)
@@ -150,23 +570,29 @@ class HomePage(QWidget):
         # field for compatibility without giving it KPI prominence on Home.
         self.dashboard_metrics["errors"].hide()
         for key in ("games", "accuracy"):
-            self.dashboard_metrics[key].setMinimumHeight(240)
-        layout.addLayout(metrics_grid)
-        layout.addSpacing(10)
+            # Leave enough vertical room for the wrapped, source-qualified
+            # summary even when Windows font metrics round a line upward.
+            self.dashboard_metrics[key].setMinimumHeight(186)
+            self.dashboard_metrics[key].setMaximumHeight(198)
 
         top_row = QHBoxLayout()
         self.home_primary_actions = top_row
         top_row.setSpacing(9)
         self.home_progress_card = QFrame(self)
         self.home_progress_card.setObjectName("metricCard")
-        self.home_progress_card.setMinimumHeight(240)
+        # Title, rating, trend graph, wrapped trend label and their margins
+        # need roughly 200 logical px; a smaller minimum makes the graph and
+        # trend overlap at compact Windows heights.
+        self.home_progress_card.setMinimumHeight(262)
+        self.home_progress_card.setMaximumHeight(310)
         progress_layout = QVBoxLayout(self.home_progress_card)
-        progress_layout.setContentsMargins(11, 8, 11, 8)
-        progress_layout.setSpacing(4)
+        progress_layout.setContentsMargins(11, 8, 11, 4)
+        progress_layout.setSpacing(2)
         progress_title = QLabel("Рейтинг задач")
         progress_title.setStyleSheet("font-size: 19px; font-weight: 600;")
         progress_title.setWordWrap(True)
         self.home_all_progress_button = QPushButton("Весь прогресс")
+        self.home_all_progress_button.setObjectName("primaryAction")
         self.home_all_progress_button.setMaximumHeight(32)
         self.home_all_progress_button.clicked.connect(actions["show_statistics"])
         progress_heading = QHBoxLayout()
@@ -174,11 +600,12 @@ class HomePage(QWidget):
         progress_heading.addWidget(self.home_all_progress_button)
         progress_layout.addLayout(progress_heading)
         self.puzzle_rating = QLabel("—")
-        self.puzzle_rating.setStyleSheet("font-size: 54px; font-weight: 700;")
+        self.puzzle_rating.setStyleSheet("font-size: 48px; font-weight: 700;")
         progress_layout.addWidget(self.puzzle_rating)
         self.puzzle_sparkline = PuzzleRatingSparkline(self.home_progress_card)
-        self.puzzle_sparkline.setMinimumHeight(70)
-        self.puzzle_sparkline.setMaximumHeight(80)
+        self.puzzle_sparkline.setObjectName("homePuzzleRatingGraph")
+        self.puzzle_sparkline.setMinimumHeight(112)
+        self.puzzle_sparkline.setMaximumHeight(132)
         self.puzzle_sparkline.setMinimumWidth(0)
         self.puzzle_sparkline.setSizePolicy(QSizePolicy.Policy.Ignored,
                                             QSizePolicy.Policy.Preferred)
@@ -186,46 +613,99 @@ class HomePage(QWidget):
         self.progress_trend = QLabel("Нет сохранённых точек тренда.")
         self.progress_trend.setObjectName("secondary")
         self.progress_trend.setWordWrap(True)
-        self.progress_trend.setMaximumHeight(50)
-        progress_layout.addWidget(self.progress_trend, 1)
+        self.progress_trend.setMinimumHeight(22)
+        self.progress_trend.setSizePolicy(QSizePolicy.Policy.Preferred,
+                                          QSizePolicy.Policy.Minimum)
+        progress_layout.addWidget(self.progress_trend)
         self.dashboard_metrics["games"].layout().addWidget(
             self._dashboard_metric_values["analysis"])
         self._dashboard_metric_values["analysis"].setStyleSheet("font-size: 14px;")
         self.dashboard_metrics["games"].layout().addWidget(
             self._dashboard_metric_details["analysis"])
         self._dashboard_metric_values["analysis"].hide()
+        self._dashboard_metric_details["analysis"].hide()
         self.dashboard_metrics["analysis"].hide()
         self.layout_metrics()
 
-        self.home_play_card = QFrame(self)
-        self.home_play_card.setObjectName("metricCard")
-        self.home_play_card.setMaximumHeight(160)
-        activity_layout = QHBoxLayout(self.home_play_card)
-        activity_layout.setContentsMargins(11, 8, 11, 8)
-        activity_layout.setSpacing(4)
-        activity_title = QLabel("Следующее занятие")
-        activity_title.setStyleSheet("font-size: 16px; font-weight: 700;")
-        activity_layout.addWidget(activity_title)
-        self.activity_status = QLabel("Пока нет сохранённых задач для повторения.")
+        self.home_puzzle_card = QFrame(self)
+        self.home_play_card = self.home_puzzle_card  # compatibility alias for shell hooks
+        self.home_puzzle_card.setObjectName("metricCard")
+        self.home_puzzle_card.setMinimumHeight(250)
+        self.home_puzzle_card.setMaximumHeight(292)
+        puzzle_layout = QVBoxLayout(self.home_puzzle_card)
+        puzzle_layout.setContentsMargins(11, 8, 11, 8)
+        puzzle_layout.setSpacing(6)
+        puzzle_heading = QHBoxLayout()
+        puzzle_heading.setSpacing(8)
+        puzzle_icon = QLabel()
+        puzzle_icon.setFixedSize(34, 34)
+        puzzle_icon.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        puzzle_icon.setPixmap(icon_pixmap("target", 21, "#D8D0FF",
+                                          puzzle_icon.devicePixelRatio()))
+        puzzle_icon.setStyleSheet("background:#39365E;border-radius:9px;")
+        puzzle_heading.addWidget(puzzle_icon)
+        activity_title = QLabel("Следующая задача")
+        activity_title.setStyleSheet("font-size: 18px; font-weight: 700;")
+        puzzle_heading.addWidget(activity_title, 1)
+        puzzle_layout.addLayout(puzzle_heading)
+        puzzle_content = QHBoxLayout()
+        puzzle_content.setSpacing(12)
+        self.puzzle_preview_board = PuzzlePreviewBoard(chess.Board(), self.home_puzzle_card)
+        self.puzzle_preview_board.setObjectName("homePuzzleBoard")
+        self.puzzle_preview_board.setMinimumSize(112, 112)
+        self.puzzle_preview_board.setMaximumSize(210, 210)
+        self.puzzle_preview_board.setSizePolicy(QSizePolicy.Policy.Preferred,
+                                                QSizePolicy.Policy.Preferred)
+        self.puzzle_preview_board.set_interaction_enabled(False)
+        self.puzzle_preview_board.set_show_legal_moves(False)
+        self.puzzle_preview_board.set_show_last_move(False)
+        self.puzzle_preview_board.setAccessibleName("Открыть сохранённую задачу")
+        self.puzzle_preview_board.hide()
+        puzzle_content.addWidget(self.puzzle_preview_board, 0, Qt.AlignmentFlag.AlignVCenter)
+        puzzle_details = QVBoxLayout()
+        puzzle_details.setSpacing(7)
+        self.activity_status = QLabel("Пока нет доступной задачи.")
         self.activity_status.setObjectName("secondary")
         self.activity_status.setWordWrap(True)
-        self.activity_status.setMaximumHeight(50)
-        activity_layout.addWidget(self.activity_status, 1)
+        self.activity_status.setMinimumHeight(42)
+        puzzle_details.addWidget(self.activity_status)
+        self.puzzle_side_to_move = QLabel("")
+        self.puzzle_side_to_move.setObjectName("secondary")
+        self.puzzle_side_to_move.setWordWrap(True)
+        puzzle_details.addWidget(self.puzzle_side_to_move)
+        self.puzzle_meta = QLabel("")
+        self.puzzle_meta.setObjectName("muted")
+        self.puzzle_meta.setWordWrap(True)
+        puzzle_details.addWidget(self.puzzle_meta)
+        puzzle_details.addStretch(1)
         self.home_activity_button = QPushButton("Открыть обучение")
         self.home_activity_button.setObjectName("primaryAction")
-        self.home_activity_button.clicked.connect(actions["open_puzzle_history_local"])
-        activity_layout.addWidget(self.home_activity_button)
-        top_row.addWidget(self.home_play_card, 1)
+        self.home_activity_button.setMinimumHeight(40)
+        self.home_activity_button.clicked.connect(self._open_puzzle_preview)
+        puzzle_details.addWidget(self.home_activity_button)
+        puzzle_content.addLayout(puzzle_details, 1)
+        puzzle_layout.addLayout(puzzle_content, 1)
+        self._puzzle_open_action = actions.get("open_saved_puzzle")
+        self._puzzle_history_action = actions["open_puzzle_history_local"]
+        self._puzzle_preview = None
+        self.puzzle_preview_board.open_requested.connect(self._open_puzzle_preview)
+        top_row.addWidget(self.home_puzzle_card, 1)
 
         recent_card = QFrame(self)
         self.home_recent_card = recent_card
         recent_card.setObjectName("recentGames")
         recent_layout = QVBoxLayout(recent_card)
         recent_layout.setContentsMargins(11, 8, 11, 8)
-        recent_layout.setSpacing(20)
+        recent_layout.setSpacing(8)
         recent_title_row = QHBoxLayout()
+        recent_icon = QLabel()
+        recent_icon.setFixedSize(30, 30)
+        recent_icon.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        recent_icon.setPixmap(icon_pixmap("clock", 22, "#E5E1FF",
+                                          recent_icon.devicePixelRatio()))
+        recent_title_row.addWidget(recent_icon)
         recent_title = QLabel("Последние партии")
-        recent_title.setStyleSheet("font-size: 30px; font-weight: 700;")
+        recent_title.setStyleSheet("font-size: 24px; font-weight: 700;")
         recent_title_row.addWidget(recent_title)
         recent_title_row.addStretch(1)
         self.home_games_button = QPushButton("Все партии")
@@ -237,18 +717,43 @@ class HomePage(QWidget):
         self.recent_safety_notice.setMaximumHeight(20)
         recent_layout.addWidget(self.recent_safety_notice)
         recent_rows = QWidget()
+        # Keep the resizable scroll content constrained by its viewport even
+        # when recent-game cards have a wider desktop size hint.
+        recent_rows.setSizePolicy(QSizePolicy.Policy.Ignored,
+                                  QSizePolicy.Policy.Preferred)
+        recent_rows.setMinimumSize(0, 0)
         self._recent_games_layout = QVBoxLayout(recent_rows)
         self._recent_games_layout.setContentsMargins(0, 0, 0, 0)
-        self._recent_games_layout.setSpacing(12)
+        self._recent_games_layout.setSpacing(10)
         self.recent_scroll = QScrollArea()
         self.recent_scroll.setFrameShape(QFrame.Shape.NoFrame)
         self.recent_scroll.setWidgetResizable(True)
         self.recent_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self.recent_scroll.setWidget(recent_rows)
         recent_layout.addWidget(self.recent_scroll, 1)
-        layout.addWidget(recent_card, 1)
-        # Training remains available through the primary sidebar route.
-        self.home_play_card.hide()
+        # Keep progress and the next-lesson action in the center zone and the
+        # three compact recent-game cards visible together in the right zone.
+        # This follows the approved Home layout and avoids a page-level scroll.
+        overview = QWidget(self)
+        overview_layout = QVBoxLayout(overview)
+        overview_layout.setContentsMargins(0, 0, 0, 0)
+        overview_layout.setSpacing(8)
+        overview_layout.addLayout(metrics_grid)
+        overview_layout.addWidget(self.home_progress_card, 1)
+        overview_layout.addLayout(top_row)
+        overview_scroll = QScrollArea(self)
+        self.home_overview_scroll = overview_scroll
+        overview_scroll.setObjectName("homeOverviewScroll")
+        overview_scroll.setFrameShape(QFrame.Shape.NoFrame)
+        overview_scroll.setWidgetResizable(True)
+        overview_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        overview_scroll.setWidget(overview)
+        zones = QHBoxLayout()
+        zones.setContentsMargins(0, 0, 0, 0)
+        zones.setSpacing(12)
+        zones.addWidget(overview_scroll, 38)
+        zones.addWidget(recent_card, 62)
+        layout.addLayout(zones, 1)
 
         # Preserve shell callbacks and old tests as hidden compatibility hooks.
         self.home_friend_button = QPushButton("Играть с другом по ссылке")
@@ -333,27 +838,88 @@ class HomePage(QWidget):
 
     def layout_metrics(self, width: int | None = None) -> None:
         grid = self.dashboard_metrics_grid
-        cards = [self.dashboard_metrics["games"], self.dashboard_metrics["accuracy"],
-                 self.home_progress_card]
+        cards = [self.dashboard_metrics["games"], self.dashboard_metrics["accuracy"]]
         if not cards:
             return
         available = int(width if width is not None else self.width())
-        columns = 3 if available >= 980 else 2 if available >= 620 else 1
+        columns = 2 if available >= 440 else 1
         if getattr(self, "_dashboard_metric_columns", None) == columns:
             return
         self._dashboard_metric_columns = columns
         while grid.count():
             grid.takeAt(0)
-        # Match the approved hierarchy: the rating trend receives more space,
-        # while the two numeric summaries remain compact and balanced.
-        visual_stretch = (81, 75, 102)
-        for column in range(3):
+        for column in range(2):
             grid.setColumnStretch(
-                column,
-                visual_stretch[column] if columns == 3 else int(column < columns))
+                column, int(column < columns))
         for index, card in enumerate(cards):
             grid.addWidget(card, index // columns, index % columns)
 
+    def set_puzzle_preview(self, preview: dict | None, *, loading: bool = False) -> None:
+        self._puzzle_preview = preview if isinstance(preview, dict) else None
+        if self._puzzle_preview:
+            try:
+                board = chess.Board(str(preview["fen"]))
+                if not board.is_valid() or board.turn != bool(preview["solver_is_white"]):
+                    raise ValueError("invalid saved puzzle position")
+            except (KeyError, TypeError, ValueError):
+                self._puzzle_preview = None
+        if self._puzzle_preview:
+            board = chess.Board(str(self._puzzle_preview["fen"]))
+            self.puzzle_preview_board.set_position(board)
+            self.puzzle_preview_board.set_flipped(board.turn == chess.BLACK)
+            self.puzzle_preview_board.setAccessibleDescription(
+                f"Сохранённая задача {self._puzzle_preview['puzzle_id']}; "
+                f"ход за {'белых' if board.turn == chess.WHITE else 'чёрных'}. Нажмите Enter.")
+            self.puzzle_preview_board.setToolTip("Открыть и решить эту сохранённую задачу")
+            self.puzzle_preview_board.show()
+            self.activity_status.setText("Задача Lichess")
+            self.activity_status.setToolTip(
+                f"Сохранённая задача Lichess · ID {self._puzzle_preview['puzzle_id']}")
+            self.puzzle_side_to_move.setText(
+                "Найдите лучший ход за белых" if board.turn == chess.WHITE
+                else "Найдите лучший ход за чёрных")
+            rating = self._puzzle_preview.get("rating")
+            themes = self._puzzle_preview.get("themes") or []
+            meta = []
+            if rating is not None:
+                meta.append(f"Рейтинг задачи: {rating}")
+            if themes:
+                meta.append("Темы: " + ", ".join(str(theme) for theme in themes[:3]))
+            self.puzzle_meta.setText(" · ".join(meta))
+            self.home_activity_button.setText("Решать задачу")
+            self.home_activity_button.setToolTip("Открыть и решить именно эту сохранённую задачу")
+        else:
+            self.puzzle_preview_board.hide()
+            self.activity_status.setToolTip("")
+            self.puzzle_side_to_move.clear()
+            self.puzzle_meta.clear()
+            self.activity_status.setText(
+                "Загружаю сохранённые задачи…" if loading else
+                "Пока нет доступной задачи. Можно открыть историю обучения.")
+            self.home_activity_button.setText("Открыть обучение")
+            self.home_activity_button.setToolTip("Открыть локальную историю задач")
+
+    def _open_puzzle_preview(self) -> None:
+        if self._puzzle_preview and self._puzzle_open_action:
+            self._puzzle_open_action(str(self._puzzle_preview["account_id"]),
+                                     str(self._puzzle_preview["puzzle_id"]))
+            return
+        self._puzzle_history_action()
+
+    def _layout_metrics_from_viewport(self) -> None:
+        if hasattr(self, "home_overview_scroll"):
+            self.layout_metrics(self.home_overview_scroll.viewport().width())
+
     def resizeEvent(self, event) -> None:  # noqa: N802 - Qt override
         super().resizeEvent(event)
-        self.layout_metrics(event.size().width())
+        metric_width = (self.home_overview_scroll.viewport().width()
+                        if hasattr(self, "home_overview_scroll")
+                        else event.size().width())
+        self.layout_metrics(metric_width)
+        QTimer.singleShot(0, self._layout_metrics_from_viewport)
+        if hasattr(self, "puzzle_preview_board"):
+            content_width = max(0, self.home_puzzle_card.contentsRect().width() - 34)
+            min_side = min(210, max(112, round(content_width * .40)))
+            max_side = min(210, max(min_side, round(content_width * .43)))
+            self.puzzle_preview_board.setMinimumSize(min_side, min_side)
+            self.puzzle_preview_board.setMaximumSize(max_side, max_side)

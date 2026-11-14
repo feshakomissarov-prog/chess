@@ -7,12 +7,15 @@ store, user settings, user database or real engine is opened.
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from copy import deepcopy
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 import os
 import sys
+import tempfile
 import threading
 import time
+import math
 from hashlib import sha256
 from types import SimpleNamespace
 
@@ -20,13 +23,15 @@ import chess
 from PySide6.QtCore import QPoint, QRect, QSize, Qt
 from PySide6.QtGui import QColor, QCursor, QImage, QPainter
 from PySide6.QtTest import QSignalSpy, QTest
-from PySide6.QtWidgets import QApplication, QLabel, QListWidgetItem, QScrollArea, QToolTip, QWidget
+from PySide6.QtWidgets import (
+    QApplication, QBoxLayout, QLabel, QListWidgetItem, QScrollArea, QToolTip, QWidget,
+)
 
 from chess_coach.bootstrap import create_runtime
-from chess_coach.application.dashboard import dashboard_snapshot
+from chess_coach.application.dashboard import dashboard_snapshot, _home_graph_points
 from chess_coach.application.background_work import OperationLane
 from chess_coach.lichess.batch_analysis import BatchAnalysisRunner, FastPassOptions
-from chess_coach.ui.game_review import ReviewGraph
+from chess_coach.ui.pages.home import HomeEvaluationGraph
 from chess_coach.ui.pages.background import BackgroundOperationsPage
 from chess_coach.ui.pages.puzzles import PuzzleHistoryPage
 from chess_coach.window import MainWindow
@@ -88,7 +93,11 @@ def assert_label_fits(label: QLabel, description: str) -> None:
     if label.hasHeightForWidth():
         required = label.heightForWidth(max(1, label.width()))
         assert required <= label.height(), (
-            f"{description} is vertically clipped: required={required}, actual={label.height()}"
+            f"{description} is vertically clipped: required={required}, actual={label.height()}, "
+            f"label_width={label.width()}, label_min_height={label.minimumHeight()}, "
+            f"label_size_hint={label.sizeHint().width()}x{label.sizeHint().height()}, "
+            f"parent={label.parentWidget().objectName() if label.parentWidget() else None} "
+            f"{label.parentWidget().width()}x{label.parentWidget().height()}"
         )
     elif not label.wordWrap():
         required = label.fontMetrics().horizontalAdvance(label.text())
@@ -99,12 +108,20 @@ def assert_label_fits(label: QLabel, description: str) -> None:
 
 
 def assert_scroll_action(scroll: QScrollArea, widget: QWidget, description: str) -> None:
-    scroll.ensureWidgetVisible(widget)
+    # Qt defaults to a 50 px margin. At 125%/150% a valid bottom-row action
+    # can be shorter than that extra margin even though the full click target
+    # fits in the viewport; validate reachability with no artificial padding.
+    scroll.ensureWidgetVisible(widget, 0, 0)
     QApplication.processEvents()
     assert widget.isVisible(), f"{description} is hidden"
     bounds = QRect(widget.mapTo(scroll.viewport(), QPoint(0, 0)), widget.size())
     assert scroll.viewport().rect().contains(bounds), (
-        f"{description} cannot be fully reached in its local scroll area: {bounds.getRect()}"
+        f"{description} cannot be fully reached in its local scroll area: "
+        f"widget={bounds.getRect()}, viewport={scroll.viewport().rect().getRect()}, "
+        f"content=({scroll.widget().width()}, {scroll.widget().height()}), "
+        f"scroll_range=({scroll.verticalScrollBar().minimum()}"
+        f"..{scroll.verticalScrollBar().maximum()}), "
+        f"scroll_value={scroll.verticalScrollBar().value()}"
     )
     assert bounds.width() >= 24 and bounds.height() >= 24, (
         f"{description} has a truncated click target: {bounds.getRect()}"
@@ -280,6 +297,12 @@ def wait_home(window, account_id: str) -> None:
                  and bool(window._latest_dashboard_snapshot)
                  and not window._latest_dashboard_snapshot.get("is_preview")
                  and window._dashboard_metric_values["games"].text() == "8"
+                 and window._home_view.puzzle_preview_board.isVisible()
+                 and window._home_view.puzzle_preview_board.width() >= 112
+                 and window._home_view.puzzle_preview_board.height() >= 112
+                 and bool(window._home_view._puzzle_preview)
+                 and str(window._home_view._puzzle_preview.get("puzzle_id", "")).startswith(
+                     "visual-puzzle-")
                  and len([window._home_view._recent_games_layout.itemAt(i).widget()
                           for i in range(window._home_view._recent_games_layout.count())
                           if window._home_view._recent_games_layout.itemAt(i).widget()
@@ -299,13 +322,42 @@ def wait_home(window, account_id: str) -> None:
         raise
     assert window._dashboard_metric_values["accuracy"].text().endswith("%")
     assert "Lichess" in window._dashboard_metric_details["accuracy"].text()
+    game_detail = window._dashboard_metric_details["games"].text()
+    assert game_detail.count("С оценками:") == 1, (
+        "The Home completed-games KPI must not repeat its source summary."
+    )
+    assert window._dashboard_metric_details["analysis"].isHidden(), (
+        "The hidden legacy analysis KPI must not duplicate details in the games card."
+    )
     recent_cards = [window._home_view._recent_games_layout.itemAt(i).widget()
                     for i in range(window._home_view._recent_games_layout.count())
                     if window._home_view._recent_games_layout.itemAt(i).widget()
                     and window._home_view._recent_games_layout.itemAt(i).widget().objectName() == "metricCard"]
-    assert all(card.findChild(ReviewGraph) is not None for card in recent_cards), (
+    assert all(card.findChild(HomeEvaluationGraph) is not None for card in recent_cards), (
         "All three synthetic Home games require a real rendered evaluation graph."
     )
+    for index, card in enumerate(recent_cards, start=1):
+        assert card.width() <= window._home_view.recent_scroll.viewport().width(), (
+            f"Home card {index} exceeds its scroll viewport width: "
+            f"{card.width()} > {window._home_view.recent_scroll.viewport().width()}"
+        )
+        if card.width() < 400:
+            assert card._responsive_details_layout.direction() == (
+                QBoxLayout.Direction.TopToBottom), (
+                    "Home details should stack only below their measured fit width."
+                )
+        for label_index, label in enumerate(card.findChildren(QLabel), start=1):
+            if label.isVisible():
+                assert_label_fits(
+                    label,
+                    f"Home card {index}, text {label_index} ({label.text()!r})",
+                )
+        graph = card.findChild(HomeEvaluationGraph)
+        assert graph is not None and graph.width() >= 160, (
+            f"Home card {index} evaluation graph is too narrow: "
+            f"{graph.width() if graph is not None else 'missing'}"
+        )
+        assert graph.points, f"Home card {index} has no source-backed graph points."
 
 
 def wait_selected_review(page, expected_game_id: str) -> None:
@@ -512,6 +564,13 @@ def capture(window: MainWindow, output: Path, name: str, width: int, height: int
         if mode in page.buttons:
             assert_scroll_action(page.content_scroll, page.buttons[mode], f"Play mode {mode}")
             assert_action_target(window, page.buttons[mode], f"Play mode {mode}")
+        assert page.form_card.isAncestorOf(page.start_button), (
+            "The primary start action belongs to the selected mode form, matching UX-01/02/03."
+        )
+        assert_scroll_action(page.content_scroll, page.start_button, "Play start action")
+        assert_action_target(window, page.start_button, "Play start action")
+        if page.active_open.isVisibleTo(window):
+            assert_action_target(window, page.active_open, "Continue selected game action")
         page.content_scroll.verticalScrollBar().setValue(0)
         QTest.qWait(20)
     if current is window.game_page:
@@ -530,7 +589,10 @@ def capture(window: MainWindow, output: Path, name: str, width: int, height: int
         QTest.qWait(20)
     training_page = (current if isinstance(current, PuzzleHistoryPage)
                      else current.findChild(PuzzleHistoryPage))
-    if training_page is not None:
+    # A hidden PuzzleHistoryPage remains a child of the shell when another
+    # route is active. Its last query need not be populated until Training is
+    # opened, so inspect it only while it contributes pixels to this capture.
+    if training_page is not None and training_page.isVisibleTo(window):
         assert training_page.history.count() > 0
         assert training_page.board.isVisible()
         assert_no_widget_overlap(training_page.board, training_page.solution,
@@ -630,6 +692,41 @@ def capture(window: MainWindow, output: Path, name: str, width: int, height: int
         expected_account = window.dashboard_account.currentData()
         if expected_account:
             wait_home(window, str(expected_account))
+        progress = window._home_view
+        board_minimum = 176 if width >= 1500 else 112
+        assert progress.puzzle_preview_board.width() >= board_minimum
+        assert progress.puzzle_preview_board.height() >= board_minimum
+        overview_viewport = progress.home_overview_scroll.viewport()
+        viewport_left = overview_viewport.mapToGlobal(QPoint(0, 0)).x()
+        viewport_right = viewport_left + overview_viewport.width()
+        for key in ("games", "accuracy"):
+            metric = progress.dashboard_metrics[key]
+            metric_left = metric.mapToGlobal(QPoint(0, 0)).x()
+            metric_right = metric_left + metric.width()
+            assert metric_left >= viewport_left and metric_right <= viewport_right, (
+                f"Home {key} KPI is horizontally clipped at {width}x{height}: "
+                f"metric={metric_left}:{metric_right}, "
+                f"viewport={viewport_left}:{viewport_right}"
+            )
+        graph_rect = QRect(progress.puzzle_sparkline.mapToGlobal(QPoint(0, 0)),
+                           progress.puzzle_sparkline.size())
+        trend_rect = QRect(progress.progress_trend.mapToGlobal(QPoint(0, 0)),
+                           progress.progress_trend.size())
+        if progress.progress_trend.isVisible():
+            assert not graph_rect.intersects(trend_rect), (
+                f"Home puzzle trend label overlaps its graph at {width}x{height}: "
+                f"graph={graph_rect.getRect()}, label={trend_rect.getRect()}"
+            )
+            assert_label_fits(progress.progress_trend, "Home puzzle rating trend label")
+        recent_cards = [window._recent_games_layout.itemAt(i).widget()
+                        for i in range(window._recent_games_layout.count())
+                        if window._recent_games_layout.itemAt(i).widget() is not None
+                        and window._recent_games_layout.itemAt(i).widget().objectName() == "metricCard"]
+        for card_index, card in enumerate(recent_cards, start=1):
+            for label_index, label in enumerate(card.findChildren(QLabel), start=1):
+                if label.isVisible():
+                    assert_label_fits(label, f"Home {width}x{height}, card {card_index}, "
+                                               f"label {label_index}")
         if width >= 1500 and height >= 900:
             recent = window._home_view.recent_scroll
             card_heights = [window._recent_games_layout.itemAt(i).widget().height()
@@ -645,7 +742,7 @@ def capture(window: MainWindow, output: Path, name: str, width: int, height: int
                 "The approved wide Home reference requires all three recent cards visible "
                 "without an internal scroll bar."
             )
-    elif current is window.library_page:
+    elif current is getattr(window, "library_page", None):
         game = window.library_page._detail_game or {}
         wait_selected_review(window.library_page, str(game.get("game_id") or ""))
         page = window.library_page
@@ -721,10 +818,14 @@ def capture(window: MainWindow, output: Path, name: str, width: int, height: int
             f"background {width}x{height}: page={page.height()}px, "
             f"events={page.recent_events.count()} rows/{page.recent_events.height()}px, "
             f"cards={[card.height() for card, _icon, _title in page._workflow_cards]}")
-    assert window.size() == QSize(width, height), (
-        f"Requested {width}x{height}, actual Qt window is {window.width()}x{window.height()}, "
-        f"minimum={window.minimumWidth()}x{window.minimumHeight()}, "
-        f"maximized={window.isMaximized()}, page={type(window.screen_stack.currentWidget()).__name__}"
+    # Windows may clamp a top-level window to the usable work area (taskbar and
+    # native frame). Treat that as the real display geometry, and fail only if
+    # the toolkit creates a window larger than the requested test target.
+    assert window.width() <= width and window.height() <= height, (
+        f"Requested maximum {width}x{height}, actual Qt window is "
+        f"{window.width()}x{window.height()}, minimum={window.minimumWidth()}x"
+        f"{window.minimumHeight()}, maximized={window.isMaximized()}, "
+        f"page={type(window.screen_stack.currentWidget()).__name__}"
     )
     assert window.isVisible(), "capture target is not visible"
     # Click-driven route navigation can leave the pointer on a control and
@@ -738,9 +839,12 @@ def capture(window: MainWindow, output: Path, name: str, width: int, height: int
     image = window.grab().toImage()
     assert not image.isNull()
     dpr = float(image.devicePixelRatio())
-    expected_pixels = QSize(round(width * dpr), round(height * dpr))
-    assert image.size() == expected_pixels, (
-        f"Logical window {width}x{height} at DPR {dpr} should capture as "
+    expected_pixels = QSize(round(window.width() * dpr), round(window.height() * dpr))
+    pixel_size_delta = (abs(image.width() - expected_pixels.width()),
+                        abs(image.height() - expected_pixels.height()))
+    assert max(pixel_size_delta) <= 1, (
+        f"Actual logical window {window.width()}x{window.height()} at DPR {dpr} "
+        "should capture as "
         f"{expected_pixels.width()}x{expected_pixels.height()}, got "
         f"{image.width()}x{image.height()}"
     )
@@ -749,6 +853,70 @@ def capture(window: MainWindow, output: Path, name: str, width: int, height: int
     print(f"{filename}: window {window.width()}x{window.height()} logical px, "
           f"capture {image.width()}x{image.height()} px, DPR {image.devicePixelRatio()}")
     return image
+
+
+def capture_home_metric_hover_evidence(window: MainWindow, output: Path,
+                                       width: int, height: int) -> None:
+    """Capture real pointer hovers over both large Home KPIs and their details."""
+    window.resize(width, height)
+    QTest.qWait(60)
+    original_values = {key: widget.text() for key, widget in
+                       window._dashboard_metric_values.items()}
+    window._dashboard_metric_values["games"].setText("3325")
+    window._dashboard_metric_values["accuracy"].setText("82.8%")
+    assert window._dashboard_metric_values["games"].font().pixelSize() >= 40
+    assert window._dashboard_metric_values["accuracy"].font().pixelSize() >= 40
+    targets = (
+        ("games-value", window._dashboard_metric_values["games"], False),
+        ("games-detail", window._dashboard_metric_details["games"], True),
+        ("accuracy-value", window._dashboard_metric_values["accuracy"], False),
+        ("accuracy-detail", window._dashboard_metric_details["accuracy"], True),
+    )
+    screen = window.screen()
+    assert screen is not None
+    for name, widget, expects_tooltip in targets:
+        assert widget.isVisibleTo(window), f"Home KPI hover target is not visible: {name}"
+        QToolTip.hideText()
+        QTest.mouseMove(widget, widget.rect().center())
+        if expects_tooltip:
+            deadline = time.monotonic() + 1.8
+            while not QToolTip.isVisible() and time.monotonic() < deadline:
+                QTest.qWait(50)
+            assert QToolTip.isVisible(), f"Native Qt hover did not open tooltip: {name}"
+            assert QToolTip.text() == widget.toolTip()
+            popup = next((item for item in QApplication.topLevelWidgets()
+                          if item.isVisible()
+                          and item.windowType() == Qt.WindowType.ToolTip), None)
+            if popup is None:
+                popup = QApplication.activePopupWidget()
+            assert popup is not None and popup.isVisible(), f"No native popup for {name}"
+            popup_font = popup.font()
+            pixel_size = popup_font.pixelSize()
+            assert popup.width() <= 480, (
+                f"Home tooltip exceeds 480 logical px: {name} width={popup.width()}"
+            )
+            assert pixel_size in (-1, 0) or pixel_size <= 14, (
+                f"Home tooltip inherited large KPI font: {name} pixel-size={pixel_size}"
+            )
+            print(f"Home native tooltip {name}: {popup.width()}x{popup.height()} logical px; "
+                  f"font pixel-size={pixel_size}; text={QToolTip.text()!r}", flush=True)
+        else:
+            QTest.qWait(900)
+            assert not QToolTip.isVisible(), (
+                f"Large KPI value must expose detail without a large tooltip: {name}"
+            )
+            print(f"Home KPI value hover {name}: no popup; value font pixel-size="
+                  f"{widget.font().pixelSize()}", flush=True)
+        QApplication.processEvents()
+        image = screen.grabWindow(0).toImage()
+        assert not image.isNull()
+        path = output / f"{width}x{height}-home-tooltip-{name}.png"
+        assert image.save(str(path)), f"Could not save native hover evidence: {path}"
+        QToolTip.hideText()
+    QCursor.setPos(window.mapToGlobal(QPoint(width + 20, height + 20)))
+    QToolTip.hideText()
+    for key, value in original_values.items():
+        window._dashboard_metric_values[key].setText(value)
 
 
 def make_pair(reference_dir: Path, output: Path, reference_file: str,
@@ -769,6 +937,260 @@ def make_pair(reference_dir: Path, output: Path, reference_file: str,
     assert canvas.save(str(output / f"pair-{label}.png"))
 
 
+def capture_long_game_graph_cases(window: MainWindow, output: Path,
+                                  width: int, height: int) -> QImage:
+    """Capture production Home cards with structurally realistic saved scores."""
+    original = window._latest_dashboard_snapshot
+    assert original and len(original.get("recent_games") or []) == 3
+    snapshot = deepcopy(original)
+    scenarios = ("continuous-long", "twenty-ply-gap", "mate-and-clipped")
+    for game, scenario in zip(snapshot["recent_games"], scenarios):
+        assessments = []
+        anchors = ([(1, -160), (60, -60), (120, 80), (180, 20),
+                    (240, 200), (300, 140), (360, 280), (420, 140),
+                    (480, 220), (540, 80), (600, 170)]
+                   if scenario != "mate-and-clipped" else
+                   [(1, -120), (80, 20), (160, 80), (240, 160),
+                    (320, 250), (360, 800), (380, 900), (400, 1400),
+                    (420, 200), (440, 500), (460, -1000), (480, -1000),
+                    (500, -200), (520, -780), (540, -450), (580, -100),
+                    (600, 150)])
+
+        def score_at(ply: int) -> int:
+            for (left_ply, left_cp), (right_ply, right_cp) in zip(anchors, anchors[1:]):
+                if ply <= right_ply:
+                    fraction = (ply - left_ply) / (right_ply - left_ply)
+                    base = left_cp + (right_cp - left_cp) * fraction
+                    # Small, deterministic local movement avoids an artificial
+                    # high-frequency sawtooth while keeping dense real plies.
+                    return round(base + 18 * math.sin(ply / 11) + 8 * math.cos(ply / 23))
+            return anchors[-1][1]
+
+        for ply in range(1, 601):
+            if scenario == "twenty-ply-gap" and 281 <= ply <= 300:
+                continue
+            if scenario == "mate-and-clipped" and ply >= 581:
+                assessments.append({"ply": ply, "white_cp": None, "mate_white": 601 - ply})
+                continue
+            cp = score_at(ply)
+            assessments.append({"ply": ply, "white_cp": cp, "mate_white": None})
+        metrics = dict(game.get("review_metrics") or {})
+        metrics["graph_points"] = _home_graph_points(assessments)
+        metrics["total_positions"] = 601
+        metrics["coverage"] = ("580/600" if scenario == "twenty-ply-gap" else "600/600")
+        metrics["status"] = "complete"
+        metrics["source"] = "synthetic saved assessments"
+        game["review_metrics"] = metrics
+
+    try:
+        window._render_dashboard_snapshot(snapshot)
+        graphs = [
+            window._recent_games_layout.itemAt(index).widget().findChild(HomeEvaluationGraph)
+            for index in range(window._recent_games_layout.count())
+            if window._recent_games_layout.itemAt(index).widget() is not None
+            and window._recent_games_layout.itemAt(index).widget().objectName() == "metricCard"
+        ]
+        assert len(graphs) == 3 and all(graph is not None for graph in graphs)
+        for graph in graphs:
+            host = graph.parentWidget()
+            for object_name in ("dashboardGraphTitle", "dashboardGraphLegend",
+                                "dashboardGraphSource"):
+                assert host.findChild(QLabel, object_name) is None, (
+                    f"Home graph must omit permanent density label {object_name}."
+                )
+            card = host.parentWidget()
+            assert card.findChild(QLabel, "dashboardAnalysisCoverage") is None, (
+                "Home recent cards must not show a permanent analysis coverage label."
+            )
+            assert "Источник: synthetic saved assessments" in graph.accessibleDescription()
+            assert "Охват сохранённых позиций:" in graph.accessibleDescription()
+        QApplication.processEvents()
+        for graph in graphs:
+            graph.repaint()
+            assert not graph.grab().isNull()
+        by_point_count = {len(graph.points): graph for graph in graphs}
+        assert set(by_point_count) == {580, 581, 600}
+        long_graph = by_point_count[600]
+        gap_graph = by_point_count[580]
+        mate_graph = by_point_count[581]
+        print("Graph diagnostics:", [
+            {"points": len(graph.points),
+             "cp": sum(point.get("white_cp") is not None for point in graph.points),
+             "connect_flags": sum(point.get("connect_from_previous") is True
+                                  for point in graph.points),
+             "segments": len(graph._drawn_cp_segments),
+             "first": graph.points[:2], "last": graph.points[-2:]}
+            for graph in graphs
+        ], flush=True)
+        assert len(long_graph._drawn_cp_segments) == 599
+        assert len(gap_graph._drawn_cp_segments) == 578
+        assert not any(start <= 280 < end for start, end in gap_graph._drawn_cp_segments)
+        assert len(mate_graph._drawn_cp_segments) == 579
+        assert len(mate_graph._mate_markers) == 1
+        assert mate_graph._mate_markers[0][2:] == (581, 20)
+        assert "Мат: белые через 1" in next(
+            target[3] for target in mate_graph._hit_targets if target[2] == 600)
+        assert mate_graph._clipped_markers == []
+        raw_scores = [cp for _ply, cp, _x, _y, _tip in mate_graph._raw_cp_points]
+        assert max(raw_scores) >= 1200 and min(raw_scores) <= -900
+        assert any(150 <= cp <= 250 for cp in raw_scores)
+        image = capture(window, output, "home-long-game-graph-cases", width, height)
+        print("Long-game graph cases: 600 plies; one 20-ply assessment gap; "
+              "20 mate assessments rendered as one interval; unbounded CP paths clip cleanly.")
+        return image
+    finally:
+        window._render_dashboard_snapshot(original)
+
+
+def capture_home_long_opponent_case(window: MainWindow, output: Path,
+                                    width: int, height: int) -> QImage:
+    """Check a real Home card with a long opponent name at this native size."""
+    original = deepcopy(window._latest_dashboard_snapshot)
+    assert original and len(original.get("recent_games") or []) == 3
+    snapshot = deepcopy(original)
+    long_name = ("Synthetic Opponent With A Deliberately Long Display Name "
+                 "For Home Card Wrapping And Geometry 0123456789")
+    snapshot["recent_games"][0]["opponent"] = long_name
+    snapshot["recent_games"][0]["account_opponent"] = long_name
+    try:
+        window._render_dashboard_snapshot(snapshot)
+        QApplication.processEvents()
+        card = window._recent_games_layout.itemAt(0).widget()
+        assert card is not None and card.objectName() == "metricCard"
+        opponent = card.findChild(QLabel, "dashboardOpponent")
+        assert opponent is not None and opponent.text() == long_name
+        assert_label_fits(opponent, f"Home long opponent name at {width}x{height}")
+        recent = window._home_view.recent_scroll
+        assert recent.horizontalScrollBar().maximum() == 0, (
+            f"Home recent cards must not create horizontal overflow at {width}x{height}."
+        )
+        viewport = recent.viewport()
+        card_rect = QRect(card.mapTo(viewport, QPoint(0, 0)), card.size())
+        assert card_rect.left() >= 0 and card_rect.right() <= viewport.width(), (
+            f"Home long-name card exceeds its viewport at {width}x{height}: "
+            f"card={card_rect.getRect()} viewport={viewport.rect().getRect()}"
+        )
+        if width >= 1500 and height >= 900:
+            assert recent.verticalScrollBar().maximum() == 0
+            cards = [window._recent_games_layout.itemAt(index).widget()
+                     for index in range(window._recent_games_layout.count())
+                     if window._recent_games_layout.itemAt(index).widget() is not None
+                     and window._recent_games_layout.itemAt(index).widget().objectName()
+                     == "metricCard"]
+            assert len(cards) == 3
+            assert all(viewport.rect().contains(
+                QRect(item.mapTo(viewport, QPoint(0, 0)), item.size())) for item in cards)
+        return capture(window, output, "home-long-opponent-name", width, height)
+    finally:
+        window._render_dashboard_snapshot(original)
+        QApplication.processEvents()
+
+
+def capture_home_rating_review(window: MainWindow, output: Path,
+                               width: int, height: int) -> list[QImage]:
+    """Capture two truthful date/rating shapes through the production Home UI."""
+    chart = window._home_view.puzzle_sparkline
+    original_points = deepcopy(chart.points)
+    today = datetime.now(timezone.utc).date()
+    fixtures = (
+        ("high-amplitude-long-period", (90, 72, 54, 36, 18, 0),
+         (1120, 2700, 1420, 2450, 1690, 2620)),
+        ("low-amplitude-short-period", (6, 4, 2, 1, 0),
+         (1802, 1813, 1806, 1817, 1810)),
+    )
+    images = []
+    try:
+        for name, ages, ratings in fixtures:
+            chart.set_points([
+                {"day": (today - timedelta(days=age)).isoformat(),
+                 "rating": rating, "attempts": (12, 8)}
+                for age, rating in zip(ages, ratings)
+            ])
+            window.resize(width, height)
+            QTest.qWait(30)
+            QApplication.processEvents()
+            ancestor = chart
+            while ancestor is not None:
+                layout = ancestor.layout()
+                if layout is not None:
+                    layout.activate()
+                ancestor = ancestor.parentWidget()
+            QApplication.processEvents()
+            chart.repaint()
+            QApplication.processEvents()
+            assert chart.isVisibleTo(window), "Home puzzle-rating chart must be visible."
+            assert 2 <= len(chart._x_label_bounds) <= 4
+            assert 2 <= len(chart._y_label_bounds) <= 5
+            assert not any("−" in label or label.startswith("-")
+                           for label in chart._x_axis_labels)
+            image = capture(window, output, f"home-rating-{name}", width, height)
+            images.append(image)
+            QApplication.processEvents()
+            chart_dpr = float(chart.devicePixelRatioF())
+            chart_image = QImage(
+                round(chart.width() * chart_dpr), round(chart.height() * chart_dpr),
+                QImage.Format.Format_ARGB32)
+            chart_image.setDevicePixelRatio(chart_dpr)
+            chart_image.fill(Qt.GlobalColor.transparent)
+            chart_painter = QPainter(chart_image)
+            chart.render(chart_painter, QPoint())
+            chart_painter.end()
+            assert chart_image.save(str(
+                output / f"{width}x{height}-home-rating-{name}-chart.png"))
+            label_bounds = chart._x_label_bounds + [
+                rect for _value, rect in chart._y_label_bounds]
+            out_of_bounds = [bounds.getRect() for bounds in label_bounds
+                             if not chart.rect().contains(bounds)]
+            if out_of_bounds:
+                print("Home rating label geometry:", {
+                    "fixture": name, "window": (width, height),
+                    "chart": chart.size().toTuple(),
+                    "chart_rect": chart.rect().getRect(),
+                    "plot_rect": chart._plot_rect().getRect(),
+                    "x_labels": [(label, rect.getRect()) for label, rect in
+                                 zip(chart._x_axis_labels, chart._x_label_bounds)],
+                    "y_labels": [(value, rect.getRect()) for value, rect in
+                                 chart._y_label_bounds],
+                    "out_of_bounds": out_of_bounds,
+                }, flush=True)
+                capture(window, output, f"home-rating-bounds-debug-{name}",
+                        width, height)
+                raise AssertionError(
+                    f"Home rating labels extend beyond chart bounds at {width}x{height}: "
+                    f"{out_of_bounds}")
+            assert all(not first.intersects(second)
+                       for bounds in (chart._x_label_bounds,
+                                      [rect for _value, rect in chart._y_label_bounds])
+                       for i, first in enumerate(bounds)
+                       for second in bounds[i + 1:])
+    finally:
+        chart.set_points(original_points)
+        QApplication.processEvents()
+    return images
+
+
+def verify_home_play_return(window: MainWindow, account_id: str, output: Path,
+                            width: int, height: int) -> QImage:
+    """Exercise the real sidebar route Home → Play → Home on the native window."""
+    before = [str(game.get("game_id") or "")
+              for game in (window._latest_dashboard_snapshot or {}).get("recent_games", [])]
+    assert len(before) == 3
+    QTest.mouseClick(window._nav_buttons["play"], Qt.MouseButton.LeftButton)
+    assert window.screen_stack.currentWidget() is window.play_page
+    QTest.mouseClick(window._nav_buttons["home"], Qt.MouseButton.LeftButton)
+    wait_home(window, account_id)
+    after = [str(game.get("game_id") or "")
+             for game in (window._latest_dashboard_snapshot or {}).get("recent_games", [])]
+    assert after[:3] == before[:3]
+    assert window._home_view.recent_scroll.horizontalScrollBar().maximum() == 0
+    cards = [window._recent_games_layout.itemAt(index).widget()
+             for index in range(window._recent_games_layout.count())
+             if window._recent_games_layout.itemAt(index).widget() is not None
+             and window._recent_games_layout.itemAt(index).widget().objectName() == "metricCard"]
+    assert len(cards) == 3 and all(card.isVisibleTo(window) for card in cards)
+    return capture(window, output, "home-return-from-play", width, height)
+
+
 def main() -> None:
     # Hosted Windows may use cp1252 for redirected stdout/stderr even though
     # screenshot labels and test output contain Russian UI text.
@@ -778,6 +1200,13 @@ def main() -> None:
             reconfigure(encoding="utf-8", errors="backslashreplace")
     output = Path(os.environ.get("CC_VISUAL_OUTPUT", "visual-evidence")).resolve()
     output.mkdir(parents=True, exist_ok=True)
+    # Approved reference screenshots can contain profile names or game data.
+    # Keep side-by-side comparisons outside the directory uploaded by CI.
+    compare_output = Path(os.environ.get(
+        "CC_VISUAL_COMPARE_OUTPUT",
+        str(Path(tempfile.gettempdir()) / "chess-coach-visual-pairs" / output.name),
+    )).resolve()
+    compare_output.mkdir(parents=True, exist_ok=True)
     # Keep diagnostics generated by this one-shot offline capture away from the
     # owner's normal Chess Coach logs. The real profile/database/credential
     # store are never consulted by this synthetic capture.
@@ -813,18 +1242,125 @@ def main() -> None:
         # Production Home worker owns its query. No snapshot is passed directly
         # to the renderer and no production method is overridden.
         wait_home(window, account_id)
-        for width, height in target_sizes:
+        if os.environ.get("CC_VISUAL_SCOPE", "").strip() == "home-chart-review":
+            for width, height in target_sizes:
+                QTest.mouseClick(window._nav_buttons["home"], Qt.MouseButton.LeftButton)
+                wait_home(window, account_id)
+                capture_home_rating_review(window, output, width, height)
+                capture_long_game_graph_cases(window, output, width, height)
+            print(f"Targeted Home chart review captured {len(target_sizes) * 2} native states.")
+            return
+        for target_index, (width, height) in enumerate(target_sizes):
             QTest.mouseClick(window._nav_buttons["home"], Qt.MouseButton.LeftButton)
             wait_home(window, account_id)
             window._set_sidebar_collapsed(False)
             image = capture(window, output, "home", width, height)
             captured[f"home-{width}x{height}"] = image
-            make_pair(reference_dir, output, REFERENCE_MAP["home"], image, f"home-{width}x{height}")
+            scale_factor = float(os.environ.get("QT_SCALE_FACTOR", "1"))
+            if width >= 1500 or width <= 1280:
+                long_name_image = capture_home_long_opponent_case(
+                    window, output, width, height)
+                captured[f"home-long-opponent-name-{width}x{height}"] = long_name_image
+            if target_index == 0:
+                returned_home = verify_home_play_return(
+                    window, account_id, output, width, height)
+                captured[f"home-return-from-play-{width}x{height}"] = returned_home
+            if ((scale_factor == 1.0 and target_index == 0)
+                    or (scale_factor == 1.25 and width <= 1280 and height <= 720)):
+                capture_home_metric_hover_evidence(window, output, width, height)
+            if (width, height) == (target_sizes[0][0], target_sizes[0][1]) or width <= 1280:
+                graph_case_image = capture_long_game_graph_cases(
+                    window, output, width, height)
+                captured[f"home-long-game-graphs-{width}x{height}"] = graph_case_image
+            if width <= 1280 and height <= 720:
+                scroll = window._home_view.home_overview_scroll.verticalScrollBar()
+                assert scroll.maximum() > 0, (
+                    "Compact Home must expose vertical scrolling for the full left overview."
+                )
+                old_scroll_value = scroll.value()
+                scroll.setValue(scroll.maximum())
+                app.processEvents()
+                button_rect = QRect(
+                    window.home_activity_button.mapToGlobal(QPoint(0, 0)),
+                    window.home_activity_button.size())
+                viewport_rect = QRect(
+                    window._home_view.home_overview_scroll.viewport().mapToGlobal(QPoint(0, 0)),
+                    window._home_view.home_overview_scroll.viewport().size())
+                assert viewport_rect.contains(button_rect), (
+                    "The next-puzzle CTA must be fully visible after scrolling compact Home."
+                )
+                captured[f"home-scroll-bottom-{width}x{height}"] = capture(
+                    window, output, "home-scroll-bottom", width, height)
+                scroll.setValue(old_scroll_value)
+                app.processEvents()
+                recent_scroll = window._home_view.recent_scroll.verticalScrollBar()
+                assert recent_scroll.maximum() > 0, (
+                    "Compact Home must expose scrolling through all three recent games."
+                )
+                old_recent_scroll_value = recent_scroll.value()
+                recent_scroll.setValue(recent_scroll.maximum())
+                app.processEvents()
+                recent_cards = [
+                    window._recent_games_layout.itemAt(i).widget()
+                    for i in range(window._recent_games_layout.count())
+                    if window._recent_games_layout.itemAt(i).widget() is not None
+                    and window._recent_games_layout.itemAt(i).widget().objectName() == "metricCard"
+                ]
+                assert len(recent_cards) == 3
+                window._home_view.recent_scroll.ensureWidgetVisible(
+                    recent_cards[-1], 0, 0)
+                app.processEvents()
+                last_card_rect = QRect(
+                    recent_cards[-1].mapToGlobal(QPoint(0, 0)),
+                    recent_cards[-1].size())
+                recent_viewport = window._home_view.recent_scroll.viewport()
+                recent_viewport_rect = QRect(
+                    recent_viewport.mapToGlobal(QPoint(0, 0)), recent_viewport.size())
+                assert recent_viewport_rect.contains(last_card_rect), (
+                    "The last recent-game card must be fully accessible in compact Home: "
+                    f"card={last_card_rect.getRect()} viewport={recent_viewport_rect.getRect()} "
+                    f"card_size={recent_cards[-1].size().width()}x{recent_cards[-1].size().height()} "
+                    f"viewport_size={recent_viewport.size().width()}x{recent_viewport.size().height()} "
+                    f"scroll={recent_scroll.value()}/{recent_scroll.maximum()}"
+                )
+                captured[f"home-recent-scroll-bottom-{width}x{height}"] = capture(
+                    window, output, "home-recent-scroll-bottom", width, height)
+                recent_scroll.setValue(old_recent_scroll_value)
+                app.processEvents()
+            if width == target_sizes[0][0] and height == target_sizes[0][1]:
+                puzzle_id = window._home_view._puzzle_preview["puzzle_id"]
+                QTest.mouseClick(window.home_activity_button, Qt.MouseButton.LeftButton)
+                wait_for(lambda: window._puzzle_page is not None
+                         and window.screen_stack.currentWidget() is window._puzzle_page
+                         and window._puzzle_page.findChild(PuzzleHistoryPage) is not None,
+                         "exact saved puzzle route from Home", timeout=30)
+                puzzle_page = window._puzzle_page.findChild(PuzzleHistoryPage)
+                wait_for(lambda: puzzle_page.history.count() > 0
+                         and puzzle_page.reset_replay.isEnabled()
+                         and puzzle_page.board._interaction_enabled
+                         and puzzle_page.solution.text().startswith("Офлайн-упражнение"),
+                         "selected Home puzzle in playable local replay", timeout=30)
+                selected_attempt = puzzle_page.history.currentItem().data(Qt.ItemDataRole.UserRole)
+                assert selected_attempt["puzzle_id"] == puzzle_id, (
+                    "Home CTA must open the same saved puzzle ID as the preview."
+                )
+                captured["home-puzzle-exact-replay"] = capture(
+                    window, output, "home-puzzle-exact-replay", width, height)
+                window.show_home()
+                wait_home(window, account_id)
+                QTest.mouseClick(window.sidebar_toggle, Qt.MouseButton.LeftButton)
+                assert window.sidebar.width() == 252
+                assert all(button.text().endswith(str(button.property("route_label")))
+                           for button in window._nav_buttons.values())
+                expanded = capture(
+                    window, output, "home-sidebar-expanded-after-toggle", width, height)
+                captured["home-sidebar-expanded-after-toggle"] = expanded
 
             navigate_to_games(window, selected_game_id)
             image = capture(window, output, "games", width, height)
             captured[f"games-{width}x{height}"] = image
-            make_pair(reference_dir, output, REFERENCE_MAP["games"], image, f"games-{width}x{height}")
+            make_pair(reference_dir, compare_output, REFERENCE_MAP["games"], image,
+                      f"games-{width}x{height}")
 
         # Active visual state is a local fake operation registry over synthetic
         # durable SQLite state. It never starts a Lichess request or UCI process.
@@ -835,7 +1371,7 @@ def main() -> None:
         for width, height in target_sizes:
             image = capture(window, output, "background-active", width, height)
             captured[f"background-active-{width}x{height}"] = image
-            make_pair(reference_dir, output, REFERENCE_MAP["background"], image,
+            make_pair(reference_dir, compare_output, REFERENCE_MAP["background"], image,
                       f"background-active-{width}x{height}")
 
         for release in release_events:
@@ -851,7 +1387,7 @@ def main() -> None:
         for width, height in offline_sizes:
             image = capture(window, output, "background-offline", width, height)
             captured[f"background-offline-{width}x{height}"] = image
-            make_pair(reference_dir, output, REFERENCE_MAP["background"], image,
+            make_pair(reference_dir, compare_output, REFERENCE_MAP["background"], image,
                       f"background-offline-{width}x{height}")
 
         # One actual native-window frame for each remaining required route.
@@ -1012,8 +1548,19 @@ def main() -> None:
         captured["game-review"] = capture(window, output, "game-review", width, height)
 
         # Settings are captured once per tab at the largest target size.
-        expected_count = (3 * len(target_sizes) + len(offline_sizes) + 16
-                          + tabs.count())
+        compact_size_count = sum(1 for width, height in target_sizes
+                                 if width <= 1280 and height <= 720)
+        graph_case_count = sum(
+            1 for index, (width, _height) in enumerate(target_sizes)
+            if index == 0 or width <= 1280
+        )
+        long_opponent_count = sum(
+            1 for width, _height in target_sizes if width >= 1500 or width <= 1280)
+        play_return_count = int(bool(target_sizes))
+        expected_count = (3 * len(target_sizes) + len(offline_sizes) + 18
+                          + 2 * compact_size_count
+                          + tabs.count() + graph_case_count
+                          + long_opponent_count + play_return_count)
         assert len(captured) == expected_count, (
             f"Expected {expected_count} screenshot states, got {len(captured)}"
         )
@@ -1040,6 +1587,7 @@ def main() -> None:
         "Background active: synthetic archive + Stockfish running; ready-analysis waiting; "
         "puzzle sync complete; three-or-more durable event rows.\n"
         "Background offline: no active operation registry entries; queued/paused durable work remains visible.\n"
+        "Home KPI hover frames use real QTest pointer movement and native Qt popups; large-value popups are suppressed.\n"
         "Window QSize was asserted equal to each logical target; QImage pixel size was asserted as logical size × DPR.\n"
         f"Logical targets: {target_sizes}\n"
         + "\n".join(details) + "\n",

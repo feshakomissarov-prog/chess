@@ -11,10 +11,11 @@ from pathlib import Path
 import sys
 import time
 
-from PySide6.QtCore import QSettings, QTimer
+from PySide6.QtCore import QRect, QSettings, QTimer
 from PySide6.QtWidgets import QApplication
 
 from chess_coach.bootstrap import ApplicationRuntime
+from chess_coach.application.dashboard import dashboard_snapshot
 from chess_coach.diagnostics import configure_logging
 from chess_coach.lichess.repository import GameRepository
 from chess_coach.window import MainWindow
@@ -87,6 +88,26 @@ def add_game(database: Path) -> None:
     repository.shutdown()
 
 
+def write_expected(database: Path, root: Path) -> None:
+    """Prepare an independent expectation before the measured Qt process starts."""
+    root.mkdir(parents=True, exist_ok=True)
+    repository = GameRepository(database)
+    snapshot = dashboard_snapshot(repository, account_id=ACCOUNT, clock="",
+                                  wait_for_writes=True)
+    metrics = {item["key"]: item for item in snapshot["metrics"]}
+    expected = {
+        "games": metrics["games"]["value"],
+        "accuracy": metrics["accuracy"]["value"],
+        "accuracy_detail": metrics["accuracy"]["detail"],
+        "accuracy_source": metrics["accuracy"].get("source"),
+        "puzzle_rating": str((snapshot.get("puzzle_player_rating") or {}).get("latest") or ""),
+        "recent_ids": [game.get("game_id") for game in snapshot.get("recent_games", [])],
+    }
+    (root / "expected.json").write_text(
+        json.dumps(expected, ensure_ascii=False, indent=2), encoding="utf-8")
+    repository.shutdown()
+
+
 def launch(database: Path, root: Path, run_seconds: int, navigation_cycles: int,
            capture_screenshots: bool) -> None:
     root.mkdir(parents=True, exist_ok=True)
@@ -97,6 +118,12 @@ def launch(database: Path, root: Path, run_seconds: int, navigation_cycles: int,
     settings.sync()
     repository = GameRepository(database)
     runtime = ApplicationRuntime(settings, root, repository, True, False)
+    expected_path = root / "expected.json"
+    if not expected_path.is_file():
+        raise RuntimeError("Run the separate 'expect' process before measured 'launch'.")
+    expected = json.loads(expected_path.read_text(encoding="utf-8"))
+    target_count = expected["games"]
+    target_recent_ids = expected["recent_ids"]
     window = MainWindow(runtime=runtime)
     aggregate_calls = 0
     original_snapshot = window.dashboard_queries.snapshot
@@ -113,6 +140,8 @@ def launch(database: Path, root: Path, run_seconds: int, navigation_cycles: int,
     state_path = root / "window-state.json"
     first_count = first_useful = first_recent_cards = full_ready = None
     first_useful_snapshot = None
+    current_summary_ms = None
+    current_summary_cards = None
     count_capture = False
     useful_capture = False
     useful_capture_pending = False
@@ -154,12 +183,71 @@ def launch(database: Path, root: Path, run_seconds: int, navigation_cycles: int,
         nonlocal useful_capture_pending
         nonlocal first_recent_cards
         nonlocal updated_capture, navigation_done
-        nonlocal first_useful_snapshot
+        nonlocal first_useful_snapshot, current_summary_ms, current_summary_cards
         now = time.perf_counter()
         games = window._dashboard_metric_values["games"].text()
         accuracy = window._dashboard_metric_values["accuracy"].text()
         rating = window._home_view.puzzle_rating.text()
         snapshot = window._latest_dashboard_snapshot or {}
+        visible_recent_ids = [game.get("game_id") for game in snapshot.get("recent_games", [])]
+        painted_cards = []
+        viewport = window._home_view.recent_scroll.viewport()
+        for index in range(window._recent_games_layout.count()):
+            widget = window._recent_games_layout.itemAt(index).widget()
+            if widget is not None and widget.objectName() == "metricCard":
+                top_left = widget.mapTo(viewport, widget.rect().topLeft())
+                card_rect = QRect(top_left, widget.size())
+                painted_cards.append((widget, card_rect))
+        painted_ids = [str(card.property("dashboard_game_id") or "")
+                       for card, _rect in painted_cards]
+        cards_fully_visible = (len(painted_cards) == min(int(target_count), 3)
+                               and all(viewport.rect().contains(rect)
+                                       for _card, rect in painted_cards))
+        from PySide6.QtWidgets import QLabel
+        from chess_coach.ui.pages.home import HomeEvaluationGraph
+        required_card_labels = (
+            "dashboardOutcome", "dashboardOpponent", "dashboardAccuracy",
+            "dashboardGameDate",
+        )
+        labels_have_visible_content = all(
+            all((label := card.findChild(QLabel, object_name)) is not None
+                and label.isVisibleTo(window) and bool(label.text().strip())
+                for object_name in required_card_labels)
+            for card, _rect in painted_cards
+        )
+        graphs_have_accessible_context = all(
+            (graph := card.findChild(HomeEvaluationGraph, "homeEvaluationGraph")) is not None
+            and graph.isVisibleTo(window)
+            and graph.width() > 0 and graph.height() > 0
+            and (not graph.source or f"Источник: {graph.source}." in graph.accessibleDescription())
+            and (not graph.coverage or
+                 f"Охват сохранённых позиций: {graph.coverage}." in graph.accessibleDescription())
+            for card, _rect in painted_cards
+        )
+        cards_have_visible_content = (labels_have_visible_content
+                                      and graphs_have_accessible_context)
+        accuracy_detail = window._dashboard_metric_details["accuracy"].text()
+        if (current_summary_ms is None and games == target_count
+                and visible_recent_ids[:len(target_recent_ids)] == target_recent_ids
+                and painted_ids == target_recent_ids[:3] and cards_fully_visible
+                and cards_have_visible_content
+                and accuracy == expected["accuracy"]
+                # A valid last-good Tier B may be rendered with an explicit
+                # "updating" prefix while the newer aggregate runs. The saved
+                # source/detail must still be present; don't time the background
+                # replacement as though it were the first complete Home paint.
+                and expected["accuracy_detail"] in accuracy_detail
+                and rating == expected["puzzle_rating"]):
+            current_summary_ms = round((now - shown) * 1000, 2)
+            current_summary_cards = [{
+                "game_id": str(card.property("dashboard_game_id") or ""),
+                "labels": [label.text() for label in card.findChildren(QLabel)
+                           if label.isVisible()],
+                "graph_empty_text": (
+                    graph.empty_text if (graph := card.findChild(
+                        HomeEvaluationGraph, "homeEvaluationGraph")) is not None
+                    and not graph.points else None),
+            } for card, _rect in painted_cards]
         if games not in {"—", "-"} and first_count is None:
             first_count = round((now - shown) * 1000, 2)
         if first_count is not None and not count_capture:
@@ -183,13 +271,26 @@ def launch(database: Path, root: Path, run_seconds: int, navigation_cycles: int,
                 item = window._recent_games_layout.itemAt(index)
                 widget = item.widget()
                 if widget is not None and widget.objectName() == "metricCard":
-                    recent.append([label.text() for label in widget.findChildren(QLabel)])
+                    recent.append({
+                        "game_id": str(widget.property("dashboard_game_id") or ""),
+                        "labels": [label.text() for label in widget.findChildren(QLabel)
+                                   if label.isVisible()],
+                        "graph_empty_text": (
+                            graph.empty_text if (graph := widget.findChild(
+                                HomeEvaluationGraph, "homeEvaluationGraph")) is not None
+                            and not graph.points else None),
+                    })
             try:
                 count_value = int(games.replace(",", ""))
             except ValueError:
                 count_value = -1
             expected_cards = min(count_value, 3) if count_value >= 0 else -1
-            if len(recent) == expected_cards and (expected_cards > 0 or count_value == 0):
+            snapshot_ids = [str(game.get("game_id") or "")
+                            for game in snapshot.get("recent_games", [])]
+            rendered_ids = [card["game_id"] for card in recent]
+            if (len(recent) == expected_cards
+                    and snapshot_ids == rendered_ids[:expected_cards]
+                    and (expected_cards > 0 or count_value == 0)):
                 first_recent_cards = round((now - shown) * 1000, 2)
                 if first_useful_snapshot is not None:
                     first_useful_snapshot["_first_useful_cards"] = recent
@@ -241,8 +342,15 @@ def launch(database: Path, root: Path, run_seconds: int, navigation_cycles: int,
             QTimer.singleShot(250, exercise_home_navigation)
         final_state.update({
             "shown_at_monotonic": shown,
+            "timer_origin": ("immediately_before_window.show(); diagnostic only, "
+                             "not native first-visible-frame timing"),
             "first_count_ms": first_count,
             "first_useful_ms": first_useful,
+            "current_summary_ms": current_summary_ms,
+            "current_summary_cards": current_summary_cards,
+            "target_games": target_count,
+            "target_recent_ids": target_recent_ids,
+            "expected": expected,
             "first_recent_cards_ms": first_recent_cards,
             "full_ready_ms": full_ready,
             "games": games,
@@ -255,6 +363,8 @@ def launch(database: Path, root: Path, run_seconds: int, navigation_cycles: int,
             "snapshot_stale": bool(snapshot.get("_dashboard_stale")),
             "snapshot_revision": snapshot.get("_dashboard_revision"),
             "recent_ids": [game.get("game_id") for game in snapshot.get("recent_games", [])],
+            "painted_recent_ids": painted_ids,
+            "recent_cards_fully_visible": cards_fully_visible,
             "recent_card_labels": (first_useful_snapshot or {}).get("_first_useful_cards", []),
             "first_useful_accuracy": (first_useful_snapshot or {}).get("_first_useful_accuracy"),
             "first_useful_accuracy_detail": (first_useful_snapshot or {}).get(
@@ -280,7 +390,9 @@ def launch(database: Path, root: Path, run_seconds: int, navigation_cycles: int,
         })
 
     timer.timeout.connect(write_state)
-    timer.start(50)
+    # Use a finer sampling interval so the reported first complete Qt paint is
+    # not rounded late by a 50 ms polling cadence.
+    timer.start(10)
     QTimer.singleShot(run_seconds * 1000, window.close)
     app.exec()
     state_path.write_text(json.dumps(final_state, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -289,7 +401,7 @@ def launch(database: Path, root: Path, run_seconds: int, navigation_cycles: int,
 
 def main() -> None:
     parser = argparse.ArgumentParser()
-    parser.add_argument("mode", choices=("seed", "add", "launch"))
+    parser.add_argument("mode", choices=("seed", "add", "expect", "launch"))
     parser.add_argument("database", type=Path)
     parser.add_argument("root", type=Path)
     parser.add_argument("--count", type=int, default=3319)
@@ -301,6 +413,8 @@ def main() -> None:
         seed(args.database, args.count)
     elif args.mode == "add":
         add_game(args.database)
+    elif args.mode == "expect":
+        write_expected(args.database, args.root)
     else:
         launch(args.database, args.root, args.seconds, args.navigation_cycles,
                not args.no_screenshots)

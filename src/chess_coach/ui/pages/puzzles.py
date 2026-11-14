@@ -12,6 +12,42 @@ from ...board_view import BoardView
 import chess
 
 
+class PuzzleSolutionLabel(QLabel):
+    """Keep full local attempt details accessible while fitting compact screens."""
+
+    def __init__(self, text: str, parent=None) -> None:
+        self._full_text = str(text)
+        self._compact = False
+        super().__init__(text, parent)
+        self.setWordWrap(True)
+        self.setToolTip(self._full_text)
+        self.setAccessibleDescription(self._full_text)
+
+    def setText(self, text: str) -> None:  # noqa: N802 - Qt API override
+        self._full_text = str(text)
+        self.setToolTip(self._full_text)
+        self.setAccessibleDescription(self._full_text)
+        super().setText(self._display_text())
+
+    def set_compact(self, compact: bool) -> None:
+        compact = bool(compact)
+        if compact == self._compact:
+            return
+        self._compact = compact
+        self.setMinimumHeight(60 if compact else 0)
+        self.setStyleSheet("font-size: 13px;" if compact else "")
+        super().setText(self._display_text())
+
+    def _display_text(self) -> str:
+        if not self._compact or "Исходная попытка:" not in self._full_text:
+            return self._full_text
+        lines = self._full_text.splitlines()
+        title = lines[0].split(" · темы:", 1)[0]
+        attempt = lines[1].split(".", 1)[0].replace(
+            "Исходная попытка:", "Попытка:") if len(lines) > 1 else "Попытка"
+        return f"{title}\n{attempt} · правильный вариант скрыт"
+
+
 class PuzzleHistoryPage(QWidget):
     """Reusable view. Account data and all persistence/network actions stay external."""
 
@@ -68,7 +104,7 @@ class PuzzleHistoryPage(QWidget):
         self.board.set_interaction_enabled(False)
         self.board.setMinimumSize(0, 0)
         self.board.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Ignored)
-        self.solution = QLabel("Выберите попытку для локального просмотра.")
+        self.solution = PuzzleSolutionLabel("Выберите попытку для локального просмотра.")
         self.solution.setWordWrap(True)
         self.replay = QPushButton("Решить повторно")
         self.replay.setMinimumHeight(32)
@@ -100,6 +136,7 @@ class PuzzleHistoryPage(QWidget):
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
+        self.solution.set_compact(self.height() < 540 or self.width() < 920)
         right = self.board.parentWidget()
         if right is None or right.width() < 1 or right.height() < 1:
             return

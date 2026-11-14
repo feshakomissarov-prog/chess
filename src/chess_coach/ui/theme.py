@@ -49,7 +49,7 @@ def stylesheet(t: Theme = TOKENS) -> str:
     }}
     QFrame#appSidebar QPushButton#navItem:hover {{ background: {t.hover}; }}
     QFrame#appSidebar QPushButton#navItem[active="true"] {{ background: {selected}; }}
-    QFrame#appSidebar QLabel#sidebarBrand {{ font-size: 23px; font-weight: 700; }}
+    QFrame#appSidebar QLabel#sidebarBrandText {{ font-size: 23px; font-weight: 700; }}
     QFrame#appSidebar QLabel#sidebarProfile {{ font-size: 17px; font-weight: 600; }}
     """ if t is VISUAL_TOKENS else ""
     return f"""
@@ -59,10 +59,16 @@ def stylesheet(t: Theme = TOKENS) -> str:
     QStatusBar#inlineNoticeBar {{ background: {t.sidebar}; color: {t.secondary}; border-top: 1px solid {t.border}; }}
     QStatusBar#inlineNoticeBar::item {{ border: none; }}
     QFrame#appSidebar {{ background: {t.sidebar}; border-right: 1px solid {t.border}; }}
-    QLabel#sidebarBrand {{ font-size: 18px; font-weight: 700; padding: 4px; }}
+    QWidget#sidebarBrand QLabel#sidebarBrandText {{ font-size: 18px; font-weight: 700; }}
     QLabel#sidebarProfile {{ color: {t.secondary}; }}
     QFrame#card, QFrame#metricCard, QFrame#gameCard {{
         background: {t.surface}; border: 1px solid {t.border}; border-radius: {radius}px;
+    }}
+    QWidget#dashboardDetailsColumn, QWidget#dashboardInfoColumn,
+    QWidget#dashboardInfoRow, QWidget#dashboardAnalysisMetrics,
+    QWidget#dashboardGraphColumn,
+    QWidget#homeEvaluationGraph, QWidget#homePuzzleRatingGraph {{
+        background: transparent;
     }}
     QLabel#secondary, QLabel#muted, QLabel#connectionStatus {{ color: {t.secondary}; }}
     QLabel#pageTitle {{ font-size: {30 if t is VISUAL_TOKENS else 22}px; font-weight: 700; }}
@@ -128,7 +134,8 @@ def stylesheet(t: Theme = TOKENS) -> str:
     QProgressBar::chunk {{ background: {t.success}; border-radius: 6px; }}
     QScrollBar:vertical {{ background: {t.app}; width: 12px; }}
     QScrollBar::handle:vertical {{ background: {t.hover}; min-height: 24px; border-radius: 5px; }}
-    QToolTip {{ background: {t.raised}; color: {t.text}; border: 1px solid {t.border}; }}
+    QToolTip {{ background: {t.raised}; color: {t.text}; border: 1px solid {t.border};
+        font: 12px "Segoe UI"; max-width: 460px; padding: 4px 6px; }}
     {visual_sidebar}
     """
 

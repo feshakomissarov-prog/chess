@@ -7,7 +7,7 @@ from pathlib import Path
 from PySide6.QtCore import QPoint, QSettings, QStandardPaths, QTimer, Qt
 from PySide6.QtGui import QColor, QCloseEvent, QImage, QPainter
 from PySide6.QtWidgets import (QComboBox, QDialog, QDialogButtonBox, QLabel, QInputDialog,
-                               QApplication, QMessageBox, QPushButton)
+                               QApplication, QMessageBox, QPushButton, QWidget)
 
 from chess_coach.board_view import BoardView
 from chess_coach.window import (ActiveGamesDialog, BatchAnalysisDialog, EvaluationGraph, MainWindow,
@@ -21,6 +21,7 @@ from chess_coach.lichess.repository import GameRepository
 from chess_coach.application.fair_play import playing_snapshot_allows_analysis as _batch_safety_from_games
 from chess_coach.ui.workspace_state import geometry_intersects_available, reposition_visible_frame
 from chess_coach.ui.analytics_dialogs import RatingTrendGraph
+from chess_coach.ui.pages.home import HomeEvaluationGraph
 from chess_coach.ui.theme import VISUAL_TOKENS
 
 
@@ -532,24 +533,24 @@ def test_main_window_smoke_and_game_controller_integration(qtbot, tmp_path) -> N
     assert window.controller.viewing_live_position
 
 
-def test_m46_shell_has_stable_routes_and_collapses_for_board_screens(qtbot, tmp_path):
+def test_m46_shell_keeps_owner_approved_expanded_navigation_on_board_screens(qtbot, tmp_path):
     window = MainWindow(QSettings(str(tmp_path / "m46-shell.ini"),
                                   QSettings.Format.IniFormat), offline_mode=True)
     qtbot.addWidget(window)
-    assert window.sidebar.width() == (60 if window.width() < 1160 else 212)
+    assert window.sidebar.width() == 252
     assert set(window._nav_buttons) == {
         "home", "play", "analysis", "training", "progress"}
     assert window._nav_buttons["home"].property("active") is True
     window.start_local_game()
-    assert window.sidebar.width() == 60
+    assert window.sidebar.width() == 252
     assert window._nav_buttons["play"].property("active") is True
 
     window._set_sidebar_collapsed(False, explicit=True)
-    assert window.sidebar.width() == 212
+    assert window.sidebar.width() == 252
     assert window.screen_stack.currentWidget() is window.game_page
-    assert window.sidebar.width() == 212  # explicit session override is preserved
+    assert window.sidebar.width() == 252  # explicit session override is preserved
     window._set_sidebar_collapsed(True, explicit=True)
-    assert window.sidebar.width() == 60
+    assert window.sidebar.width() == 252
 
 
 def test_m46_shell_uses_expanded_sidebar_at_wide_home_and_compact_board(qtbot, tmp_path):
@@ -559,39 +560,39 @@ def test_m46_shell_uses_expanded_sidebar_at_wide_home_and_compact_board(qtbot, t
     window.resize(1280, 800)
     window._sidebar_explicit_override = False
     window._shell_screen_changed(window.screen_stack.currentIndex())
-    assert window.sidebar.width() == 212
+    assert window.sidebar.width() == 252
     window.start_local_game()
     # The approved live-game workspace keeps all five navigation routes open.
-    assert window.sidebar.width() == 212
+    assert window.sidebar.width() == 252
 
 
-def test_visual_sidebar_recovers_after_wide_resize_and_routes_but_respects_explicit_choice(
+def test_visual_sidebar_stays_expanded_after_restart_resize_and_routes(
         qtbot, tmp_path):
     window = MainWindow(QSettings(str(tmp_path / "visual-sidebar-responsive.ini"),
                                   QSettings.Format.IniFormat), offline_mode=True)
     qtbot.addWidget(window)
     window.resize(1028, 720)
     window.show()
-    qtbot.waitUntil(lambda: window.sidebar.width() == 60)
+    qtbot.waitUntil(lambda: window.sidebar.width() == 252)
 
     # A native window first opened at the compact size must expand when the
     # owner drags it to the approved wide desktop size, without another click.
     window.resize(1672, 941)
-    qtbot.waitUntil(lambda: window.sidebar.width() == 272)
+    qtbot.waitUntil(lambda: window.sidebar.width() == 252)
     window.show_saved_games()
-    assert window.sidebar.width() == 272
+    assert window.sidebar.width() == 252
     window.show_background_analytics()
-    assert window.sidebar.width() == 272
+    assert window.sidebar.width() == 252
     window.show_home()
-    assert window.sidebar.width() == 272
+    assert window.sidebar.width() == 252
 
-    # An explicit collapse is a user preference, not a responsive default.
+    # A stale explicit collapse from older settings can never hide captions.
     window._set_sidebar_collapsed(True, explicit=True)
     window.resize(1280, 860)
     qtbot.wait(20)
     window.resize(1672, 941)
     qtbot.wait(20)
-    assert window.sidebar.width() == 60
+    assert window.sidebar.width() == 252
     window.close()
 
 
@@ -3846,7 +3847,8 @@ def test_home_has_rating_kpi_and_three_recent_game_cards(qtbot, tmp_path):
     # Let that generation finish before installing this test's synthetic data,
     # otherwise its later render can delete the card wrappers retained below.
     qtbot.waitUntil(lambda: window._dashboard_thread is None, timeout=3000)
-    assert window._home_view.dashboard_metrics_grid.indexOf(window.home_progress_card) >= 0
+    assert window._home_view.dashboard_metrics_grid.indexOf(window.home_progress_card) < 0
+    assert window._home_view.home_recent_card.parentWidget() is window.home_page
     assert window.home_primary_actions.itemAt(0).widget() is window.home_play_card
     assert window.home_friend_button.isHidden()
     games = [{
@@ -3862,8 +3864,8 @@ def test_home_has_rating_kpi_and_three_recent_game_cards(qtbot, tmp_path):
                for i in range(window._recent_games_layout.count())) == 3
     cards = [window._recent_games_layout.itemAt(i).widget() for i in range(3)]
     from PySide6.QtWidgets import QLabel, QScrollArea, QWidget
-    headings = [card.findChild(QLabel).text() for card in cards]
-    assert headings == ["♟  Победа"] * 3
+    headings = [card.findChild(QLabel, "dashboardOutcome").text() for card in cards]
+    assert headings == ["Победа"] * 3
     assert all(f"Opponent {index}" in [label.text() for label in card.findChildren(QLabel)]
                for index, card in enumerate(cards))
     assert all("Queen's Pawn Game" not in heading for heading in headings)
@@ -3872,26 +3874,54 @@ def test_home_has_rating_kpi_and_three_recent_game_cards(qtbot, tmp_path):
     window.setFixedSize(1360, 860)
     window.show()
     qtbot.wait(20)
-    assert not window.home_activity_button.isVisible()
+    assert window.home_activity_button.isVisible()
     assert window._nav_buttons["training"].isVisible()
     kpi_widths = [window._home_view.dashboard_metrics[key].width() for key in ("games", "accuracy")]
     kpi_widths.append(window.home_progress_card.width())
-    # The approved reference intentionally gives the rating-history card more
-    # width for its sparkline; the two summary cards need not be equal-sized.
-    assert min(kpi_widths) >= 260
-    assert max(kpi_widths) <= 440
+    # Progress is stacked beneath the compact KPI pair in the approved center
+    # zone; recent games occupy the adjacent right zone.
+    assert min(kpi_widths) >= 150
+    assert max(kpi_widths) <= 560
     assert window.home_activity_button.parentWidget() is window.home_play_card
     assert not isinstance(window.home_page, QScrollArea)
     assert not hasattr(window._home_view, "home_pilot_import_button")
     assert not hasattr(window._home_view, "home_puzzles_pilot_button")
     assert not window.local_mode_label.isVisible()
     assert not window.local_mode_combo.isVisible()
-    assert all(card.sizeHint().height() <= 200 for card in cards)
-    assert window.home_play_card.maximumHeight() <= 230
+    assert all(0 < card.height() <= 392 for card in cards)
+    assert window.home_play_card.minimumHeight() >= 250
+    assert window.home_play_card.maximumHeight() <= 292
     opened = []
     window._open_home_game_details = lambda game: opened.append(game["game_id"])
     qtbot.mouseClick(cards[1].findChildren(QLabel)[1], Qt.MouseButton.LeftButton)
     assert opened == ["synthetic-1"]
+    window.close()
+
+
+def test_home_saved_puzzle_preview_opens_exact_offline_attempt(qtbot, tmp_path, monkeypatch):
+    monkeypatch.setattr(MainWindow, "_refresh_home_dashboard", lambda _self: None)
+    window = MainWindow(QSettings(str(tmp_path / "home-puzzle-preview.ini"),
+                                  QSettings.Format.IniFormat), offline_mode=True)
+    qtbot.addWidget(window)
+    opened = []
+    window._home_view._puzzle_open_action = lambda account_id, puzzle_id: opened.append(
+        (account_id, puzzle_id))
+    window._home_view.set_puzzle_preview({
+        "account_id": "lichess:owner", "puzzle_id": "saved-puzzle-42",
+        "fen": chess.Board().fen(), "solver_is_white": True,
+        "rating": 1770, "themes": ["fork", "mateIn2"],
+    })
+
+    assert not window._home_view.puzzle_preview_board.isHidden()
+    assert not window._home_view.puzzle_preview_board._interaction_enabled
+    assert window._home_view.activity_status.text() == "Задача Lichess"
+    assert "saved-puzzle-42" in window._home_view.activity_status.toolTip()
+    assert "1770" in window._home_view.puzzle_meta.text()
+    window.home_activity_button.click()
+    assert opened == [("lichess:owner", "saved-puzzle-42")]
+    window._home_view.puzzle_preview_board.open_requested.emit()
+    assert opened == [("lichess:owner", "saved-puzzle-42"),
+                      ("lichess:owner", "saved-puzzle-42")]
     window.close()
 
 
@@ -3912,11 +3942,13 @@ def test_sidebar_play_opens_mode_picker_without_resetting_local_game(qtbot, tmp_
     assert window.play_local_button.accessibleName() == "Свободная доска"
     assert window.play_ai_button.isEnabled()
     assert window.play_page.buttons.get("active") is None
+    window.show()
     window.setFixedSize(1000, 720)
-    window._layout_play_mode_cards()
+    qtbot.waitUntil(lambda: window.play_page.content_scroll.viewport().width() > 0)
+    qtbot.waitUntil(lambda: window._play_mode_columns == 1)
     assert window._play_mode_columns == 1
     window.setFixedSize(1360, 860)
-    window._layout_play_mode_cards()
+    qtbot.waitUntil(lambda: window._play_mode_columns == 2)
     assert window._play_mode_columns == 2
     window.close()
 
@@ -4012,7 +4044,7 @@ def test_home_dashboard_masks_cached_analysis_when_safety_is_pending_or_human_ga
     assert window._dashboard_metric_values["analysis"].text() == "1/1"
     assert window._dashboard_metric_details["errors"].text() == "synthetic error count"
     card = window._recent_games_layout.itemAt(0).widget()
-    assert card.findChild(QLabel, "dashboardAnalysisMetrics") is not None
+    assert card.findChild(QWidget, "dashboardAnalysisMetrics") is not None
     assert window.recent_safety_notice.isHidden()
 
     window._dashboard_analysis_safety_allowed = True
@@ -4025,8 +4057,13 @@ def test_home_dashboard_masks_cached_analysis_when_safety_is_pending_or_human_ga
     window._render_dashboard_snapshot(snapshot)
     assert window._dashboard_metric_values["accuracy"].text() == "скрыто"
     assert window._dashboard_metric_values["analysis"].text() == "скрыто"
-    assert window._recent_games_layout.itemAt(0).widget().findChild(
-        QLabel, "dashboardAnalysisMetrics") is None
+    masked_card = window._recent_games_layout.itemAt(0).widget()
+    masked_metrics = masked_card.findChild(QWidget, "dashboardAnalysisMetrics")
+    assert masked_metrics is not None
+    assert "99.0%" not in " ".join(
+        label.text() for label in masked_metrics.findChildren(QLabel))
+    masked_graph = masked_card.findChild(HomeEvaluationGraph)
+    assert masked_graph is not None and not masked_graph.points
     human.status = "mate"
     window.online_sessions.pop(human.game_id)
     window._render_dashboard_snapshot(snapshot)
@@ -4711,10 +4748,13 @@ def test_recent_game_card_does_not_show_zero_coverage_when_analysis_is_missing(
             "review_metrics": {"status": "без анализа", "coverage": "0/12",
                                "opponent_coverage": "0/12", "source": "нет данных"}}
     window._render_dashboard_snapshot({"metrics": [], "recent_games": [game]})
-    labels = [label.text() for label in window.home_page.findChildren(QLabel)]
-    card_detail = next(value for value in labels if "оценок пока нет" in value)
-    assert "0/12" not in card_detail
-    assert "охват" not in card_detail
+    card = window._recent_games_layout.itemAt(0).widget()
+    assert card.findChild(QLabel, "dashboardAnalysisCoverage") is None
+    graph = card.findChild(HomeEvaluationGraph, "homeEvaluationGraph")
+    assert graph is not None
+    assert graph.empty_text == "Нет сохранённых оценок"
+    assert "0/12" not in graph.toolTip()
+    assert "оценки позиций" in graph.toolTip().casefold()
     window.close()
 
 
@@ -6031,7 +6071,15 @@ def test_connected_analysis_cancel_stops_fake_analyzer_without_saving_complete_r
     qtbot.waitUntil(lambda: window._analysis_stop is None, timeout=3000)
     assert window.game_repository.list_analyses("cancelled-connected-game") == []
     assert window._analysis_safety_phase is None
-    assert window.close() is True
+    # Startup dashboard work may still be draining independently of the
+    # analysis worker. close() correctly defers rather than shutting SQLite
+    # down under that read; the scheduled retry must finish once it drains.
+    closed_immediately = window.close()
+    if not closed_immediately:
+        assert window._close_retry_scheduled
+        qtbot.waitUntil(lambda: window.runtime._closed, timeout=5000)
+    else:
+        assert window.runtime._closed
 
 
 def test_preflight_cancel_ignores_late_empty_snapshot_and_http_429_fails_closed(
@@ -6943,7 +6991,7 @@ def test_home_shows_local_archive_preview_while_full_dashboard_aggregate_is_pend
         qtbot, tmp_path, monkeypatch):
     import threading
     from chess_coach.bootstrap import create_runtime
-    from chess_coach.ui.game_review import ReviewGraph
+    from chess_coach.ui.pages.home import HomeEvaluationGraph
 
     runtime = create_runtime(offline_mode=True)
     window = MainWindow(runtime=runtime)
@@ -6983,7 +7031,9 @@ def test_home_shows_local_archive_preview_while_full_dashboard_aggregate_is_pend
                         and window._home_view._recent_games_layout.itemAt(index).widget().objectName()
                         == "metricCard"]
         assert len(recent_cards) == 3
-        assert all(card.findChild(ReviewGraph) is None for card in recent_cards)
+        assert all(card.findChild(HomeEvaluationGraph) is not None
+                   and not card.findChild(HomeEvaluationGraph).points
+                   for card in recent_cards)
     finally:
         release_aggregate.set()
         qtbot.waitUntil(lambda: window._dashboard_thread is None, timeout=15000)

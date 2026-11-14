@@ -64,6 +64,9 @@ def test_play_preferences_are_saved_per_mode_and_restored(qtbot, tmp_path):
     settings = QSettings(str(tmp_path / "play-modes.ini"), QSettings.Format.IniFormat)
     page = PlayPage({}, settings=settings)
     qtbot.addWidget(page)
+    page.resize(960, 720)
+    page.show()
+    qtbot.wait(30)
     assert len(page.cards) == 4
     assert page.mode_selector.currentData() == "ai"
     page.color.setCurrentIndex(page.color.findData("black"))
@@ -79,6 +82,14 @@ def test_play_preferences_are_saved_per_mode_and_restored(qtbot, tmp_path):
     page.rated.setChecked(True)
     page.select_mode("challenge")
     page.username.setText("ExampleOpponent")
+    opponent_row = page._form_grid_widgets["Соперник"]
+    assert page._form_grid.getItemPosition(page._form_grid.indexOf(opponent_row)) == (
+        0, 0, 1, page._form_columns)
+    challenge_color_position = page._form_grid.getItemPosition(
+        page._form_grid.indexOf(page._form_grid_widgets["Цвет фигур"]))
+    challenge_clock_position = page._form_grid.getItemPosition(
+        page._form_grid.indexOf(page._form_grid_widgets["Контроль времени"]))
+    assert challenge_color_position[0] == challenge_clock_position[0] == 1
     page.select_mode("ai")
     assert page.color.currentData() == "black"
     assert page.clock.currentData() == (300, 0)
