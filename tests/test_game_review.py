@@ -150,6 +150,12 @@ def test_review_moves_graph_and_training_share_position_without_mutating_saved_p
         assert workspace.title.text() == "Разбор партии"
         assert "1–0" in workspace.subtitle.text()
         assert "Stockfish" not in workspace.subtitle.text()
+        chip_text = [chip.text() for chip in workspace.metadata_chip_labels]
+        assert len(chip_text) == 3
+        assert any("1–0" in text for text in chip_text)
+        assert any("02.11.2026" in text for text in chip_text)
+        assert any("5 с + 0 с" in text for text in chip_text)
+        assert workspace.phase_selector.parentWidget() is not workspace.left_metrics.widget()
         workspace.moves_list.setCurrentRow(2)
         assert workspace.selected_ply == 2
         assert workspace.review_board._board.fen() == workspace.review["positions"][2].fen()

@@ -531,7 +531,17 @@ class GameReviewWorkspace(QWidget):
         self.subtitle = QLabel()
         self.subtitle.setObjectName("secondary")
         self.subtitle.setWordWrap(False)
-        root.addWidget(self.subtitle)
+        # Keep the existing plain-text value for callers while rendering the
+        # metadata as the compact, individually accessible chips from the
+        # approved review layout.
+        self.subtitle.hide()
+        self.metadata_chips = QWidget()
+        metadata_layout = QHBoxLayout(self.metadata_chips)
+        metadata_layout.setContentsMargins(0, 0, 0, 0)
+        metadata_layout.setSpacing(8)
+        self.metadata_chips_layout = metadata_layout
+        self.metadata_chip_labels: list[QLabel] = []
+        root.addWidget(self.metadata_chips)
 
         split = QSplitter(Qt.Orientation.Horizontal)
         board_column = QWidget()
@@ -612,7 +622,6 @@ class GameReviewWorkspace(QWidget):
         self.phase_selector.addItem("Эндшпиль", "endgame")
         self.phase_selector.setAccessibleName("Выбор фазы статистики партии")
         self.phase_selector.currentIndexChanged.connect(self._phase_scope_changed)
-        metrics_column.addWidget(self.phase_selector)
         self.side_metrics_summary = QTableWidget(0, 3)
         self.side_metrics_summary.setObjectName("reviewSideMetrics")
         self.side_metrics_summary.setHorizontalHeaderLabels(("Показатель", "Я", "Сопер."))
@@ -704,6 +713,10 @@ class GameReviewWorkspace(QWidget):
         moves_page = QWidget()
         moves_layout = QVBoxLayout(moves_page)
         moves_layout.addWidget(QLabel("Ходы и оценка показаны в правой панели."))
+        phase_filter_label = QLabel("Фаза статистики")
+        phase_filter_label.setObjectName("secondary")
+        moves_layout.addWidget(phase_filter_label)
+        moves_layout.addWidget(self.phase_selector)
         self.tabs.addTab(moves_page, "Ходы")
         facts = QWidget()
         self.metrics_layout = QVBoxLayout(facts)
@@ -863,9 +876,9 @@ class GameReviewWorkspace(QWidget):
                 available = max(1, splitter.width() - 8)
                 compact = self.width() < 980
                 left_width = (max(190, round(available * .30)) if compact else
-                              min(410, max(385, round(available * .38))))
-                inspector_width = (max(220, round(available * .34)) if compact else
-                                   max(300, round(available * .31)))
+                              max(360, round(available * .26)))
+                inspector_width = (max(300, round(available * .34)) if compact else
+                                   max(440, round(available * .36)))
                 board_side = max(170, min(splitter.height() - 8,
                                           available - left_width - inspector_width - 8))
                 board_width = board_side + 8
@@ -1035,6 +1048,30 @@ class GameReviewWorkspace(QWidget):
             f"{white} — {black}\n{format_game_timeline(game)} · {clock} · {opening}")
         self.subtitle.setText(game_details)
         self.subtitle.setToolTip(opening_tooltip(game.get("opening_name")))
+        chip_values = [("♟", result, "Результат партии")]
+        if date_text and not date_text.startswith(("Дата неизвестна", "Время неизвестно")):
+            chip_values.append(("▣", date_text, "Дата начала партии"))
+        if opening not in {"Дебют не определён", "Неизвестный дебют", ""}:
+            chip_values.append(("♧", opening, opening_tooltip(game.get("opening_name"))))
+        if clock != "Контроль не указан":
+            chip_values.append(("◷", clock, "Фактический контроль времени партии"))
+        while self.metadata_chips_layout.count():
+            item = self.metadata_chips_layout.takeAt(0)
+            widget = item.widget()
+            if widget is not None:
+                widget.deleteLater()
+        self.metadata_chip_labels.clear()
+        for icon, value, details in chip_values:
+            chip = QLabel(f"{icon}  {value}")
+            chip.setObjectName("reviewMetadataChip")
+            chip.setToolTip(details)
+            chip.setAccessibleName(f"{details}: {value}")
+            chip.setStyleSheet(
+                "QLabel#reviewMetadataChip { padding: 5px 10px; background: #20243a; "
+                "border: 1px solid #32384f; border-radius: 8px; }")
+            self.metadata_chips_layout.addWidget(chip)
+            self.metadata_chip_labels.append(chip)
+        self.metadata_chips_layout.addStretch(1)
         self.white_name.setText(f"♔  {white}")
         self.black_name.setText(f"♚  {black}")
         color = self.review["owner_color"]
