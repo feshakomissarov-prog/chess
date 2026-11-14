@@ -103,6 +103,24 @@ Exact-head SHA #543: `97f3671be489c36af2363c2c8eb6b41b20130011`. Windows test **
 
 **Ограничения статуса:** всё выше подтверждает только код и synthetic fixtures. Основная пользовательская база, штатные старты и P0 ≤1000 мс, реальный подключённый профиль/Lichess, физический DPI рабочего ПК и пользовательская приёмка не проверялись. `R47-GATE-01 / TD-06`, `R47-SAFE-01`, реальные owner gameplay checks и `OWNER ACCEPTED` остаются OPEN. PR #47 остаётся Draft; merge не выполнялся. DIST-01 не начиналась.
 
+### B.7. Повторная проверка после уточнений §11–12 (14.11.2026)
+
+**Причины и исправления:** при визуальном просмотре #574 обнаружена сохранявшаяся видимая строка «Охват» (`dashboardAnalysisCoverage`), поэтому прежний статус HIMG-10.META по одному графическому footer был недостаточен. На SHA `b282c06` постоянный QLabel удалён; источник/coverage остались в tooltip и accessible description графика. Первая попытка native-проверки длинного имени не дошла до геометрии из-за fixture, менявшего `opponent`, тогда как карточка профиля использует `account_opponent`; фикстура исправлена. Следующий native запуск выявил начальное переполнение card `640 > 611 px`: responsive layout создавался горизонтальным и ждал resize-событие. На SHA `7198e9f` направление теперь сразу выбирается по фактической ширине viewport; это устраняет переполнение до первого ручного resize.
+
+**Статусы стабильных ID на final code SHA `642a3f017b58511ead782522609c8d8463f5154e`:**
+
+| ID | Итоговый статус | Проверка и доказательство |
+| --- | --- | --- |
+| **HIMG-02.TIP** | **CI VERIFIED · OWNER ACCEPTANCE PENDING** | Финальный actual Qt artifact содержит четыре hover captures (`1672x941-home-tooltip-games-value/detail.png`, `...accuracy-value/detail.png`) и compact 125% hover captures; на большом KPI popup подавлен, малые подписи дают компактный tooltip. |
+| **HIMG-09.A/B/C, HIMG-09.DENSITY, HIMG-09.MATE, HIMG-09.PHASE** | **CI VERIFIED · OWNER ACCEPTANCE PENDING** | Полный exact-head pytest подтверждает continuity/gaps, настоящий ply после resize-hover, 19-ходовую fixture и source-backed phases; native captures проверены при 100/125/150%, включая 600 ply, 20-ply gap, 20 mate points и clipped CP. Нет статического Y-числа/легенды/M-букв; сохранена нулевая линия. |
+| **HIMG-10.META** | **CI VERIFIED · OWNER ACCEPTANCE PENDING** | В карточках отсутствует постоянный coverage QLabel. Source/coverage сохранены в graph tooltip/accessibility. В wide Home и long-game captures строка охвата не видна. |
+| **HIMG-08.A/B** | **CI VERIFIED · OWNER ACCEPTANCE PENDING** | Final full pytest: unknown/unowned side values, ноль и отсутствие данных различаются; live human-game path не показывает сохранённый анализ; существующий Fair Play guard остаётся в regression suite. |
+| **R47-H-01 / R47-QA-02** | **CI VERIFIED (synthetic) · OWNER GATE OPEN** | Проверены отсутствие горизонтального переполнения и длинное имя: `1672x941-home-long-opponent-name.png`, `1280x720-home-long-opponent-name.png`, `1120x640-home-long-opponent-name.png`; Play→Home captures и компоновка трёх карт также входят в artifact. |
+
+**Exact-head L3:** [Windows run #583](https://github.com/feshakomissarov-prog/chess/actions/runs/43582880679) для SHA `642a3f017b58511ead782522609c8d8463f5154e` завершился PASS: **1156 passed in 643.85s**, `compileall` PASS, offline-window smoke PASS; native `visual-evidence` PASS. [Artifact #14108818580](https://github.com/feshakomissarov-prog/chess/actions/runs/43582880679/artifacts/14108818580) просмотрен вручную: 41 strict state при 100% (1672×941/1360×860/1280×720), 32 при 125% (1280×720), 32 при 150% (1120×640). Матрица — synthetic offline Windows runner с Qt UI; не пользовательская SQLite, не физическое OS DPI текущего компьютера и не подключённый Lichess.
+
+**Owner gates без изменения статуса:** `R47-GATE-01 / TD-06` (штатное появление всей статистики ≤1000 мс на основной базе 3k+), `R47-GATE-02` (реальные online/Play/MAT-01 сценарии), `R47-GATE-03` (личная визуальная приёмка), `R47-QA-01` (физическое разрешение/OS DPI), `R47-SAFE-01` (локальные Qt аварии) остаются OPEN/OWNER REQUIRED. Рабочее приложение, primary SQLite, авторизация и Dr.Web не запускались/не менялись. DIST-01 не начиналась. PR #47 остаётся Draft; merge не выполнялся; пользовательская приёмка не заявляется.
+
 ## C. Зафиксированные падения Windows pytest (6)
 
 Для каждого пункта выяснить, что изменилось: продуктовая регрессия, контракт теста или гонка. **Не исправлять CI простым удалением assertion/теста, если это ослабляет утверждённые требования.** Для преднамеренно изменённого breakpoint — объяснить новый UX-контракт и обновить все связанные тесты согласованно.
