@@ -393,7 +393,10 @@ class _DashboardGameCard(QFrame):
         owner = self.window()
         compact_height = owner.height() < 780
         if compact:
-            minimum, maximum = (376, 392) if compact_height else (332, 350)
+            if compact_details:
+                minimum, maximum = (404, 420) if compact_height else (360, 376)
+            else:
+                minimum, maximum = (376, 392) if compact_height else (332, 350)
         elif compact_height:
             minimum, maximum = 208, 222
         else:
