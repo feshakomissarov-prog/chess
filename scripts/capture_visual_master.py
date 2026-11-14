@@ -93,7 +93,11 @@ def assert_label_fits(label: QLabel, description: str) -> None:
     if label.hasHeightForWidth():
         required = label.heightForWidth(max(1, label.width()))
         assert required <= label.height(), (
-            f"{description} is vertically clipped: required={required}, actual={label.height()}"
+            f"{description} is vertically clipped: required={required}, actual={label.height()}, "
+            f"label_width={label.width()}, label_min_height={label.minimumHeight()}, "
+            f"label_size_hint={label.sizeHint().width()}x{label.sizeHint().height()}, "
+            f"parent={label.parentWidget().objectName() if label.parentWidget() else None} "
+            f"{label.parentWidget().width()}x{label.parentWidget().height()}"
         )
     elif not label.wordWrap():
         required = label.fontMetrics().horizontalAdvance(label.text())
