@@ -4063,11 +4063,11 @@ class MainWindow(QMainWindow):
             if metric["key"] == "games" and analysis_summary:
                 source_description = f"{analysis_summary}\nИсточник: {metric['source']}"
             if not masked and metric["key"] == "accuracy":
-                # Keep the hover hint concise; retain full provenance/formula for
-                # assistive technology without displaying a screen-sized tooltip.
-                tooltip = ("Средняя точность по партиям с достоверными данными.\n"
-                           "Официальные оценки Lichess и расчёты Stockfish показаны отдельно.\n"
-                           "Охват источников может различаться.")
+                # The large KPI value has no popup. Keep exact source values on
+                # the compact detail-label tooltip and full formula/provenance
+                # in its accessible description.
+                tooltip = (f"{metric['detail']}\n"
+                           "Средняя точность по достоверным данным; охват источников может различаться.")
             else:
                 tooltip = source_description
             # Large KPI values stay visually unchanged. Their source is exposed

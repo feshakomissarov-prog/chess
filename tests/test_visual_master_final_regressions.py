@@ -225,8 +225,10 @@ def test_home_accuracy_tooltip_is_compact_but_accessible_description_keeps_prove
         ],
         "recent_games": [],
     })
-    tooltip = window._dashboard_metric_values["accuracy"].toolTip()
+    value_tooltip = window._dashboard_metric_values["accuracy"].toolTip()
+    tooltip = window._dashboard_metric_details["accuracy"].toolTip()
     accessible = window._dashboard_metric_values["accuracy"].accessibleDescription()
+    assert value_tooltip == ""
     assert len(tooltip) < 200
     assert "chess-coach-accuracy-v3" not in tooltip
     assert "chess-coach-accuracy-v3" in accessible

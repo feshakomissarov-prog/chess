@@ -204,17 +204,28 @@ def launch(database: Path, root: Path, run_seconds: int, navigation_cycles: int,
                                and all(viewport.rect().contains(rect)
                                        for _card, rect in painted_cards))
         from PySide6.QtWidgets import QLabel
+        from chess_coach.ui.pages.home import HomeEvaluationGraph
         required_card_labels = (
             "dashboardOutcome", "dashboardOpponent", "dashboardAccuracy",
             "dashboardGameDate", "dashboardAnalysisCoverage",
-            "dashboardGraphTitle", "dashboardGraphLegend", "dashboardGraphSource",
         )
-        cards_have_visible_content = all(
+        labels_have_visible_content = all(
             all((label := card.findChild(QLabel, object_name)) is not None
                 and label.isVisibleTo(window) and bool(label.text().strip())
                 for object_name in required_card_labels)
             for card, _rect in painted_cards
         )
+        graphs_have_accessible_context = all(
+            (graph := card.findChild(HomeEvaluationGraph, "homeEvaluationGraph")) is not None
+            and graph.isVisibleTo(window)
+            and graph.width() > 0 and graph.height() > 0
+            and (not graph.source or f"Источник: {graph.source}." in graph.accessibleDescription())
+            and (not graph.coverage or
+                 f"Охват сохранённых позиций: {graph.coverage}." in graph.accessibleDescription())
+            for card, _rect in painted_cards
+        )
+        cards_have_visible_content = (labels_have_visible_content
+                                      and graphs_have_accessible_context)
         accuracy_detail = window._dashboard_metric_details["accuracy"].text()
         if (current_summary_ms is None and games == target_count
                 and visible_recent_ids[:len(target_recent_ids)] == target_recent_ids

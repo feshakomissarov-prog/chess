@@ -41,7 +41,7 @@ def test_long_saved_game_keeps_all_600_consecutive_plies_and_tooltip_ply(qtbot):
     assert graph._drawn_cp_segments[-1] == (599, 600)
     assert graph._hit_targets[-1][2] == 600
     assert "Полуход 600 (ход 300)" in graph._hit_targets[-1][3]
-    assert "Белые +" in graph._hit_targets[-1][3]
+    assert "Чёрные +" in graph._hit_targets[-1][3]
 
     graph.resize(420, 190)
     graph.repaint()
@@ -101,9 +101,15 @@ def test_mate_and_out_of_axis_markers_are_aggregated_with_exact_tooltip(qtbot):
         for target in graph._hit_targets)
     assert "350–369 (20 позиций)" in next(
         target[3] for target in graph._hit_targets if target[2] == 369)
-    assert "M+" not in graph._hit_targets[-1][3]
+    mate_target = next(target for target in graph._hit_targets if target[2] == 369)
+    assert "M+" not in mate_target[3]
+    assert "Мат: белые через 6" in mate_target[3]
     graph.setFocus()
-    qtbot.keyPress(graph, Qt.Key.Key_End)
+    mate_index = next(index for index, target in enumerate(graph._hit_targets)
+                      if target[2] == 369)
+    qtbot.keyPress(graph, Qt.Key.Key_Home)
+    for _ in range(mate_index):
+        qtbot.keyPress(graph, Qt.Key.Key_Right)
     assert "Мат: белые через 6" in graph.accessibleDescription()
 
     clipped_rows = [row for row in assessments if row["mate_white"] is None]
