@@ -4256,6 +4256,7 @@ class MainWindow(QMainWindow):
         opponent_label.setWordWrap(True)
         opponent_label.setSizePolicy(QSizePolicy.Policy.Ignored,
                                      QSizePolicy.Policy.Preferred)
+        opponent_label.ensurePolished()
         # QLabel's font metrics omit its vertical layout allowance on the
         # native Windows style; reserve the actual widget hint to avoid a
         # one-line baseline clip in the compact recent-game cards.
