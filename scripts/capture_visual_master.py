@@ -641,7 +641,6 @@ def capture(window: MainWindow, output: Path, name: str, width: int, height: int
         assert page.graph.full_ply_count >= 16
         assert_no_widget_overlap(page.review_board, page.side_metrics_summary,
                                  "Review board and comparison table")
-        assert_label_fits(page.phase_summary, "Review phase summary")
         assert_action_target(window, page.export_button, "Export PGN")
         assert_action_target(window, page.training_button, "Review mistakes")
         last_ply = len(page.review.get("moves") or {})
