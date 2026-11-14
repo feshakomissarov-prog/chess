@@ -203,3 +203,21 @@ Exact-head SHA #543: `97f3671be489c36af2363c2c8eb6b41b20130011`. Windows test **
 ### Примечание о полноте
 
 Проверка охватывает доступный diff, exact-head 6 CI failures, manifest и предоставленные screenshots, а также ранее согласованные документы. Это добросовестный **зафиксированный исходный набор контроля**, но никакой статический обзор не гарантирует отсутствие всех возможных скрытых ошибок в неисполненных состояниях. Для этого предусмотрены полная повторная матрица и отдельные категории `REG-` и `MISSED-`. **Не выдавать отсутствие нового списка замечаний за гарантию отсутствия регрессий.**
+
+
+## I. POSTMERGE-01 — повторный CI RED после merge #47
+
+**Новый срез статусов 14.11.2026 — после закрытия исторического Draft PR #47.** PR #47 [слит в main](https://github.com/feshakomissarov-prog/chess/pull/47) merge `2ab3dde656db0f78ba3bcfbbe46c9c0371bcd896` по явному согласию владельца, его внешний Home визуально принят. [PR #48](https://github.com/feshakomissarov-prog/chess/pull/48) со стандартом CC-VERIFY-01 также слит, merge `394ad979f2507183ccd2cc56c074efcfd43fed41`. Строки выше сохраняются как **исторические контракты и доказательства по кодовому HEAD**, а не как утверждение, что PR #47 до сих пор Draft.
+
+**Важно:** PR #47 на `4f5fa663` прошёл [CI #594](https://github.com/feshakomissarov-prog/chess/actions/runs/43588751885): 1161 passed, L1/L2 native chart PASS, visual-evidence PASS. Но новый workflow непосредственно на **merge commit `2ab3dde`** [run #43596085647](https://github.com/feshakomissarov-prog/chess/actions/runs/43596085647) **FAILED** в `home-chart-review` (native Qt transition). Traceback: `scripts/capture_visual_master.py::wait_home`, `Home card 1 exceeds its scroll viewport width: 640 > 611`. Остальные большие jobs **SKIPPED**, поэтому main нельзя обозначить полностью зелёным.
+
+| Существующий ID | Новая post-merge запись | Статус |
+| --- | --- | --- |
+| **R47-H-01 / R47-QA-02** | Уточнение ранее открытой адаптивной геометрии: после wide Home очередной compact Qt capture превысил viewport; не создавать нового `MISSED-` без доказательства иной причины. [ТЗ на адресную проверку](POSTMERGE_01_WINDOWS_GATE_AND_LICHESS_DATA_AUDIT_2026_11_14.md). | **REOPENED / CONFIRMED CI RED ON MAIN**, пока нет нового точного GREEN и стабильного reproducible narrow сценария. |
+| **R47-GATE-01 / TD-06** | Владелец сказал «по сути готово» и принял внешний вид, но покадровое `≤1000 мс` на личной SQLite при cold/warm/offline/new game не измерено. | **OWNER NOT MEASURED**; без нового локального запуска из-за R47-SAFE-01. |
+| **R47-GATE-02 / MAT-01 / real Lichess** | Код/синтетический тест PASS ранее, не было физической онлайн-партии с владельцем. | **OWNER SCENARIO NOT RUN**. |
+| **R47-SAFE-01** | Qt6Core.dll 0xC0000409, четыре события 12.11.2026; причина не доказана. | **OPEN, no new owner-local Qt process**. |
+
+**DATA-01 не трактовать как найденную массовую потерю данных Lichess.** Исторические числа на пользовательском экране `953` (игры с оценками источника Lichess), `40` (игры с official accuracy выбранной стороны), `244` (проверенные ready-analytics строки) относятся к **разным знаменателям**. Достоверного сопоставления полного списка на сервере и локальной SQLite пока нет. [Read-only data audit](POSTMERGE_01_WINDOWS_GATE_AND_LICHESS_DATA_AUDIT_2026_11_14.md) нужен как проверка, не как автоматическая пересинхронизация.
+
+**Обновлять статус только по evidence:** `RED → RCA → FIX → isolated L1/L2 GREEN → exact-head L3 GREEN → OWNER gates separately`. Все старые IDs и их историю сохранять.
