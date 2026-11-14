@@ -1116,6 +1116,11 @@ def capture_home_rating_review(window: MainWindow, output: Path,
             assert 2 <= len(chart._y_label_bounds) <= 5
             assert not any("−" in label or label.startswith("-")
                            for label in chart._x_axis_labels)
+            image = capture(window, output, f"home-rating-{name}", width, height)
+            images.append(image)
+            QApplication.processEvents()
+            chart.repaint()
+            QApplication.processEvents()
             label_bounds = chart._x_label_bounds + [
                 rect for _value, rect in chart._y_label_bounds]
             out_of_bounds = [bounds.getRect() for bounds in label_bounds
@@ -1142,8 +1147,6 @@ def capture_home_rating_review(window: MainWindow, output: Path,
                                       [rect for _value, rect in chart._y_label_bounds])
                        for i, first in enumerate(bounds)
                        for second in bounds[i + 1:])
-            image = capture(window, output, f"home-rating-{name}", width, height)
-            images.append(image)
     finally:
         chart.set_points(original_points)
         QApplication.processEvents()
