@@ -23,7 +23,9 @@ import chess
 from PySide6.QtCore import QPoint, QRect, QSize, Qt
 from PySide6.QtGui import QColor, QCursor, QImage, QPainter
 from PySide6.QtTest import QSignalSpy, QTest
-from PySide6.QtWidgets import QApplication, QLabel, QListWidgetItem, QScrollArea, QToolTip, QWidget
+from PySide6.QtWidgets import (
+    QApplication, QBoxLayout, QLabel, QListWidgetItem, QScrollArea, QToolTip, QWidget,
+)
 
 from chess_coach.bootstrap import create_runtime
 from chess_coach.application.dashboard import dashboard_snapshot, _home_graph_points
@@ -335,6 +337,11 @@ def wait_home(window, account_id: str) -> None:
             f"Home card {index} exceeds its scroll viewport width: "
             f"{card.width()} > {window._home_view.recent_scroll.viewport().width()}"
         )
+        if card.width() < 680:
+            assert card._responsive_details_layout.direction() == (
+                QBoxLayout.Direction.TopToBottom), (
+                    "Very narrow Home cards must stack the detail table below game text."
+                )
         for label_index, label in enumerate(card.findChildren(QLabel), start=1):
             if label.isVisible():
                 assert_label_fits(

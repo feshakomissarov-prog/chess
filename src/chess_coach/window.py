@@ -361,9 +361,14 @@ class _DashboardGameCard(QFrame):
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
         self._responsive_layout: QBoxLayout | None = None
+        self._responsive_details_layout: QBoxLayout | None = None
         self._responsive_graph: QWidget | None = None
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
         self.setCursor(Qt.CursorShape.PointingHandCursor)
+
+    def set_responsive_details(self, layout: QBoxLayout) -> None:
+        self._responsive_details_layout = layout
+        self._sync_graph_layout()
 
     def set_responsive_graph(self, layout: QBoxLayout, graph: QWidget | None) -> None:
         self._responsive_layout = layout
@@ -374,6 +379,12 @@ class _DashboardGameCard(QFrame):
         if self._responsive_layout is None:
             return
         compact = self.width() < 760
+        compact_details = self.width() < 680
+        if self._responsive_details_layout is not None:
+            detail_direction = (QBoxLayout.Direction.TopToBottom if compact_details else
+                                QBoxLayout.Direction.LeftToRight)
+            if self._responsive_details_layout.direction() != detail_direction:
+                self._responsive_details_layout.setDirection(detail_direction)
         direction = (QBoxLayout.Direction.TopToBottom if compact else
                      QBoxLayout.Direction.LeftToRight)
         if (self._responsive_graph is not None
@@ -4416,6 +4427,7 @@ class MainWindow(QMainWindow):
             graph.setAccessibleDescription(coverage.toolTip())
         graph_layout.addWidget(graph, 1)
         root.addWidget(graph_host, 50)
+        card.set_responsive_details(details_layout)
         card.set_responsive_graph(root, graph_host)
         return card
 
