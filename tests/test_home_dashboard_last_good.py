@@ -211,8 +211,8 @@ def test_3319_to_3320_restart_persists_and_paints_real_ui_in_separate_processes(
     new_game_card = next(card for card in summary_cards
                          if card["game_id"] == "seed-new")
     new_game_text = " ".join(new_game_card["labels"])
-    assert ("Загружаем сохранённые оценки" in new_game_text
-            or "Нет сохранённых оценок" in new_game_text)
+    assert new_game_card["graph_empty_text"] in {
+        "Загружаем сохранённые оценки", "Нет сохранённых оценок"}
     assert "0/" not in new_game_text
     assert changed["aggregate_calls"] >= 1
     assert changed["full_ready_ms"] is not None

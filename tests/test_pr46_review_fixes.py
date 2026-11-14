@@ -111,7 +111,9 @@ def test_same_scope_preview_uses_fresh_top_three_and_only_reuses_matching_metric
     assert "G1" not in text
     graphs = [card.findChild(HomeEvaluationGraph) for card in cards]
     assert sum(graph is not None and bool(graph.points) for graph in graphs) == 1
-    assert "Загружаем сохранённые оценки" in text
+    assert any(graph is not None
+               and graph.empty_text == "Загружаем сохранённые оценки"
+               for graph in graphs)
     assert window._dashboard_metric_values["games"].text() == "4"
     assert window.close() is True
 
@@ -143,7 +145,7 @@ def test_unowned_completed_card_shows_saved_white_black_review_but_live_card_hid
     assert accuracy is not None and accuracy.text() == "Точность: —"
     assert "99.0%" not in accuracy.toolTip()
     assert card.findChild(type(window.screen_title), "dashboardAnalysisCoverage") is None
-    assert "Охват позиций: 1/1" in graph.accessibleDescription()
+    assert "Охват сохранённых позиций: 1/1" in graph.accessibleDescription()
     assert "Источник: stockfish" in graph.toolTip()
     headers = [label.text() for label in card.findChildren(type(window.screen_title))
                if label.text() in {"Белые", "Чёрные", "Я", "Соперник"}]

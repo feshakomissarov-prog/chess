@@ -243,6 +243,10 @@ def launch(database: Path, root: Path, run_seconds: int, navigation_cycles: int,
                 "game_id": str(card.property("dashboard_game_id") or ""),
                 "labels": [label.text() for label in card.findChildren(QLabel)
                            if label.isVisible()],
+                "graph_empty_text": (
+                    graph.empty_text if (graph := card.findChild(
+                        HomeEvaluationGraph, "homeEvaluationGraph")) is not None
+                    and not graph.points else None),
             } for card, _rect in painted_cards]
         if games not in {"—", "-"} and first_count is None:
             first_count = round((now - shown) * 1000, 2)
@@ -271,6 +275,10 @@ def launch(database: Path, root: Path, run_seconds: int, navigation_cycles: int,
                         "game_id": str(widget.property("dashboard_game_id") or ""),
                         "labels": [label.text() for label in widget.findChildren(QLabel)
                                    if label.isVisible()],
+                        "graph_empty_text": (
+                            graph.empty_text if (graph := widget.findChild(
+                                HomeEvaluationGraph, "homeEvaluationGraph")) is not None
+                            and not graph.points else None),
                     })
             try:
                 count_value = int(games.replace(",", ""))
