@@ -7,6 +7,7 @@ on:
       - docs/specs/**
       - docs/process/**
       - scripts/check_spec_contract.py
+      - tests/test_spec_contract.py
       - .github/workflows/spec-contract.yml
       - .github/PULL_REQUEST_TEMPLATE.md
 
