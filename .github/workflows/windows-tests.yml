@@ -37,13 +37,14 @@ jobs:
       - name: L1 diff and compile checks
         run: |
           git diff --check HEAD^ HEAD
-          python -m py_compile src/chess_coach/ui/pages/home.py scripts/capture_visual_master.py tests/test_home_graph_acceptance.py tests/test_home_rating_sparkline.py
-      - name: L1 targeted Home graph and rating tests
+          python -m py_compile src/chess_coach/ui/pages/home.py src/chess_coach/window.py src/chess_coach/application/lichess_coverage_audit.py scripts/audit_lichess_coverage.py scripts/capture_visual_master.py tests/test_lichess_coverage_audit.py tests/test_visual_master_final_regressions.py tests/test_ui_pages.py
+      - name: L1 targeted Home geometry and Lichess coverage tests
         env:
           QT_QPA_PLATFORM: offscreen
         run: >-
           python -X faulthandler -m pytest -o addopts= -q
-          tests/test_home_graph_acceptance.py tests/test_home_rating_sparkline.py
+          tests/test_visual_master_final_regressions.py tests/test_ui_pages.py
+          tests/test_lichess_coverage_audit.py tests/test_dashboard.py
       - name: Configure native display for Home chart captures
         shell: pwsh
         run: |

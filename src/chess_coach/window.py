@@ -1659,6 +1659,10 @@ class MainWindow(QMainWindow):
                 f"Последние данные получены: {last_success}\n{next_check}\n"
                 f"Запросов сегодня: {summary.get('requests_today', 0)}/"
                 f"{payload.get('daily_limit', 25)}. Источник: документированный JSON export Lichess. "
+                "Проверено — число строк очереди с отметкой проверки, а не число "
+                "проанализированных партий; знаменатель очереди отличается от всего архива. "
+                "Отсутствие новых данных означает только, что конкретная проверка не вернула "
+                "дополнительную аналитику, а не что партия никогда не анализировалась. "
                 "Локальный Stockfish хранится отдельно; создание серверного анализа не запрашивается.")
 
             def state(kind: str, *, error=False, complete=False, paused=False) -> str:
@@ -4062,12 +4066,23 @@ class MainWindow(QMainWindow):
                                   if metric["key"] == "analysis" else str(metric["source"]))
             if metric["key"] == "games" and analysis_summary:
                 source_description = f"{analysis_summary}\nИсточник: {metric['source']}"
+            if not masked and metric["key"] == "games":
+                source_description = (
+                    f"{detail_text}\nИсточник: {metric['source']}\n"
+                    "Числа Lichess и Stockfish могут относиться к одним и тем же партиям. "
+                    "Партии с позиционными оценками и партии с официальной точностью Lichess — "
+                    "разные показатели с разными знаменателями.")
             if not masked and metric["key"] == "accuracy":
+                source_description = (
+                    f"{metric['source']}\nОфициальная точность Lichess берётся только для стороны "
+                    "выбранного профиля; число партий с точностью отличается от числа партий "
+                    "с позиционными оценками. Выборки источников могут пересекаться.")
                 # The large KPI value has no popup. Keep exact source values on
                 # the compact detail-label tooltip and full formula/provenance
                 # in its accessible description.
                 tooltip = (f"{metric['detail']}\n"
-                           "Средняя точность по достоверным данным; охват источников может различаться.")
+                           "Официальная точность Lichess — только для стороны выбранного профиля; "
+                           "её число не равно числу всех партий с позиционными оценками.")
             else:
                 tooltip = source_description
             # Large KPI values stay visually unchanged. Their source is exposed
@@ -4210,6 +4225,12 @@ class MainWindow(QMainWindow):
         compact = recent_width < 760
         compact_height = self.height() < 780
         card = _DashboardGameCard()
+        # QWidget starts at Qt's default 640 px even while its scroll-area
+        # viewport is narrower. Give the responsive layout the real available
+        # width before its first size-hint calculation; otherwise a nested
+        # layout can retain a desktop minimum until a later resize event.
+        if recent_width > 0:
+            card.resize(recent_width, card.height())
         # The scroll-area viewport owns the card width. Ignoring the card's
         # stale horizontal size hint lets its child layout switch to the
         # compact stacked form instead of overflowing at 1280x720.

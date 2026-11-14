@@ -1,5 +1,7 @@
 # PR #47 — консолидированное ревью и единый реестр приёмки (12.11.2026)
 
+<!-- verification-contract: docs/process/VERIFICATION_PROTOCOL.md -->
+
 **Ревизия проверенного кода:** `97127e8091b068f05668033ab249092613d7b145`
 **Последняя перепроверка:** `ca4373f942ea1b3cb3b60132d6f8221db80534f4` (12.11.2026); ниже сохранён исторический снимок 97127e8, последующие результаты вынесены в раздел B.1.  
 **Репозиторий / PR:** [feshakomissarov-prog/chess, Draft PR #47](https://github.com/feshakomissarov-prog/chess/pull/47)  
@@ -203,3 +205,63 @@ Exact-head SHA #543: `97f3671be489c36af2363c2c8eb6b41b20130011`. Windows test **
 ### Примечание о полноте
 
 Проверка охватывает доступный diff, exact-head 6 CI failures, manifest и предоставленные screenshots, а также ранее согласованные документы. Это добросовестный **зафиксированный исходный набор контроля**, но никакой статический обзор не гарантирует отсутствие всех возможных скрытых ошибок в неисполненных состояниях. Для этого предусмотрены полная повторная матрица и отдельные категории `REG-` и `MISSED-`. **Не выдавать отсутствие нового списка замечаний за гарантию отсутствия регрессий.**
+
+
+## I. POSTMERGE-01 — повторный CI RED после merge #47
+
+**Новый срез статусов 14.11.2026 — после закрытия исторического Draft PR #47.** PR #47 [слит в main](https://github.com/feshakomissarov-prog/chess/pull/47) merge `2ab3dde656db0f78ba3bcfbbe46c9c0371bcd896` по явному согласию владельца, его внешний Home визуально принят. [PR #48](https://github.com/feshakomissarov-prog/chess/pull/48) со стандартом CC-VERIFY-01 также слит, merge `394ad979f2507183ccd2cc56c074efcfd43fed41`. Строки выше сохраняются как **исторические контракты и доказательства по кодовому HEAD**, а не как утверждение, что PR #47 до сих пор Draft.
+
+**Важно:** PR #47 на `4f5fa663` прошёл [CI #594](https://github.com/feshakomissarov-prog/chess/actions/runs/43588751885): 1161 passed, L1/L2 native chart PASS, visual-evidence PASS. Но новый workflow непосредственно на **merge commit `2ab3dde`** [run #43596085647](https://github.com/feshakomissarov-prog/chess/actions/runs/43596085647) **FAILED** в `home-chart-review` (native Qt transition). Traceback: `scripts/capture_visual_master.py::wait_home`, `Home card 1 exceeds its scroll viewport width: 640 > 611`. Остальные большие jobs **SKIPPED**, поэтому main нельзя обозначить полностью зелёным.
+
+| Существующий ID | Новая post-merge запись | Статус |
+| --- | --- | --- |
+| **R47-H-01 / R47-QA-02** | Уточнение ранее открытой адаптивной геометрии: после wide Home очередной compact Qt capture превысил viewport; не создавать нового `MISSED-` без доказательства иной причины. [ТЗ на адресную проверку](POSTMERGE_01_WINDOWS_GATE_AND_LICHESS_DATA_AUDIT_2026_11_14.md). | **REOPENED / CONFIRMED CI RED ON MAIN**, пока нет нового точного GREEN и стабильного reproducible narrow сценария. |
+| **R47-GATE-01 / TD-06** | Владелец сказал «по сути готово» и принял внешний вид, но покадровое `≤1000 мс` на личной SQLite при cold/warm/offline/new game не измерено. | **OWNER NOT MEASURED**; без нового локального запуска из-за R47-SAFE-01. |
+| **R47-GATE-02 / MAT-01 / real Lichess** | Код/синтетический тест PASS ранее, не было физической онлайн-партии с владельцем. | **OWNER SCENARIO NOT RUN**. |
+| **R47-SAFE-01** | Qt6Core.dll 0xC0000409, четыре события 12.11.2026; причина не доказана. | **OPEN, no new owner-local Qt process**. |
+
+**DATA-01 не трактовать как найденную массовую потерю данных Lichess.** Исторические числа на пользовательском экране `953` (игры с оценками источника Lichess), `40` (игры с official accuracy выбранной стороны), `244` (проверенные ready-analytics строки) относятся к **разным знаменателям**. Достоверного сопоставления полного списка на сервере и локальной SQLite пока нет. [Read-only data audit](POSTMERGE_01_WINDOWS_GATE_AND_LICHESS_DATA_AUDIT_2026_11_14.md) нужен как проверка, не как автоматическая пересинхронизация.
+
+**Обновлять статус только по evidence:** `RED → RCA → FIX → isolated L1/L2 GREEN → exact-head L3 GREEN → OWNER gates separately`. Все старые IDs и их историю сохранять.
+
+
+## План проверок и стоимость CI
+
+**Контракт CC-VERIFY-01 действует для обновления этого исторического реестра начиная с 14.11.2026**; прежние записи §A–H — артефакт истории и не требуют ретроактивного повтора всех CI. Основная конкретика находится в [POSTMERGE-01 + DATA-01](POSTMERGE_01_WINDOWS_GATE_AND_LICHESS_DATA_AUDIT_2026_11_14.md). Каждая новая правка требований ссылается на тот же протокол и не заводит новый дублирующий реестр.
+
+### Уровень 1
+
+**Адресно:** проверить источники актуального `main` и исходного CI RED, тест `R47-H-01` с `QRect.width <= viewport.width`; для DATA-01 сначала без сети на временной SQLite. Команды, тестовые пути, статусы и исходные SHA перечислены в ТЗ, § «План проверок…». Использовать `git diff --check`, targeted pytest и Python compile только изменённых файлов.
+
+### Уровень 2
+
+**Тематически:** изолированный Windows Qt Home wide→compact/Play→Home, подходящие 125%/150%, экраны с 3 recent cards и полный скролл; DATA-01 synthetic контроль source overlap/current line/backfill. Не повторять все штатные ~113 screenshots после каждого `QLabel`.
+
+### Уровень 3
+
+**Финальный exact-head:** одна полная Windows регрессия pytest/compileall/offline smoke/native visual после исправлений на точном кодовом SHA, с артефактами. Изменения **docs-only** в этом реестре не требуют новой ручной полной регрессии исполняемого кода, но быстрый spec gate должен быть зелёным. Личные Qt/SQLite/сетевые проверки остаются OWNER gates.
+
+## Критерии приёмки и доказательства
+
+| ID | Критерий | Evidence / действующий статус |
+| --- | --- | --- |
+| R47-H-01 / QA-02 | Home card не выходит за scroll viewport на main после последовательного resize | [RED main CI](https://github.com/feshakomissarov-prog/chess/actions/runs/43596085647); будущий L1/L2/L3 GREEN, пока **OPEN** |
+| DATA-01 | Локальный аудит метрик без доступа к личной SQLite/токенам, ясно различает знаменатели | Новое [ТЗ](POSTMERGE_01_WINDOWS_GATE_AND_LICHESS_DATA_AUDIT_2026_11_14.md), пока **NOT IMPLEMENTED** |
+| TD-06 / R47-GATE-01 | Home ≤1000 мс на реальной базе и сохранённом Tier B | **OWNER NOT MEASURED**, synthetic CI недостаточен |
+| R47-SAFE-01 | Никаких неразрешённых Qt/pytest/Dr.Web операций на компьютере владельца | **OPEN**, безопасность не симулировать |
+
+
+## J. Итоговая независимая проверка PR #49 — 14.11.2026
+
+Этот раздел **обновляет текущие статусы** после исторической записи §I (RED после merge #47), не стирая историю или стабильные ID. Зафиксировано отдельное пользовательское одобрение изменений PR #49 и независимое чтение кода/логов на [code SHA `97d2a8d74cf06438f6d6f5e6e33a63cfb2ca9d8d`](https://github.com/feshakomissarov-prog/chess/commit/97d2a8d74cf06438f6d6f5e6e33a63cfb2ca9d8d).
+
+| ID | Текущий статус (сверху истории §I) | Доказательство и ограничение |
+| --- | --- | --- |
+| **R47-H-01 / R47-QA-02 / POSTMERGE-01** | **FIXED · CI VERIFIED на PR #49 code SHA** | Устранена начальная ширина QFrame 640px до расчёта узкого viewport; `card.resize(recent_width, card.height())` до QBoxLayout; **строгое** `card.width() <= viewport.width()` не удалено. [Windows #599](https://github.com/feshakomissarov-prog/chess/actions/runs/43608145277): L1 62 passed, L2 native Qt 100/125/150% PASS, L3 1167 passed + visual PASS. После merge main-run — дополнительное подтверждение, не подмена. |
+| **DATA-01.A** | **IMPLEMENTED · SYNTHETIC CI VERIFIED, real account not audited** | Новая функция read-only coverage на соединении к стабильному SQLite snapshot, CLI `mode=ro` + `query_only`, без импорта сервера/движка и без перечисления private game IDs. Тесты пересечения источников, статусов backfill, validity и current line. Числа 953 / 40 / 244 объяснены по разным знаменателям; реальная SQLite пользователя не открывалась. |
+| **DATA-01.B** | **IMPLEMENTED · CI VERIFIED** | Compact KPI/фоновые tooltips различают Lichess evals, official player-side accuracy, backfill checked и перекрытие источников. |
+| **DATA-01.C** | **НЕ ВЫПОЛНЯЛСЯ И НЕ ТРЕБОВАЛСЯ** | Не было разрешения на серверную/пользовательскую реконcиляцию. Никакой массовой повторной загрузки. |
+| **R47-GATE-01 / TD-06** | **OWNER NOT MEASURED (P0 остаётся открытым)** | Нет замера ≤1000ms на реальной SQLite 3k+ и пользовательском профиле; зелёные synthetic тесты не доказывают P0. |
+| **R47-SAFE-01 / R47-GATE-02** | **OWNER / OPEN** | Ранее обнаруженные Qt6Core.dll и реальные Lichess/Play/MAT-01 не проверены на рабочем Windows. Не проводить самовольный local Qt/DB smoke. |
+
+**Качество CI и тестовый контракт:** единственный финальный успешный кодовый [run #599](https://github.com/feshakomissarov-prog/chess/actions/runs/43608145277) на `97d2a8d` содержит три зелёных job (L1/L2 Home chart review, Windows test, native visual). Промежуточный архитектурный import-boundary FAIL исправлен до финального L3. После этой записи изменяются **только Markdown**; для не изменившегося исполняемого кода не нужно заново запускать полный L3. Не повышать статус P0 и локальных owner gates.
