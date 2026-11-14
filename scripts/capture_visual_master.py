@@ -15,6 +15,7 @@ import sys
 import tempfile
 import threading
 import time
+import math
 from hashlib import sha256
 from types import SimpleNamespace
 
@@ -870,17 +871,32 @@ def capture_long_game_graph_cases(window: MainWindow, output: Path,
     scenarios = ("continuous-long", "twenty-ply-gap", "mate-and-clipped")
     for game, scenario in zip(snapshot["recent_games"], scenarios):
         assessments = []
+        anchors = ([(1, -160), (60, -60), (120, 80), (180, 20),
+                    (240, 200), (300, 140), (360, 280), (420, 140),
+                    (480, 220), (540, 80), (600, 170)]
+                   if scenario != "mate-and-clipped" else
+                   [(1, -120), (80, 20), (160, 80), (240, 160),
+                    (320, 250), (380, 580), (420, 760), (460, 500),
+                    (500, 100), (520, -650), (540, -780), (560, -450),
+                    (580, -100), (600, 150)])
+
+        def score_at(ply: int) -> int:
+            for (left_ply, left_cp), (right_ply, right_cp) in zip(anchors, anchors[1:]):
+                if ply <= right_ply:
+                    fraction = (ply - left_ply) / (right_ply - left_ply)
+                    base = left_cp + (right_cp - left_cp) * fraction
+                    # Small, deterministic local movement avoids an artificial
+                    # high-frequency sawtooth while keeping dense real plies.
+                    return round(base + 18 * math.sin(ply / 11) + 8 * math.cos(ply / 23))
+            return anchors[-1][1]
+
         for ply in range(1, 601):
             if scenario == "twenty-ply-gap" and 281 <= ply <= 300:
                 continue
-            if scenario == "mate-and-clipped" and 350 <= ply <= 369:
-                assessments.append({"ply": ply, "white_cp": None, "mate_white": 25 - (ply - 350)})
+            if scenario == "mate-and-clipped" and ply >= 581:
+                assessments.append({"ply": ply, "white_cp": None, "mate_white": 601 - ply})
                 continue
-            cp = ((ply * 37) % 900) - 450
-            if scenario == "mate-and-clipped" and 40 <= ply <= 59:
-                cp = 800
-            elif scenario == "mate-and-clipped" and 500 <= ply <= 519:
-                cp = -900
+            cp = score_at(ply)
             assessments.append({"ply": ply, "white_cp": cp, "mate_white": None})
         metrics = dict(game.get("review_metrics") or {})
         metrics["graph_points"] = _home_graph_points(assessments)
@@ -922,7 +938,7 @@ def capture_long_game_graph_cases(window: MainWindow, output: Path,
         assert not any(start <= 280 < end for start, end in gap_graph._drawn_cp_segments)
         assert len(mate_graph._drawn_cp_segments) == 578
         assert len(mate_graph._mate_markers) == 1
-        assert mate_graph._mate_markers[0][2:] == (350, 20)
+        assert mate_graph._mate_markers[0][2:] == (581, 20)
         assert len(mate_graph._clipped_markers) == 2
         image = capture(window, output, "home-long-game-graph-cases", width, height)
         print("Long-game graph cases: 600 plies; one 20-ply assessment gap; "
