@@ -1,5 +1,15 @@
 ## 14.11.2026 — post-merge PR #47 / #48: актуальное состояние
 
+## 14.11.2026 — PR #49 принят к merge владельцем: актуальный проверенный результат
+
+- **POSTMERGE-01 / R47-H-01 / R47-QA-02:** FIXED / CI VERIFIED на code SHA `97d2a8d74cf06438f6d6f5e6e33a63cfb2ca9d8d`; карточка Home получает ширину от реального viewport до первого Qt layout, строгий geometry gate сохранён. Исторический RED на merge #47 остаётся в записи ниже как обоснование исправления, но не является текущим статусом кода PR #49.
+- **DATA-01:** read-only offline diagnostic на snapshot SQLite, проверены source overlap, валидная official accuracy выбранной стороны, current line и backfill. Фактическая SQLite пользователя не открывалась, а серверная Lichess reconciliation не выполнялась. Пояснения KPI добавлены.
+- **CC-VERIFY-01 / Windows CI #599:** L1 62 tests PASS, L2 real native Qt 100/125/150 PASS, L3 **1167 passed** + compileall/offline window/native visual PASS на кодовом HEAD `97d2a8d`. Ссылки и стабильные IDs — [реестр PR47 §J](specs/PR47_CONSOLIDATED_REVIEW_REGISTER_2026_11_12.md). Документационные коммиты позже L3 не меняют исполняемый код.
+- **Остаётся:** `R47-GATE-01/TD-06` Home ≤1с на реальном профиле — `OWNER NOT MEASURED`; локальный `R47-SAFE-01` Qt6Core.dll; реальные Lichess/Play/MAT-01 owner gates. Никакого утверждения о PASS этих сценариев. Решение владельца о merge PR #49 имеется, окончательный merge выполняется отдельно.
+
+---
+
+
 - **PR #47 объединён в main** merge-коммитом [`2ab3dde`](https://github.com/feshakomissarov-prog/chess/commit/2ab3dde656db0f78ba3bcfbbe46c9c0371bcd896). На code SHA `4f5fa663` [Windows #594](https://github.com/feshakomissarov-prog/chess/actions/runs/43588751885): 1161 PASS, actual Qt visual, согласован Home и реализован MAT-01. Владелец явно согласился на merge.
 - **PR #48 объединён в main** merge-коммитом [`394ad979`](https://github.com/feshakomissarov-prog/chess/commit/394ad979f2507183ccd2cc56c074efcfd43fed41): [CC-VERIFY-01](process/VERIFICATION_PROTOCOL.md), AGENTS.md, обязательный план L1/L2/L3 и быстрый spec-contract gate.
 - **POST-MERGE CI RED:** [Windows run #43596085647](https://github.com/feshakomissarov-prog/chess/actions/runs/43596085647) для merge #47 упал на реальном native `Home card 1 exceeds scroll viewport 640 > 611`; downstream `test`/full `visual-evidence` jobs были **SKIPPED**. Это повтор существующего R47-H-01/R47-QA-02, возможно timing/Qt resize. Нельзя выдавать зелёный PR #594 за зелёный main CI. Исправлять узко без повторения полного визуального редизайна.
