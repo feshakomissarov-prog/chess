@@ -94,6 +94,7 @@ def test_delayed_save_ack_refreshes_reopened_page_after_navigation(qtbot, tmp_pa
                                   QSettings.Format.IniFormat), offline_mode=True)
     qtbot.addWidget(window)
     old_page = PuzzleTrainingPage(demo=True)
+    qtbot.addWidget(old_page)
     old_page.account_id = "local"
     old_page.load_puzzle(old_page.state.puzzle, old_page._puzzle_payload, source="demo")
     attempts = []
@@ -135,6 +136,7 @@ def test_delayed_save_ack_refreshes_reopened_page_after_navigation(qtbot, tmp_pa
     qtbot.waitUntil(repository.started.is_set, timeout=5000)
 
     reopened = PuzzleTrainingPage(demo=True)
+    qtbot.addWidget(reopened)
     reopened.account_id = "local"
     window._puzzle_training_page = reopened
     repository.release.set()
@@ -152,3 +154,6 @@ def test_delayed_save_ack_refreshes_reopened_page_after_navigation(qtbot, tmp_pa
     window.puzzle_attempt_save_finished.emit(duplicate_ack, None)
     assert reopened.history.count() == 1
     window.close()
+    old_page.close()
+    reopened.close()
+    qtbot.wait(100)
