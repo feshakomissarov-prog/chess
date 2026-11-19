@@ -676,7 +676,7 @@ class PuzzleTrainingPage(QWidget):
             self._training_root_layout.setSpacing(4)
             center_layout = self.board.parentWidget().layout()
             if center_layout is not None:
-                center_layout.setSpacing(2)
+                center_layout.setSpacing(0)
             for button in (self.hint, self.reveal, self.repeat, self.retry_save, self.next):
                 button.setMinimumHeight(34)
         else:
