@@ -211,3 +211,122 @@
 **Строгий запрет:** Codex **не выполняет merge**, не меняет основную SQLite владельца и не авторизуется его Lichess от его имени. Пользователь сам принимает результат. Старые дефекты не заводить повторно под новыми ID: привязать к существующему `docs/TECHNICAL_DEBT.md`; новые ошибки текущей работы — `PUZ-01…PUZ-08` в одном реестре/журнале.
 
 **Будущая фаза отдельно:** если владелец захочет, чтобы решения в Chess Coach официально меняли его рейтинг Lichess, предложить отдельное ТЗ на opt-in `puzzle:write` с чёткой семантикой credited/rated/unrated, retry/idempotence и privacy. Не реализовывать в текущем PR.
+
+
+## 7. Независимая проверка реализации PR #51 — **доработка до приёмки, 19.11.2026**
+
+**Статус:** обязательное дополнение к этому *единственному действующему ТЗ* на реализацию, **НЕ новый продуктовый этап**, PR остаётся Draft, **без merge**. Пользователь запросил независимую проверку отчёта Codex и доработку. Документ сохраняет исходные идентификаторы `PUZ-01…PUZ-08`, ниже используются **стабильные под-ID**, не заводить одни и те же дефекты повторно и не переносить свежие ошибки текущего PR в исторический технический долг.
+
+### 7.1 Проверенные факты / источник доказательств
+
+- **Кодовый SHA:** `7afc30f66aa2dc569aca6cea1d687212206f3080`; поздний `6c11a836d8870e37c568fd3189d3a61e2ef3eeb6` — docs-only коммит журнала. На момент аудита PR #51 открыт Draft.
+- **[Windows CI #633](https://github.com/feshakomissarov-prog/chess/actions/runs/44603997659)** на указанном кодовом SHA: `1183 passed`, `compileall`, offline-window smoke, `visual-evidence` и targeted Home job — **PASS**. Эти проверки реальны, их **не нужно объявлять проваленными** из-за новых пробелов в пользовательских сценариях.
+- **[Артефакт #14570307752](https://github.com/feshakomissarov-prog/chess/actions/runs/44603997659/artifacts/14570307752)** скачан и реально просмотрен независимым рецензентом: `puzzle-training/scale-1/1672x941-ready.png`, `...-solved.png`, `scale-1.25/1280x720-ready.png`, `scale-1.5/1120x640-ready.png`. Нативные кадры получены от isolated Windows CI с синтетической задачей `PZ42`, **не с компьютера владельца**.
+- Изучены исходники `src/chess_coach/ui/pages/puzzle_training.py`, `src/chess_coach/window.py` (участок `show_puzzle_training` / `_request_local_training_puzzle` / `_request_puzzle_training`), `src/chess_coach/lichess/puzzle_training.py`, `src/chess_coach/infrastructure/sqlite/puzzles.py`, SQLite v27, новые pytest, `AGENTS.md` и `docs/process/VERIFICATION_PROTOCOL.md`.
+- **Результат:** базовые механики и API GET действительно добавлены, но **MERGE NOT READY** из-за дефектов ниже. Ручная OAuth/physical-DPI приёмка дополнительно остаётся `OWNER NOT VERIFIED`; это не означает, что её нужно проводить на ПК владельца сейчас.
+
+### 7.2 Единый реестр дефектов и проверяемых остаточных требований
+
+| Стабильный ID / исходный критерий | Приоритет | Статус независимого аудита | Evidence / наблюдаемый результат |
+| --- | --- | --- | --- |
+| **PUZ-07.ACCOUNT-BOUND** / PUZ-05,07 | **P0 data integrity** | **CONFIRMED CODE PATH** | `PuzzleTrainingPage.account_selector` меняет `page.account_id`, однако активные `state.puzzle` и `_allow_submit` не сбрасываются. Можно завершить задачу профиля A после переключения на B; `_finish()` посылает `account_id=B` → `_save_training_attempt()`. Это ложная атрибуция результатов между аккаунтами. |
+| **PUZ-05.NEXT-LOCAL** / PUZ-01,05 | **P1 function** | **CONFIRMED CODE PATH** | `_request_local_training_puzzle()` формирует `candidates` и без ротации/курсора всегда берёт `selected = candidates[0]`. Повторный «Следующая задача» в «Сохранённые» / «Мои ошибки» при наборе из нескольких задач повторно открывает ту же первую задачу. |
+| **PUZ-05.REPLAY-OLD** / PUZ-05 | **P1 function** | **CONFIRMED CODE PATH** | `cached_training_puzzles(...limit=100)`, `local_puzzle_attempts(...limit=100)`, `puzzle_history(...limit=100)` и поиск `target_id` только *после* среза. Клик по ID из старой истории/Home за пределами последних 100 не найдёт существующую задачу; локальные старые темы также могут ошибочно давать «0 задач». |
+| **PUZ-06.SAVE-ACK** / PUZ-06 | **P1 data reliability** | **CONFIRMED CODE PATH** | `_finish()` немедленно увеличивает счётчики и добавляет строку «предыдущие задачи»; фоновый `_save_training_attempt` ловит исключение и **только пишет log_event**. При `sqlite3.OperationalError`/закрытии страницы пользователь видит сохранённый результат, которого в SQLite нет. |
+| **PUZ-07.OAUTH-UI-THREAD** / PUZ-07 | **P1 Qt safety audit** | **CODE RISK · test required, not claimed crash** | `_request_puzzle_training.worker()` выполняет `QDesktopServices.openUrl(QUrl(...))` прямо в background worker; GUI-bound browser interaction следует явно передать в Qt main thread по signal/queued-slot, а сетевой OAuth callback оставить в worker. Проверить on hide/cancel и отсутствие позднего OAuth диалога. |
+| **PUZ-04.REPEAT-ACTIVE** / PUZ-04 | **P2 UX/data** | **CONFIRMED CODE PATH** | `_repeat()` немедленно `load_puzzle` даже при активной незавершённой попытке с ошибками/подсказками; нет подтверждения и фиксации исхода, хотя `_next()` подтверждает пропуск. Не уничтожать без предупреждения процесс текущего решения. |
+| **PUZ-05.RESULT-LABELS** / PUZ-05 | **P2 visual** | **CONFIRMED NATIVE PNG** | `1672x941-solved.png`: в «Предыдущие задачи» видна строка вида `19.11 · Вилка · success · Chess Coa…`, исход `success` не переведён, а надпись обрезана. В UI используются raw `mistake/hinted/revealed/skipped`. |
+| **PUZ-01.THEME-LIST-CLIP** / PUZ-01/visual | **P2 visual** | **CONFIRMED NATIVE PNG** | `1672x941-ready.png` и `...-solved.png`: левый список тем ограничен `setMaximumWidth(180)`, есть **горизонтальный scrollbar** и строки `Открытое нападение` / `Незащищённая фигура` обрезаны. На compact 125/150% выбран dropdown, но wide тоже должен быть читаем. |
+| **PUZ-02.API-GOLDEN-FIXTURE** / PUZ-02 | **P1 acceptance test** | **NOT VERIFIED against genuine API response** | `normalize_api_puzzle` использует собственную интерпретацию `initialPly` («zero-based index») и PGN. Сейчас синтетический тест проверяет ту же гипотезу, а не реальную API-схему/пример с полноценной партией. Нужна **реальная публичная документированная JSON fixture**, подтверждение точной FEN/стороны/первого ответа без запроса live OAuth. Не объявлять off-by-one дефектом, пока не воспроизведён. |
+| **PUZ-05.HISTORY-MATRIX** / PUZ-05,08/visual | **P2 acceptance gap** | **NOT COVERED by screenshot evidence** | В native 12 кадрах только `ready/user-marks/solved/mistake-hint` на synthetic `PZ42`; `solved` показывает ровно **одну** предыдущую задачу. Нет визуальных кадров для 5–8 mixed source rows, 2 profiles, offline/error, filtered themes, «Мои ошибки», длинных названий/дат. |
+
+**Не плодить `PUZ-NEW-01/02`:** закрывать именно эти строки, отмечая `OPEN → FIXED BY CODE SHA → VERIFIED L1/L2 → OWNER`. Дополнительные подтверждённые проблемы этой же области добавлять сюда, а не заводить отдельный реестр.
+
+### 7.3 Подробное исправление и строгие тесты
+
+**PUZ-07.ACCOUNT-BOUND — блокирующее правило атрибуции.**
+
+1. Активная попытка привязывается к immutable `session_id + account_id + puzzle_id + source` **при загрузке**; `_finish` берёт account из этой привязки, не из изменяемого combo box. Это минимальное правило даже при одновременном безопасном блокировании.
+2. На смене аккаунта с активной попыткой: подтвердить действие, явно отменить/сохранить исход в **исходном** аккаунте или удержать выбор на A, пока не завершится; никакая текущая FEN/маркировка и предыдущие строки A не должны остаться видны на B как B-данные.
+3. При смене account во время `GET`, OAuth, local history read, async save — generation/session guards, stale callback не изменяет B; retry saving старого A не перекладывает данные на B. Отдельный тест против «возврат к A после B» и delayed worker.
+4. **L1 RED:** 2 account fixtures; A ready, B selected → finish/repeat/skip; assert `local_puzzle_attempts(A)` и `(...B)`/UI state и сохранность чистой истории.
+
+**PUZ-05.NEXT-LOCAL — настоящая последовательность задач.**
+
+1. Для `saved`/`errors` после 3+ разных доступных ID шаг «Следующая задача» **не возвращает текущий ID**, пока не пройдён допустимый набор; показывать понятное «Все задачи этой выборки пройдены» или разрешить явный цикл.
+2. Хранить bounded cursor / pool ID отдельно по `account+mode+theme`, избегать двойной задачи при повторном click и while-loading. Стратегию порядка (по дате/случайно) описать и сделать детерминируемой тестом.
+3. Для `errors` не использовать только последние 100 попыток, а честный поиск «все мои ошибки», из которого можно получить следующую, с лимитированными страницами. Учитывать несколько попыток одного `puzzle_id` с разными результатами, выбранный theme.
+4. **L1 RED:** 4 puzzles (3 saved, 2 errors), последовательные `next`, смена account/theme, zero data; assert ID progression, SQLite source unchanged и no repeat before exhaustion.
+
+**PUZ-05.REPLAY-OLD — точечный lookup, не скан последних 100.**
+
+1. Сделать **repository exact lookup** по `(account_id,puzzle_id)` для кешированного API payload и официального imported `puzzles` через `puzzle_attempts`; при клике/переходе с Home не использовать выборку 100 как substitute. Сверить принадлежность account до возвращения данных. Без полного `SELECT *` на все 1500+/20k.
+2. Для фильтра по theme выборку делать **до пагинации** (SQL JSON1 если поддерживается и проверена на Windows, либо аддитивный indexed table и migration), иначе первые 100 «не той темы» скрывают 101-ю нужную.
+3. В истории каждая строка привязана к корректной source, account/puzzle_id; при дубликатах ID выбирать соответствующий historical attempt/формат, не открывать случайный cached API, если это нарушает контекст.
+4. **L1 RED:** 1501 attempts / 200 cached / 2 accounts, target id 101/1501, theme only among old records, duplicate ID и corrupted payload; bounded read и no cross-account leak.
+
+**PUZ-06.SAVE-ACK — достоверная статистика при сбоях БД.**
+
+1. Статус `Сохранение…` допускается без блокировки UI; но `Сохранено`, устойчивый счётчик и запись в «Предыдущие задачи» должны подтверждаться **реальным commit** `save_local_puzzle_attempt` (или честно помечаться `не сохранено` с возможностью retry).
+2. Не терять результат, если пользователь быстро открыл новую задачу/ушёл на другую страницу до завершения worker: pending attempt привязан к immutable session, callbacks guarded; failed write не «съедается» логом без обратной связи.
+3. Исключить повторные записи при двойном callback или retry; idempotency key должен быть стабильным для одной попытки (на уровне БД или сервиса).
+4. **L1 RED:** fake SQLite failure `OperationalError`, delayed success, double completion, save while navigate away; assert durable counts, status UI, one row per attempt и сохранённость старого `puzzle_attempts` mirror.
+
+**PUZ-07.OAUTH-UI-THREAD — проверить и при необходимости исправить Qt-boundary.**
+
+- Вынести `QDesktopServices.openUrl` (и любые GUI/dialog действия) на main Qt event loop; `worker` делает транспорт/OAuth callback/normalization, но не манипулирует виджетами/GUI. Для запроса разрешения нужен явный user gesture и callback from main thread, а закрытие окна в этот момент отменяет процедуру.
+- **L1:** mock запроса авторизации, assert main-thread execution `QThread.currentThread()==QApplication.instance().thread()`; отмена до/после открытия браузера, 401, лишний scope отсутствует, никакого живого Lichess.
+- Если current Qt API официально допускает эту конкретную операцию из worker — приложить источник и измерение/тест; не объявлять произошедший у владельца crash без факта.
+
+**PUZ-04.REPEAT-ACTIVE — сознательное действие, не silent reset.**
+
+- Повтор до финала должен сообщать «Текущая попытка не завершена. Повторить с начала?»; выбор No сохраняет board/FEN/hints/elapsed. Yes отмечает previous as `skipped` (или договорённый abandoned исход, соответствующий миграции) без ложного успеха. После `success` повтор запускает **новую локальную попытку**, не перезаписывает старую.
+- **L1 Qt:** confirm No/Yes, clean active, hinted/mistake active, fully finished.
+
+**PUZ-05.RESULT-LABELS / PUZ-01.THEME-LIST-CLIP — видимые исправления.**
+
+- Весь UI истории на русском, единый мэппинг `success→Решено`, `mistake→Решено с ошибками / Ошибка` по реальному `solved`, `hinted→С подсказкой`, `revealed→Решение показано`, `skipped→Пропущено`. **Не путать `solved=True+mistakes>0` с просто неудачной попыткой.** При выбранной строке полный ID, дата/время, тема и source доступны через details/tooltip/accessibility; список **не имеет горизонтальной прокрутки**, используйте аккуратные две строки, elide или адаптивное распределение ширины, но не обрезайте без доступа к полному тексту.
+- В списке тем wide убрать horizontal scrollbar, сделать adaptive width / wraps или `ElideRight` с доступными tooltips и понятной выбранной темой; предпочтительно полностью читаемые названия 180+ px при 1672×941 и компактный dropdown на 125/150%.
+- **L2 screenshots:** `1672x941-ready.png` & `solved.png` side-by-side **до/после**; 125%, 150%, 6–8 исторических строк, русские статусы и длинные русские темы. Строгие geometry + clipping assertions, не удалять проверки.
+
+**PUZ-02.API-GOLDEN-FIXTURE — доказать контракт PGN/initialPly.**
+
+- Официальный `PuzzleAndGame` JSON example с `game.pgn`, `initialPly`, `solution` (включая отсутствие `fen`), если доступны: локально сохранить обезличенную тестовую fixture из документации, ручной расчёт expected FEN/last move/side and legal reply в unit test. Проверить первый и последний индекс и promotions.
+- Не менять алгоритм «на всякий случай» если действительный пример проходит; если RED, исправить нормализацию, а не подправить «потому что тест хотел».
+- В proof отдельно отметить, что live authenticated Lichess на owner ПК **не проверялся**.
+
+### 7.4 Регламент доработки: **L1 → L2 → один L3**, без ненужных часов CI
+
+**До реализации:** изучить `AGENTS.md` и `docs/process/VERIFICATION_PROTOCOL.md`, текущий exact PR HEAD, весь `7`, сверить уже существующие `PUZ-01…08` и список changed files. Ни одна старая приёмка/1183 PASS не исчезает; для каждого bug — RED evidence, minimal fix, GREEN test.
+
+**L1 после каждой логической группы:** 
+- `git diff --check`; `python -m py_compile src/chess_coach/ui/pages/puzzle_training.py src/chess_coach/window.py src/chess_coach/infrastructure/sqlite/puzzles.py` (только фактически изменённые файлы);
+- `python -m pytest -o addopts= -q tests/test_puzzle_training.py tests/test_puzzle_training_store.py tests/test_puzzle_training_ui.py tests/test_puzzle_api_adapter.py` + **новые targeted tests** `tests/test_puzzle_training_navigation.py` и `tests/test_puzzle_training_async.py` (создать при необходимости; не выдавать несуществующие за запущенные);
+- на SQLite/OAuth concurrency использовать временную test SQLite, fake transport; Qt offscreen изолированно через Windows runner. **Не** делать полный pytest на каждое QLabel и каждую попытку исправить строку.
+
+**L2 после связанных исправлений:** 
+- `python -m pytest -o addopts= -q tests/test_puzzle_training.py tests/test_puzzle_training_store.py tests/test_puzzle_training_ui.py tests/test_puzzle_api_adapter.py tests/test_window.py tests/test_board_view.py tests/test_lichess.py tests/test_background_work.py` плюс новые адресные async/navigation/persistence test files;
+- одна native Qt visual capture **только для темы puzzles**: 1672×941 100% (до/после с темами и историей), 1280×720 125%, 1120×640 150%; состояния loaded, 8 history mixed, multiple local NEXT, alternate profile before finish, save error, OAuth consent mock, history older than 100, solved after hint. Для опасных сценариев геометрии проверять реальные Qt rects и label text, не только PNG.
+- обязательное side-by-side сравнение с **существующей утверждённой темой Chess Coach**, а не pixel-perfect Lichess. Артефакты с синтетическими данными, без реальной SQLite.
+
+**L3 только после GREEN L1/L2:** одна полная Windows workflow на **финальном кодовом SHA** (все jobs, `pytest`, compileall, offline-window smoke, native visual); проверить run URL, exact SHA, скриншоты, статус каждого job. Если нашли bug — сперва новый targeted RED и green L2, а не бесконечно гонять L3. После docs-only комментария полный L3 без изменения кода не повторять.
+
+**Стоимость/триггеры:** максимально быстрые L1 (точные tests), один тематический L2 после блока fixes, один итоговый L3. Записать фактическое время и число runs в `docs/handoffs/PUZZLE_UX_02_EXECUTION_LOG.md`. Если полный набор снова 10+ минут, не запускать его на каждой 1-строчной правке. Не обходить или ослаблять production-safe/fair-play gates.
+
+### 7.5 Критерии приёмки и доказательства до нового решения владельца
+
+| ID | Критерий | Доказательство | Сейчас |
+| --- | --- | --- | --- |
+| PUZ-07.ACCOUNT-BOUND | Завершение A после смены B не сохраняется у B; history scoped, stale worker не меняет новый аккаунт | L1 Qt + fake DB + delayed worker, L2 screenshot | **FAIL / OPEN** |
+| PUZ-05.NEXT-LOCAL | 3+ доступных saved/errors в рамках темы → 3 разных последовательных задач до повторов | L1 deterministic integration + L2 Qt | **FAIL / OPEN** |
+| PUZ-05.REPLAY-OLD | Точная локальная/официальная задача 101/1501 доступна по ID, не сканируя все строки | SQLite integration + UI route | **FAIL / OPEN** |
+| PUZ-06.SAVE-ACK | UI никогда не показывает «сохранено» после SQL write failure, retry безопасен | L1 fail-injection + L2 Qt | **FAIL / OPEN** |
+| PUZ-07.OAUTH-UI-THREAD | GUI browser открывается на Qt main thread; cancellation/revoke безопасны | Targeted QThread test + fake OAuth | **NEEDS TEST / OPEN** |
+| PUZ-04.REPEAT-ACTIVE | Повтор не уничтожает незавершённую попытку без consent | Qt yes/no test | **FAIL / OPEN** |
+| PUZ-05.RESULT-LABELS | История на русском и различает solved-with-mistakes; без горизонтальной прокрутки | native screenshot с 8 строками | **VISUAL FAIL / OPEN** |
+| PUZ-01.THEME-LIST-CLIP | Длинные темы читаемы и без горизонтальной прокрутки при 1672×941 | native PNG и bounding geometry | **VISUAL FAIL / OPEN** |
+| PUZ-02.API-GOLDEN-FIXTURE | Реальный пример API initialPly без off-by-one | Assert FEN/side/solution по официальной fixture | **NOT VERIFIED** |
+| CC-VERIFY-01 / FINAL | Только один final exact-code-SHA Windows CI после исправлений и новый screenshot artifact | GitHub run URL + SHA + reviewed screenshots | **BLOCKED BY FIXES** |
+| OWNER | Реальная OAuth/SQLite/физический DPI и разрешённый местный Qt smoke | Только владелец после отдельного разрешения | **OWNER NOT VERIFIED** |
+
+**Окончательный статус PR #51 до выполнения этих критериев: DRAFT · NO MERGE.** Изменения только в рамках puzzles, без DIST-01 и без переписывания Review/Home. Если другая замеченная проблема относится к историческому коду *до PR #51* и не вызвана этой реализацией — фиксировать в `docs/TECHNICAL_DEBT.md` с существующим ID; приведённые выше — новые доказанные/подозреваемые недостатки **самого PR #51**, а не технический долг прошлых этапов.
