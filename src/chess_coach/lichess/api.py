@@ -486,8 +486,8 @@ class LichessClient:
         from urllib.parse import quote
 
         allowed = {"easiest", "easier", "normal", "harder", "hardest"}
-        angle = str(angle or "mix").strip()
-        difficulty = str(difficulty or "normal").strip()
+        angle = str(angle).strip() if angle is not None else ""
+        difficulty = str(difficulty).strip() if difficulty is not None else ""
         if not angle or len(angle) > 64 or any(ch not in "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-" for ch in angle):
             raise ValueError("Неизвестная тема задач.")
         if difficulty not in allowed:

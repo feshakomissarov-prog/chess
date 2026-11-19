@@ -17,7 +17,8 @@ def test_official_batch_requires_no_prep_move():
     normalized = normalize_api_puzzle(payload)
     board = normalized.board()
     assert board.turn == chess.BLACK
-    assert board.peek() == chess.Move.from_uci("g1f3")
+    assert normalized.last_move == "g1f3"
+    assert board.piece_at(chess.F3) == chess.Piece(chess.KNIGHT, chess.WHITE)
     assert normalized.expected_user_moves == ("d7d5",)
     assert normalized.themes == ("fork",)
 
@@ -27,7 +28,8 @@ def test_history_source_replays_one_prep_move():
         "history-fixture", chess.STARTING_FEN, ["e2e4", "e7e5"], themes=["opening"])
     board = normalized.board()
     assert board.turn == chess.BLACK
-    assert board.peek() == chess.Move.from_uci("e2e4")
+    assert normalized.last_move == "e2e4"
+    assert board.piece_at(chess.E4) == chess.Piece(chess.PAWN, chess.WHITE)
     assert normalized.expected_user_moves == ("e7e5",)
     assert "e2e4" not in normalized.expected_user_moves
 
