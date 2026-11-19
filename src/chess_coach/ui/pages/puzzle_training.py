@@ -671,6 +671,22 @@ class PuzzleTrainingPage(QWidget):
         self.history.setMaximumHeight(120 if self.height() < 650 else 260)
         center_width = self.board.parentWidget().width() if self.board.parentWidget() else self.width()
         compact_controls = center_width < 650 or self.height() < 700
+        if compact:
+            self._training_root_layout.setContentsMargins(8, 4, 8, 6)
+            self._training_root_layout.setSpacing(4)
+            center_layout = self.board.parentWidget().layout()
+            if center_layout is not None:
+                center_layout.setSpacing(2)
+            for button in (self.hint, self.reveal, self.repeat, self.retry_save, self.next):
+                button.setMinimumHeight(34)
+        else:
+            self._training_root_layout.setContentsMargins(10, 6, 10, 10)
+            self._training_root_layout.setSpacing(6)
+            center_layout = self.board.parentWidget().layout()
+            if center_layout is not None:
+                center_layout.setSpacing(6)
+            for button in (self.hint, self.reveal, self.repeat, self.retry_save, self.next):
+                button.setMinimumHeight(38)
         if compact_controls != self._controls_compact:
             self._controls_compact = compact_controls
             self._sync_control_layout()
