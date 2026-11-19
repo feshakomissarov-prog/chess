@@ -101,6 +101,13 @@ def main() -> None:
             )
 
         def save(name: str) -> None:
+            for button in (page.hint, page.reveal, page.repeat, page.retry_save, page.next):
+                if button.isVisible():
+                    assert button.width() >= button.sizeHint().width(), (
+                        f"Button text may be clipped at {size_text}: "
+                        f"{button.text()} width={button.width()} "
+                        f"required={button.sizeHint().width()}"
+                    )
             QCursor.setPos(window.mapToGlobal(QPoint(width + 20, height + 20)))
             QTest.qWait(80)
             image = window.grab().toImage()

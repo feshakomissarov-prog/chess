@@ -9,7 +9,7 @@ import uuid
 import chess
 from PySide6.QtCore import QSize, Qt, Signal
 from PySide6.QtWidgets import (
-    QComboBox, QFrame, QHBoxLayout, QLabel, QLineEdit, QListWidget,
+    QComboBox, QFrame, QGridLayout, QHBoxLayout, QLabel, QLineEdit, QListWidget,
     QListWidgetItem, QMessageBox, QPushButton, QScrollArea, QSizePolicy, QSplitter,
     QVBoxLayout, QWidget,
 )
@@ -219,7 +219,11 @@ class PuzzleTrainingPage(QWidget):
         self.solution_line.setAccessibleName("Правильная линия решения")
         self.solution_line.hide()
         center_layout.addWidget(self.solution_line)
-        controls = QHBoxLayout()
+        controls = QGridLayout()
+        controls.setHorizontalSpacing(6)
+        controls.setVerticalSpacing(6)
+        self._controls_layout = controls
+        self._controls_compact = False
         self.hint = QPushButton("Подсказка")
         self.reveal = QPushButton("Показать решение")
         self.repeat = QPushButton("Повторить")
@@ -231,8 +235,9 @@ class PuzzleTrainingPage(QWidget):
         self.next.setObjectName("primaryAction")
         for button in (self.hint, self.reveal, self.repeat, self.retry_save, self.next):
             button.setMinimumHeight(38)
-            controls.addWidget(button)
+            button.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         center_layout.addLayout(controls)
+        self._sync_control_layout()
         self.hint.clicked.connect(self._hint)
         self.reveal.clicked.connect(self._reveal)
         self.repeat.clicked.connect(self._repeat)
@@ -520,6 +525,7 @@ class PuzzleTrainingPage(QWidget):
         self._pending_attempt_saves[attempt["attempt_id"]] = attempt
         self.retry_save.setVisible(False)
         self.retry_save.setEnabled(False)
+        self._sync_control_layout()
         self.status.setText("Сохраняю результат в SQLite…")
         self.attempt_saved.emit(attempt)
         self._set_controls(True, finished=True)
@@ -544,6 +550,7 @@ class PuzzleTrainingPage(QWidget):
             self.retry_save.setText("Повторить сохранение")
             self.retry_save.setEnabled(True)
             self.retry_save.setVisible(True)
+            self._sync_control_layout()
             if self._session_id == attempt["session_id"]:
                 self.status.setText(
                     f"Не удалось сохранить результат в SQLite ({error or 'ошибка записи'}). "
@@ -555,6 +562,7 @@ class PuzzleTrainingPage(QWidget):
             self._retry_attempt_id = None
         self.retry_save.setVisible(False)
         self.retry_save.setEnabled(False)
+        self._sync_control_layout()
         if self._session_id != attempt["session_id"]:
             return
         if self.account_id != attempt["account_id"]:
@@ -577,6 +585,7 @@ class PuzzleTrainingPage(QWidget):
             self.retry_save.setText("Повторить сохранение")
             self.retry_save.setEnabled(bool(self._retry_attempt_id))
             self.retry_save.setVisible(bool(self._retry_attempt_id))
+            self._sync_control_layout()
             self.status.setText("Есть несохранённый результат. Его можно сохранить повторно.")
 
     def local_seen_ids(self, scope: tuple[str, str, str]) -> set[str]:
@@ -660,6 +669,31 @@ class PuzzleTrainingPage(QWidget):
         self.theme.setVisible(compact)
         self.theme_search.setVisible(not compact)
         self.history.setMaximumHeight(120 if self.height() < 650 else 260)
+        center_width = self.board.parentWidget().width() if self.board.parentWidget() else self.width()
+        compact_controls = center_width < 650 or self.height() < 700
+        if compact_controls != self._controls_compact:
+            self._controls_compact = compact_controls
+            self._sync_control_layout()
+
+    def _sync_control_layout(self) -> None:
+        layout = self._controls_layout
+        while layout.count():
+            layout.takeAt(0)
+        if not self._controls_compact:
+            for column, button in enumerate(
+                    (self.hint, self.reveal, self.repeat, self.retry_save, self.next)):
+                layout.addWidget(button, 0, column)
+            return
+        if self.retry_save.isVisible():
+            for column, button in enumerate((self.hint, self.reveal, self.repeat)):
+                layout.addWidget(button, 0, column)
+            layout.addWidget(self.retry_save, 1, 0)
+            layout.addWidget(self.next, 1, 1, 1, 2)
+        else:
+            layout.addWidget(self.hint, 0, 0)
+            layout.addWidget(self.reveal, 0, 1, 1, 2)
+            layout.addWidget(self.repeat, 1, 0)
+            layout.addWidget(self.next, 1, 1, 1, 2)
 
     def hideEvent(self, event) -> None:  # noqa: N802 - Qt API
         super().hideEvent(event)
