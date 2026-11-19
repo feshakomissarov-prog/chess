@@ -9,7 +9,7 @@ import chess
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
     QComboBox, QFrame, QHBoxLayout, QLabel, QLineEdit, QListWidget,
-    QListWidgetItem, QMessageBox, QPushButton, QSizePolicy, QSplitter,
+    QListWidgetItem, QMessageBox, QPushButton, QScrollArea, QSizePolicy, QSplitter,
     QVBoxLayout, QWidget,
 )
 
@@ -200,9 +200,13 @@ class PuzzleTrainingPage(QWidget):
         self.next.clicked.connect(self._next)
         body.addWidget(center)
 
+        right_scroll = QScrollArea()
+        right_scroll.setWidgetResizable(True)
+        right_scroll.setFrameShape(QFrame.Shape.NoFrame)
+        right_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        right_scroll.setMinimumWidth(190)
         right = QFrame()
         right.setObjectName("card")
-        right.setMinimumWidth(190)
         right_layout = QVBoxLayout(right)
         heading = QLabel("Текущая задача")
         heading.setStyleSheet("font-weight: 700; font-size: 17px")
@@ -229,7 +233,8 @@ class PuzzleTrainingPage(QWidget):
         self.home_button = QPushButton("Главная")
         self.home_button.clicked.connect(self.home_requested.emit)
         right_layout.addWidget(self.home_button)
-        body.addWidget(right)
+        right_scroll.setWidget(right)
+        body.addWidget(right_scroll)
         body.setStretchFactor(0, 0)
         body.setStretchFactor(1, 1)
         body.setStretchFactor(2, 0)
@@ -544,6 +549,7 @@ class PuzzleTrainingPage(QWidget):
         self.theme_list.setVisible(not compact)
         self.theme.setVisible(compact)
         self.theme_search.setVisible(not compact)
+        self.history.setMaximumHeight(120 if self.height() < 650 else 260)
 
     def hideEvent(self, event) -> None:  # noqa: N802 - Qt API
         super().hideEvent(event)
