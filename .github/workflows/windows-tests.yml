@@ -154,6 +154,21 @@ jobs:
           if ($referencePairs) {
             throw "Public visual-evidence must not include side-by-side reference images."
           }
+      - name: Capture the puzzle trainer at three native DPI scales
+        shell: pwsh
+        run: |
+          $cases = @(
+            @{ Scale = "1"; Size = "1672x941" },
+            @{ Scale = "1.25"; Size = "1280x720" },
+            @{ Scale = "1.5"; Size = "1120x640" }
+          )
+          foreach ($case in $cases) {
+            $env:QT_SCALE_FACTOR = $case.Scale
+            $env:CC_PUZZLE_VISUAL_SIZE = $case.Size
+            $env:CC_PUZZLE_VISUAL_OUTPUT = "visual-evidence/puzzle-training/scale-$($case.Scale)"
+            python -X faulthandler scripts/capture_puzzle_training.py
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          }
       - uses: actions/upload-artifact@v4
         if: always()
         with:

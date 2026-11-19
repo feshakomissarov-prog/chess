@@ -476,6 +476,30 @@ class LichessClient:
             raise LichessError("Lichess вернул неожиданный JSON партии.")
         return payload
 
+    def get_puzzle_batch(self, token: str, *, angle: str = "mix",
+                         difficulty: str = "normal", count: int = 1) -> dict:
+        """Fetch a small, authenticated, read-only puzzle batch.
+
+        Never submits results: the matching POST endpoint requires puzzle:write,
+        which Chess Coach deliberately does not request.
+        """
+        from urllib.parse import quote
+
+        allowed = {"easiest", "easier", "normal", "harder", "hardest"}
+        angle = str(angle or "mix").strip()
+        difficulty = str(difficulty or "normal").strip()
+        if not angle or len(angle) > 64 or any(ch not in "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-" for ch in angle):
+            raise ValueError("Неизвестная тема задач.")
+        if difficulty not in allowed:
+            raise ValueError("Неизвестная сложность задач.")
+        count = min(5, max(1, int(count)))
+        payload = self._json_call(
+            "GET", f"/api/puzzle/batch/{quote(angle, safe='')}", token,
+            query={"difficulty": difficulty, "nb": count})
+        if not isinstance(payload.get("puzzles"), list):
+            raise LichessError("Lichess вернул некорректный список задач.")
+        return payload
+
     def stream_user_games(self, token: str, username: str, stop_event: threading.Event,
                           *, since: int | None = None, until_ms: int | None = None,
                           max_games: int = 1000) -> Iterator[dict]:

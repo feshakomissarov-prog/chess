@@ -4,8 +4,9 @@ from .home import HomePage
 from .library import LibraryPage
 from .play import PlayPage
 from .puzzles import PuzzleHistoryPage
+from .puzzle_training import PuzzleTrainingPage
 from .result import ResultPage
 from .position_setup import PositionSetupWidget
 
-__all__ = ["HomePage", "LibraryPage", "PlayPage", "PuzzleHistoryPage", "ResultPage",
+__all__ = ["HomePage", "LibraryPage", "PlayPage", "PuzzleHistoryPage", "PuzzleTrainingPage", "ResultPage",
            "PositionSetupWidget"]

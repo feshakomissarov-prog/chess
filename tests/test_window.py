@@ -2752,6 +2752,8 @@ def test_puzzle_history_summary_uses_attempt_denominators_and_available_fields()
 def test_my_puzzles_home_action_opens_local_history_without_network_or_oauth(
     qtbot, tmp_path
 ):
+    from chess_coach.ui.pages.puzzle_training import PuzzleTrainingPage
+
     window = MainWindow(QSettings(str(tmp_path / "puzzle-local-nav.ini"),
                                   QSettings.Format.IniFormat), offline_mode=True)
     qtbot.addWidget(window)
@@ -2762,10 +2764,10 @@ def test_my_puzzles_home_action_opens_local_history_without_network_or_oauth(
     }])
     window.open_puzzle_history_local()
     qtbot.waitUntil(lambda: window._puzzle_page is not None
-                    and window._puzzle_page.findChild(QComboBox) is not None
-                    and window._puzzle_page.findChild(QComboBox).count() == 1,
+                    and isinstance(window._puzzle_page, PuzzleTrainingPage)
+                    and window._puzzle_page.account_selector.findData("lichess:localuser") >= 0,
                     timeout=5000)
-    assert window._puzzle_page.findChild(QComboBox).currentData() == "lichess:localuser"
+    assert window._puzzle_page.account_selector.currentData() == "lichess:localuser"
     assert window.lichess is None
     assert window._puzzle_progress_dialog is None
     window.close()

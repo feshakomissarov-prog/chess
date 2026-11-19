@@ -61,7 +61,10 @@ from .controller import GameController
 from .engine_manager import discover_stockfish, install_official_stockfish
 from .uci import popen_uci_hidden
 from .position_analysis import evaluate_position
-from .lichess.auth import CredentialStorageError
+from .lichess.auth import (CredentialStorageError, OAuthCallbackServer,
+                           WindowsCredentialStore, authorize_and_store,
+                           create_authorization_request, CLIENT_ID)
+from .lichess.api import authenticated_request_admission
 from .lichess.analysis import AnalysisOptions, CLASSIFIER_VERSION, CompletedGameAnalyzer
 from .lichess.batch_analysis import BatchAnalysisRunner, FastPassOptions
 from .lichess.repository import GameRepository, SCHEMA_VERSION
@@ -101,6 +104,8 @@ from .ui.pages import PlayPage, ResultPage
 from .ui.pages.home import HomeEvaluationGraph, HomePage
 from .ui.pages.library import LibraryPage
 from .ui.pages.puzzles import PuzzleHistoryPage
+from .ui.pages.puzzle_training import PuzzleTrainingPage
+from .lichess.puzzle_training import normalize_api_puzzle, normalize_activity_puzzle
 from .ui.pages.analysis import AnalysisLandingPage
 from .ui.pages.background import BackgroundOperationsPage
 from .ui.dialogs import (OnlineGameDialog, BatchAnalysisDialog, ActiveGamesDialog,
@@ -485,6 +490,7 @@ class MainWindow(QMainWindow):
     batch_live_progress = Signal(str, int, int, int)
     legacy_metrics_finished = Signal(int, object)
     puzzle_history_finished = Signal(str, object, object)
+    puzzle_training_finished = Signal(str, object, object)
     statistics_filter_options_finished = Signal(int, object, object)
     home_game_read_finished = Signal(int, str, object, object, object, object)
     home_puzzle_preview_ready = Signal(int, str, object, object)
@@ -725,6 +731,10 @@ class MainWindow(QMainWindow):
         self._archive_account_handle = None
         self._puzzle_accounts_generation = 0
         self._puzzle_accounts_handle = None
+        self._puzzle_training_page = None
+        self._puzzle_training_generation = 0
+        self._puzzle_training_callbacks: dict[str, object] = {}
+        self._puzzle_training_oauth_callback = None
         self.analysis_progress.connect(self._analysis_progress)
         self.analysis_finished.connect(self._analysis_finished)
         self.engine_install_progress.connect(self._engine_install_progress_changed)
@@ -768,6 +778,7 @@ class MainWindow(QMainWindow):
         self.batch_live_progress.connect(self._show_batch_live_progress)
         self.legacy_metrics_finished.connect(self._legacy_metrics_batch_finished)
         self.puzzle_history_finished.connect(self._puzzle_history_result_ready)
+        self.puzzle_training_finished.connect(self._puzzle_history_result_ready)
         self.statistics_filter_options_finished.connect(
             self._statistics_filter_options_ready)
         self._external_study_generation = 0
@@ -3111,8 +3122,8 @@ class MainWindow(QMainWindow):
                 "show_statistics": self.show_statistics,
                 "show_batch_analysis": self.show_batch_analysis,
                 "open_puzzle_history_local": self.open_puzzle_history_local,
-                "open_saved_puzzle": lambda account_id, puzzle_id: self.show_puzzle_history(
-                    account_id, target_puzzle_id=puzzle_id),
+                "open_saved_puzzle": lambda account_id, puzzle_id: self.show_puzzle_training(
+                    account_id, puzzle_id=puzzle_id),
                 "open_settings": self.open_settings,
             }, self._dashboard_filter_changed)
         self._home_view = view
@@ -5931,8 +5942,450 @@ class MainWindow(QMainWindow):
         callback(result, error)
 
     def open_puzzle_history_local(self) -> None:
-        """Open stored attempts without authentication, network, or progress UI."""
-        self.show_puzzle_history("")
+        """Compatibility action now opens the complete puzzle training workspace."""
+        self.open_puzzle_training()
+
+    def open_puzzle_training(self) -> None:
+        self.show_puzzle_training()
+
+    def show_puzzle_training(self, account_id: str | None = None, *,
+                             puzzle_id: str | None = None) -> None:
+        """Open the main puzzle workspace while preserving the existing history view."""
+        previous = getattr(self, "_puzzle_page", None)
+        if previous is not None:
+            self.screen_stack.removeWidget(previous)
+            previous.deleteLater()
+        page = PuzzleTrainingPage(parent=self)
+        self._puzzle_training_page = page
+        self._puzzle_page = page
+        selected = (str(account_id or self.settings.value(
+            "workspace/selected_account", "local", type=str)).strip() or "local")
+        if not selected.startswith("lichess:"):
+            selected = "local"
+        page.account_id = selected
+        page.set_accounts([], selected)
+        page.source.setCurrentIndex(page.source.findData("saved" if puzzle_id else "new"))
+        saved_theme = str(self.settings.value("puzzles/theme", "mix", type=str) or "mix")
+        theme_index = page.theme.findData(saved_theme)
+        if theme_index >= 0:
+            page.theme.setCurrentIndex(theme_index)
+        page.theme.currentIndexChanged.connect(
+            lambda _index: self._puzzle_theme_selection_changed(page))
+        page.new_puzzle_requested.connect(
+            lambda theme, difficulty: self._request_puzzle_training(
+                page, theme, difficulty, authorize=False))
+        page.authorize_requested.connect(
+            lambda theme, difficulty: self._request_puzzle_training(
+                page, theme, difficulty, authorize=True))
+        page.local_puzzle_requested.connect(
+            lambda mode, theme: self._request_local_training_puzzle(page, mode, theme))
+        page.account_changed.connect(
+            lambda selected_account: self._puzzle_training_account_changed(page, selected_account))
+        page.session_hidden.connect(lambda: self._puzzle_training_hidden(page))
+        page.attempt_saved.connect(lambda attempt: self._save_training_attempt(page, attempt))
+        page.history_requested.connect(lambda: self.show_puzzle_history(page.account_id))
+        page.home_requested.connect(self.show_home)
+        self.screen_title.setText("Обучение")
+        self.screen_stack.addWidget(page)
+        self.screen_stack.setCurrentWidget(page)
+        self._load_puzzle_training_accounts(page, selected)
+        if puzzle_id:
+            self._request_local_training_puzzle(page, "replay", "", puzzle_id=puzzle_id)
+
+    def _load_puzzle_training_accounts(self, page: PuzzleTrainingPage,
+                                       selected_account: str) -> None:
+        request_id = uuid.uuid4().hex
+        generation = self._puzzle_training_generation
+        selected_theme = page.selected_theme()
+        preferred_username = ((getattr(self.lichess, "puzzle_username", None)
+                               or getattr(self.lichess, "username", None)) if self.lichess else None)
+        def worker() -> None:
+            try:
+                accounts = self.game_repository.list_puzzle_accounts()
+                preferred = selected_account
+                if preferred == "local" and accounts:
+                    candidate = (f"lichess:{str(preferred_username).strip().lower()}"
+                                 if preferred_username else "")
+                    ids = {str(row.get("account_id")) for row in accounts}
+                    preferred = candidate if candidate in ids else str(
+                        accounts[0].get("account_id", "local"))
+                local_attempts = self.game_repository.local_puzzle_attempts(preferred, limit=8)
+                official_attempts = self.game_repository.puzzle_history(preferred, limit=8)
+                recent = []
+                for row in local_attempts:
+                    try:
+                        puzzle_payload = json.loads(row["puzzle_json"])
+                        themes = puzzle_payload.get("puzzle", {}).get("themes", [])
+                    except (TypeError, ValueError, AttributeError):
+                        themes = []
+                    recent.append({"puzzle_id": row["puzzle_id"], "result": row["result"],
+                                   "created_at_ms": row["created_at_ms"], "source": "local",
+                                   "themes": themes})
+                recent.extend({"puzzle_id": row["puzzle_id"],
+                               "result": "Решено" if row.get("win") else "Ошибка",
+                               "attempt_date_ms": row.get("attempt_date_ms"),
+                               "themes": json.loads(row.get("themes_json") or "[]"),
+                               "source": "lichess"} for row in official_attempts)
+                recent.sort(key=lambda row: row.get("created_at_ms") or row.get("attempt_date_ms") or 0,
+                            reverse=True)
+                self.puzzle_training_finished.emit(request_id, {
+                    "accounts": accounts, "selected": preferred,
+                    "recent": recent[:8],
+                    "local_count": self.game_repository.local_puzzle_attempt_count(preferred),
+                    "local_stats": self.game_repository.local_puzzle_statistics(preferred),
+                    "theme_stats": self.game_repository.local_puzzle_statistics(
+                        preferred, selected_theme if selected_theme != "mix" else None),
+                    "rating": self.game_repository.puzzle_player_rating(preferred),
+                }, None)
+            except Exception as exc:
+                self.puzzle_training_finished.emit(request_id, None, str(exc))
+
+        def apply_result(payload, error) -> None:
+            if (page is not self._puzzle_training_page or not shiboken6.isValid(page)
+                    or generation != self._puzzle_training_generation
+                    or self.screen_stack.currentWidget() is not page):
+                return
+            if error or not isinstance(payload, dict):
+                return
+            accounts = payload.get("accounts", []) if isinstance(payload, dict) else []
+            preferred = payload.get("selected", selected_account) if isinstance(payload, dict) else selected_account
+            page.set_accounts(accounts, preferred)
+            page.set_recent_history(
+                payload.get("recent", []), local_count=payload.get("local_count", 0),
+                official_rating=(payload.get("rating") or {}).get("latest"),
+                rating_date=(payload.get("rating") or {}).get("date"),
+                local_stats=payload.get("local_stats"),
+                theme_stats=payload.get("theme_stats"))
+
+        self._register_training_callback(page, request_id, generation, apply_result)
+        handle = self._start_registered_work(
+            worker, kind="puzzle_training_accounts", lane=OperationLane.INTERACTIVE,
+            thread_name="cc-puzzle-training-accounts")
+        page.destroyed.connect(lambda *_: handle.cancel("shutdown"))
+
+    def _puzzle_theme_selection_changed(self, page: PuzzleTrainingPage) -> None:
+        self.settings.setValue("puzzles/theme", page.selected_theme())
+        if page is not self._puzzle_training_page:
+            return
+        handle = getattr(self, "_puzzle_training_handle", None)
+        if handle is not None and handle.is_alive():
+            handle.cancel("theme_changed")
+        self._cancel_puzzle_training_oauth()
+        self._puzzle_training_generation += 1
+        self._load_puzzle_training_accounts(page, page.account_id)
+
+    def _puzzle_training_account_changed(self, page: PuzzleTrainingPage,
+                                         account_id: str) -> None:
+        page.account_id = str(account_id or "local")
+        if page is not self._puzzle_training_page:
+            return
+        handle = getattr(self, "_puzzle_training_handle", None)
+        if handle is not None and handle.is_alive():
+            handle.cancel("account_changed")
+        self._cancel_puzzle_training_oauth()
+        self._puzzle_training_generation += 1
+        self._load_puzzle_training_accounts(page, page.account_id)
+
+    def _cancel_puzzle_training_oauth(self) -> None:
+        callback = getattr(self, "_puzzle_training_oauth_callback", None)
+        if callback is not None:
+            callback.cancel()
+
+    def _puzzle_training_hidden(self, page: PuzzleTrainingPage) -> None:
+        if page is not self._puzzle_training_page:
+            return
+        handle = getattr(self, "_puzzle_training_handle", None)
+        if handle is not None and handle.is_alive():
+            handle.cancel("page_hidden")
+        self._cancel_puzzle_training_oauth()
+        self._puzzle_training_generation += 1
+
+    def _register_training_callback(self, page: PuzzleTrainingPage, request_id: str,
+                                    generation: int, callback) -> None:
+        self._puzzle_history_callbacks[request_id] = (page, generation, callback)
+
+    def _request_puzzle_training(self, page: PuzzleTrainingPage, theme: str,
+                                 difficulty: str, *, authorize: bool) -> None:
+        """Fetch exactly one new puzzle (and authorize only after the explicit CTA)."""
+        if self.offline_mode:
+            page.set_message("Новые задачи Lichess недоступны в офлайн-режиме. "
+                             "Выберите «Сохранённые» для локальной практики.")
+            return
+        if self.lichess is None:
+            page.set_message("Сначала подключите Lichess в боковом меню. "
+                             "Локальные сохранённые задачи доступны офлайн.")
+            return
+        previous = getattr(self, "_puzzle_training_handle", None)
+        if previous is not None and previous.is_alive():
+            previous.cancel("session_replaced")
+        self._cancel_puzzle_training_oauth()
+        self._puzzle_training_generation += 1
+        generation = self._puzzle_training_generation
+        request_id = uuid.uuid4().hex
+        stop_event = threading.Event()
+        requested_account = page.account_id
+        service = self.lichess
+        client = service.client
+        capture_context = getattr(service, "capture_operation_context", None)
+        operation_context = (capture_context(command="puzzle_training_fetch")
+                             if capture_context else None)
+
+        def operation_current() -> bool:
+            if (stop_event.is_set() or generation != self._puzzle_training_generation
+                    or self.lichess is not service):
+                return False
+            validator = getattr(service, "is_operation_context_current", None)
+            return bool(validator(operation_context)) if validator and operation_context is not None else True
+
+        page.set_authorization_needed(False)
+        page.set_loading("Получаю одну новую задачу Lichess…")
+
+        def worker() -> None:
+            callback = None
+            try:
+                store = WindowsCredentialStore(
+                    service="ChessCoach.Lichess.Puzzles", user="puzzle-activity-token")
+                token = store.get()
+                username = None
+                if not token and not authorize:
+                    raise PermissionError("Для новых задач требуется отдельное разрешение puzzle:read.")
+                if authorize:
+                    callback = OAuthCallbackServer()
+                    self._puzzle_training_oauth_callback = callback
+                    request = create_authorization_request(
+                        callback.redirect_uri, CLIENT_ID, scopes="puzzle:read")
+                    if not QDesktopServices.openUrl(QUrl(request.url)):
+                        raise RuntimeError("Не удалось открыть браузер для разрешения puzzle:read.")
+                    token, username = authorize_and_store(
+                        client, store, callback, request, is_current=operation_current)
+                if not operation_current():
+                    return
+                if not username:
+                    with authenticated_request_admission(operation_current, stop_event):
+                        username = str(client.get_account(token)["username"])
+                actual_account = f"lichess:{username.strip().lower()}"
+                if (requested_account.startswith("lichess:")
+                        and requested_account.casefold() != actual_account.casefold()):
+                    raise PermissionError(
+                        "Сохранённое разрешение puzzle:read относится к другому профилю. "
+                        "Выберите соответствующий профиль или подключите его отдельно.")
+                with authenticated_request_admission(operation_current, stop_event):
+                    result = client.get_puzzle_batch(
+                        token, angle=theme, difficulty=difficulty, count=1)
+                if not operation_current():
+                    return
+                puzzles = result.get("puzzles") or []
+                if not puzzles:
+                    raise LookupError("Для выбранной темы и сложности Lichess не вернул задачу.")
+                payload = puzzles[0]
+                playable = normalize_api_puzzle(payload)
+                scoped_account = self.game_repository.ensure_archive_account(username)
+                serialized = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+                self.game_repository.cache_training_puzzle(scoped_account, playable.puzzle_id,
+                                                           serialized)
+                if stop_event.is_set() or generation != self._puzzle_training_generation:
+                    return
+                recent = self.game_repository.local_puzzle_attempts(scoped_account, limit=8)
+                official = self.game_repository.puzzle_history(scoped_account, limit=8)
+                recent = [{"puzzle_id": row["puzzle_id"], "result": row["result"],
+                           "created_at_ms": row["created_at_ms"], "source": "local"}
+                          for row in recent]
+                recent.extend({"puzzle_id": row["puzzle_id"],
+                               "result": "Решено" if row.get("win") else "Ошибка",
+                               "attempt_date_ms": row.get("attempt_date_ms"),
+                               "themes": json.loads(row.get("themes_json") or "[]"),
+                               "source": "lichess"} for row in official)
+                recent.sort(key=lambda row: row.get("created_at_ms") or row.get("attempt_date_ms") or 0,
+                            reverse=True)
+                rating = self.game_repository.puzzle_player_rating(scoped_account)
+                self.puzzle_training_finished.emit(request_id, {
+                    "puzzle": playable, "payload": payload, "account_id": scoped_account,
+                    "username": username, "recent": recent[:8], "rating": rating,
+                    "local_count": self.game_repository.local_puzzle_attempt_count(scoped_account),
+                    "local_stats": self.game_repository.local_puzzle_statistics(scoped_account),
+                    "theme_stats": self.game_repository.local_puzzle_statistics(
+                        scoped_account, theme if theme != "mix" else None),
+                }, None)
+            except PermissionError as exc:
+                self.puzzle_training_finished.emit(request_id, None, {
+                    "message": str(exc), "authorization_needed": True})
+            except Exception as exc:
+                self.puzzle_training_finished.emit(
+                    request_id, None, {
+                        "message": f"Не удалось получить задачу ({type(exc).__name__}): {exc}",
+                        "authorization_needed": getattr(exc, "status", None) in {401, 403},
+                    })
+            finally:
+                if callback is not None:
+                    callback.close()
+                    if self._puzzle_training_oauth_callback is callback:
+                        self._puzzle_training_oauth_callback = None
+
+        def apply_result(payload, error) -> None:
+            if (generation != self._puzzle_training_generation or page is not self._puzzle_training_page
+                    or self.screen_stack.currentWidget() is not page):
+                return
+            if error:
+                message = error.get("message", "Ошибка загрузки задачи.") if isinstance(error, dict) else str(error)
+                page.set_message(message + " Можно продолжить с локальными задачами.")
+                page.set_authorization_needed(
+                    bool(error.get("authorization_needed")) if isinstance(error, dict)
+                    else "puzzle:read" in message)
+                return
+            page.account_id = payload["account_id"]
+            rows = []
+            for index in range(page.account_selector.count()):
+                rows.append({"account_id": page.account_selector.itemData(index),
+                             "username": page.account_selector.itemText(index), "attempts": 0})
+            if not any(str(row.get("account_id")) == str(payload["account_id"]) for row in rows):
+                rows.append({"account_id": payload["account_id"],
+                             "username": payload.get("username", payload["account_id"]),
+                             "attempts": payload.get("local_count", 0)})
+            page.set_accounts(rows, payload["account_id"])
+            page.load_puzzle(payload["puzzle"], payload["payload"], source="lichess")
+            rating = payload.get("rating") or {}
+            page.set_recent_history(payload.get("recent", []),
+                                    local_count=payload.get("local_count", 0),
+                                    official_rating=rating.get("latest"),
+                                    rating_date=rating.get("date"),
+                                    local_stats=payload.get("local_stats"),
+                                    theme_stats=payload.get("theme_stats"))
+            page.set_authorization_needed(False)
+
+        self._register_training_callback(page, request_id, generation, apply_result)
+        handle = self._start_registered_work(
+            worker, kind="puzzle_training_fetch", lane=OperationLane.INTERACTIVE,
+            thread_name="cc-puzzle-training-fetch", stop_event=stop_event)
+        self._puzzle_training_handle = handle
+        page.destroyed.connect(lambda *_: (handle.cancel("shutdown"),
+                                           self._cancel_puzzle_training_oauth()))
+
+    def _request_local_training_puzzle(self, page: PuzzleTrainingPage, mode: str,
+                                       theme: str, *, puzzle_id: str | None = None) -> None:
+        previous = getattr(self, "_puzzle_training_handle", None)
+        if previous is not None and previous.is_alive():
+            previous.cancel("session_replaced")
+        self._puzzle_training_generation += 1
+        generation = self._puzzle_training_generation
+        request_id = uuid.uuid4().hex
+        stop_event = threading.Event()
+        account_id = page.account_id or "local"
+        page.set_loading("Ищу сохранённые задачи…")
+
+        def worker() -> None:
+            try:
+                target_id = puzzle_id or (theme if mode == "replay" else None)
+                theme_filter = (theme if mode != "replay" and theme not in {"", "mix"}
+                                else None)
+                cached = self.game_repository.cached_training_puzzles(
+                    account_id, limit=100, theme=theme_filter)
+                local_attempts = self.game_repository.local_puzzle_attempts(account_id, limit=100)
+                imported = self.game_repository.puzzle_history(account_id, limit=100)
+                error_ids = {row["puzzle_id"] for row in local_attempts
+                             if row["result"] == "mistake"}
+                error_ids.update(str(row["puzzle_id"]) for row in imported if not row.get("win"))
+                candidates: list[tuple[object, dict, str]] = []
+                for row in cached:
+                    payload = json.loads(row["puzzle_json"])
+                    playable = normalize_api_puzzle(payload)
+                    if mode == "errors" and playable.puzzle_id not in error_ids:
+                        continue
+                    if mode == "replay" and target_id and playable.puzzle_id != target_id:
+                        continue
+                    candidates.append((playable, payload, "local"))
+                for row in imported:
+                    if mode == "errors" and row.get("win"):
+                        continue
+                    if mode == "replay" and target_id and str(row.get("puzzle_id")) != target_id:
+                        continue
+                    try:
+                        playable = normalize_activity_puzzle(
+                            str(row["puzzle_id"]), row["fen"], row["solution_json"],
+                            themes=row.get("themes_json"), rating=row.get("puzzle_rating"),
+                            plays=row.get("plays"))
+                    except (ValueError, TypeError):
+                        continue
+                    if theme not in {"", "mix"} and theme not in playable.themes:
+                        continue
+                    candidates.append((playable, {"puzzle": {
+                        "id": playable.puzzle_id, "fen": row["fen"],
+                        "solution": json.loads(row["solution_json"]),
+                        "themes": list(playable.themes), "rating": playable.rating,
+                        "plays": playable.plays}}, "lichess_activity"))
+                if mode == "errors":
+                    candidates = [candidate for candidate in candidates
+                                  if candidate[0].puzzle_id in error_ids]
+                if not candidates:
+                    raise LookupError("В этой локальной выборке нет задач. Синхронизированные попытки Lichess доступны в разделе «Вся история».")
+                selected = candidates[0]
+                if stop_event.is_set() or generation != self._puzzle_training_generation:
+                    return
+                recent = [{"puzzle_id": row["puzzle_id"], "result": row["result"],
+                           "created_at_ms": row["created_at_ms"], "source": "local"}
+                          for row in local_attempts[:8]]
+                recent.extend({"puzzle_id": row["puzzle_id"],
+                               "result": "Решено" if row.get("win") else "Ошибка",
+                               "attempt_date_ms": row.get("attempt_date_ms"),
+                               "themes": json.loads(row.get("themes_json") or "[]"),
+                               "source": "lichess"} for row in imported[:8])
+                recent.sort(key=lambda row: row.get("created_at_ms") or row.get("attempt_date_ms") or 0,
+                            reverse=True)
+                self.puzzle_training_finished.emit(request_id, {
+                    "puzzle": selected[0], "payload": selected[1],
+                    "account_id": account_id, "recent": recent[:8],
+                    "local_count": len(local_attempts),
+                    "local_stats": self.game_repository.local_puzzle_statistics(account_id),
+                    "theme_stats": self.game_repository.local_puzzle_statistics(
+                        account_id, theme if theme not in {"", "mix"} else None),
+                    "rating": self.game_repository.puzzle_player_rating(account_id),
+                    "source": selected[2],
+                }, None)
+            except Exception as exc:
+                self.puzzle_training_finished.emit(request_id, None, str(exc))
+
+        def apply_result(payload, error) -> None:
+            if (generation != self._puzzle_training_generation or page is not self._puzzle_training_page
+                    or self.screen_stack.currentWidget() is not page):
+                return
+            if error:
+                page.set_message(str(error))
+                return
+            page.account_id = payload["account_id"]
+            page.load_puzzle(payload["puzzle"], payload["payload"],
+                             source=payload.get("source", "local"))
+            rating = payload.get("rating") or {}
+            page.set_recent_history(payload.get("recent", []),
+                                    local_count=payload.get("local_count", 0),
+                                    official_rating=rating.get("latest"),
+                                    rating_date=rating.get("date"),
+                                    local_stats=payload.get("local_stats"),
+                                    theme_stats=payload.get("theme_stats"))
+
+        self._register_training_callback(page, request_id, generation, apply_result)
+        handle = self._start_registered_work(
+            worker, kind="puzzle_training_local", lane=OperationLane.INTERACTIVE,
+            thread_name="cc-puzzle-training-local", stop_event=stop_event)
+        self._puzzle_training_handle = handle
+        page.destroyed.connect(lambda *_: handle.cancel("shutdown"))
+
+    def _save_training_attempt(self, page: PuzzleTrainingPage, attempt: dict) -> None:
+        """Append the local outcome in SQLite; the Lichess activity mirror is untouched."""
+        payload = dict(attempt)
+        def worker() -> None:
+            try:
+                self.game_repository.save_local_puzzle_attempt(
+                    payload.get("account_id", page.account_id), payload["puzzle_id"],
+                    result=payload["result"], solved=payload["solved"],
+                    mistakes=payload["mistakes"],
+                    hints=payload["hints"], duration_ms=payload["duration_ms"],
+                    puzzle_json=payload["puzzle_json"])
+            except Exception:
+                log_event("local_puzzle_attempt_save_failed", "puzzle_training",
+                          status="failed")
+
+        self._start_registered_work(
+            worker, kind="puzzle_training_attempt_save", lane=OperationLane.INTERACTIVE,
+            thread_name="cc-puzzle-training-save")
 
     def show_puzzle_history(self, account_id: str, *, pilot_run_id: str | None = None,
                             target_puzzle_id: str | None = None,
