@@ -164,7 +164,7 @@ class PuzzleTrainingPage(QWidget):
         self.board.set_show_legal_moves(True)
         self.board.setAccessibleName("Шахматная доска задачи")
         self.board.move_intent.connect(self._submit_move)
-        center_layout.addWidget(self.board, 1, Qt.AlignmentFlag.AlignCenter)
+        center_layout.addWidget(self.board, 1)
         self.status = QLabel("Выберите тему и нажмите «Новая задача».")
         self.status.setObjectName("puzzleStatus")
         self.status.setWordWrap(True)
