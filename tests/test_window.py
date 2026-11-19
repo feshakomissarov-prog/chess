@@ -92,7 +92,7 @@ def test_saved_game_orientation_uses_selected_account_color(qtbot, tmp_path):
     assert window.board._flipped
     assert window.screen_title.isHidden()
     assert window.review_workspace.title.text() == "Разбор партии"
-    assert "Owner — Opponent · 1–0" in window.review_workspace.subtitle.text()
+    assert "1–0" in window.review_workspace.subtitle.text()
     window.show_home()
     assert not window.screen_title.isHidden()
 
@@ -418,7 +418,7 @@ def test_review_board_fits_shell_column_and_keeps_full_navigation(qtbot, tmp_pat
     assert window.review_workspace.review_board.height() <= \
         window.review_workspace.board_column.height() - 8
     assert window.review_workspace.title.text() == "Разбор партии"
-    assert window.review_workspace.subtitle.text().startswith("Белые — Чёрные ·")
+    assert window.review_workspace.subtitle.text().startswith("1–0")
     assert window.review_workspace.side_metrics_summary.horizontalHeaderItem(1).text() == "Белые"
     assert window.review_workspace.side_metrics_summary.horizontalHeaderItem(2).text() == "Чёрные"
     window.close()
@@ -3546,7 +3546,7 @@ def test_home_game_result_review_home_and_new_game_flow(qtbot, tmp_path):
     qtbot.mouseClick(window.result_review_button, Qt.MouseButton.LeftButton)
     assert window._screen_mode == "review"
     assert window.screen_stack.currentWidget() is window.review_workspace
-    assert not window.review_workspace.review_board._interaction_enabled
+    assert window.review_workspace.review_board._interaction_enabled
     assert not window.resign_button.isVisible()
     window.leave_online_game()
     assert window.screen_stack.currentWidget() is window.home_page

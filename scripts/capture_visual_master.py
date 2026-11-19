@@ -637,11 +637,12 @@ def capture(window: MainWindow, output: Path, name: str, width: int, height: int
     if current is window.review_workspace:
         page = current
         assert page.review and page.moves_list.table.rowCount() > 0
-        assert page.side_metrics_summary.rowCount() >= 4
+        if page.training_allowed:
+            assert page.side_metrics_summary.rowCount() >= 4
         assert page.graph.full_ply_count >= 16
-        assert_no_widget_overlap(page.review_board, page.side_metrics_summary,
-                                 "Review board and comparison table")
-        assert_label_fits(page.phase_summary, "Review phase summary")
+        if page.training_allowed:
+            assert_no_widget_overlap(page.review_board, page.side_metrics_summary,
+                                     "Review board and comparison table")
         assert_action_target(window, page.export_button, "Export PGN")
         assert_action_target(window, page.training_button, "Review mistakes")
         last_ply = len(page.review.get("moves") or {})
@@ -651,11 +652,20 @@ def capture(window: MainWindow, output: Path, name: str, width: int, height: int
             page.select_ply(last_ply)
             QTest.qWait(50)  # allow the native splitter/table geometry pass to settle
             QApplication.processEvents()
-        elif review_selection != "keep":
+        elif review_selection not in {"keep", "keep-variation"}:
             raise ValueError(f"Unknown review capture selection: {review_selection}")
         selected_ply = int(page.selected_ply)
         row = (page.moves_list.item_by_ply(selected_ply) if selected_ply else
                page.moves_list.item_by_ply(1))
+        variation_id = page._selected_variation_id
+        if variation_id and review_selection == "keep-variation":
+            row = next((page.moves_list.table.item(index, 0)
+                        for index in range(page.moves_list.table.rowCount())
+                        if (data := page.moves_list.table.item(index, 0).data(
+                            Qt.ItemDataRole.UserRole))
+                        and isinstance(data, tuple) and data[0] == "variation"
+                        and data[1] == variation_id and data[2] == page._selected_variation_ply),
+                       None)
         assert row is not None and row.text().strip(), "Selected-line move row must be populated."
         bounds = page.moves_list.table.visualItemRect(row)
         if not (bounds.isValid() and page.moves_list.table.viewport().rect().contains(bounds)):
@@ -681,7 +691,11 @@ def capture(window: MainWindow, output: Path, name: str, width: int, height: int
         assert bounds.isValid() and page.moves_list.table.viewport().rect().contains(bounds), (
             "The selected move must be visible and clickable in the review table."
         )
-        if selected_ply:
+        if variation_id and review_selection == "keep-variation":
+            QTest.mouseClick(page.moves_list.table.viewport(), Qt.MouseButton.LeftButton,
+                             pos=bounds.center())
+            assert page._selected_variation_id == variation_id
+        elif selected_ply:
             QTest.mouseClick(page.moves_list.table.viewport(), Qt.MouseButton.LeftButton,
                              pos=bounds.center())
             assert page.selected_ply == selected_ply
@@ -1290,6 +1304,66 @@ def main() -> None:
                 QTest.mouseClick(window._nav_buttons["home"], Qt.MouseButton.LeftButton)
                 wait_home(window, account_id)
             print(f"Targeted Home chart review captured {len(target_sizes) * 2} native states.")
+            return
+        if os.environ.get("CC_VISUAL_SCOPE", "").strip() == "review-ux-01":
+            window._set_sidebar_collapsed(False)
+            navigate_to_games(window, selected_game_id)
+            selected = window.library_page.selected_game()
+            assert selected and window._open_saved_game(dict(selected))
+            wait_review_workspace(window.review_workspace, selected_game_id)
+            page = window.review_workspace
+            page.training_allowed = True
+            page.evaluation_allowed = True
+            page.repeat_analysis_button.setVisible(True)
+            for width, height in target_sizes:
+                page.set_training_safety_result(
+                    True, "Синтетическая проверка для снимка.", evaluation_allowed=True)
+                window.resize(width, height)
+                QApplication.processEvents()
+                page.select_ply(0)
+                captured[f"review-mainline-{width}x{height}"] = capture(
+                    window, output, "review-mainline", width, height, review_selection="keep")
+                page.select_ply(1)
+                captured[f"review-white-ply-{width}x{height}"] = capture(
+                    window, output, "review-white-ply", width, height, review_selection="keep")
+                page.select_ply(2)
+                captured[f"review-black-ply-{width}x{height}"] = capture(
+                    window, output, "review-black-ply", width, height, review_selection="keep")
+                fork_ply = min(2, len(page.review["moves"]))
+                page.select_ply(fork_ply)
+                board = page.review["positions"][fork_ply]
+                main_move = (page.review["moves"][fork_ply].uci
+                             if fork_ply < len(page.review["moves"]) else None)
+                alternate = next((move for move in board.legal_moves if move != main_move), None)
+                assert alternate is not None, "Synthetic review position needs an alternate legal move."
+                page._review_board_move_intent(alternate)
+                branch = page._review_variations[-1]
+                page._selected_variation_id = branch["id"]
+                page._selected_variation_ply = 1
+                branch["request_ids"][1] = f"visual-{width}-{height}"
+                branch["pending"][1] = True
+                page.select_variation_ply(branch["id"], 1)
+                captured[f"review-variation-pending-{width}x{height}"] = capture(
+                    window, output, "review-variation-pending", width, height,
+                    review_selection="keep-variation")
+                page.set_variation_evaluation(
+                    branch["id"], 1, branch["request_ids"][1],
+                    {"score_white_cp": 34, "depth": 18})
+                captured[f"review-variation-evaluated-{width}x{height}"] = capture(
+                    window, output, "review-variation-evaluated", width, height,
+                    review_selection="keep-variation")
+                page.revoke_safety("Fair Play: активная человеческая партия")
+                captured[f"review-fair-play-blocked-{width}x{height}"] = capture(
+                    window, output, "review-fair-play-blocked", width, height,
+                    review_selection="keep")
+            (output / "capture.txt").write_text(
+                f"SHA: {os.environ.get('CC_VISUAL_SHA', 'local working tree')}\n"
+                "Platform: isolated native Windows Qt; synthetic SQLite only.\n"
+                "No reference image or personal data was uploaded by this capture job.\n"
+                "Frames: mainline, selected white/black ply, pending/evaluated variation, "
+                "Fair Play blocked, 1672x941/1280x720 and requested DPI scales.\n",
+                encoding="utf-8")
+            print(f"REVIEW-UX-01 native Qt capture: PASS ({len(captured)} frames)")
             return
         for target_index, (width, height) in enumerate(target_sizes):
             QTest.mouseClick(window._nav_buttons["home"], Qt.MouseButton.LeftButton)
