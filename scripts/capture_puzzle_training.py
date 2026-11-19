@@ -45,6 +45,17 @@ def main() -> None:
         }
         page.load_puzzle(normalize_api_puzzle(payload), payload, source="lichess")
         page.status.setText("Найдите лучший ход · визуальный fixture")
+        now_ms = int(time.time() * 1000)
+        page.set_recent_history([
+            {"puzzle_id": f"VIS-{index}", "result": result,
+             "created_at_ms": now_ms - index * 86_400_000, "source": "local",
+             "themes": [theme]}
+            for index, (result, theme) in enumerate((
+                ("success", "fork"), ("mistake", "pin"), ("hinted", "middlegame"),
+                ("success", "endgame"), ("revealed", "mateIn2")), start=1)
+        ], local_count=14,
+           local_stats={"attempts": 14, "solved": 9, "success_percent": 64.3},
+           theme_stats={"attempts": 4, "solved": 3, "success_percent": 75.0})
         app.processEvents()
         size_text = os.environ.get("CC_PUZZLE_VISUAL_SIZE", "1672x941")
         width, height = (int(part) for part in size_text.lower().split("x", 1))
