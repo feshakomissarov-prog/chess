@@ -38,6 +38,25 @@ def main() -> None:
         app.processEvents()
         page = window._puzzle_training_page
         assert page is not None
+
+        def wait_for(predicate) -> None:
+            deadline = time.monotonic() + 5
+            while time.monotonic() < deadline:
+                app.processEvents()
+                if predicate():
+                    return
+                QTest.qWait(30)
+            raise AssertionError(
+                f"Qt training state did not settle: status={page.status.text()!r}, "
+                f"account={page.account_id!r}, "
+                f"puzzle={getattr(page.state.puzzle, 'puzzle_id', None)!r}")
+
+        def settle_account_reads() -> None:
+            request_ids = set(window._puzzle_history_callbacks)
+            wait_for(lambda: all(request_id not in window._puzzle_history_callbacks
+                                 for request_id in request_ids))
+
+        settle_account_reads()
         payload = {
             "game": {"id": "visual-fixture", "pgn": "1. e4 e5 2. Nf3"},
             "puzzle": {"id": "PZ42", "initialPly": 2, "lastMove": "g1f3",
@@ -97,9 +116,11 @@ def main() -> None:
                            {"account_id": "lichess:visual-b", "username": "Профиль B"}], "local")
         page.account_selector.setCurrentIndex(page.account_selector.findData("lichess:visual-b"))
         app.processEvents()
+        settle_account_reads()
         save("account-switch")
         page.account_selector.setCurrentIndex(page.account_selector.findData("local"))
         app.processEvents()
+        settle_account_reads()
 
         failed = {"attempt_id": "visual-save-failure", "session_id": page._session_id,
                   "account_id": page._session_account_id, "puzzle_id": page._session_puzzle_id}
@@ -125,15 +146,6 @@ def main() -> None:
             cached_payload = fixture(puzzle_id)
             window.game_repository.cache_training_puzzle(
                 "local", puzzle_id, json.dumps(cached_payload))
-
-        def wait_for(predicate) -> None:
-            deadline = time.monotonic() + 5
-            while time.monotonic() < deadline:
-                app.processEvents()
-                if predicate():
-                    return
-                QTest.qWait(30)
-            raise AssertionError("Qt training state did not reach the expected capture state")
 
         page.source.setCurrentIndex(page.source.findData("saved"))
         window._request_local_training_puzzle(page, "saved", "")
