@@ -672,7 +672,7 @@ class PuzzleTrainingPage(QWidget):
         center_width = self.board.parentWidget().width() if self.board.parentWidget() else self.width()
         compact_controls = center_width < 650 or self.height() < 700
         if compact:
-            self._training_root_layout.setContentsMargins(8, 4, 8, 6)
+            self._training_root_layout.setContentsMargins(8, 2, 8, 4)
             self._training_root_layout.setSpacing(4)
             center_layout = self.board.parentWidget().layout()
             if center_layout is not None:
