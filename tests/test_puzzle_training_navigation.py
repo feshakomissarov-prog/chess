@@ -13,7 +13,7 @@ def test_next_local_candidate_visits_three_ids_before_repeat():
         selected.append(candidate[0])
         seen.add(candidate[0])
     assert selected == ["p1", "p2", "p3"]
-    assert select_next_local_candidate(rows, seen) is None
+    assert selector(rows, seen) is None
 
 
 def test_next_local_candidate_skips_seen_ids_and_preserves_candidate_order():

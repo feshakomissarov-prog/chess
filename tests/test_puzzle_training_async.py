@@ -10,6 +10,8 @@ from PySide6.QtWidgets import QApplication
 
 from chess_coach import window as window_module
 from chess_coach.window import MainWindow
+from chess_coach.ui.pages.puzzle_training import PuzzleTrainingPage
+import chess
 
 
 def _official_example():
@@ -84,4 +86,66 @@ def test_oauth_browser_open_is_dispatched_on_qt_main_thread(
                     timeout=5000)
     assert calls and calls[0][0].startswith("https://lichess.org/oauth/")
     assert calls[0][1], "QDesktopServices.openUrl ran outside QApplication's Qt thread"
+    window.close()
+
+
+def test_delayed_save_ack_refreshes_reopened_page_after_navigation(qtbot, tmp_path):
+    window = MainWindow(QSettings(str(tmp_path / "save-navigation.ini"),
+                                  QSettings.Format.IniFormat), offline_mode=True)
+    qtbot.addWidget(window)
+    old_page = PuzzleTrainingPage(demo=True)
+    old_page.account_id = "local"
+    old_page.load_puzzle(old_page.state.puzzle, old_page._puzzle_payload, source="demo")
+    attempts = []
+    old_page.attempt_saved.connect(attempts.append)
+    old_page._submit_move(chess.Move.from_uci("d7d5"))
+    attempt = attempts[-1]
+
+    class DelayedRepository:
+        def __init__(self):
+            self.started = threading.Event()
+            self.release = threading.Event()
+            self.saved = {}
+
+        def save_local_puzzle_attempt(self, account_id, puzzle_id, **payload):
+            self.started.set()
+            assert self.release.wait(5)
+            attempt_id = payload["attempt_id"]
+            self.saved.setdefault(attempt_id, (account_id, puzzle_id, payload))
+            return attempt_id, len(self.saved) == 1
+
+        def local_puzzle_attempts(self, _account_id, *, limit):
+            return [{"puzzle_id": attempt["puzzle_id"], "result": "success",
+                     "solved": True, "created_at_ms": 1_700_000_000_000,
+                     "source": "local", "themes": ["fork"]}]
+
+        def local_puzzle_attempt_count(self, _account_id):
+            return 1
+
+        def local_puzzle_statistics(self, _account_id, _theme=None):
+            return {"attempts": 1, "solved": 1, "success_percent": 100.0}
+
+    repository = DelayedRepository()
+    window.game_repository = repository
+    window._puzzle_training_page = old_page
+    window._save_training_attempt(old_page, attempt)
+    qtbot.waitUntil(repository.started.is_set, timeout=5000)
+
+    reopened = PuzzleTrainingPage(demo=True)
+    reopened.account_id = "local"
+    window._puzzle_training_page = reopened
+    repository.release.set()
+    qtbot.waitUntil(lambda: reopened.history.count() == 1, timeout=5000)
+    assert reopened._local_count == 1
+    assert len(repository.saved) == 1
+    duplicate_ack = {**attempt, "local_count": 1,
+                     "recent": [{"puzzle_id": attempt["puzzle_id"], "result": "success",
+                                 "solved": True, "created_at_ms": 1_700_000_000_000,
+                                 "source": "local", "themes": ["fork"]}],
+                     "local_stats": {"attempts": 1, "solved": 1,
+                                     "success_percent": 100.0},
+                     "theme_stats": {"attempts": 1, "solved": 1,
+                                     "success_percent": 100.0}}
+    window.puzzle_attempt_save_finished.emit(duplicate_ack, None)
+    assert reopened.history.count() == 1
     window.close()

@@ -34,31 +34,84 @@ class PuzzleActivityStoreMixin:
     def cached_training_puzzles(self, account_id: str, *, limit: int = 100,
                                 theme: str | None = None) -> list[dict]:
         limit = min(100, max(1, int(limit)))
+        clauses = ["account_id=?"]
+        params: list[object] = [str(account_id or "local")]
+        if theme:
+            clauses.append(
+                "EXISTS (SELECT 1 FROM json_each(CASE WHEN json_valid(puzzle_json) "
+                "THEN puzzle_json ELSE '{}' END, '$.puzzle.themes') AS themes "
+                "WHERE themes.value=?)")
+            params.append(str(theme))
+        params.append(limit)
         with self._connection() as db:
             rows = db.execute(
                 "SELECT account_id,puzzle_id,puzzle_json,cached_at_ms FROM local_puzzle_cache "
-                "WHERE account_id=? ORDER BY cached_at_ms DESC LIMIT ?",
-                (str(account_id or "local"), limit)).fetchall()
-        result = [dict(row) for row in rows]
+                "WHERE " + " AND ".join(clauses) +
+                " ORDER BY cached_at_ms DESC,puzzle_id LIMIT ?", params).fetchall()
+        return [dict(row) for row in rows]
+
+    def get_cached_training_puzzle(self, account_id: str, puzzle_id: str) -> dict | None:
+        """Exact account-scoped lookup; never substitute a bounded recent page."""
+        with self._connection() as db:
+            row = db.execute(
+                "SELECT account_id,puzzle_id,puzzle_json,cached_at_ms FROM local_puzzle_cache "
+                "WHERE account_id=? AND puzzle_id=? LIMIT 1",
+                (str(account_id or "local"), str(puzzle_id))).fetchone()
+        return dict(row) if row else None
+
+    def get_local_training_attempt_by_id(self, account_id: str, puzzle_id: str) -> dict | None:
+        """Recover an exact locally practiced puzzle, even if its cache row is gone."""
+        with self._connection() as db:
+            row = db.execute(
+                "SELECT local_attempt_id,account_id,puzzle_id,result,solved,mistakes,hints,"
+                "duration_ms,puzzle_json,created_at_ms FROM local_puzzle_attempts "
+                "WHERE account_id=? AND puzzle_id=? "
+                "ORDER BY created_at_ms DESC,local_attempt_id DESC LIMIT 1",
+                (str(account_id or "local"), str(puzzle_id))).fetchone()
+        return dict(row) if row else None
+
+    def get_puzzle_attempt_by_id(self, account_id: str, puzzle_id: str) -> dict | None:
+        """Exact lookup of imported Lichess activity, scoped before returning puzzle data."""
+        with self._connection() as db:
+            row = db.execute(
+                "SELECT a.*,p.fen,p.solution_json,p.themes_json,p.puzzle_rating,p.plays "
+                "FROM puzzle_attempts a JOIN puzzles p USING(puzzle_id) "
+                "WHERE a.account_id=? AND a.puzzle_id=? "
+                "ORDER BY a.attempt_date_ms DESC,a.attempt_uid DESC LIMIT 1",
+                (str(account_id), str(puzzle_id))).fetchone()
+        return dict(row) if row else None
+
+    def local_puzzle_error_ids(self, account_id: str, *, theme: str | None = None,
+                               limit: int = 100) -> list[str]:
+        limit = min(100, max(1, int(limit)))
+        params: list[object] = [str(account_id or "local")]
+        theme_clause = ""
         if theme:
-            filtered = []
-            for row in result:
-                try:
-                    themes = json.loads(row["puzzle_json"]).get("puzzle", {}).get("themes", [])
-                except (ValueError, TypeError, AttributeError):
-                    continue
-                if isinstance(themes, list) and theme in themes:
-                    filtered.append(row)
-            result = filtered
-        return result
+            theme_clause = (
+                " AND EXISTS (SELECT 1 FROM local_puzzle_attempt_themes t "
+                "WHERE t.local_attempt_id=a.local_attempt_id AND t.theme_id=?)")
+            params.append(str(theme))
+        params.append(limit)
+        with self._connection() as db:
+            rows = db.execute(
+                "SELECT a.puzzle_id,MAX(a.created_at_ms) AS recent_at "
+                "FROM local_puzzle_attempts a WHERE a.account_id=? AND a.result='mistake'" +
+                theme_clause + " GROUP BY a.puzzle_id ORDER BY recent_at DESC,a.puzzle_id LIMIT ?",
+                params).fetchall()
+        return [str(row["puzzle_id"]) for row in rows]
 
     def save_local_puzzle_attempt(self, account_id: str, puzzle_id: str, *,
                                   result: str, solved: bool, mistakes: int, hints: int,
-                                  duration_ms: int, puzzle_json: str) -> str:
+                                  duration_ms: int, puzzle_json: str,
+                                  attempt_id: str | None = None) -> tuple[str, bool]:
         """Append a local training result without changing mirrored Lichess activity."""
         if result not in {"success", "mistake", "hinted", "revealed", "skipped"}:
             raise ValueError("Некорректный результат локальной задачи.")
-        attempt_id = uuid.uuid4().hex
+        attempt_id = str(attempt_id or uuid.uuid4().hex).strip()
+        if not attempt_id:
+            raise ValueError("Для локальной попытки требуется стабильный идентификатор.")
+        account_id = str(account_id or "local")
+        puzzle_id = str(puzzle_id)
         try:
             puzzle_payload = json.loads(str(puzzle_json))
             puzzle = puzzle_payload.get("puzzle", {})
@@ -66,15 +119,23 @@ class PuzzleActivityStoreMixin:
         except (ValueError, TypeError, AttributeError):
             themes = []
         with self._connection() as db:
-            db.execute(
-                "INSERT INTO local_puzzle_attempts VALUES (?,?,?,?,?,?,?,?,?,?)",
-                (attempt_id, str(account_id or "local"), str(puzzle_id), result, int(bool(solved)),
-                 max(0, int(mistakes)), max(0, int(hints)), max(0, int(duration_ms)),
-                 str(puzzle_json), int(time.time() * 1000)))
-            db.executemany(
-                "INSERT OR IGNORE INTO local_puzzle_attempt_themes VALUES (?,?)",
-                [(attempt_id, str(theme)) for theme in themes if theme])
-        return attempt_id
+            existing = db.execute(
+                "SELECT account_id,puzzle_id FROM local_puzzle_attempts WHERE local_attempt_id=?",
+                (attempt_id,)).fetchone()
+            if existing is not None and (str(existing["account_id"]) != account_id
+                                         or str(existing["puzzle_id"]) != puzzle_id):
+                raise ValueError("Идентификатор попытки уже принадлежит другой задаче или профилю.")
+            inserted = existing is None
+            if inserted:
+                db.execute(
+                    "INSERT INTO local_puzzle_attempts VALUES (?,?,?,?,?,?,?,?,?,?)",
+                    (attempt_id, account_id, puzzle_id, result, int(bool(solved)),
+                     max(0, int(mistakes)), max(0, int(hints)), max(0, int(duration_ms)),
+                     str(puzzle_json), int(time.time() * 1000)))
+                db.executemany(
+                    "INSERT OR IGNORE INTO local_puzzle_attempt_themes VALUES (?,?)",
+                    [(attempt_id, str(theme)) for theme in themes if theme])
+        return attempt_id, inserted
 
     def local_puzzle_attempts(self, account_id: str, *, limit: int = 8) -> list[dict]:
         limit = min(100, max(1, int(limit)))
@@ -297,14 +358,27 @@ class PuzzleActivityStoreMixin:
             db.execute("UPDATE puzzle_sync_state SET last_error=?,updated_at=? WHERE account_id=?",
                        (error[:500], now, account_id))
 
-    def puzzle_history(self, account_id: str, *, limit: int = 100, offset: int = 0) -> list[dict]:
+    def puzzle_history(self, account_id: str, *, limit: int = 100, offset: int = 0,
+                       theme: str | None = None, outcome: str | None = None) -> list[dict]:
         limit = min(MAX_PAGE_SIZE, max(1, int(limit)))
         offset = max(0, int(offset))
+        clauses = ["a.account_id=?"]
+        params: list[object] = [str(account_id)]
+        if theme:
+            clauses.append(
+                "EXISTS (SELECT 1 FROM json_each(CASE WHEN json_valid(p.themes_json) "
+                "THEN p.themes_json ELSE '[]' END) AS themes WHERE themes.value=?)")
+            params.append(str(theme))
+        if outcome in {"win", "loss"}:
+            clauses.append("a.win=?")
+            params.append(int(outcome == "win"))
+        params.extend((limit, offset))
         with self._connection() as db:
-            rows = db.execute("SELECT a.*,p.fen,p.solution_json,p.themes_json,p.puzzle_rating,p.plays "
-                               "FROM puzzle_attempts a JOIN puzzles p USING(puzzle_id) "
-                               "WHERE account_id=? ORDER BY attempt_date_ms DESC,attempt_uid "
-                               "LIMIT ? OFFSET ?", (account_id, limit, offset)).fetchall()
+            rows = db.execute(
+                "SELECT a.*,p.fen,p.solution_json,p.themes_json,p.puzzle_rating,p.plays "
+                "FROM puzzle_attempts a JOIN puzzles p USING(puzzle_id) WHERE " +
+                " AND ".join(clauses) +
+                " ORDER BY a.attempt_date_ms DESC,a.attempt_uid LIMIT ? OFFSET ?", params).fetchall()
             return [dict(row) for row in rows]
 
     def list_puzzle_accounts(self) -> list[dict]:

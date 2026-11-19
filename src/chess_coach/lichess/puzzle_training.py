@@ -57,6 +57,18 @@ def _validated_moves(board: chess.Board, raw_moves: Iterable[object]) -> tuple[s
     return tuple(moves)
 
 
+def select_next_local_candidate(candidates: Iterable[tuple], seen_ids: set[str]) -> tuple | None:
+    """Choose the first not-yet-practiced candidate in a deterministic local set."""
+    for candidate in candidates:
+        first = candidate[0] if isinstance(candidate, tuple) else candidate
+        puzzle_id = str(getattr(first, "puzzle_id", first))
+        source = str(candidate[2]) if isinstance(candidate, tuple) and len(candidate) > 2 else ""
+        scoped_id = f"{source}:{puzzle_id}" if source else puzzle_id
+        if scoped_id not in seen_ids and puzzle_id not in seen_ids:
+            return candidate
+    return None
+
+
 def normalize_api_puzzle(payload: dict) -> PuzzlePlayablePosition:
     """Normalize PuzzleAndGame API payload; solution[0] is a user move."""
     try:
@@ -84,10 +96,11 @@ def normalize_api_puzzle(payload: dict) -> PuzzlePlayablePosition:
         if move not in board.legal_moves:
             raise ValueError("Исходная партия содержит нелегальный ход.")
         board.push(move)
-    last_move = str(puzzle.get("lastMove") or "").strip() or None
-    if last_move:
+    source_last_move = str(puzzle.get("lastMove") or "").strip() or None
+    inferred_last_move = moves[initial_ply].uci()
+    if source_last_move:
         try:
-            supplied = chess.Move.from_uci(last_move)
+            supplied = chess.Move.from_uci(source_last_move)
         except ValueError as exc:
             raise ValueError("Поле последнего хода Lichess повреждено.") from exc
         if supplied != moves[initial_ply]:
@@ -101,7 +114,7 @@ def normalize_api_puzzle(payload: dict) -> PuzzlePlayablePosition:
         rating=int(puzzle["rating"]) if puzzle.get("rating") is not None else None,
         plays=int(puzzle["plays"]) if puzzle.get("plays") is not None else None,
         source=PuzzleSource.LICHESS_NEW,
-        last_move=last_move,
+        last_move=inferred_last_move,
         game_id=str(game.get("id") or "") or None,
     )
 

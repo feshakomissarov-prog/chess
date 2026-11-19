@@ -4,9 +4,10 @@ from __future__ import annotations
 
 import json
 import time
+import uuid
 
 import chess
-from PySide6.QtCore import Qt, Signal
+from PySide6.QtCore import QSize, Qt, Signal
 from PySide6.QtWidgets import (
     QComboBox, QFrame, QHBoxLayout, QLabel, QLineEdit, QListWidget,
     QListWidgetItem, QMessageBox, QPushButton, QScrollArea, QSizePolicy, QSplitter,
@@ -39,6 +40,27 @@ THEME_LABELS = {theme_id: label for _category, *items in THEMES
                 for theme_id, label in items}
 
 
+def puzzle_result_label(row: dict) -> str:
+    """Render historical outcomes in Russian without losing clean/error distinctions."""
+    raw = str(row.get("result") or "").strip().casefold()
+    source = str(row.get("source") or "").casefold()
+    solved = bool(row.get("solved", row.get("win", False)))
+    mistakes = max(0, int(row.get("mistakes") or 0))
+    if source == "lichess" and "win" in row:
+        return "Решено" if bool(row.get("win")) else "Ошибка"
+    if raw in {"success", "решено"}:
+        return "Решено с ошибками" if solved and mistakes else "Решено"
+    if raw in {"mistake", "ошибка"}:
+        return "Решено с ошибками" if solved and mistakes else "Ошибка"
+    if raw in {"hinted", "с подсказкой"}:
+        return "С подсказкой"
+    if raw in {"revealed", "решение показано"}:
+        return "Решение показано"
+    if raw in {"skipped", "пропущено"}:
+        return "Пропущено"
+    return raw[:1].upper() + raw[1:] if raw else ("Решено" if solved else "Ошибка")
+
+
 class PuzzleTrainingPage(QWidget):
     """Interactive board and controls. Persistence and network stay in the window."""
 
@@ -46,6 +68,7 @@ class PuzzleTrainingPage(QWidget):
     authorize_requested = Signal(str, str)
     local_puzzle_requested = Signal(str, str)
     attempt_saved = Signal(object)
+    replay_requested = Signal(str, str, str)
     history_requested = Signal()
     home_requested = Signal()
     account_changed = Signal(str)
@@ -58,6 +81,11 @@ class PuzzleTrainingPage(QWidget):
         self._started_at = 0.0
         self._puzzle_payload: dict = {}
         self._active_source = "local"
+        self._session_id = ""
+        self._session_account_id = "local"
+        self._session_puzzle_id = ""
+        self._pending_attempt_saves: dict[str, dict] = {}
+        self._local_seen_by_scope: dict[tuple[str, str, str], set[str]] = {}
         self._allow_submit = False
         self._local_count = 0
         self._local_stats = {"attempts": 0, "solved": 0, "success_percent": None}
@@ -144,14 +172,21 @@ class PuzzleTrainingPage(QWidget):
         body.setChildrenCollapsible(False)
         self.theme_list = QListWidget()
         self.theme_list.setObjectName("puzzleThemeList")
-        self.theme_list.setMaximumWidth(180)
+        self.theme_list.setMinimumWidth(220)
+        self.theme_list.setMaximumWidth(252)
+        self.theme_list.setWordWrap(True)
+        self.theme_list.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         for category, *items in THEMES:
             head = QListWidgetItem(category)
             head.setFlags(Qt.ItemFlag.NoItemFlags)
+            head.setToolTip(category)
+            head.setSizeHint(QSize(0, 30))
             self.theme_list.addItem(head)
             for theme_id, label in items:
                 item = QListWidgetItem(f"  {label}")
                 item.setData(Qt.ItemDataRole.UserRole, theme_id)
+                item.setToolTip(label)
+                item.setSizeHint(QSize(0, 36))
                 self.theme_list.addItem(item)
         body.addWidget(self.theme_list)
 
@@ -189,8 +224,12 @@ class PuzzleTrainingPage(QWidget):
         self.reveal = QPushButton("Показать решение")
         self.repeat = QPushButton("Повторить")
         self.next = QPushButton("Следующая задача")
+        self.retry_save = QPushButton("Повторить сохранение")
+        self.retry_save.setObjectName("retryPuzzleSave")
+        self.retry_save.hide()
+        self.retry_save.clicked.connect(self._retry_attempt_save)
         self.next.setObjectName("primaryAction")
-        for button in (self.hint, self.reveal, self.repeat, self.next):
+        for button in (self.hint, self.reveal, self.repeat, self.retry_save, self.next):
             button.setMinimumHeight(38)
             controls.addWidget(button)
         center_layout.addLayout(controls)
@@ -225,6 +264,8 @@ class PuzzleTrainingPage(QWidget):
         self.history = QListWidget()
         self.history.setObjectName("puzzleRecentHistory")
         self.history.setMaximumHeight(260)
+        self.history.setWordWrap(True)
+        self.history.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self.history.itemClicked.connect(self._open_history_item)
         right_layout.addWidget(self.history, 1)
         self.history_button = QPushButton("Вся история")
@@ -338,6 +379,9 @@ class PuzzleTrainingPage(QWidget):
         self.state.load(puzzle)
         self._puzzle_payload = dict(payload or {})
         self._active_source = source
+        self._session_id = uuid.uuid4().hex
+        self._session_account_id = str(self.account_id or "local")
+        self._session_puzzle_id = puzzle.puzzle_id
         self._started_at = time.monotonic()
         self._allow_submit = True
         self.board.set_position(self.state.board)
@@ -418,8 +462,19 @@ class PuzzleTrainingPage(QWidget):
         self._finish(PuzzleOutcome.REVEALED)
 
     def _repeat(self) -> None:
-        if self.state.puzzle:
-            self.load_puzzle(self.state.puzzle, self._puzzle_payload, source=self._active_source)
+        if not self.state.puzzle:
+            return
+        if self.state.status not in {PuzzleStatus.SUCCESS, PuzzleStatus.REVEALED,
+                                     PuzzleStatus.SKIPPED, PuzzleStatus.UNAVAILABLE}:
+            answer = QMessageBox.question(
+                self, "Повторить задачу", "Текущая попытка не завершена. Повторить с начала?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No)
+            if answer != QMessageBox.StandardButton.Yes:
+                return
+            self.state.skip()
+            self._finish(PuzzleOutcome.SKIPPED)
+        self.load_puzzle(self.state.puzzle, self._puzzle_payload, source=self._active_source)
 
     def _show_solution_line(self) -> None:
         if not self.state.puzzle:
@@ -451,32 +506,84 @@ class PuzzleTrainingPage(QWidget):
                   "skipped" if outcome == PuzzleOutcome.SKIPPED else
                   "hinted" if self.state.hints_used else
                   "mistake" if self.state.mistakes else "success")
-        self.attempt_saved.emit({
-            "account_id": self.account_id, "puzzle_id": self.state.puzzle.puzzle_id,
+        attempt = {
+            "attempt_id": uuid.uuid4().hex,
+            "session_id": self._session_id,
+            "account_id": self._session_account_id,
+            "puzzle_id": self._session_puzzle_id,
             "result": result, "mistakes": self.state.mistakes,
             "solved": outcome == PuzzleOutcome.SUCCESS,
             "hints": self.state.hints_used, "duration_ms": int((time.monotonic() - self._started_at) * 1000),
             "puzzle_json": payload, "source": self._active_source,
-        })
-        self._local_count += 1
-        self._local_stats["attempts"] += 1
-        self._local_stats["solved"] += int(outcome == PuzzleOutcome.SUCCESS)
-        attempts = self._local_stats["attempts"]
-        self._local_stats["success_percent"] = (
-            round(self._local_stats["solved"] / attempts * 100, 1) if attempts else None)
-        if self.state.puzzle.themes:
-            self._theme_stats["attempts"] += 1
-            self._theme_stats["solved"] += int(outcome == PuzzleOutcome.SUCCESS)
-            self._theme_stats["success_percent"] = round(
-                self._theme_stats["solved"] / self._theme_stats["attempts"] * 100, 1)
-        recent = [{"puzzle_id": self.state.puzzle.puzzle_id, "result": result,
-                   "created_at_ms": int(time.time() * 1000), "source": "local",
-                   "themes": list(self.state.puzzle.themes)}]
-        for index in range(self.history.count()):
-            recent.append(self.history.item(index).data(Qt.ItemDataRole.UserRole) or {})
-        self.set_recent_history(recent[:8], local_count=self._local_count,
-                                local_stats=self._local_stats, theme_stats=self._theme_stats)
+            "themes": list(self.state.puzzle.themes), "selected_theme": self.selected_theme(),
+        }
+        self._pending_attempt_saves[attempt["attempt_id"]] = attempt
+        self.retry_save.setVisible(False)
+        self.retry_save.setEnabled(False)
+        self.status.setText("Сохраняю результат в SQLite…")
+        self.attempt_saved.emit(attempt)
         self._set_controls(True, finished=True)
+
+    def _retry_attempt_save(self) -> None:
+        attempt_id = getattr(self, "_retry_attempt_id", None)
+        attempt = self._pending_attempt_saves.get(attempt_id or "")
+        if attempt is None:
+            return
+        self.retry_save.setEnabled(False)
+        self.retry_save.setText("Повторяю сохранение…")
+        self.status.setText("Повторно сохраняю результат…")
+        self.attempt_saved.emit(dict(attempt))
+
+    def _attempt_save_completed(self, attempt_id: str, success: bool,
+                                data: dict | None = None, error: str | None = None) -> None:
+        attempt = self._pending_attempt_saves.get(str(attempt_id))
+        if attempt is None:
+            return
+        if not success:
+            self._retry_attempt_id = str(attempt_id)
+            self.retry_save.setText("Повторить сохранение")
+            self.retry_save.setEnabled(True)
+            self.retry_save.setVisible(True)
+            if self._session_id == attempt["session_id"]:
+                self.status.setText(
+                    f"Не удалось сохранить результат в SQLite ({error or 'ошибка записи'}). "
+                    "Попробуйте ещё раз.")
+            return
+
+        self._pending_attempt_saves.pop(str(attempt_id), None)
+        if getattr(self, "_retry_attempt_id", None) == str(attempt_id):
+            self._retry_attempt_id = None
+        self.retry_save.setVisible(False)
+        self.retry_save.setEnabled(False)
+        if self._session_id != attempt["session_id"]:
+            return
+        if self.account_id != attempt["account_id"]:
+            self.status.setText(
+                f"Результат сохранён в профиле {attempt['account_id']}.")
+            return
+        payload = data or {}
+        self.set_recent_history(
+            payload.get("recent", []), local_count=payload.get("local_count", self._local_count),
+            local_stats=payload.get("local_stats"), theme_stats=payload.get("theme_stats"))
+        self.status.setText("Результат сохранён локально в SQLite.")
+
+    def attach_pending_attempts(self, attempts: list[dict]) -> None:
+        for attempt in attempts:
+            attempt_id = str(attempt.get("attempt_id") or "")
+            if attempt_id:
+                self._pending_attempt_saves[attempt_id] = dict(attempt)
+        if attempts:
+            self._retry_attempt_id = str(attempts[0].get("attempt_id") or "")
+            self.retry_save.setText("Повторить сохранение")
+            self.retry_save.setEnabled(bool(self._retry_attempt_id))
+            self.retry_save.setVisible(bool(self._retry_attempt_id))
+            self.status.setText("Есть несохранённый результат. Его можно сохранить повторно.")
+
+    def local_seen_ids(self, scope: tuple[str, str, str]) -> set[str]:
+        return self._local_seen_by_scope.setdefault(scope, set())
+
+    def mark_local_candidate_seen(self, scope: tuple[str, str, str], puzzle_id: str) -> None:
+        self.local_seen_ids(scope).add(str(puzzle_id))
 
     def _set_controls(self, loaded: bool, *, finished: bool = False) -> None:
         self.hint.setEnabled(loaded and not finished)
@@ -502,14 +609,16 @@ class PuzzleTrainingPage(QWidget):
         self.history.clear()
         for row in rows[:8]:
             source = "Chess Coach" if row.get("source") == "local" else "Lichess · sync"
-            outcome = str(row.get("result") or ("Решено" if row.get("win") else "Ошибка"))
+            outcome = puzzle_result_label(row)
             themes = row.get("themes") or []
             theme = THEME_LABELS.get(themes[0], themes[0]) if themes else "без темы"
             created = row.get("created_at_ms") or row.get("attempt_date_ms")
             date_text = time.strftime("%d.%m", time.localtime(created / 1000)) if created else "—"
-            item = QListWidgetItem(f"{date_text} · {theme} · {outcome} · {source}")
+            item = QListWidgetItem(f"{date_text} · {theme}\n{outcome} · {source}")
+            item.setSizeHint(QSize(0, 50))
             item.setData(Qt.ItemDataRole.UserRole, row)
-            item.setToolTip(f"{row.get('puzzle_id', '—')} · {source} · {outcome}")
+            item.setToolTip(
+                f"{row.get('puzzle_id', '—')} · {date_text} · {theme} · {outcome} · {source}")
             self.history.addItem(item)
         rating_text = (f"{self._official_rating} · {self._rating_date or 'дата не указана'}"
                        if self._official_rating is not None else "нет данных")
@@ -531,7 +640,8 @@ class PuzzleTrainingPage(QWidget):
         row = item.data(Qt.ItemDataRole.UserRole) or {}
         puzzle_id = str(row.get("puzzle_id", ""))
         if puzzle_id:
-            self.local_puzzle_requested.emit("replay", puzzle_id)
+            self.replay_requested.emit(self.account_id, puzzle_id,
+                                       str(row.get("source") or ""))
 
     def resizeEvent(self, event) -> None:  # noqa: N802 - Qt API
         super().resizeEvent(event)

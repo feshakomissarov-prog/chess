@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import json
 from pathlib import Path
 import sys
 import tempfile
@@ -48,11 +49,16 @@ def main() -> None:
         now_ms = int(time.time() * 1000)
         page.set_recent_history([
             {"puzzle_id": f"VIS-{index}", "result": result,
-             "created_at_ms": now_ms - index * 86_400_000, "source": "local",
+             "created_at_ms": now_ms - index * 86_400_000,
+             "source": "lichess" if index % 2 == 0 else "local",
+             "win": result == "success", "solved": result == "success",
+             "mistakes": 1 if result == "mistake" else 0,
              "themes": [theme]}
             for index, (result, theme) in enumerate((
                 ("success", "fork"), ("mistake", "pin"), ("hinted", "middlegame"),
-                ("success", "endgame"), ("revealed", "mateIn2")), start=1)
+                ("success", "endgame"), ("revealed", "mateIn2"),
+                ("skipped", "discoveredAttack"), ("success", "rookEndgame"),
+                ("hinted", "hangingPiece")), start=1)
         ], local_count=14,
            local_stats={"attempts": 14, "solved": 9, "success_percent": 64.3},
            theme_stats={"attempts": 4, "solved": 3, "success_percent": 75.0})
@@ -86,6 +92,66 @@ def main() -> None:
                   f"DPR={image.devicePixelRatio()}")
 
         save("ready")
+
+        page.set_accounts([{"account_id": "local", "username": "Локальный профиль"},
+                           {"account_id": "lichess:visual-b", "username": "Профиль B"}], "local")
+        page.account_selector.setCurrentIndex(page.account_selector.findData("lichess:visual-b"))
+        app.processEvents()
+        save("account-switch")
+        page.account_selector.setCurrentIndex(page.account_selector.findData("local"))
+        app.processEvents()
+
+        failed = {"attempt_id": "visual-save-failure", "session_id": page._session_id,
+                  "account_id": page._session_account_id, "puzzle_id": page._session_puzzle_id}
+        page._pending_attempt_saves[failed["attempt_id"]] = failed
+        page._attempt_save_completed(failed["attempt_id"], False, {}, "OperationalError")
+        save("save-error")
+
+        page._pending_attempt_saves.pop(failed["attempt_id"], None)
+        page.retry_save.hide()
+        page.set_authorization_needed(True)
+        page.set_message("Для новых задач требуется разрешение puzzle:read."
+                         " Сохранённые задачи доступны офлайн.")
+        save("oauth-consent")
+        page.set_authorization_needed(False)
+
+        def fixture(puzzle_id: str) -> dict:
+            return {"game": {"id": f"visual-{puzzle_id}", "pgn": "1. e4 e5 2. Nf3"},
+                    "puzzle": {"id": puzzle_id, "initialPly": 2, "lastMove": "g1f3",
+                               "solution": ["d7d5"], "themes": ["fork"],
+                               "rating": 1500, "plays": 12}}
+
+        for puzzle_id in ("NEXT-A", "NEXT-B", "NEXT-C", "OLD-101"):
+            cached_payload = fixture(puzzle_id)
+            window.game_repository.cache_training_puzzle(
+                "local", puzzle_id, json.dumps(cached_payload))
+
+        def wait_for(predicate) -> None:
+            deadline = time.monotonic() + 5
+            while time.monotonic() < deadline:
+                app.processEvents()
+                if predicate():
+                    return
+                QTest.qWait(30)
+            raise AssertionError("Qt training state did not reach the expected capture state")
+
+        page.source.setCurrentIndex(page.source.findData("saved"))
+        window._request_local_training_puzzle(page, "saved", "")
+        wait_for(lambda: page.state.puzzle is not None and
+                 page.state.puzzle.puzzle_id.startswith("NEXT-"))
+        first_local_id = page.state.puzzle.puzzle_id
+        window._request_local_training_puzzle(page, "saved", "")
+        wait_for(lambda: page.state.puzzle is not None and
+                 page.state.puzzle.puzzle_id != first_local_id)
+        assert page.state.puzzle.puzzle_id != first_local_id
+        save("local-next")
+
+        window._request_local_training_puzzle(
+            page, "replay", "", puzzle_id="OLD-101", source_hint="local")
+        wait_for(lambda: page.state.puzzle is not None and
+                 page.state.puzzle.puzzle_id == "OLD-101")
+        assert page.state.puzzle.puzzle_id == "OLD-101"
+        save("old-history-replay")
         center = page.board._square_center
         start = center(chess.F3).toPoint()
         end = center(chess.D5).toPoint()
@@ -105,6 +171,12 @@ def main() -> None:
         assert page.state.status.value == "mistake_retry"
         page._hint()
         save("mistake-hint")
+
+        page.load_puzzle(normalize_api_puzzle(payload), payload, source="lichess")
+        page._hint()
+        page.board.move_intent.emit(chess.Move.from_uci("d7d5"))
+        assert page.state.status.value == "success"
+        save("solved-after-hint")
 
         page.close()
         window.close()
