@@ -95,7 +95,7 @@ class PuzzleTrainingPage(QWidget):
         self.setObjectName("puzzleTrainingPage")
         root = QVBoxLayout(self)
         root.setContentsMargins(10, 6, 10, 10)
-        root.setSpacing(8)
+        root.setSpacing(6)
 
         header = QHBoxLayout()
         title = QLabel("Решение задач")
@@ -221,7 +221,7 @@ class PuzzleTrainingPage(QWidget):
         center_layout.addWidget(self.solution_line)
         controls = QGridLayout()
         controls.setHorizontalSpacing(6)
-        controls.setVerticalSpacing(6)
+        controls.setVerticalSpacing(2)
         self._controls_layout = controls
         self._controls_compact = False
         self.hint = QPushButton("Подсказка")
