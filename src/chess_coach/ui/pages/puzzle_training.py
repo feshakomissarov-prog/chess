@@ -74,34 +74,41 @@ class PuzzleTrainingPage(QWidget):
         title.setObjectName("pageTitle")
         header.addWidget(title)
         header.addStretch(1)
+        self._training_root_layout = root
+        self._training_header_layout = header
+        self._training_header_reflowed = False
+        self._training_header_controls = QWidget()
+        header_controls = QHBoxLayout(self._training_header_controls)
+        header_controls.setContentsMargins(0, 0, 0, 0)
         self.source = QComboBox()
         self.source.addItem("Новые Lichess", "new")
         self.source.addItem("Мои ошибки", "errors")
         self.source.addItem("Сохранённые", "saved")
         self.source.setAccessibleName("Источник задач")
-        header.addWidget(self.source)
+        header_controls.addWidget(self.source)
         self.account_selector = QComboBox()
         self.account_selector.setAccessibleName("Профиль истории задач")
         self.account_selector.addItem("Локальный профиль", "local")
         self.account_selector.currentIndexChanged.connect(
             lambda index: self.account_changed.emit(str(self.account_selector.itemData(index) or "local")))
-        header.addWidget(self.account_selector)
+        header_controls.addWidget(self.account_selector)
         self.difficulty = QComboBox()
         self.difficulty.addItem("Легче", "easier")
         self.difficulty.addItem("Обычная", "normal")
         self.difficulty.addItem("Сложнее", "harder")
         self.difficulty.setCurrentIndex(1)
         self.difficulty.setAccessibleName("Сложность задач")
-        header.addWidget(self.difficulty)
+        header_controls.addWidget(self.difficulty)
         self.advanced_difficulty = QComboBox()
         self.advanced_difficulty.addItem("Самая лёгкая", "easiest")
         self.advanced_difficulty.addItem("Самая сложная", "hardest")
         self.advanced_difficulty.setVisible(False)
-        header.addWidget(self.advanced_difficulty)
+        header_controls.addWidget(self.advanced_difficulty)
         self.more_difficulty = QPushButton("Дополнительно")
         self.more_difficulty.setCheckable(True)
         self.more_difficulty.toggled.connect(self.advanced_difficulty.setVisible)
-        header.addWidget(self.more_difficulty)
+        header_controls.addWidget(self.more_difficulty)
+        header.addWidget(self._training_header_controls)
         root.addLayout(header)
 
         self.filter_row = QHBoxLayout()
@@ -524,6 +531,16 @@ class PuzzleTrainingPage(QWidget):
     def resizeEvent(self, event) -> None:  # noqa: N802 - Qt API
         super().resizeEvent(event)
         compact = self.width() < 1050 or self.height() < 650
+        reflow_header = self.width() < 900 or self.height() < 650
+        if reflow_header != self._training_header_reflowed:
+            if reflow_header:
+                self._training_header_layout.removeWidget(self._training_header_controls)
+                self._training_root_layout.insertWidget(
+                    1, self._training_header_controls, 0, Qt.AlignmentFlag.AlignRight)
+            else:
+                self._training_root_layout.removeWidget(self._training_header_controls)
+                self._training_header_layout.addWidget(self._training_header_controls)
+            self._training_header_reflowed = reflow_header
         self.theme_list.setVisible(not compact)
         self.theme.setVisible(compact)
         self.theme_search.setVisible(not compact)
