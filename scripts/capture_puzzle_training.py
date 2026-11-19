@@ -142,10 +142,14 @@ def main() -> None:
                                "solution": ["d7d5"], "themes": ["fork"],
                                "rating": 1500, "plays": 12}}
 
-        for puzzle_id in ("NEXT-A", "NEXT-B", "NEXT-C", "OLD-101"):
+        for index, puzzle_id in enumerate(("NEXT-A", "NEXT-B", "NEXT-C", "OLD-101")):
             cached_payload = fixture(puzzle_id)
             window.game_repository.cache_training_puzzle(
                 "local", puzzle_id, json.dumps(cached_payload))
+            with window.game_repository._connection() as db:
+                db.execute("UPDATE local_puzzle_cache SET cached_at_ms=? "
+                           "WHERE account_id=? AND puzzle_id=?",
+                           (4000 - index * 1000, "local", puzzle_id))
 
         page.source.setCurrentIndex(page.source.findData("saved"))
         window._request_local_training_puzzle(page, "saved", "")
