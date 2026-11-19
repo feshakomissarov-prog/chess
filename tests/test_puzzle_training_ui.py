@@ -46,3 +46,83 @@ def test_reveal_requires_confirmation_and_exposes_line_only_after_yes(qtbot, mon
     assert not page.solution_line.isHidden()
     assert "Правильная линия" in page.solution_line.text()
     assert page.state.status.value == "revealed"
+
+
+def test_attempt_is_bound_to_account_at_load_not_current_selector(qtbot):
+    page = PuzzleTrainingPage(demo=True)
+    qtbot.addWidget(page)
+    page.set_accounts([{"account_id": "lichess:a", "username": "A"},
+                       {"account_id": "lichess:b", "username": "B"}], "lichess:a")
+    page.load_puzzle(page.state.puzzle, page._puzzle_payload, source="demo")
+    attempts = []
+    page.attempt_saved.connect(attempts.append)
+    page.account_selector.setCurrentIndex(page.account_selector.findData("lichess:b"))
+    page._submit_move(chess.Move.from_uci("d7d5"))
+    assert attempts[-1]["account_id"] == "lichess:a"
+
+
+def test_history_and_statistics_wait_for_real_save_ack_and_retry_same_attempt(qtbot):
+    page = PuzzleTrainingPage(demo=True)
+    qtbot.addWidget(page)
+    page.set_recent_history([], local_count=0,
+                            local_stats={"attempts": 0, "solved": 0, "success_percent": None},
+                            theme_stats={"attempts": 0, "solved": 0, "success_percent": None})
+    saved = []
+    page.attempt_saved.connect(saved.append)
+    page._submit_move(chess.Move.from_uci("d7d5"))
+    attempt = saved[-1]
+    assert page.history.count() == 0
+    assert page._local_count == 0
+    assert page.status.text().startswith("Сохраняю")
+
+    page._attempt_save_completed(attempt["attempt_id"], False, {}, "OperationalError")
+    assert page.history.count() == 0
+    assert page._local_count == 0
+    assert "не удалось сохранить" in page.status.text().casefold()
+    page._retry_attempt_save()
+    assert saved[-1]["attempt_id"] == attempt["attempt_id"]
+
+    page._attempt_save_completed(attempt["attempt_id"], True, {
+        "local_count": 1,
+        "local_stats": {"attempts": 1, "solved": 1, "success_percent": 100.0},
+        "theme_stats": {"attempts": 1, "solved": 1, "success_percent": 100.0},
+        "recent": [{"puzzle_id": "Demo", "result": "success", "solved": True,
+                    "created_at_ms": 1_700_000_000_000, "source": "local",
+                    "themes": ["fork"]}],
+    })
+    assert page.history.count() == 1
+    assert "Решено" in page.history.item(0).text()
+    assert page._local_count == 1
+    assert "сохранено" in page.status.text().casefold()
+
+
+def test_repeat_requires_consent_when_attempt_is_still_active(qtbot, monkeypatch):
+    page = PuzzleTrainingPage(demo=True)
+    qtbot.addWidget(page)
+    start_fen = page.state.board.fen()
+    page.state.hint()
+    monkeypatch.setattr(QMessageBox, "question",
+                        lambda *args, **kwargs: QMessageBox.StandardButton.No)
+    page._repeat()
+    assert page.state.board.fen() == start_fen
+    assert page.state.hints_used == 1
+    monkeypatch.setattr(QMessageBox, "question",
+                        lambda *args, **kwargs: QMessageBox.StandardButton.Yes)
+    page._repeat()
+    assert page.state.status.value == "ready"
+    assert page.state.hints_used == 0
+
+
+def test_history_status_labels_and_theme_list_have_no_horizontal_scroll(qtbot):
+    page = PuzzleTrainingPage(demo=True)
+    qtbot.addWidget(page)
+    page.set_recent_history([
+        {"puzzle_id": "p1", "result": "success", "solved": True,
+         "mistakes": 2, "source": "local", "themes": ["discoveredAttack"]},
+        {"puzzle_id": "p2", "result": "hinted", "solved": False,
+         "source": "lichess", "themes": ["hangingPiece"]},
+    ])
+    assert "Решено с ошибками" in page.history.item(0).text()
+    assert "С подсказкой" in page.history.item(1).text()
+    assert page.history.horizontalScrollBarPolicy() == Qt.ScrollBarPolicy.ScrollBarAlwaysOff
+    assert page.theme_list.horizontalScrollBarPolicy() == Qt.ScrollBarPolicy.ScrollBarAlwaysOff

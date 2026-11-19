@@ -1,3 +1,6 @@
+import json
+from pathlib import Path
+
 import chess
 import pytest
 
@@ -21,6 +24,18 @@ def test_official_batch_requires_no_prep_move():
     assert board.piece_at(chess.F3) == chess.Piece(chess.KNIGHT, chess.WHITE)
     assert normalized.expected_user_moves == ("d7d5",)
     assert normalized.themes == ("fork",)
+
+
+def test_real_lichess_batch_example_initial_ply_and_promotion_fixture():
+    fixture_path = Path(__file__).parent / "fixtures" / "lichess_puzzle_batch_official_example.json"
+    payload = json.loads(fixture_path.read_text(encoding="utf-8"))["puzzle"]
+    normalized = normalize_api_puzzle(payload)
+    board = normalized.board()
+    assert board.fen() == "6k1/1q3p2/5prp/2b5/3pN3/1PP2P1P/2Q1R1P1/6K1 b - - 0 27"
+    assert board.turn == chess.BLACK
+    assert normalized.last_move == "f2f3"
+    assert normalized.expected_user_moves == ("d4d3", "e4c5", "d3c2", "c5b7", "c2c1q")
+    assert chess.Move.from_uci(normalized.expected_user_moves[-1]).promotion == chess.QUEEN
 
 
 def test_history_source_replays_one_prep_move():

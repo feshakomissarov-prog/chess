@@ -1,0 +1,135 @@
+name: PUZZLE-UX-02 focused verification
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - "src/chess_coach/ui/pages/puzzle_training.py"
+      - "src/chess_coach/lichess/puzzle_training.py"
+      - "src/chess_coach/infrastructure/sqlite/puzzles.py"
+      - "src/chess_coach/infrastructure/sqlite/migrations.py"
+      - "src/chess_coach/window.py"
+      - "scripts/capture_puzzle_training.py"
+      - "tests/test_puzzle_training*.py"
+      - "tests/test_puzzle_api_adapter.py"
+      - "tests/test_board_view.py"
+      - "tests/test_background_work.py"
+      - ".github/workflows/puzzle-ux-02-verification.yml"
+      - ".github/workflows/windows-tests.yml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: puzzle-ux-02-focused-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  detect-visual-scope:
+    runs-on: windows-latest
+    outputs:
+      changed: ${{ steps.scope.outputs.changed }}
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          fetch-depth: 0
+      - name: Detect UI and capture changes for L2
+        id: scope
+        shell: pwsh
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          $files = git diff --name-only $env:BASE_SHA $env:HEAD_SHA
+          $patterns = @(
+            '^src/chess_coach/ui/pages/puzzle_training\.py$',
+            '^src/chess_coach/lichess/puzzle_training\.py$',
+            '^src/chess_coach/infrastructure/sqlite/puzzles\.py$',
+            '^src/chess_coach/window\.py$',
+            '^scripts/capture_puzzle_training\.py$'
+          )
+          $changed = [bool]($files | Where-Object {
+            $candidate = $_
+            $patterns | Where-Object { $candidate -match $_ }
+          })
+          "changed=$($changed.ToString().ToLowerInvariant())" >> $env:GITHUB_OUTPUT
+          Write-Host "L2 UI/capture source changed: $changed"
+
+  l1-targeted:
+    name: L1 targeted RED/GREEN
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+      - uses: actions/setup-python@v7.1.0
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Install application and test dependencies
+        run: python -m pip install -e ".[dev]"
+      - name: Compile changed puzzle modules and tests
+        run: >-
+          python -m py_compile src/chess_coach/ui/pages/puzzle_training.py
+          src/chess_coach/window.py
+          src/chess_coach/infrastructure/sqlite/puzzles.py
+          src/chess_coach/lichess/puzzle_training.py
+          tests/test_puzzle_training.py tests/test_puzzle_training_store.py
+          tests/test_puzzle_training_ui.py tests/test_puzzle_training_navigation.py
+          tests/test_puzzle_training_async.py tests/test_puzzle_api_adapter.py
+      - name: Run targeted puzzle contracts
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: >-
+          python -X faulthandler -m pytest -o addopts= -q
+          tests/test_puzzle_training.py tests/test_puzzle_training_store.py
+          tests/test_puzzle_training_ui.py tests/test_puzzle_training_navigation.py
+          tests/test_puzzle_training_async.py tests/test_puzzle_api_adapter.py
+
+  l2-native-puzzle-captures:
+    name: L2 native puzzle training captures
+    needs: [detect-visual-scope, l1-targeted]
+    if: needs.detect-visual-scope.outputs.changed == 'true' && needs.l1-targeted.result == 'success'
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+      - uses: actions/setup-python@v7.1.0
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Install application
+        run: python -m pip install -e .
+      - name: Configure native Windows display
+        shell: pwsh
+        run: |
+          Set-DisplayResolution -Width 1920 -Height 1080 -Force
+          Add-Type -AssemblyName System.Windows.Forms
+          $bounds = [System.Windows.Forms.Screen]::PrimaryScreen.Bounds
+          if ($bounds.Width -lt 1672 -or $bounds.Height -lt 941) {
+            throw "Runner display cannot fit the 1672x941 puzzle capture."
+          }
+      - name: Capture the puzzle workflow at 100, 125, and 150 percent
+        shell: pwsh
+        env:
+          CC_PUZZLE_VISUAL_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          foreach ($case in @(
+            @{ Scale = "1"; Size = "1672x941" },
+            @{ Scale = "1.25"; Size = "1280x720" },
+            @{ Scale = "1.5"; Size = "1120x640" }
+          )) {
+            $env:QT_SCALE_FACTOR = $case.Scale
+            $env:CC_PUZZLE_VISUAL_SIZE = $case.Size
+            $env:CC_PUZZLE_VISUAL_OUTPUT = "visual-evidence/puzzle-followup/scale-$($case.Scale)"
+            python -X faulthandler scripts/capture_puzzle_training.py
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          }
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: puzzle-ux-02-l2-${{ github.event.pull_request.head.sha }}
+          path: visual-evidence/puzzle-followup/
+          if-no-files-found: error
