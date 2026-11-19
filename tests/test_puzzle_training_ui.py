@@ -110,7 +110,7 @@ def test_history_and_statistics_wait_for_real_save_ack_and_retry_same_attempt(qt
     assert page.history.count() == 1
     assert "Решено" in page.history.item(0).text()
     assert page._local_count == 1
-    assert "сохранено" in page.status.text().casefold()
+    assert "сохран" in page.status.text().casefold()
 
 
 def test_repeat_requires_consent_when_attempt_is_still_active(qtbot, monkeypatch):

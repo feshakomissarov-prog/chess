@@ -62,9 +62,7 @@ def select_next_local_candidate(candidates: Iterable[tuple], seen_ids: set[str])
     for candidate in candidates:
         first = candidate[0] if isinstance(candidate, tuple) else candidate
         puzzle_id = str(getattr(first, "puzzle_id", first))
-        source = str(candidate[2]) if isinstance(candidate, tuple) and len(candidate) > 2 else ""
-        scoped_id = f"{source}:{puzzle_id}" if source else puzzle_id
-        if scoped_id not in seen_ids and puzzle_id not in seen_ids:
+        if puzzle_id not in seen_ids:
             return candidate
     return None
 

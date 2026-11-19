@@ -6459,8 +6459,7 @@ class MainWindow(QMainWindow):
                              source=payload.get("source", "local"))
             if mode != "replay":
                 page.mark_local_candidate_seen(
-                    payload.get("scope", scope),
-                    f"{payload.get('source', 'local')}:{payload['puzzle'].puzzle_id}")
+                    payload.get("scope", scope), payload["puzzle"].puzzle_id)
             rating = payload.get("rating") or {}
             page.set_recent_history(payload.get("recent", []),
                                     local_count=payload.get("local_count", 0),

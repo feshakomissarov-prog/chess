@@ -125,6 +125,9 @@ def test_delayed_save_ack_refreshes_reopened_page_after_navigation(qtbot, tmp_pa
         def local_puzzle_statistics(self, _account_id, _theme=None):
             return {"attempts": 1, "solved": 1, "success_percent": 100.0}
 
+        def has_pending_writes(self):
+            return False
+
     repository = DelayedRepository()
     window.game_repository = repository
     window._puzzle_training_page = old_page
