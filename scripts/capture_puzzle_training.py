@@ -53,8 +53,10 @@ def main() -> None:
         assert window.isVisible()
         assert window.width() <= width and window.height() <= height
         assert page.board.isVisible() and page.fetch.isVisible() and page.hint.isVisible()
-        assert min(page.board.width(), page.board.height()) >= 320, (
-            f"Puzzle board is too small: {page.board.width()}x{page.board.height()}"
+        physical_board_side = min(page.board.width(), page.board.height()) * page.board.devicePixelRatioF()
+        assert physical_board_side >= 320, (
+            f"Puzzle board is too small: {page.board.width()}x{page.board.height()} logical, "
+            f"DPR={page.board.devicePixelRatioF():.2f}, {physical_board_side:.0f} physical"
         )
         for widget in (page.fetch, page.hint, page.reveal, page.repeat, page.next):
             rect = widget.rect().translated(widget.mapTo(window, QPoint(0, 0)))
