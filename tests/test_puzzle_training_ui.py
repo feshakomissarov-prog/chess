@@ -54,11 +54,28 @@ def test_attempt_is_bound_to_account_at_load_not_current_selector(qtbot):
     page.set_accounts([{"account_id": "lichess:a", "username": "A"},
                        {"account_id": "lichess:b", "username": "B"}], "lichess:a")
     page.load_puzzle(page.state.puzzle, page._puzzle_payload, source="demo")
+    page.account_changed.connect(lambda account: setattr(page, "account_id", account))
     attempts = []
     page.attempt_saved.connect(attempts.append)
     page.account_selector.setCurrentIndex(page.account_selector.findData("lichess:b"))
     page._submit_move(chess.Move.from_uci("d7d5"))
     assert attempts[-1]["account_id"] == "lichess:a"
+
+
+def test_history_replay_carries_original_source_and_account(qtbot):
+    page = PuzzleTrainingPage(demo=True)
+    qtbot.addWidget(page)
+    page.account_id = "lichess:history-user"
+    page.set_recent_history([{
+        "puzzle_id": "old-puzzle", "result": "Ошибка", "source": "lichess",
+        "themes": ["endgame"], "attempt_date_ms": 1_600_000_000_000,
+    }])
+    replay_signal = getattr(page, "replay_requested", None)
+    assert replay_signal is not None, "history replay must carry source/account context"
+    captured = []
+    replay_signal.connect(lambda *args: captured.append(args))
+    page._open_history_item(page.history.item(0))
+    assert captured == [("lichess:history-user", "old-puzzle", "lichess")]
 
 
 def test_history_and_statistics_wait_for_real_save_ack_and_retry_same_attempt(qtbot):

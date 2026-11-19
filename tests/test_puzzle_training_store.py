@@ -69,6 +69,23 @@ def test_exact_puzzle_lookup_finds_cache_and_imported_attempt_outside_recent_win
         repository.shutdown()
 
 
+def test_exact_imported_attempt_lookup_uses_account_and_id_without_recent_limit(tmp_path):
+    repository = GameRepository(tmp_path / "old-imported-puzzle.sqlite3")
+    account = repository.ensure_archive_account("old-imported-user")
+    try:
+        records = [{"date": 1_700_000_000_000 + index, "win": bool(index % 2),
+                    "puzzle": {"id": f"activity-{index:04d}", "fen": chess.STARTING_FEN,
+                               "solution": ["e2e4"], "themes": ["endgame" if index == 0 else "fork"],
+                               "rating": 1500, "plays": 10}}
+                   for index in range(1501)]
+        repository.import_puzzle_activities("old-imported-user", records)
+        target = repository.get_puzzle_attempt_by_id(account, "activity-0000")
+        assert target["puzzle_id"] == "activity-0000"
+        assert repository.get_puzzle_attempt_by_id("other-account", "activity-0000") is None
+    finally:
+        repository.shutdown()
+
+
 def test_stable_local_attempt_id_makes_retry_idempotent(tmp_path):
     repository = GameRepository(tmp_path / "idempotent.sqlite3")
     account = repository.ensure_archive_account("retry-user")
