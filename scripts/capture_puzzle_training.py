@@ -14,6 +14,7 @@ from PySide6.QtGui import QCursor
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication
 
+from chess_coach.diagnostics import shutdown_logging
 from chess_coach.lichess.puzzle_training import normalize_api_puzzle
 from chess_coach.window import MainWindow
 
@@ -25,7 +26,8 @@ def main() -> None:
             reconfigure(encoding="utf-8", errors="backslashreplace")
     output = Path(os.environ.get("CC_PUZZLE_VISUAL_OUTPUT", "visual-evidence/puzzle-training"))
     output.mkdir(parents=True, exist_ok=True)
-    with tempfile.TemporaryDirectory(prefix="cc-puzzle-capture-") as local_data:
+    with tempfile.TemporaryDirectory(prefix="cc-puzzle-capture-",
+                                     ignore_cleanup_errors=True) as local_data:
         os.environ["LOCALAPPDATA"] = local_data
         app = QApplication([])
         assert app.platformName() == "windows", f"Expected native Windows Qt, got {app.platformName()}"
@@ -91,6 +93,7 @@ def main() -> None:
         page.close()
         window.close()
         app.processEvents()
+        shutdown_logging()
 
 
 if __name__ == "__main__":
