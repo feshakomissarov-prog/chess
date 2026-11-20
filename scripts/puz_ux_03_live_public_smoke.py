@@ -107,7 +107,10 @@ def capture(page: PuzzleTrainingPage, output: Path, index: int, label: str,
 def solve_public_line(app: QApplication, page: PuzzleTrainingPage, output: Path,
                       frames: list[dict], label_prefix: str) -> None:
     """Enter only the solver's plies; the production page plays replies itself."""
-    while page.state.status.value != "success":
+    moves = page.state.puzzle.expected_user_moves
+    for _ in range(max(3, len(moves) * 2 + 2)):
+        if page.state.status.value == "success":
+            return
         if page.state.status.value == "opponent_reply":
             capture(page, output, len(frames), f"{label_prefix}-awaiting-reply", frames)
             wait_until(app, lambda: page.state.status.value != "opponent_reply")
@@ -117,10 +120,22 @@ def solve_public_line(app: QApplication, page: PuzzleTrainingPage, output: Path,
             raise AssertionError(
                 f"Unexpected live puzzle status while solving: {page.state.status.value}")
         index = page.state.solution_index
-        moves = page.state.puzzle.expected_user_moves
         if index >= len(moves):
-            break
-        click_move(app, page, chess.Move.from_uci(moves[index]))
+            raise AssertionError("Puzzle left an unfinished solution index")
+        raw_move = moves[index]
+        print("LIVE_MOVE " + json.dumps({
+            "id": page.state.puzzle.puzzle_id, "index": index,
+            "uci": raw_move, "fen": page.state.board.fen(),
+        }, sort_keys=True))
+        click_move(app, page, chess.Move.from_uci(raw_move))
+        if page.state.status.value == "mistake_retry":
+            raise AssertionError(
+                f"Public solution move was rejected: id={page.state.puzzle.puzzle_id} "
+                f"index={index} uci={raw_move} fen={page.state.board.fen()}")
+    raise AssertionError(
+        f"Public solution exceeded bounded interaction steps: "
+        f"id={page.state.puzzle.puzzle_id} index={page.state.solution_index} "
+        f"status={page.state.status.value}")
 
 
 def play(output: Path, dpi_scale: str) -> None:
