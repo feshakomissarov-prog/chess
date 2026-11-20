@@ -2867,6 +2867,10 @@ def test_account_switch_discards_delayed_profile_a_and_requests_profile_b(
 
     monkeypatch.setattr(window.game_repository, "local_puzzle_attempts", delayed_attempts)
     requests = []
+    worker_results = []
+    window.puzzle_training_finished.connect(
+        lambda request_id, payload, error: worker_results.append(
+            (request_id, payload, error)))
     monkeypatch.setattr(window, "_request_puzzle_training",
                         lambda target, theme, difficulty, **kwargs:
                         requests.append((target.account_id, theme, difficulty, kwargs)))
@@ -2876,9 +2880,18 @@ def test_account_switch_discards_delayed_profile_a_and_requests_profile_b(
     window._puzzle_training_account_changed(page, account_b)
     assert page.account_id == account_b
     release_account_a.set()
-    qtbot.waitUntil(lambda: requests == [(account_b, page.selected_theme(),
-                                         page.selected_difficulty(),
-                                         {"authorize": False})], timeout=5000)
+    qtbot.waitUntil(lambda: len(worker_results) >= 2, timeout=5000)
+    qtbot.waitUntil(lambda: bool(requests) or page.history.count() > 0, timeout=3000)
+    history_ids = [
+        (page.history.item(index).data(Qt.ItemDataRole.UserRole) or {}).get("puzzle_id")
+        for index in range(page.history.count())]
+    assert requests == [(account_b, page.selected_theme(),
+                         page.selected_difficulty(), {"authorize": False})], (
+        f"requests={requests!r}; page_account={page.account_id!r}; "
+        f"selector={page.account_selector.currentData()!r}; "
+        f"history={history_ids!r}; "
+        f"worker_results={worker_results!r}; "
+        f"account_generation={window._puzzle_training_accounts_generation}")
     qtbot.waitUntil(lambda: page.history.count() == 1, timeout=3000)
     assert page.account_id == account_b
     assert requests[0][0] == account_b
