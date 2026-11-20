@@ -981,7 +981,8 @@ class PuzzleTrainingPage(QWidget):
             return
         self._retry_attempt_id = next(iter(self._retry_attempt_queue), None)
         count = len(self._retry_attempt_queue)
-        self.retry_save.setText("Повторить запись")
+        self.retry_save.setText(
+            "Повторить запись" if count <= 1 else f"Повторить запись ({count})")
         self.retry_save.setToolTip(
             "Повторить сохранение результата в SQLite" if count <= 1 else
             f"Повторить сохранение {count} результатов в SQLite")
