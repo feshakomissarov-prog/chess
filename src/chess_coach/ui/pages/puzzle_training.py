@@ -853,7 +853,8 @@ class PuzzleTrainingPage(QWidget):
         self.board.set_interaction_enabled(False)
         if outcome == PuzzleOutcome.SUCCESS:
             clean = self.state.mistakes == 0 and self.state.hints_used == 0
-            verdict = ("✓ Задача решена! Следующая задача начнётся автоматически."
+            verdict = ("✓ Повтор решён. Рейтинг не изменён." if clean and self._is_replay else
+                       "✓ Задача решена! Следующая задача начнётся автоматически."
                        if clean else
                        "Задача решена с ошибкой." if self.state.mistakes else
                        "Задача решена с подсказкой.")
