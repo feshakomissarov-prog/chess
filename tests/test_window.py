@@ -2956,8 +2956,10 @@ def test_advanced_difficulty_prefetch_accepts_selected_key(
                      source="lichess")
 
     window._prefetch_puzzle_training(page, account_id, "mix", difficulty, page._session_id)
-    handle = window._puzzle_prefetch_handle
-    qtbot.waitUntil(lambda: handle is not None and not handle.is_alive(), timeout=4000)
+    # Thread termination can happen just before Qt delivers the queued
+    # puzzle_training_finished signal. Wait for the observable UI contract,
+    # not only for the Python worker to exit.
+    qtbot.waitUntil(lambda: page._prepared_online_puzzle is not None, timeout=5000)
     assert page._prepared_online_puzzle is not None, (
         f"worker_results={worker_results!r}; requested={service.client.difficulties!r}; "
         f"account={page.account_id!r}/{account_id!r}; theme={page.selected_theme()!r}; "

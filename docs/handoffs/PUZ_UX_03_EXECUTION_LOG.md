@@ -167,4 +167,8 @@ Values are intentionally left blank until collected from actual run output/artif
 
 ### §14 L3 — pending
 
-The one full exact-head Windows L3 is pending on the final code+evidence-document HEAD. PR #52 remains Draft until this run is initiated; after it completes the PR will return to Draft. No merge is authorized or performed.
+The first full Windows L3 was initiated on exact head `39c495912f04b42d3baf4bc89a385b5f421bc4a3` while preparing final acceptance. Its native visual and focused jobs passed, and the full suite reported **1248 passed, 1 failed**: `test_advanced_difficulty_prefetch_accepts_selected_key[hardest]`. The worker had emitted its completion event, but the assertion only waited for Python thread termination; Qt's queued completion could be delivered just after that condition became true. This was a synchronization defect in the test, not a confirmed production prefetch failure.
+
+The test now waits for the observable contract (`page._prepared_online_puzzle` is installed) so Qt continues dispatching queued signals. The exact parameterized test passed once and in 10 further consecutive runs (**22/22 cases** total); `py_compile` and `git diff --check` passed. No production code changed after the successful L2 at `34771ccf7df04e9224c2122cba3bcb5d0f08921b`, so that real public-Lichess/native-Qt L2 and its 100/125/150% captures remain the thematic L2 evidence for the final executable code.
+
+One final full exact-head Windows L3 remains pending on the test-harness + evidence-log HEAD. The PR was returned to Draft before this harness-only push; it will be briefly marked Ready only to trigger the final L3, then returned to Draft. No merge is authorized or performed.
