@@ -65,6 +65,19 @@ def test_save_ack_does_not_replace_terminal_verdict(qtbot):
     assert page.status.text().startswith("✓ Задача решена")
 
 
+def test_replay_success_does_not_promise_auto_next_or_change_rating(qtbot):
+    page = online_page(qtbot)
+    page.load_puzzle(page.state.puzzle, page._puzzle_payload, source="replay",
+                     rating_eligible=False)
+    attempts = []
+    page.attempt_saved.connect(attempts.append)
+    page._submit_move(chess.Move.from_uci("e2e4"))
+    assert page.status.text() == "✓ Повтор решён. Рейтинг не изменён."
+    assert "автоматически" not in page.status.text().casefold()
+    assert not page._auto_next_timer.isActive()
+    assert attempts[-1]["rating_eligible"] is False
+
+
 def test_review_wheel_shows_only_played_moves_and_return_restores_current_board(qtbot):
     page = online_page(qtbot, ("e2e4", "e7e5", "g1f3"), "review")
     page._submit_move(chess.Move.from_uci("e2e4"))
