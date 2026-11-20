@@ -201,6 +201,7 @@ class PuzzleTrainingState:
     _review_labels: list[str] = field(default_factory=list, repr=False)
     _review_cursor: int = field(default=0, repr=False)
     _reviewing: bool = field(default=False, repr=False)
+    _review_return_status: PuzzleStatus | None = field(default=None, repr=False)
 
     def load(self, puzzle: PuzzlePlayablePosition) -> None:
         self.puzzle = puzzle
@@ -218,6 +219,7 @@ class PuzzleTrainingState:
         self._review_labels.extend(puzzle.review_san)
         self._review_cursor = max(0, len(self._review_snapshots) - 1)
         self._reviewing = False
+        self._review_return_status = None
 
     @property
     def is_reviewing(self) -> bool:
@@ -240,6 +242,8 @@ class PuzzleTrainingState:
         if not self._review_snapshots:
             self._review_snapshots = [self.board.copy(stack=True)]
             self._review_labels = ["Позиция до задачи"]
+        if not self._reviewing:
+            self._review_return_status = self.status
         self._reviewing = True
         self.status = PuzzleStatus.REVIEW
         self._review_cursor = max(
@@ -250,10 +254,12 @@ class PuzzleTrainingState:
         self._reviewing = False
         self._review_cursor = max(0, len(self._review_snapshots) - 1)
         if self.puzzle is not None and self.status == PuzzleStatus.REVIEW:
-            self.status = (PuzzleStatus.SUCCESS if self.solution_index >= len(
-                self.puzzle.expected_user_moves) else
+            self.status = self._review_return_status or (
+                PuzzleStatus.SUCCESS if self.solution_index >= len(
+                    self.puzzle.expected_user_moves) else
                 PuzzleStatus.OPPONENT_REPLY if self._pending_reply else
                 PuzzleStatus.MISTAKE_RETRY if self.mistakes else PuzzleStatus.READY)
+        self._review_return_status = None
         return self.board.copy(stack=True)
 
     def _record_visible_move(self, move: chess.Move) -> None:

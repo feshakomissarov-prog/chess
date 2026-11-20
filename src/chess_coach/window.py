@@ -6053,7 +6053,9 @@ class MainWindow(QMainWindow):
         page.auto_next.blockSignals(False)
 
     def _load_puzzle_training_accounts(self, page: PuzzleTrainingPage,
-                                       selected_account: str) -> None:
+                                       selected_account: str, *,
+                                       default_to_available: bool = True,
+                                       request_puzzle: bool = False) -> None:
         request_id = uuid.uuid4().hex
         self._puzzle_training_accounts_generation += 1
         generation = self._puzzle_training_accounts_generation
@@ -6064,7 +6066,7 @@ class MainWindow(QMainWindow):
             try:
                 accounts = self.game_repository.list_puzzle_accounts()
                 preferred = selected_account
-                if preferred == "local" and accounts:
+                if default_to_available and preferred == "local" and accounts:
                     candidate = (f"lichess:{str(preferred_username).strip().lower()}"
                                  if preferred_username else "")
                     ids = {str(row.get("account_id")) for row in accounts}
@@ -6108,6 +6110,8 @@ class MainWindow(QMainWindow):
                     or self.screen_stack.currentWidget() is not page):
                 return
             if error or not isinstance(payload, dict):
+                if request_puzzle:
+                    page.set_message("Не удалось загрузить историю выбранного профиля. Повторите запрос.")
                 return
             accounts = payload.get("accounts", []) if isinstance(payload, dict) else []
             preferred = payload.get("selected", selected_account) if isinstance(payload, dict) else selected_account
@@ -6120,6 +6124,9 @@ class MainWindow(QMainWindow):
                 local_stats=payload.get("local_stats"),
                 theme_stats=payload.get("theme_stats"),
                 practice_rating=payload.get("practice_rating"))
+            if request_puzzle:
+                self._request_puzzle_training(
+                    page, page.selected_theme(), page.selected_difficulty(), authorize=False)
 
         self._register_training_callback(page, request_id, generation, apply_result)
         handle = self._start_registered_work(
@@ -6196,7 +6203,8 @@ class MainWindow(QMainWindow):
             prefetch.cancel("account_changed")
         self._cancel_puzzle_training_oauth()
         self._puzzle_training_generation += 1
-        self._load_puzzle_training_accounts(page, page.account_id)
+        self._load_puzzle_training_accounts(
+            page, page.account_id, default_to_available=False, request_puzzle=True)
 
     def _cancel_puzzle_training_oauth(self) -> None:
         for pending in list(self._puzzle_oauth_open_requests.values()):
@@ -6473,34 +6481,12 @@ class MainWindow(QMainWindow):
                 self.game_repository.cache_training_puzzle(
                     scoped_account, playable.puzzle_id,
                     json.dumps(raw, ensure_ascii=False, separators=(",", ":")))
-                local_rows = self.game_repository.local_puzzle_attempts(scoped_account, limit=8)
-                official_rows = self.game_repository.puzzle_history(scoped_account, limit=8)
-                recent = [{"puzzle_id": row["puzzle_id"], "result": row["result"],
-                           "created_at_ms": row["created_at_ms"], "source": "local"}
-                          for row in local_rows]
-                recent.extend({"puzzle_id": row["puzzle_id"],
-                               "result": "Решено" if row.get("win") else "Ошибка",
-                               "attempt_date_ms": row.get("attempt_date_ms"),
-                               "themes": json.loads(row.get("themes_json") or "[]"),
-                               "source": "lichess"} for row in official_rows)
-                recent.sort(key=lambda row: row.get("created_at_ms") or
-                            row.get("attempt_date_ms") or 0, reverse=True)
                 payload = {
                     "puzzle": playable, "raw": raw, "account_id": scoped_account,
                     "rating_eligible": not self.game_repository.has_local_puzzle_rating_event(
                         scoped_account, playable.puzzle_id),
                     "details": {
                         "live_get_ms": puzzle_get_ms,
-                        "recent": recent[:8],
-                        "local_count": self.game_repository.local_puzzle_attempt_count(scoped_account),
-                        "official_rating": (self.game_repository.puzzle_player_rating(
-                            scoped_account) or {}).get("latest"),
-                        "rating_date": (self.game_repository.puzzle_player_rating(
-                            scoped_account) or {}).get("date"),
-                        "local_stats": self.game_repository.local_puzzle_statistics(scoped_account),
-                        "theme_stats": self.game_repository.local_puzzle_statistics(
-                            scoped_account, theme if theme != "mix" else None),
-                        "practice_rating": self.game_repository.local_puzzle_rating(scoped_account),
                     },
                 }
                 self.puzzle_training_finished.emit(request_id, payload, None)
@@ -6513,7 +6499,7 @@ class MainWindow(QMainWindow):
                     or self.screen_stack.currentWidget() is not page
                     or page.account_id != requested_account
                     or page.selected_theme() != theme
-                    or str(page.difficulty.currentData() or "normal") != difficulty
+                    or page.selected_difficulty() != difficulty
                     or page._is_replay):
                 return
             if error or not isinstance(payload, dict):
@@ -6665,8 +6651,10 @@ class MainWindow(QMainWindow):
                 page.set_message(str(error))
                 return
             page.account_id = payload["account_id"]
-            page.load_puzzle(payload["puzzle"], payload["payload"],
-                             source=payload.get("source", "local"))
+            page.load_puzzle(
+                payload["puzzle"], payload["payload"],
+                source="replay" if mode == "replay" else payload.get("source", "local"),
+                rating_eligible=False if mode == "replay" else None)
             if mode != "replay":
                 page.mark_local_candidate_seen(
                     payload.get("scope", scope), payload["puzzle"].puzzle_id)

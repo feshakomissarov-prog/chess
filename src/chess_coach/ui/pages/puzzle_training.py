@@ -126,6 +126,7 @@ class PuzzleTrainingPage(QWidget):
         self._rating_preview: tuple[int, int] | None = None
         self._allow_submit = False
         self._local_count = 0
+        self._metadata_attempt_count_by_account: dict[str, int] = {}
         self._local_stats = {"attempts": 0, "solved": 0, "success_percent": None}
         self._theme_stats = {"attempts": 0, "solved": 0, "success_percent": None}
         self._official_rating: int | None = None
@@ -516,12 +517,6 @@ class PuzzleTrainingPage(QWidget):
         self.network_status.clear()
         self.load_puzzle(prepared["puzzle"], prepared["payload"], source="lichess",
                          rating_eligible=bool(details.get("rating_eligible", True)))
-        self.set_recent_history(
-            details.get("recent", []), local_count=details.get("local_count", self._local_count),
-            official_rating=details.get("official_rating"),
-            rating_date=details.get("rating_date"),
-            local_stats=details.get("local_stats"), theme_stats=details.get("theme_stats"),
-            practice_rating=details.get("practice_rating"))
 
     def load_puzzle(self, puzzle: PuzzlePlayablePosition, payload: dict | None = None,
                     *, source: str = "local",
@@ -543,14 +538,15 @@ class PuzzleTrainingPage(QWidget):
         self._started_at = time.monotonic()
         self._terminal_verdict = ""
         self._rating_preview = None
-        self._allow_submit = not self._is_replay
+        # History/review puzzles are playable practice, but always unrated.
+        self._allow_submit = True
         self.board.set_position(self.state.board)
         self.board.set_flipped(not self.state.board.turn)
         self.board.clear_annotations(record_action=False)
         self.board.set_hint_arrows(())
         self.board.set_hint_squares(())
         self.board.set_feedback_squares(())
-        self.board.set_interaction_enabled(not self._is_replay)
+        self.board.set_interaction_enabled(True)
         self.return_to_solution.hide()
         self.review_back.setEnabled(self.state.review_count > 1)
         self.review_forward.setEnabled(False)
@@ -567,7 +563,7 @@ class PuzzleTrainingPage(QWidget):
         self._show_verdict("Найдите лучший ход. ПКМ — ваши стрелки и отметки.", "neutral")
         self.persistence_status.clear()
         self.network_status.clear()
-        self._set_controls(True, finished=self._is_replay)
+        self._set_controls(True)
         self.fetch.setText("Следующая задача")
         self._sync_hint_button()
         if source == "lichess":
@@ -615,7 +611,7 @@ class PuzzleTrainingPage(QWidget):
         self._wrong_timer_pending = False
         self.board.set_position(self.state.board)
         self.board.set_feedback_squares(())
-        self.board.set_interaction_enabled(not self._is_replay)
+        self.board.set_interaction_enabled(self._allow_submit)
         self.turn_label.setText("Ваш ход · " + ("белые" if self.state.board.turn else "чёрные"))
         self._show_verdict("✕ Неверный ход. Позиция восстановлена — попробуйте ещё.", "error")
 
@@ -634,7 +630,7 @@ class PuzzleTrainingPage(QWidget):
             self.board.set_position(self.state.board)
         self.board.set_feedback_squares(())
         self.board.clear_annotations(record_action=False)
-        self.board.set_interaction_enabled(not self._is_replay)
+        self.board.set_interaction_enabled(self._allow_submit)
         self.turn_label.setText("Ваш ход · " + ("белые" if self.state.board.turn else "чёрные"))
         if result == "success":
             self._finish(PuzzleOutcome.SUCCESS)
@@ -669,15 +665,26 @@ class PuzzleTrainingPage(QWidget):
         can_move = self._allow_submit and self.state.status in {
             PuzzleStatus.READY, PuzzleStatus.MISTAKE_RETRY,
         }
-        self.board.set_interaction_enabled(can_move and not self._is_replay)
+        self.board.set_interaction_enabled(can_move and self._allow_submit)
         self.return_to_solution.hide()
         self.review_position.setText("Текущая позиция решения")
         self.review_back.setEnabled(self.state.review_count > 1)
         self.review_forward.setEnabled(False)
-        if self.state.status == PuzzleStatus.SUCCESS:
-            self._show_verdict(self._terminal_verdict or "✓ Задача решена.", "success")
-        else:
-            self._show_verdict("Ваш ход · продолжайте решение.", "neutral")
+        success_kind = ("success" if not self.state.mistakes and not self.state.hints_used
+                        else "neutral")
+        restored = {
+            PuzzleStatus.SUCCESS: (self._terminal_verdict or "✓ Задача решена.", success_kind),
+            PuzzleStatus.REVEALED: (self._terminal_verdict or
+                                    "Решение показано · можно просмотреть линию.", "neutral"),
+            PuzzleStatus.SKIPPED: (self._terminal_verdict or
+                                   "Задача пропущена · следующая задача доступна.", "error"),
+            PuzzleStatus.UNAVAILABLE: ("Ответ соперника недоступен в этой задаче.", "error"),
+            PuzzleStatus.MISTAKE_RETRY: ("Неверный ход ранее · попробуйте снова.", "error"),
+            PuzzleStatus.OPPONENT_REPLY: ("Верно! Соперник отвечает…", "success"),
+        }
+        text, kind = restored.get(self.state.status,
+                                  ("Ваш ход · продолжайте решение.", "neutral"))
+        self._show_verdict(text, kind)
 
     def _sync_hint_button(self) -> None:
         self.hint.setText(f"Подсказка ({min(self.state.hint_level, 2)}/2)")
@@ -1074,7 +1081,13 @@ class PuzzleTrainingPage(QWidget):
                            local_stats: dict | None = None,
                            theme_stats: dict | None = None,
                            practice_rating: dict | None = None) -> None:
-        self._local_count = max(0, int(local_count))
+        incoming_count = max(0, int(local_count))
+        account_scope = str(self.account_id or "local")
+        known_count = self._metadata_attempt_count_by_account.get(account_scope, -1)
+        if incoming_count < known_count:
+            return
+        self._metadata_attempt_count_by_account[account_scope] = incoming_count
+        self._local_count = incoming_count
         if local_stats is not None:
             self._local_stats = dict(local_stats)
         if theme_stats is not None:
