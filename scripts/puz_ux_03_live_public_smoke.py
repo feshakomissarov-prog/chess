@@ -19,7 +19,7 @@ from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
 import chess
-from PySide6.QtCore import QPoint, QPointF, QTimer, Qt
+from PySide6.QtCore import QEvent, QObject, QPoint, QPointF, QTimer, Qt
 from PySide6.QtCore import QCoreApplication
 from PySide6.QtGui import QWheelEvent
 from PySide6.QtTest import QTest
@@ -33,6 +33,28 @@ from chess_coach.ui.pages.puzzle_training import PuzzleTrainingPage
 
 PUZZLE_IDS = ("0haqU", "00008", "0000D")
 BASE_URL = "https://lichess.org/api/puzzle/"
+
+
+class BoardPaintObserver(QObject):
+    """Record actual QWidget paint duration separately from input-to-paint delay."""
+
+    def __init__(self, page: PuzzleTrainingPage) -> None:
+        super().__init__(page.board)
+        self._paint_started: float | None = None
+        self.durations_ms: list[float] = []
+        page.board.installEventFilter(self)
+        page.board.paint_completed.connect(self._paint_completed)
+
+    def eventFilter(self, watched, event) -> bool:  # noqa: N802 - Qt API
+        if event.type() == QEvent.Type.Paint:
+            self._paint_started = time.perf_counter()
+        return False
+
+    def _paint_completed(self) -> None:
+        if self._paint_started is not None:
+            self.durations_ms.append(
+                round((time.perf_counter() - self._paint_started) * 1000, 2))
+            self._paint_started = None
 
 
 def fetch_public_puzzles() -> list[tuple[dict, dict]]:
@@ -86,7 +108,12 @@ def click_move(app: QApplication, page: PuzzleTrainingPage, move: chess.Move) ->
     starting_mistakes = page.state.mistakes
     start = page.board._square_center(move.from_square).toPoint()
     end = page.board._square_center(move.to_square).toPoint()
+    automation_clicks = getattr(page, "_automation_click_ms", None)
+    click_started = time.perf_counter()
     QTest.mouseClick(page.board, Qt.MouseButton.LeftButton, pos=start)
+    if automation_clicks is not None:
+        automation_clicks.append({"phase": "source",
+                                  "elapsed_ms": round((time.perf_counter() - click_started) * 1000, 2)})
     if move.promotion:
         # BoardView deliberately opens the normal piece picker for user input.
         # Select the puzzle's expected piece through its actual Qt button while
@@ -108,7 +135,11 @@ def click_move(app: QApplication, page: PuzzleTrainingPage, move: chess.Move) ->
                 QTimer.singleShot(10, choose_promotion)
 
         QTimer.singleShot(0, choose_promotion)
+    click_started = time.perf_counter()
     QTest.mouseClick(page.board, Qt.MouseButton.LeftButton, pos=end)
+    if automation_clicks is not None:
+        automation_clicks.append({"phase": "destination",
+                                  "elapsed_ms": round((time.perf_counter() - click_started) * 1000, 2)})
     if move.promotion and not promotion["selected"]:
         raise AssertionError("Promotion picker did not accept the expected piece")
     wait_until(app, lambda: page.state.solution_index > starting_index
@@ -205,6 +236,8 @@ def play(output: Path, dpi_scale: str) -> None:
     wait_until(app, lambda: page.isActiveWindow())
     page.board.setFocus()
     app.processEvents()
+    paint_observer = BoardPaintObserver(page)
+    page._automation_click_ms = []
     puzzles = fetch_public_puzzles()
     frames: list[dict] = []
 
@@ -299,6 +332,8 @@ def play(output: Path, dpi_scale: str) -> None:
                  for kind, value in zip(page._input_feedback_kinds,
                                         page._input_feedback_ms)],
              "first_input_stage_timings": first_input_stages,
+             "automation_click_samples": page._automation_click_ms,
+             "board_paint_event_ms": paint_observer.durations_ms,
              "elapsed_seconds": round(sum(float(meta["get_ms"]) for _raw, meta in puzzles) / 1000, 3),
              "rating_eligible": False}
     input_samples = sorted(page._input_feedback_ms)
