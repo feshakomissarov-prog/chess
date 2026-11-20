@@ -9,7 +9,7 @@ import uuid
 import chess
 from PySide6.QtCore import QSize, Qt, Signal, QTimer
 from PySide6.QtWidgets import (
-    QCheckBox, QComboBox, QFrame, QGridLayout, QHBoxLayout, QLabel, QLineEdit, QListWidget,
+    QBoxLayout, QCheckBox, QComboBox, QFrame, QGridLayout, QHBoxLayout, QLabel, QLineEdit, QListWidget,
     QListWidgetItem, QMessageBox, QPushButton, QScrollArea, QSizePolicy, QSplitter,
     QVBoxLayout, QWidget,
 )
@@ -234,17 +234,22 @@ class PuzzleTrainingPage(QWidget):
         center = QWidget()
         center_layout = QVBoxLayout(center)
         center_layout.setContentsMargins(4, 0, 4, 0)
+        feedback = QWidget(center)
+        self._feedback_layout = QBoxLayout(QBoxLayout.Direction.TopToBottom, feedback)
+        self._feedback_layout.setContentsMargins(0, 0, 0, 0)
+        self._feedback_layout.setSpacing(0)
         self.turn_label = QLabel("Задача не загружена · ход стороны решающего")
         self.turn_label.setObjectName("secondary")
         self.turn_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        center_layout.addWidget(self.turn_label)
+        self._feedback_layout.addWidget(self.turn_label)
         self.status = QLabel("Подключите задачи Lichess, чтобы начать.")
         self.status.setObjectName("puzzleVerdict")
         self.status.setWordWrap(True)
         self.status.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.status.setMinimumHeight(32)
         self.status.setAccessibleName("Состояние решения задачи")
-        center_layout.addWidget(self.status)
+        self._feedback_layout.addWidget(self.status)
+        center_layout.addWidget(feedback)
         self.board = BoardView(chess.Board(), center)
         self.board.setObjectName("puzzleBoard")
         self.board.setMinimumSize(160, 160)
@@ -1139,6 +1144,11 @@ class PuzzleTrainingPage(QWidget):
         self.theme_search.setVisible(not compact)
         self.history.setMaximumHeight(120 if self.height() < 650 else 260)
         center_width = self.board.parentWidget().width() if self.board.parentWidget() else self.width()
+        self._feedback_layout.setDirection(
+            QBoxLayout.Direction.LeftToRight
+            if compact and self.height() < 760 and center_width >= 600
+            else QBoxLayout.Direction.TopToBottom
+        )
         compact_controls = self._needs_compact_controls(center_width) or self.height() < 700
         if compact:
             self._training_root_layout.setContentsMargins(8, 2, 8, 4)
@@ -1148,7 +1158,7 @@ class PuzzleTrainingPage(QWidget):
             if center_layout is not None:
                 center_layout.setSpacing(0)
             for button in (self.hint, self.reveal, self.repeat, self.retry_save, self.next):
-                button.setMinimumHeight(30)
+                button.setFixedHeight(32)
         else:
             self._training_root_layout.setContentsMargins(10, 6, 10, 10)
             self._training_root_layout.setSpacing(6)
@@ -1157,6 +1167,7 @@ class PuzzleTrainingPage(QWidget):
             if center_layout is not None:
                 center_layout.setSpacing(6)
             for button in (self.hint, self.reveal, self.repeat, self.retry_save, self.next):
+                button.setMaximumHeight(16777215)
                 button.setMinimumHeight(38)
         if compact_controls != self._controls_compact:
             self._controls_compact = compact_controls
