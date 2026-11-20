@@ -1,6 +1,9 @@
 import json
 
+import chess
+from chess_coach.lichess.puzzle_training import PuzzlePlayablePosition
 from chess_coach.lichess.repository import GameRepository
+from chess_coach.ui.pages.puzzle_training import PuzzleTrainingPage
 
 
 def payload(puzzle_id, rating=1500):
@@ -82,3 +85,35 @@ def test_unrated_replay_and_missing_puzzle_rating_do_not_change_cc_rating(tmp_pa
         }
     finally:
         repository.shutdown()
+
+
+def test_prefetched_rating_metadata_cannot_roll_back_fresh_save_ack(qtbot):
+    page = PuzzleTrainingPage()
+    qtbot.addWidget(page)
+    page.account_id = "lichess:rating-user"
+    page.set_recent_history([], local_count=2, practice_rating={
+        "rating": 1508, "delta": 8, "rated_attempts": 1,
+    })
+    prepared = PuzzlePlayablePosition("prepared", chess.STARTING_FEN, ("d2d4",), ("fork",))
+
+    page._apply_prepared_puzzle({
+        "account_id": page.account_id, "theme": "mix", "difficulty": "normal",
+        "puzzle": prepared,
+        "payload": {"puzzle": {"id": "prepared", "rating": 1500,
+                               "solution": ["d2d4"], "themes": ["fork"]}},
+        "details": {
+            "recent": [], "local_count": 1,
+            "practice_rating": {"rating": 1500, "delta": 0, "rated_attempts": 0},
+        },
+    })
+
+    assert page._current_cc_rating == 1508
+    assert "1508" in page.practice_rating.text()
+    assert page._local_count == 2
+
+    # A later callback carrying an older per-account snapshot is stale too.
+    page.set_recent_history([], local_count=1, practice_rating={
+        "rating": 1500, "delta": 0, "rated_attempts": 0,
+    })
+    assert page._current_cc_rating == 1508
+    assert "1508" in page.practice_rating.text()

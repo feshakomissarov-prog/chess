@@ -2817,7 +2817,8 @@ def test_puzzle_account_switch_clears_old_board_and_keeps_scope(qtbot, tmp_path,
     window.screen_stack.setCurrentWidget(page)
     loaded = []
     monkeypatch.setattr(window, "_load_puzzle_training_accounts",
-                        lambda target, account: loaded.append((target, account)))
+                        lambda target, account, **kwargs:
+                        loaded.append((target, account, kwargs)))
 
     window._puzzle_training_account_changed(page, "lichess:account-b")
 
@@ -2825,7 +2826,67 @@ def test_puzzle_account_switch_clears_old_board_and_keeps_scope(qtbot, tmp_path,
     assert page.state.puzzle is None
     assert page.board._board.fen() == chess.STARTING_FEN
     assert page.turn_label.text() == "Задача не загружена"
-    assert loaded == [(page, "lichess:account-b")]
+    assert loaded == [(page, "lichess:account-b", {
+        "default_to_available": False, "request_puzzle": True,
+    })]
+    window.close()
+
+
+@pytest.mark.parametrize("difficulty", ["easiest", "hardest"])
+def test_advanced_difficulty_prefetch_accepts_selected_key(
+        qtbot, tmp_path, monkeypatch, difficulty):
+    from chess_coach.lichess.puzzle_training import PuzzlePlayablePosition
+    from chess_coach.ui.pages.puzzle_training import PuzzleTrainingPage
+
+    window = MainWindow(QSettings(str(tmp_path / f"advanced-prefetch-{difficulty}.ini"),
+                                  QSettings.Format.IniFormat), offline_mode=True)
+    qtbot.addWidget(window)
+    window.offline_mode = False
+    account_id = window.game_repository.ensure_archive_account("prefetch-user")
+    page = PuzzleTrainingPage(parent=window)
+    page.account_id = account_id
+    page.set_accounts([], account_id)
+    page.more_difficulty.setChecked(True)
+    page.advanced_difficulty.setCurrentIndex(
+        page.advanced_difficulty.findData(difficulty))
+    window._puzzle_training_page = page
+    window._puzzle_page = page
+    window.screen_stack.addWidget(page)
+    window.screen_stack.setCurrentWidget(page)
+
+    class FakeCredentialStore:
+        def __init__(self, **_kwargs): pass
+        def get(self): return "fake-test-token-not-sent-to-network"
+
+    class PublicPuzzleAdapter:
+        def __init__(self): self.difficulties = []
+        def get_puzzle_batch(self, _token, *, angle, difficulty, count):
+            self.difficulties.append(difficulty)
+            return {"puzzles": [{
+                "game": {"id": "fixture-game", "pgn": "1. e4"},
+                "puzzle": {"id": f"prepared-{difficulty}", "initialPly": 1,
+                           "lastMove": "e2e4", "solution": ["e7e5"],
+                           "themes": [angle], "rating": 1500},
+            }]}
+
+    class FakeService:
+        puzzle_username = "prefetch-user"
+        username = "prefetch-user"
+        def __init__(self): self.client = PublicPuzzleAdapter()
+
+    service = FakeService()
+    window.lichess = service
+    monkeypatch.setattr("chess_coach.window.WindowsCredentialStore", FakeCredentialStore)
+    page.load_puzzle(PuzzlePlayablePosition("current", chess.STARTING_FEN,
+                                            ("e2e4",), ("fork",)),
+                     {"puzzle": {"id": "current", "solution": ["e2e4"]}},
+                     source="lichess")
+
+    window._prefetch_puzzle_training(page, account_id, "mix", difficulty, page._session_id)
+    qtbot.waitUntil(lambda: page._prepared_online_puzzle is not None, timeout=4000)
+
+    assert service.client.difficulties == [difficulty]
+    assert page._prepared_online_puzzle["difficulty"] == difficulty
     window.close()
 
 

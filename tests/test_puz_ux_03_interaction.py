@@ -3,7 +3,7 @@ import time
 from PySide6.QtCore import QTimer
 
 from chess_coach.lichess.puzzle_training import (
-    PuzzlePlayablePosition, PuzzleStatus, PuzzleTrainingState,
+    PuzzleOutcome, PuzzlePlayablePosition, PuzzleStatus, PuzzleTrainingState,
 )
 from chess_coach.ui.pages.puzzle_training import PuzzleTrainingPage
 
@@ -217,3 +217,70 @@ def test_prepared_online_next_is_consumed_without_waiting_for_a_second_get(qtbot
     assert page._prepared_next_ms is not None
     assert page._prepared_next_ms < 250
     assert (time.perf_counter() - started) < 0.250
+
+
+def test_replayed_local_and_lichess_activity_are_interactive_but_unrated(qtbot):
+    import pytest
+
+    for source in ("local", "lichess_activity"):
+        page = PuzzleTrainingPage()
+        qtbot.addWidget(page)
+        attempts = []
+        page.attempt_saved.connect(attempts.append)
+        page.load_puzzle(puzzle(f"replay-{source}"), {"puzzle": {
+            "id": f"replay-{source}", "rating": 1500, "solution": ["e2e4"],
+            "themes": ["fork"],
+        }}, source=source)
+
+        assert page.board._interaction_enabled
+        assert page._allow_submit
+        page._submit_move(chess.Move.from_uci("e2e4"))
+
+        assert page.state.status == PuzzleStatus.SUCCESS
+        assert attempts[-1]["rating_eligible"] is False
+        assert page._session_streak == 0
+        assert "без рейтинга" in page.turn_label.text().casefold() or page._is_replay
+
+
+def test_review_roundtrip_preserves_terminal_and_retry_statuses():
+    cases = {
+        PuzzleStatus.SUCCESS: ("e2e4",),
+        PuzzleStatus.REVEALED: ("e2e4",),
+        PuzzleStatus.SKIPPED: ("e2e4",),
+        PuzzleStatus.UNAVAILABLE: ("e2e4", "a1a8", "d2d4"),
+        PuzzleStatus.MISTAKE_RETRY: ("e2e4",),
+    }
+    for expected, moves in cases.items():
+        state = PuzzleTrainingState()
+        state.load(puzzle(f"review-{expected.value}", moves))
+        if expected == PuzzleStatus.SUCCESS:
+            assert state.submit(chess.Move.from_uci("e2e4")) == "success"
+        elif expected == PuzzleStatus.REVEALED:
+            state.reveal()
+        elif expected == PuzzleStatus.SKIPPED:
+            state.skip()
+        elif expected == PuzzleStatus.UNAVAILABLE:
+            assert state.submit(chess.Move.from_uci("e2e4")) == "correct"
+            assert state.apply_opponent_reply() == "unavailable"
+        else:
+            assert state.submit(chess.Move.from_uci("d2d4")) == "mistake"
+        assert state.status == expected
+
+        state.navigate_review(-1)
+        state.return_to_solution()
+
+        assert state.status == expected
+
+
+def test_review_return_restores_the_visible_terminal_verdict(qtbot):
+    page = online_page(qtbot, puzzle_id="review-verdict")
+    page.state.reveal()
+    page._finish(PuzzleOutcome.REVEALED)
+    assert "Решение показано" in page.status.text()
+
+    page._navigate_review(-1)
+    page._return_to_solution()
+
+    assert page.state.status == PuzzleStatus.REVEALED
+    assert "Решение показано" in page.status.text()
+    assert not page.board._interaction_enabled

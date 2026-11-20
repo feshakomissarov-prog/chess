@@ -11,7 +11,9 @@ on:
       - "src/chess_coach/window.py"
       - "scripts/capture_puzzle_training.py"
       - "tests/test_puzzle_training*.py"
+      - "tests/test_puz_ux_03_*.py"
       - "tests/test_puzzle_api_adapter.py"
+      - "tests/test_window.py"
       - "tests/test_board_view.py"
       - "tests/test_background_work.py"
       - ".github/workflows/puzzle-ux-02-verification.yml"
@@ -78,6 +80,8 @@ jobs:
           tests/test_puzzle_training.py tests/test_puzzle_training_store.py
           tests/test_puzzle_training_ui.py tests/test_puzzle_training_navigation.py
           tests/test_puzzle_training_async.py tests/test_puzzle_api_adapter.py
+          tests/test_puz_ux_03_interaction.py tests/test_puz_ux_03_rating.py
+          tests/test_window.py
       - name: Run targeted puzzle contracts
         env:
           QT_QPA_PLATFORM: offscreen
@@ -86,11 +90,14 @@ jobs:
           tests/test_puzzle_training.py tests/test_puzzle_training_store.py
           tests/test_puzzle_training_ui.py tests/test_puzzle_training_navigation.py
           tests/test_puzzle_training_async.py tests/test_puzzle_api_adapter.py
+          tests/test_puz_ux_03_interaction.py tests/test_puz_ux_03_rating.py
+          tests/test_window.py::test_puzzle_account_switch_clears_old_board_and_keeps_scope
+          tests/test_window.py::test_advanced_difficulty_prefetch_accepts_selected_key
 
   l2-native-puzzle-captures:
     name: L2 native puzzle training captures
     needs: [detect-visual-scope, l1-targeted]
-    if: needs.detect-visual-scope.outputs.changed == 'true' && needs.l1-targeted.result == 'success'
+    if: needs.detect-visual-scope.outputs.changed == 'true' && needs.l1-targeted.result == 'success' && github.event.pull_request.head.ref != 'codex/puz-ux-03-online-puzzle-playability-2026-11-20'
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v7.0.1
