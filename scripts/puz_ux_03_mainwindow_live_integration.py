@@ -359,12 +359,14 @@ def run(output: Path) -> None:
     # rating history does not inherit the prior profile's number or date.
     window.game_repository.save_puzzle_player_rating(account_id, [[2026, 10, 19, 1850]])
     page.account_id = account_id
-    page.set_recent_history([], official_rating=1850, rating_date="2026-11-19",
-                            official_rating_loaded=True)
+    page.set_recent_history(
+        [], local_count=window.game_repository.local_puzzle_attempt_count(account_id),
+        official_rating=1850, rating_date="2026-11-19",
+        official_rating_loaded=True)
     if "1850" not in page.metrics.text():
         raise AssertionError("Isolated account A's official rating was not displayed")
     page.account_id = second_account
-    page.set_recent_history([], official_rating=None, rating_date=None,
+    page.set_recent_history([], local_count=0, official_rating=None, rating_date=None,
                             official_rating_loaded=True)
     if "1850" in page.metrics.text() or "нет данных" not in page.metrics.text():
         raise AssertionError("Account B inherited account A's official puzzle rating")
