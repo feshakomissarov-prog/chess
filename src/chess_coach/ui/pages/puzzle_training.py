@@ -137,6 +137,7 @@ class PuzzleTrainingPage(QWidget):
         header = QHBoxLayout()
         title = QLabel("Решение задач")
         title.setObjectName("pageTitle")
+        self._training_title = title
         header.addWidget(title)
         header.addStretch(1)
         self._training_root_layout = root
@@ -1146,14 +1147,19 @@ class PuzzleTrainingPage(QWidget):
         center_width = self.board.parentWidget().width() if self.board.parentWidget() else self.width()
         self._feedback_layout.setDirection(
             QBoxLayout.Direction.LeftToRight
-            if compact and self.height() < 760 and center_width >= 600
+            if compact and self.height() < 760 and center_width >= 500
             else QBoxLayout.Direction.TopToBottom
         )
         compact_controls = self._needs_compact_controls(center_width) or self.height() < 700
         if compact:
             self._training_root_layout.setContentsMargins(8, 2, 8, 4)
             self._training_root_layout.setSpacing(4)
+            self._training_title.setStyleSheet("font-size: 20px")
+            self.fetch.setMinimumHeight(30)
             self.status.setMinimumHeight(24)
+            for control in (self.account_selector, self.difficulty, self.more_difficulty,
+                            self.auto_next):
+                control.setMaximumHeight(32)
             center_layout = self.board.parentWidget().layout()
             if center_layout is not None:
                 center_layout.setSpacing(0)
@@ -1162,7 +1168,12 @@ class PuzzleTrainingPage(QWidget):
         else:
             self._training_root_layout.setContentsMargins(10, 6, 10, 10)
             self._training_root_layout.setSpacing(6)
+            self._training_title.setStyleSheet("")
+            self.fetch.setMinimumHeight(38)
             self.status.setMinimumHeight(32)
+            for control in (self.account_selector, self.difficulty, self.more_difficulty,
+                            self.auto_next):
+                control.setMaximumHeight(16777215)
             center_layout = self.board.parentWidget().layout()
             if center_layout is not None:
                 center_layout.setSpacing(6)
