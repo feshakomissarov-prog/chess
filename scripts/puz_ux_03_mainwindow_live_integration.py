@@ -154,6 +154,7 @@ def run(output: Path) -> None:
     account_id = page.account_id
     if not account_id.startswith("lichess:cc-puz-ux03-isolated"):
         raise AssertionError(f"Unexpected account scope: {account_id}")
+    second_account = window.game_repository.ensure_archive_account("cc-puz-ux03-second")
 
     solve_public_line(app, page, output, frames, "mainwindow-first")
     if page.state.status.value != "success":
@@ -414,7 +415,6 @@ def run(output: Path) -> None:
 
     # Change to a second synthetic profile and confirm the MainWindow account
     # callback clears the previous position and starts a scoped request.
-    second_account = window.game_repository.ensure_archive_account("cc-puz-ux03-second")
     rows = [{"account_id": page.account_selector.itemData(index),
              "username": page.account_selector.itemText(index), "attempts": 0}
             for index in range(page.account_selector.count())]
