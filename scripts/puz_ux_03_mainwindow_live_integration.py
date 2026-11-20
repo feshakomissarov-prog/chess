@@ -159,6 +159,111 @@ def run(output: Path) -> None:
     account_id = page.account_id
     if not account_id.startswith("lichess:cc-puz-ux03-isolated"):
         raise AssertionError(f"Unexpected account scope: {account_id}")
+
+    # Exercise the real background credential recheck while a public puzzle is
+    # active. A stale/missing credential must only report that speculative next
+    # is unavailable; it must leave the current position actionable.
+    active_before_recheck = {
+        "puzzle_id": page.state.puzzle.puzzle_id,
+        "fen": page.state.board.fen(),
+        "status": page.state.status.value,
+        "account_id": page._session_account_id,
+    }
+    generation_before_recheck = window._puzzle_training_generation
+    invalid_messages: list[str] = []
+
+    def report_prefetch_error(error) -> None:
+        message = "Следующая задача недоступна · проверьте разрешение"
+        page.network_status.setText(message)
+        page.set_authorization_needed(bool(error))
+        invalid_messages.append(message)
+
+    window._validate_puzzle_credential_before_apply(
+        page, generation_before_recheck, "deliberately-stale-fingerprint",
+        lambda: (_ for _ in ()).throw(AssertionError("stale credential applied")),
+        on_invalid=report_prefetch_error)
+    wait_until(app, lambda: bool(invalid_messages), timeout_ms=10000)
+    if (page.state.puzzle.puzzle_id != active_before_recheck["puzzle_id"]
+            or page.state.board.fen() != active_before_recheck["fen"]
+            or page.state.status.value != active_before_recheck["status"]
+            or page._session_account_id != active_before_recheck["account_id"]
+            or not page._allow_submit or not page.board._interaction_enabled):
+        raise AssertionError("Background credential error changed the active puzzle state")
+    capture(page, output, len(frames), "mainwindow-prefetch-error-current-task-actionable", frames)
+    prefetch_error_trace = {
+        **active_before_recheck,
+        "generation": generation_before_recheck,
+        "board_enabled": bool(page.board._interaction_enabled),
+        "allow_submit": bool(page._allow_submit),
+        "attempt_id": None,
+        "status_text": page.network_status.text(),
+        "credential_material_recorded": False,
+    }
+    page.network_status.clear()
+    page.set_authorization_needed(False)
+
+    # Hold the first durable enqueue while submitting the same immutable ID a
+    # second time. The second signal must coalesce with the active worker.
+    duplicate_attempt_id = "l2-prefetch-save-single-flight"
+    duplicate_attempt = {
+        "attempt_id": duplicate_attempt_id,
+        "account_id": account_id,
+        "session_id": page._session_id,
+        "puzzle_id": "l2-prefetch-save-puzzle",
+        "result": "success",
+        "solved": True,
+        "mistakes": 0,
+        "hints": 0,
+        "duration_ms": 25,
+        "puzzle_json": json.dumps({"puzzle": {
+            "id": "l2-prefetch-save-puzzle", "themes": ["fork"], "rating": 1600}}),
+        "selected_theme": "fork",
+        "rating_eligible": False,
+    }
+    enqueue_started = threading.Event()
+    release_enqueue = threading.Event()
+    enqueue_calls = 0
+    original_enqueue = window.game_repository.enqueue_puzzle_attempt
+
+    def gated_enqueue(attempt_payload):
+        nonlocal enqueue_calls
+        enqueue_calls += 1
+        enqueue_started.set()
+        if not release_enqueue.wait(10):
+            raise TimeoutError("L2 duplicate-save barrier was not released")
+        return original_enqueue(attempt_payload)
+
+    window.game_repository.enqueue_puzzle_attempt = gated_enqueue
+    attempts_before_duplicate_save = window.game_repository.local_puzzle_attempt_count(account_id)
+    page.attach_pending_attempts([duplicate_attempt])
+    window._save_training_attempt(page, duplicate_attempt)
+    wait_until(app, enqueue_started.is_set, timeout_ms=10000)
+    window._save_training_attempt(page, duplicate_attempt)
+    release_enqueue.set()
+    try:
+        wait_until(app, lambda: window.game_repository.local_puzzle_attempt_count(account_id)
+                   == attempts_before_duplicate_save + 1
+                   and duplicate_attempt_id not in page._pending_attempt_saves,
+                   timeout_ms=15000)
+    finally:
+        release_enqueue.set()
+        window.game_repository.enqueue_puzzle_attempt = original_enqueue
+    duplicate_save_event = window.game_repository.local_puzzle_rating_event(
+        account_id, "l2-prefetch-save-puzzle")
+    if enqueue_calls != 1 or duplicate_save_event is not None:
+        raise AssertionError("Duplicate attempt save did not coalesce to one committed worker")
+    duplicate_save_trace = {
+        "attempt_id": duplicate_attempt_id,
+        "account_id": account_id,
+        "generation": window._puzzle_training_generation,
+        "enqueue_workers": enqueue_calls,
+        "attempt_rows_added": (window.game_repository.local_puzzle_attempt_count(account_id)
+                               - attempts_before_duplicate_save),
+        "rating_events_added": int(duplicate_save_event is not None),
+        "status": page.persistence_status.text(),
+        "credential_material_recorded": False,
+    }
+    capture(page, output, len(frames), "mainwindow-duplicate-save-coalesced", frames)
     second_account = window.game_repository.ensure_archive_account("cc-puz-ux03-second")
 
     solve_public_line(app, page, output, frames, "mainwindow-first")
@@ -510,6 +615,8 @@ def run(output: Path) -> None:
         "reducer_history_cleared_on_next_puzzle": True,
         "gaming_account_a": "cc-puz-ux03-game-only",
         "puzzle_read_profile_b": "cc-puz-ux03-isolated",
+        "prefetch_error_kept_current_task_actionable": prefetch_error_trace,
+        "duplicate_attempt_save_coalesced": duplicate_save_trace,
     }
     (output / "mainwindow-public-integration.json").write_text(
         json.dumps(trace, ensure_ascii=False, indent=2), encoding="utf-8")

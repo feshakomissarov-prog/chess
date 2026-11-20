@@ -3474,6 +3474,8 @@ def test_puzzle_token_rotation_after_worker_emit_rejects_queued_result(
         return (not stale_applied()
                 and ("измен" in page.status.text().casefold()
                      or "измен" in page.network_status.text().casefold()
+                     or "разрешение" in page.network_status.text().casefold()
+                     or "не подготовлена" in page.network_status.text().casefold()
                      or "профиль" in page.status.text().casefold()))
 
     qtbot.waitUntil(lambda: stale_applied() or rejected(), timeout=5000)
@@ -3718,7 +3720,8 @@ def test_duplicate_attempt_save_is_single_flight_and_ack_remains_success(
                "result": "success", "solved": True, "mistakes": 0, "hints": 0,
                "duration_ms": 19,
                "puzzle_json": json.dumps({"puzzle": {"id": "same-attempt-puzzle",
-                                                          "themes": ["fork"]}}),
+                                                          "themes": ["fork"],
+                                                          "rating": 1600}}),
                "selected_theme": "fork", "rating_eligible": True}
     page.attach_pending_attempts([attempt])
     workers = []
@@ -3829,7 +3832,7 @@ def test_prefetch_validation_rechecks_scope_before_installing_prepared_puzzle(
     validator_callbacks = []
     if scope_change != "account":
         monkeypatch.setattr(window, "_validate_puzzle_credential_before_apply",
-                            lambda _page, _generation, _fingerprint, apply:
+                            lambda _page, _generation, _fingerprint, apply, **_kwargs:
                             validator_callbacks.append(apply))
     restarted_scopes = []
     monkeypatch.setattr(window, "_schedule_puzzle_prefetch_when_idle",

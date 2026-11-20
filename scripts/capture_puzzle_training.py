@@ -129,6 +129,30 @@ def main() -> None:
 
         save("ready")
 
+        # The background next-puzzle error is deliberately non-blocking: show
+        # its real status treatment over the loaded task and verify that the
+        # current move controls remain available at each native DPI scale.
+        actionable_puzzle_id = page.state.puzzle.puzzle_id
+        actionable_fen = page.state.board.fen()
+        page.network_status.setText(
+            "Следующая задача недоступна · проверьте разрешение")
+        assert page._allow_submit and page.board._interaction_enabled
+        assert page.state.puzzle.puzzle_id == actionable_puzzle_id
+        assert page.state.board.fen() == actionable_fen
+        save("prefetch-error-current-task-actionable")
+        (output / f"{size_text}-prefetch-error-trace.json").write_text(
+            json.dumps({
+                "puzzle_id": actionable_puzzle_id,
+                "fen": actionable_fen,
+                "account_id": page._session_account_id,
+                "generation": window._puzzle_training_generation,
+                "board_enabled": bool(page.board._interaction_enabled),
+                "allow_submit": bool(page._allow_submit),
+                "attempt_id": None,
+                "credential_material_recorded": False,
+            }, ensure_ascii=False, indent=2), encoding="utf-8")
+        page.network_status.clear()
+
         page.set_accounts([{"account_id": "local", "username": "Локальный профиль"},
                            {"account_id": "lichess:visual-b", "username": "Профиль B"}], "local")
         original_list_accounts = window.game_repository.list_puzzle_accounts
