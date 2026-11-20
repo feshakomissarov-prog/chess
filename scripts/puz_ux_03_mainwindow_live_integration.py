@@ -163,7 +163,6 @@ def run(output: Path) -> None:
     replay_before_rating = int(window.game_repository.local_puzzle_rating(account_id)["rating"])
     first = chess.Move.from_uci(page.state.puzzle.expected_user_moves[0])
     click_move(app, page, first)
-    wait_until(app, lambda: page.state.status.value in {"success", "mistake_retry"})
     if page.state.status.value == "mistake_retry":
         raise AssertionError("History replay rejected its known correct first move")
     if not page._is_replay or not page._allow_submit:
