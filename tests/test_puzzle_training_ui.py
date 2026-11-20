@@ -5,6 +5,13 @@ from PySide6.QtWidgets import QMessageBox
 from chess_coach.ui.pages.puzzle_training import PuzzleTrainingPage
 
 
+def test_initial_puzzle_instruction_fits_compact_feedback_area(qtbot):
+    page = PuzzleTrainingPage(demo=True)
+    qtbot.addWidget(page)
+    assert page.status.text() == "Найдите лучший ход · ПКМ — отметки."
+    assert page.status.wordWrap()
+
+
 def test_right_annotations_do_not_move_and_lmb_click_click_solves(qtbot):
     page = PuzzleTrainingPage(demo=True)
     qtbot.addWidget(page)

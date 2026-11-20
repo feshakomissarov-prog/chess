@@ -560,7 +560,7 @@ class PuzzleTrainingPage(QWidget):
                   "Новая задача Lichess" if source == "lichess" else "Демо · только для тестов")
         self.details.setText(f"ID: {puzzle.puzzle_id}\nИсточник: {origin}\n"
                              f"Тема: {theme_text}\nРейтинг задачи: {puzzle.rating or 'нет данных'}")
-        self._show_verdict("Найдите лучший ход. ПКМ — ваши стрелки и отметки.", "neutral")
+        self._show_verdict("Найдите лучший ход · ПКМ — отметки.", "neutral")
         self.persistence_status.clear()
         self.network_status.clear()
         self._set_controls(True)
