@@ -249,6 +249,8 @@ class PuzzleTrainingState:
         self.status = PuzzleStatus.REVIEW
         self._review_cursor = max(
             0, min(len(self._review_snapshots) - 1, self._review_cursor + int(direction)))
+        if int(direction) > 0 and self._review_cursor == len(self._review_snapshots) - 1:
+            return self.return_to_solution()
         return self._review_snapshots[self._review_cursor].copy(stack=True)
 
     def return_to_solution(self) -> chess.Board:

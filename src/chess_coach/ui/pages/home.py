@@ -488,6 +488,7 @@ class PuzzleRatingSparkline(QWidget):
 
 
 class HomePage(QWidget):
+    refresh_dashboard_requested = Signal()
     def __init__(self, repository, settings, username, actions, filters_changed, parent=None):
         super().__init__(parent)
         layout = QVBoxLayout(self)
@@ -498,7 +499,15 @@ class HomePage(QWidget):
         self.home_status.setWordWrap(False)
         self.home_status.setMaximumHeight(24)
         self.home_status.hide()
-        layout.addWidget(self.home_status)
+        self.dashboard_refresh_button = QPushButton("Обновить")
+        self.dashboard_refresh_button.setAccessibleName("Обновить сводку Home")
+        self.dashboard_refresh_button.setMaximumHeight(28)
+        self.dashboard_refresh_button.hide()
+        self.dashboard_refresh_button.clicked.connect(self.refresh_dashboard_requested.emit)
+        status_row = QHBoxLayout()
+        status_row.addWidget(self.home_status, 1)
+        status_row.addWidget(self.dashboard_refresh_button)
+        layout.addLayout(status_row)
         # The status row is hidden on Home; retain the baseline rhythm gap.
         layout.addSpacing(2)
 
