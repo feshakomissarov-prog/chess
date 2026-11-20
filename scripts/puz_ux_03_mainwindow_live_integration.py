@@ -375,6 +375,9 @@ def run(output: Path) -> None:
 
     # Durable failed attempts are recovered only in their account scope. Reopen
     # the page model for A/B/A without touching any persistent owner database.
+    if page.state.puzzle is None:
+        raise AssertionError("Expected the current live puzzle before outbox recovery")
+    previous_puzzle_id = page.state.puzzle.puzzle_id
     outbox_attempt = {
         "attempt_id": "l2-outbox-account-a", "account_id": account_id,
         "puzzle_id": "l2-outbox-puzzle", "session_id": "closed-l2-session",
@@ -422,7 +425,6 @@ def run(output: Path) -> None:
             for index in range(page.account_selector.count())]
     rows.append({"account_id": second_account, "username": "cc-puz-ux03-second",
                  "attempts": 0})
-    previous_puzzle_id = page.state.puzzle.puzzle_id
     page.set_accounts(rows, page.account_id)
     window.lichess.puzzle_username = "cc-puz-ux03-second"
     window.lichess.username = "cc-puz-ux03-second"
