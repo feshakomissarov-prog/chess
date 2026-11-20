@@ -4012,6 +4012,36 @@ def test_home_saved_puzzle_preview_opens_exact_offline_attempt(qtbot, tmp_path, 
     window.close()
 
 
+def test_home_dashboard_kpis_fit_at_compact_150_percent_viewport(qtbot, tmp_path):
+    from PySide6.QtCore import QRect
+
+    window = MainWindow(QSettings(str(tmp_path / "compact-home-kpis.ini"),
+                                  QSettings.Format.IniFormat), offline_mode=True)
+    qtbot.addWidget(window)
+    window.setFixedSize(1120, 640)
+    window.show()
+    qtbot.waitUntil(lambda: window._home_view.home_overview_scroll.viewport().width() > 100,
+                    timeout=3000)
+    qtbot.wait(50)
+
+    viewport = window._home_view.home_overview_scroll.viewport()
+    viewport_rect = QRect(viewport.mapToGlobal(QPoint(0, 0)), viewport.size())
+    for key in ("games", "accuracy"):
+        metric = window.dashboard_metrics[key]
+        metric_rect = QRect(metric.mapToGlobal(QPoint(0, 0)), metric.size())
+        assert viewport_rect.contains(metric_rect), (
+            f"{key} KPI extends outside the compact Home viewport: "
+            f"metric={metric_rect.getRect()} viewport={viewport_rect.getRect()} "
+            f"window={window.size().width()}x{window.size().height()} "
+            f"home={window._home_view.size().width()}x{window._home_view.size().height()} "
+            f"content={window._home_view.home_overview_scroll.widget().size().width()}x"
+            f"{window._home_view.home_overview_scroll.widget().size().height()} "
+            f"grid={window._home_view.dashboard_metrics_grid.geometry().getRect()} "
+            f"columns={window._home_view._dashboard_metric_columns}"
+        )
+    window.close()
+
+
 def test_sidebar_play_opens_mode_picker_without_resetting_local_game(qtbot, tmp_path):
     from PySide6.QtWidgets import QFrame
     window = MainWindow(QSettings(str(tmp_path / "play-picker.ini"),

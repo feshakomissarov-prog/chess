@@ -572,8 +572,12 @@ class HomePage(QWidget):
         for key in ("games", "accuracy"):
             # Leave enough vertical room for the wrapped, source-qualified
             # summary even when Windows font metrics round a line upward.
-            self.dashboard_metrics[key].setMinimumHeight(186)
-            self.dashboard_metrics[key].setMaximumHeight(198)
+            metric_card = self.dashboard_metrics[key]
+            metric_card.setMinimumWidth(0)
+            metric_card.setSizePolicy(QSizePolicy.Policy.Ignored,
+                                      QSizePolicy.Policy.Preferred)
+            metric_card.setMinimumHeight(186)
+            metric_card.setMaximumHeight(198)
 
         top_row = QHBoxLayout()
         self.home_primary_actions = top_row
@@ -735,6 +739,9 @@ class HomePage(QWidget):
         # three compact recent-game cards visible together in the right zone.
         # This follows the approved Home layout and avoids a page-level scroll.
         overview = QWidget(self)
+        overview.setMinimumWidth(0)
+        overview.setSizePolicy(QSizePolicy.Policy.Ignored,
+                               QSizePolicy.Policy.Preferred)
         overview_layout = QVBoxLayout(overview)
         overview_layout.setContentsMargins(0, 0, 0, 0)
         overview_layout.setSpacing(8)
