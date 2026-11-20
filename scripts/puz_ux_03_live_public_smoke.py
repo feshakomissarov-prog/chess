@@ -104,6 +104,25 @@ def capture(page: PuzzleTrainingPage, output: Path, index: int, label: str,
     print(f"FRAME {timestamp} {filename}")
 
 
+def solve_public_line(app: QApplication, page: PuzzleTrainingPage, output: Path,
+                      frames: list[dict], label_prefix: str) -> None:
+    """Enter only the solver's plies; the production page plays replies itself."""
+    while page.state.status.value != "success":
+        if page.state.status.value == "opponent_reply":
+            capture(page, output, len(frames), f"{label_prefix}-awaiting-reply", frames)
+            wait_until(app, lambda: page.state.status.value != "opponent_reply")
+            capture(page, output, len(frames), f"{label_prefix}-opponent-replied", frames)
+            continue
+        if page.state.status.value not in {"ready", "mistake_retry"}:
+            raise AssertionError(
+                f"Unexpected live puzzle status while solving: {page.state.status.value}")
+        index = page.state.solution_index
+        moves = page.state.puzzle.expected_user_moves
+        if index >= len(moves):
+            break
+        click_move(app, page, chess.Move.from_uci(moves[index]))
+
+
 def play(output: Path, dpi_scale: str) -> None:
     os.environ["QT_SCALE_FACTOR"] = dpi_scale
     app = QApplication([])
@@ -151,13 +170,7 @@ def play(output: Path, dpi_scale: str) -> None:
     capture(page, output, len(frames), "hint-one", frames)
     page._hint()
     capture(page, output, len(frames), "hint-two-arrow", frames)
-    for raw_move in page.state.puzzle.expected_user_moves:
-        move = chess.Move.from_uci(raw_move)
-        click_move(app, page, move)
-        if page.state.status.value == "opponent_reply":
-            capture(page, output, len(frames), "correct-awaiting-reply", frames)
-            wait_until(app, lambda: page.state.status.value != "opponent_reply")
-            capture(page, output, len(frames), "opponent-replied", frames)
+    solve_public_line(app, page, output, frames, "correct")
     if page.state.status.value != "success":
         raise AssertionError("Did not finish first public puzzle in production page")
     capture(page, output, len(frames), "hinted-win", frames)
@@ -186,12 +199,7 @@ def play(output: Path, dpi_scale: str) -> None:
         page.return_to_solution.click()
         if page.state.is_reviewing:
             raise AssertionError("Return-to-solution control did not restore the live position")
-    for raw_move in page.state.puzzle.expected_user_moves:
-        move = chess.Move.from_uci(raw_move)
-        click_move(app, page, move)
-        if page.state.status.value == "opponent_reply":
-            capture(page, output, len(frames), "reply-phase", frames)
-            wait_until(app, lambda: page.state.status.value != "opponent_reply")
+    solve_public_line(app, page, output, frames, "second")
     if page.state.status.value != "success":
         raise AssertionError("Did not finish second public puzzle in production page")
     capture(page, output, len(frames), "clean-win", frames)
@@ -201,11 +209,7 @@ def play(output: Path, dpi_scale: str) -> None:
 
     # Third public position is now visible in the same live Qt page; exercise
     # the user's first move and finish its known public solution as well.
-    for raw_move in page.state.puzzle.expected_user_moves:
-        move = chess.Move.from_uci(raw_move)
-        click_move(app, page, move)
-        if page.state.status.value == "opponent_reply":
-            wait_until(app, lambda: page.state.status.value != "opponent_reply")
+    solve_public_line(app, page, output, frames, "third")
     if page.state.status.value != "success":
         raise AssertionError("Did not finish third public puzzle after auto-next")
     capture(page, output, len(frames), "third-live-win", frames)
