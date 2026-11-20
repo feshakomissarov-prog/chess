@@ -23,6 +23,7 @@ class BoardView(BoardWidget):
 
     move_intent = Signal(object)
     wheel_navigate = Signal(int)
+    paint_completed = Signal()
     premove_intent = Signal(object)
     annotations_changed = Signal()
     annotation_action = Signal(dict)
@@ -50,6 +51,8 @@ class BoardView(BoardWidget):
         self._annotation_squares: set[int] = set()
         self._hint_arrows: set[tuple[int, int]] = set()
         self._hint_squares: set[int] = set()
+        self._feedback_squares: set[int] = set()
+        self._feedback_color = QColor(220, 74, 83, 170)
         self._right_start: Optional[int] = None
         self._right_end: Optional[int] = None
         self._right_dragged = False
@@ -113,6 +116,16 @@ class BoardView(BoardWidget):
             self.update()
         self.set_annotation_context(self._line_context.get("game_id"), board)
 
+    def animate_move(self, move: chess.Move) -> bool:
+        """Render an already-authorized puzzle move with the upstream animation."""
+        if move not in self._board.legal_moves:
+            return False
+        # chess-widgets owns the established piece animation; the puzzle state
+        # has already accepted this move before the rendering snapshot advances.
+        self.play_move(move, animate=True, interactive=False)
+        self.set_annotation_context(self._line_context.get("game_id"), self._board)
+        return True
+
     def set_premove(self, move: Optional[chess.Move], color: chess.Color) -> None:
         if self._queued_premove == move and self._premove_color == color:
             return
@@ -173,6 +186,13 @@ class BoardView(BoardWidget):
         """Highlight a hint origin without revealing the destination."""
         self._hint_squares = {int(square) for square in squares}
         self._hint_arrows.clear()
+        self.update()
+
+    def set_feedback_squares(self, squares, color: QColor | str = "#dc4a53") -> None:
+        """Draw temporary move feedback independently from user marks and hints."""
+        self._feedback_squares = {int(square) for square in squares}
+        self._feedback_color = QColor(color)
+        self._feedback_color.setAlpha(178)
         self.update()
 
     def _make_interactive_move(self, move: chess.Move) -> None:
@@ -257,6 +277,10 @@ class BoardView(BoardWidget):
             self._renderer.highlight_square(
                 painter, self._get_board_rect(), square,
                 QColor(170, 155, 239, 155), self._flipped)
+        for square in self._feedback_squares:
+            self._renderer.highlight_square(
+                painter, self._get_board_rect(), square,
+                self._feedback_color, self._flipped)
         if self._queued_premove is not None:
             self._draw_arrow(
                 painter,
@@ -279,6 +303,7 @@ class BoardView(BoardWidget):
                 painter, self._get_board_rect(), self._premove_target,
                 QColor(60, 140, 220, 115), self._flipped,
             )
+        self.paint_completed.emit()
 
     def mousePressEvent(self, event: QMouseEvent) -> None:  # noqa: N802 - Qt API
         if event.button() == Qt.MouseButton.RightButton:
@@ -414,6 +439,17 @@ class BoardView(BoardWidget):
             event.accept()
 
     def keyPressEvent(self, event) -> None:  # noqa: N802 - Qt API
+        if not event.modifiers() & (Qt.KeyboardModifier.ControlModifier
+                                    | Qt.KeyboardModifier.AltModifier
+                                    | Qt.KeyboardModifier.MetaModifier):
+            if event.key() == Qt.Key.Key_Left:
+                self.wheel_navigate.emit(-1)
+                event.accept()
+                return
+            if event.key() == Qt.Key.Key_Right:
+                self.wheel_navigate.emit(1)
+                event.accept()
+                return
         if event.key() == Qt.Key.Key_Escape:
             self._clear_selection()
             self._queued_premove = None

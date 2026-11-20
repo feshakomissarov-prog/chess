@@ -1,4 +1,5 @@
 import json
+import sqlite3
 import chess
 
 from chess_coach.lichess.repository import GameRepository
@@ -104,3 +105,35 @@ def test_stable_local_attempt_id_makes_retry_idempotent(tmp_path):
         assert repository.local_puzzle_attempt_count(account) == 1
     finally:
         repository.shutdown()
+
+
+def test_v27_upgrade_adds_rating_tables_without_losing_attempt_history(tmp_path):
+    path = tmp_path / "puzzles-v27.sqlite3"
+    repository = GameRepository(path)
+    account = repository.ensure_archive_account("migration-user")
+    payload = json.dumps({"puzzle": {"id": "old-attempt", "rating": 1550,
+                                     "solution": ["e2e4"], "themes": ["fork"]}})
+    repository.save_local_puzzle_attempt(
+        account, "old-attempt", result="mistake", solved=False, mistakes=1,
+        hints=0, duration_ms=900, puzzle_json=payload, attempt_id="preserved-attempt",
+    )
+    repository.shutdown()
+
+    with sqlite3.connect(path) as db:
+        db.execute("DROP TABLE IF EXISTS local_puzzle_rating_events")
+        db.execute("DROP TABLE IF EXISTS local_puzzle_practice_ratings")
+        db.execute("PRAGMA user_version=27")
+
+    migrated = GameRepository(path)
+    try:
+        attempts = migrated.local_puzzle_attempts(account, limit=8)
+        assert len(attempts) == 1
+        assert attempts[0]["local_attempt_id"] == "preserved-attempt"
+        assert migrated.local_puzzle_rating(account)["rating"] == 1500
+        with migrated._connection() as db:
+            tables = {row[0] for row in db.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'")}
+            assert {"local_puzzle_practice_ratings", "local_puzzle_rating_events"} <= tables
+            assert db.execute("PRAGMA user_version").fetchone()[0] == 28
+    finally:
+        migrated.shutdown()

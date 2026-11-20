@@ -188,6 +188,16 @@ def main() -> None:
         page.board.move_intent.emit(chess.Move.from_uci("d7d5"))
         assert page.state.status.value == "success"
         save("solved")
+        wait_for(lambda: page.persistence_status.text().startswith("✓ Сохранено в SQLite"))
+        timing = {
+            "synthetic_visual_fixture": True,
+            "input_to_first_paint_ms": round(page._input_feedback_ms[-1], 2)
+            if page._input_feedback_ms else None,
+            "sqlite_commit_ms": page._db_commit_ms,
+        }
+        (output / "puzzle-timing.json").write_text(
+            json.dumps(timing, ensure_ascii=False, indent=2), encoding="utf-8")
+        print("TIMING " + json.dumps(timing, ensure_ascii=False))
 
         page.load_puzzle(normalize_api_puzzle(payload), payload, source="lichess")
         page.board.move_intent.emit(chess.Move.from_uci("d7d6"))
@@ -200,6 +210,22 @@ def main() -> None:
         page.board.move_intent.emit(chess.Move.from_uci("d7d5"))
         assert page.state.status.value == "success"
         save("solved-after-hint")
+
+        prepared_payload = fixture("NEXT-PREPARED")
+        page.account_id = "lichess:visual-b"
+        page._next_requested_at = time.perf_counter()
+        page.set_prepared_puzzle(
+            page.account_id, page.selected_theme(),
+            str(page.difficulty.currentData() or "normal"),
+            normalize_api_puzzle(prepared_payload), prepared_payload,
+            {"rating_eligible": True, "live_get_ms": 1200.0})
+        page._next()
+        assert page.state.puzzle.puzzle_id == "NEXT-PREPARED"
+        save("prepared-next")
+        timing["prepared_next_visible_ms"] = page._prepared_next_ms
+        (output / "puzzle-timing.json").write_text(
+            json.dumps(timing, ensure_ascii=False, indent=2), encoding="utf-8")
+        print("TIMING " + json.dumps(timing, ensure_ascii=False))
 
         page.close()
         window.close()

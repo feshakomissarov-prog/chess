@@ -2749,6 +2749,86 @@ def test_puzzle_history_summary_uses_attempt_denominators_and_available_fields()
     assert "учитываются отдельно" in summary
 
 
+def test_theme_change_restarts_cancelled_prefetch_and_uses_selected_difficulty(
+        qtbot, tmp_path, monkeypatch):
+    from chess_coach.lichess.puzzle_training import PuzzlePlayablePosition
+    from chess_coach.ui.pages.puzzle_training import PuzzleTrainingPage
+
+    window = MainWindow(QSettings(str(tmp_path / "puzzle-prefetch-restart.ini"),
+                                  QSettings.Format.IniFormat), offline_mode=True)
+    qtbot.addWidget(window)
+    page = PuzzleTrainingPage(parent=window)
+    page.account_id = "lichess:prefetch-user"
+    window._puzzle_training_page = page
+    window._puzzle_page = page
+    window.screen_stack.addWidget(page)
+    window.screen_stack.setCurrentWidget(page)
+    position = PuzzlePlayablePosition("current", chess.STARTING_FEN, ("e2e4",), ("fork",))
+    page.load_puzzle(position, {"puzzle": {"id": "current", "solution": ["e2e4"]}},
+                     source="lichess")
+
+    class InFlightHandle:
+        alive = True
+
+        def is_alive(self):
+            return self.alive
+
+        def cancel(self, *_args):
+            return True
+
+    handle = InFlightHandle()
+    window._puzzle_prefetch_handle = handle
+    theme_index = page.theme.findData("fork")
+    assert theme_index >= 0
+    page.theme.setCurrentIndex(theme_index)
+    page.more_difficulty.setChecked(True)
+    harder_index = page.advanced_difficulty.findData("hardest")
+    page.advanced_difficulty.setCurrentIndex(harder_index)
+    calls = []
+    monkeypatch.setattr(window, "_prefetch_puzzle_training",
+                        lambda *args: calls.append(args))
+    QTimer.singleShot(150, lambda: setattr(handle, "alive", False))
+
+    window._puzzle_theme_selection_changed(page)
+    qtbot.waitUntil(lambda: bool(calls), timeout=1000)
+
+    assert calls == [(page, "lichess:prefetch-user", "fork", "hardest", page._session_id)]
+    window.close()
+
+
+def test_puzzle_account_switch_clears_old_board_and_keeps_scope(qtbot, tmp_path, monkeypatch):
+    from chess_coach.lichess.puzzle_training import PuzzlePlayablePosition
+    from chess_coach.ui.pages.puzzle_training import PuzzleTrainingPage
+
+    window = MainWindow(QSettings(str(tmp_path / "puzzle-account-switch.ini"),
+                                  QSettings.Format.IniFormat), offline_mode=True)
+    qtbot.addWidget(window)
+    page = PuzzleTrainingPage(parent=window)
+    page.account_id = "lichess:account-a"
+    old_position = chess.Board()
+    old_position.push_uci("e2e4")
+    page.load_puzzle(PuzzlePlayablePosition("account-a-puzzle", old_position.fen(),
+                                            ("e7e5",), ("fork",)),
+                     {"puzzle": {"id": "account-a-puzzle", "solution": ["e7e5"]}},
+                     source="lichess")
+    window._puzzle_training_page = page
+    window._puzzle_page = page
+    window.screen_stack.addWidget(page)
+    window.screen_stack.setCurrentWidget(page)
+    loaded = []
+    monkeypatch.setattr(window, "_load_puzzle_training_accounts",
+                        lambda target, account: loaded.append((target, account)))
+
+    window._puzzle_training_account_changed(page, "lichess:account-b")
+
+    assert page.account_id == "lichess:account-b"
+    assert page.state.puzzle is None
+    assert page.board._board.fen() == chess.STARTING_FEN
+    assert page.turn_label.text() == "Задача не загружена"
+    assert loaded == [(page, "lichess:account-b")]
+    window.close()
+
+
 def test_my_puzzles_home_action_opens_local_history_without_network_or_oauth(
     qtbot, tmp_path
 ):

@@ -90,12 +90,13 @@ def test_history_and_statistics_wait_for_real_save_ack_and_retry_same_attempt(qt
     attempt = saved[-1]
     assert page.history.count() == 0
     assert page._local_count == 0
-    assert page.status.text().startswith("Сохраняю")
+    assert page.status.text().startswith("✓ Задача решена")
+    assert page.persistence_status.text().startswith("● Сохраняется")
 
     page._attempt_save_completed(attempt["attempt_id"], False, {}, "OperationalError")
     assert page.history.count() == 0
     assert page._local_count == 0
-    assert "не удалось сохранить" in page.status.text().casefold()
+    assert "не удалось сохранить" in page.persistence_status.text().casefold()
     page._retry_attempt_save()
     assert saved[-1]["attempt_id"] == attempt["attempt_id"]
 
@@ -110,7 +111,7 @@ def test_history_and_statistics_wait_for_real_save_ack_and_retry_same_attempt(qt
     assert page.history.count() == 1
     assert "Решено" in page.history.item(0).text()
     assert page._local_count == 1
-    assert "сохран" in page.status.text().casefold()
+    assert "сохран" in page.persistence_status.text().casefold()
 
 
 def test_repeat_requires_consent_when_attempt_is_still_active(qtbot, monkeypatch):

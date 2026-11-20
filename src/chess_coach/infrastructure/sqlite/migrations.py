@@ -480,6 +480,26 @@ class SQLiteMigrationMixin:
                 fetched_at TEXT NOT NULL,
                 points_json TEXT NOT NULL
             )""")
+            db.execute("""CREATE TABLE IF NOT EXISTS local_puzzle_practice_ratings (
+                account_id TEXT PRIMARY KEY REFERENCES accounts(account_id) ON DELETE CASCADE,
+                rating INTEGER NOT NULL DEFAULT 1500,
+                last_delta INTEGER NOT NULL DEFAULT 0,
+                rated_attempts INTEGER NOT NULL DEFAULT 0,
+                updated_at TEXT NOT NULL
+            )""")
+            db.execute("""CREATE TABLE IF NOT EXISTS local_puzzle_rating_events (
+                event_id TEXT PRIMARY KEY,
+                account_id TEXT NOT NULL REFERENCES accounts(account_id) ON DELETE CASCADE,
+                puzzle_id TEXT NOT NULL,
+                attempt_id TEXT NOT NULL UNIQUE REFERENCES local_puzzle_attempts(local_attempt_id) ON DELETE CASCADE,
+                puzzle_rating INTEGER NOT NULL,
+                score REAL NOT NULL CHECK(score IN (0,1)),
+                rating_before INTEGER NOT NULL,
+                delta INTEGER NOT NULL,
+                rating_after INTEGER NOT NULL,
+                created_at TEXT NOT NULL,
+                UNIQUE(account_id,puzzle_id)
+            )""")
             # Semantic source revisions let the two Home read models survive
             # restarts. Metadata-only sync writes must not invalidate analytics,
             # while every table used by dashboard SQL remains in the dependency

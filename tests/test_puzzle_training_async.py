@@ -89,7 +89,8 @@ def test_oauth_browser_open_is_dispatched_on_qt_main_thread(
     window.close()
 
 
-def test_delayed_save_ack_refreshes_reopened_page_after_navigation(qtbot, tmp_path):
+@pytest.mark.parametrize("delay_ms", (50, 500, 3000))
+def test_delayed_save_ack_refreshes_reopened_page_after_navigation(qtbot, tmp_path, delay_ms):
     window = MainWindow(QSettings(str(tmp_path / "save-navigation.ini"),
                                   QSettings.Format.IniFormat), offline_mode=True)
     qtbot.addWidget(window)
@@ -110,7 +111,7 @@ def test_delayed_save_ack_refreshes_reopened_page_after_navigation(qtbot, tmp_pa
 
         def save_local_puzzle_attempt(self, account_id, puzzle_id, **payload):
             self.started.set()
-            assert self.release.wait(5)
+            assert self.release.wait(delay_ms / 1000 + 5)
             attempt_id = payload["attempt_id"]
             self.saved.setdefault(attempt_id, (account_id, puzzle_id, payload))
             return attempt_id, len(self.saved) == 1
@@ -126,6 +127,12 @@ def test_delayed_save_ack_refreshes_reopened_page_after_navigation(qtbot, tmp_pa
         def local_puzzle_statistics(self, _account_id, _theme=None):
             return {"attempts": 1, "solved": 1, "success_percent": 100.0}
 
+        def local_puzzle_rating(self, _account_id):
+            return {"rating": 1508, "delta": 8, "rated_attempts": 1}
+
+        def local_puzzle_rating_event(self, _account_id, _puzzle_id):
+            return {"delta": 8}
+
         def has_pending_writes(self):
             return False
 
@@ -134,6 +141,12 @@ def test_delayed_save_ack_refreshes_reopened_page_after_navigation(qtbot, tmp_pa
     window._puzzle_training_page = old_page
     window._save_training_attempt(old_page, attempt)
     qtbot.waitUntil(repository.started.is_set, timeout=5000)
+    ui_tick = threading.Event()
+    from PySide6.QtCore import QTimer
+    QTimer.singleShot(20, ui_tick.set)
+    qtbot.waitUntil(ui_tick.is_set, timeout=500)
+    qtbot.wait(delay_ms)
+    assert old_page.status.text().startswith("✓ Задача решена")
 
     reopened = PuzzleTrainingPage(demo=True)
     qtbot.addWidget(reopened)
@@ -157,3 +170,58 @@ def test_delayed_save_ack_refreshes_reopened_page_after_navigation(qtbot, tmp_pa
     old_page.close()
     reopened.close()
     qtbot.wait(100)
+
+
+@pytest.mark.parametrize("delay_ms", (100, 1200, 3000))
+def test_delayed_live_get_keeps_qt_event_loop_responsive(
+        qtbot, tmp_path, monkeypatch, delay_ms):
+    window = MainWindow(QSettings(str(tmp_path / "puzzle-get-delay.ini"),
+                                  QSettings.Format.IniFormat), offline_mode=True)
+    qtbot.addWidget(window)
+    window.offline_mode = False
+    get_started = threading.Event()
+    release_get = threading.Event()
+
+    class DelayedClient(_FakePuzzleClient):
+        def get_puzzle_batch(self, _token, **_kwargs):
+            get_started.set()
+            assert release_get.wait(delay_ms / 1000 + 5), \
+                "test releases GET after proving Qt responsiveness"
+            return {"puzzles": [_official_example()],
+                    "glicko": {"rating": 1600, "deviation": 75}}
+
+    service = SimpleNamespace(
+        client=DelayedClient(), username="fixture-user", puzzle_username="fixture-user",
+        capture_operation_context=lambda **_kwargs: None,
+        close=lambda *_args, **_kwargs: True,
+    )
+    window.lichess = service
+
+    class FakeStore:
+        def __init__(self, **_kwargs):
+            pass
+
+        def get(self):
+            return "isolated-fake-puzzle-read-token"
+
+    monkeypatch.setattr(window_module, "WindowsCredentialStore", FakeStore)
+    window.show_puzzle_training("lichess:fixture-user")
+    page = window._puzzle_training_page
+    assert page is not None
+    assert get_started.wait(2)
+    ui_tick = threading.Event()
+    from PySide6.QtCore import QTimer
+    QTimer.singleShot(20, ui_tick.set)
+    try:
+        qtbot.waitUntil(ui_tick.is_set, timeout=500)
+        assert window.screen_stack.currentWidget() is page
+        assert page.state.puzzle is None
+        assert page.status.text().startswith("Получаю")
+        qtbot.wait(delay_ms)
+        assert get_started.is_set()
+        assert page.state.puzzle is None
+    finally:
+        release_get.set()
+    qtbot.waitUntil(lambda: page.state.puzzle is not None, timeout=5000)
+    assert page.state.puzzle.puzzle_id == _official_example()["puzzle"]["id"]
+    window.close()

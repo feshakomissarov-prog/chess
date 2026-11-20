@@ -5972,13 +5972,19 @@ class MainWindow(QMainWindow):
             selected = "local"
         page.account_id = selected
         page.set_accounts([], selected)
-        page.source.setCurrentIndex(page.source.findData("saved" if puzzle_id else "new"))
+        page.source.setCurrentIndex(page.source.findData("new"))
         saved_theme = str(self.settings.value("puzzles/theme", "mix", type=str) or "mix")
         theme_index = page.theme.findData(saved_theme)
         if theme_index >= 0:
             page.theme.setCurrentIndex(theme_index)
         page.theme.currentIndexChanged.connect(
             lambda _index: self._puzzle_theme_selection_changed(page))
+        page.difficulty.currentIndexChanged.connect(
+            lambda _index: self._puzzle_difficulty_selection_changed(page))
+        page.advanced_difficulty.currentIndexChanged.connect(
+            lambda _index: self._puzzle_difficulty_selection_changed(page))
+        page.more_difficulty.toggled.connect(
+            lambda _enabled: self._puzzle_difficulty_selection_changed(page))
         page.new_puzzle_requested.connect(
             lambda theme, difficulty: self._request_puzzle_training(
                 page, theme, difficulty, authorize=False))
@@ -5992,6 +5998,14 @@ class MainWindow(QMainWindow):
             self._replay_puzzle_training(page, replay_account, replay_id, replay_source))
         page.account_changed.connect(
             lambda selected_account: self._puzzle_training_account_changed(page, selected_account))
+        page.prefetch_requested.connect(
+            lambda account, theme, difficulty, session_id:
+            self._prefetch_puzzle_training(page, account, theme, difficulty, session_id))
+        self._set_puzzle_auto_next_for_account(page, selected)
+        page.auto_next.toggled.connect(
+            lambda enabled, target=page:
+            self.settings.setValue(
+                f"puzzles/auto_next/{target.account_id}", bool(enabled)))
         page.session_hidden.connect(lambda: self._puzzle_training_hidden(page))
         page.attempt_saved.connect(lambda attempt: self._save_training_attempt(page, attempt))
         page.history_requested.connect(lambda: self.show_puzzle_history(page.account_id))
@@ -6006,6 +6020,10 @@ class MainWindow(QMainWindow):
         if puzzle_id:
             self._request_local_training_puzzle(page, "replay", "", puzzle_id=puzzle_id,
                                                 source_hint=puzzle_source)
+        else:
+            self._request_puzzle_training(page, page.selected_theme(),
+                                          str(page.difficulty.currentData() or "normal"),
+                                          authorize=False)
 
     def _replay_puzzle_training(self, page: PuzzleTrainingPage, account_id: str,
                                 puzzle_id: str, source: str) -> None:
@@ -6022,9 +6040,16 @@ class MainWindow(QMainWindow):
         else:
             page.account_selector.setCurrentIndex(index)
         page.account_id = selected
-        page.source.setCurrentIndex(page.source.findData("errors" if source == "local" else "saved"))
+        page.source.setCurrentIndex(page.source.findData("new"))
         self._request_local_training_puzzle(page, "replay", "", puzzle_id=puzzle_id,
                                             source_hint=source)
+
+    def _set_puzzle_auto_next_for_account(self, page: PuzzleTrainingPage,
+                                          account_id: str) -> None:
+        page.auto_next.blockSignals(True)
+        page.auto_next.setChecked(
+            self.settings.value(f"puzzles/auto_next/{account_id}", True, type=bool))
+        page.auto_next.blockSignals(False)
 
     def _load_puzzle_training_accounts(self, page: PuzzleTrainingPage,
                                        selected_account: str) -> None:
@@ -6070,6 +6095,7 @@ class MainWindow(QMainWindow):
                     "theme_stats": self.game_repository.local_puzzle_statistics(
                         preferred, selected_theme if selected_theme != "mix" else None),
                     "rating": self.game_repository.puzzle_player_rating(preferred),
+                    "practice_rating": self.game_repository.local_puzzle_rating(preferred),
                 }, None)
             except Exception as exc:
                 self.puzzle_training_finished.emit(request_id, None, str(exc))
@@ -6084,12 +6110,14 @@ class MainWindow(QMainWindow):
             accounts = payload.get("accounts", []) if isinstance(payload, dict) else []
             preferred = payload.get("selected", selected_account) if isinstance(payload, dict) else selected_account
             page.set_accounts(accounts, preferred)
+            self._set_puzzle_auto_next_for_account(page, preferred)
             page.set_recent_history(
                 payload.get("recent", []), local_count=payload.get("local_count", 0),
                 official_rating=(payload.get("rating") or {}).get("latest"),
                 rating_date=(payload.get("rating") or {}).get("date"),
                 local_stats=payload.get("local_stats"),
-                theme_stats=payload.get("theme_stats"))
+                theme_stats=payload.get("theme_stats"),
+                practice_rating=payload.get("practice_rating"))
 
         self._register_training_callback(page, request_id, generation, apply_result)
         handle = self._start_registered_work(
@@ -6101,21 +6129,69 @@ class MainWindow(QMainWindow):
         self.settings.setValue("puzzles/theme", page.selected_theme())
         if page is not self._puzzle_training_page:
             return
-        handle = getattr(self, "_puzzle_training_handle", None)
+        page._prepared_online_puzzle = None
+        if page.state.puzzle is None:
+            self._request_puzzle_training(
+                page, page.selected_theme(), page.selected_difficulty(),
+                authorize=False)
+            return
+        handle = getattr(self, "_puzzle_prefetch_handle", None)
         if handle is not None and handle.is_alive():
             handle.cancel("theme_changed")
-        self._cancel_puzzle_training_oauth()
-        self._puzzle_training_generation += 1
-        self._load_puzzle_training_accounts(page, page.account_id)
+        if page.state.puzzle is not None and page._active_source == "lichess":
+            difficulty = page.selected_difficulty()
+            self._schedule_puzzle_prefetch_when_idle(
+                page, page.account_id, page.selected_theme(), difficulty, page._session_id)
+
+    def _puzzle_difficulty_selection_changed(self, page: PuzzleTrainingPage) -> None:
+        if page is not self._puzzle_training_page:
+            return
+        page._prepared_online_puzzle = None
+        difficulty = page.selected_difficulty()
+        if page.state.puzzle is None:
+            self._request_puzzle_training(page, page.selected_theme(), difficulty, authorize=False)
+        elif page._active_source == "lichess":
+            handle = getattr(self, "_puzzle_prefetch_handle", None)
+            if handle is not None and handle.is_alive():
+                handle.cancel("difficulty_changed")
+            self._schedule_puzzle_prefetch_when_idle(
+                page, page.account_id, page.selected_theme(), difficulty, page._session_id)
+
+    def _schedule_puzzle_prefetch_when_idle(self, page: PuzzleTrainingPage, account_id: str,
+                                            theme: str, difficulty: str,
+                                            session_id: str) -> None:
+        """Restart one cancelled prefetch after its in-flight request exits."""
+        generation = self._puzzle_training_generation
+
+        def retry_when_idle() -> None:
+            if (page is not self._puzzle_training_page or not shiboken6.isValid(page)
+                    or generation != self._puzzle_training_generation
+                    or self.screen_stack.currentWidget() is not page
+                    or page.account_id != account_id or page.selected_theme() != theme
+                    or page.selected_difficulty() != difficulty or page._is_replay
+                    or page._active_source != "lichess"):
+                return
+            handle = getattr(self, "_puzzle_prefetch_handle", None)
+            if handle is not None and handle.is_alive():
+                QTimer.singleShot(100, retry_when_idle)
+                return
+            self._prefetch_puzzle_training(page, account_id, theme, difficulty, session_id)
+
+        QTimer.singleShot(100, retry_when_idle)
 
     def _puzzle_training_account_changed(self, page: PuzzleTrainingPage,
                                          account_id: str) -> None:
         page.account_id = str(account_id or "local")
+        self._set_puzzle_auto_next_for_account(page, page.account_id)
         if page is not self._puzzle_training_page:
             return
+        page.reset_for_account_switch()
         handle = getattr(self, "_puzzle_training_handle", None)
         if handle is not None and handle.is_alive():
             handle.cancel("account_changed")
+        prefetch = getattr(self, "_puzzle_prefetch_handle", None)
+        if prefetch is not None and prefetch.is_alive():
+            prefetch.cancel("account_changed")
         self._cancel_puzzle_training_oauth()
         self._puzzle_training_generation += 1
         self._load_puzzle_training_accounts(page, page.account_id)
@@ -6158,16 +6234,18 @@ class MainWindow(QMainWindow):
                                  difficulty: str, *, authorize: bool) -> None:
         """Fetch exactly one new puzzle (and authorize only after the explicit CTA)."""
         if self.offline_mode:
-            page.set_message("Новые задачи Lichess недоступны в офлайн-режиме. "
-                             "Выберите «Сохранённые» для локальной практики.")
+            page.set_message("Для онлайн-задач Lichess включите подключение к сети.")
             return
         if self.lichess is None:
-            page.set_message("Сначала подключите Lichess в боковом меню. "
-                             "Локальные сохранённые задачи доступны офлайн.")
+            page.set_message("Подключите Lichess, чтобы получать онлайн-задачи.")
+            page.set_authorization_needed(False)
             return
         previous = getattr(self, "_puzzle_training_handle", None)
         if previous is not None and previous.is_alive():
             previous.cancel("session_replaced")
+        prefetch = getattr(self, "_puzzle_prefetch_handle", None)
+        if prefetch is not None and prefetch.is_alive():
+            prefetch.cancel("current_fetch_started")
         self._cancel_puzzle_training_oauth()
         self._puzzle_training_generation += 1
         generation = self._puzzle_training_generation
@@ -6232,8 +6310,10 @@ class MainWindow(QMainWindow):
                         "Сохранённое разрешение puzzle:read относится к другому профилю. "
                         "Выберите соответствующий профиль или подключите его отдельно.")
                 with authenticated_request_admission(operation_current, stop_event):
+                    puzzle_get_started = time.perf_counter()
                     result = client.get_puzzle_batch(
                         token, angle=theme, difficulty=difficulty, count=1)
+                    puzzle_get_ms = (time.perf_counter() - puzzle_get_started) * 1000
                 if not operation_current():
                     return
                 puzzles = result.get("puzzles") or []
@@ -6263,6 +6343,10 @@ class MainWindow(QMainWindow):
                 self.puzzle_training_finished.emit(request_id, {
                     "puzzle": playable, "payload": payload, "account_id": scoped_account,
                     "username": username, "recent": recent[:8], "rating": rating,
+                    "live_get_ms": puzzle_get_ms,
+                    "practice_rating": self.game_repository.local_puzzle_rating(scoped_account),
+                    "rating_eligible": not self.game_repository.has_local_puzzle_rating_event(
+                        scoped_account, playable.puzzle_id),
                     "local_count": self.game_repository.local_puzzle_attempt_count(scoped_account),
                     "local_stats": self.game_repository.local_puzzle_statistics(scoped_account),
                     "theme_stats": self.game_repository.local_puzzle_statistics(
@@ -6289,10 +6373,14 @@ class MainWindow(QMainWindow):
                 return
             if error:
                 message = error.get("message", "Ошибка загрузки задачи.") if isinstance(error, dict) else str(error)
-                page.set_message(message + " Можно продолжить с локальными задачами.")
+                if isinstance(error, dict) and error.get("authorization_needed"):
+                    message = "Подключите задачи Lichess с разрешением puzzle:read."
+                else:
+                    message = "Не удалось загрузить задачу Lichess · повторите соединение."
+                page.set_message(message)
                 page.set_authorization_needed(
                     bool(error.get("authorization_needed")) if isinstance(error, dict)
-                    else "puzzle:read" in message)
+                    else False)
                 return
             page.account_id = payload["account_id"]
             rows = []
@@ -6304,14 +6392,18 @@ class MainWindow(QMainWindow):
                              "username": payload.get("username", payload["account_id"]),
                              "attempts": payload.get("local_count", 0)})
             page.set_accounts(rows, payload["account_id"])
-            page.load_puzzle(payload["puzzle"], payload["payload"], source="lichess")
+            self._set_puzzle_auto_next_for_account(page, payload["account_id"])
+            page.load_puzzle(payload["puzzle"], payload["payload"], source="lichess",
+                             rating_eligible=bool(payload.get("rating_eligible", True)))
+            page._live_get_ms = payload.get("live_get_ms")
             rating = payload.get("rating") or {}
             page.set_recent_history(payload.get("recent", []),
                                     local_count=payload.get("local_count", 0),
                                     official_rating=rating.get("latest"),
                                     rating_date=rating.get("date"),
                                     local_stats=payload.get("local_stats"),
-                                    theme_stats=payload.get("theme_stats"))
+                                    theme_stats=payload.get("theme_stats"),
+                                    practice_rating=payload.get("practice_rating"))
             page.set_authorization_needed(False)
 
         self._register_training_callback(page, request_id, generation, apply_result)
@@ -6321,6 +6413,121 @@ class MainWindow(QMainWindow):
         self._puzzle_training_handle = handle
         page.destroyed.connect(lambda *_: (handle.cancel("shutdown"),
                                            self._cancel_puzzle_training_oauth()))
+
+    def _prefetch_puzzle_training(self, page: PuzzleTrainingPage, account_id: str,
+                                  theme: str, difficulty: str, session_id: str) -> None:
+        """Prepare at most one next Lichess puzzle in the background."""
+        if (page is not self._puzzle_training_page or self.lichess is None
+                or self.offline_mode or page._is_replay
+                or page._prepared_online_puzzle is not None):
+            return
+        current = getattr(self, "_puzzle_prefetch_handle", None)
+        if current is not None and current.is_alive():
+            return
+        service = self.lichess
+        client = service.client
+        requested_account = str(account_id or "")
+        if not requested_account.startswith("lichess:"):
+            return
+        expected_username = requested_account.split(":", 1)[1]
+        generation = self._puzzle_training_generation
+        request_id = uuid.uuid4().hex
+        stop_event = threading.Event()
+        capture_context = getattr(service, "capture_operation_context", None)
+        operation_context = (capture_context(command="puzzle_training_prefetch")
+                             if capture_context else None)
+
+        def operation_current() -> bool:
+            if (stop_event.is_set() or generation != self._puzzle_training_generation
+                    or self.lichess is not service):
+                return False
+            validator = getattr(service, "is_operation_context_current", None)
+            return bool(validator(operation_context)) if validator and operation_context is not None else True
+
+        def worker() -> None:
+            try:
+                store = WindowsCredentialStore(
+                    service="ChessCoach.Lichess.Puzzles", user="puzzle-activity-token")
+                token = store.get()
+                if not token:
+                    raise PermissionError("Нет разрешения puzzle:read.")
+                username = str(getattr(service, "puzzle_username", None)
+                               or getattr(service, "username", None) or expected_username).strip()
+                if username.casefold() != expected_username.casefold():
+                    raise PermissionError("Профиль задач изменился.")
+                with authenticated_request_admission(operation_current, stop_event):
+                    puzzle_get_started = time.perf_counter()
+                    result = client.get_puzzle_batch(
+                        token, angle=theme, difficulty=difficulty, count=1)
+                    puzzle_get_ms = (time.perf_counter() - puzzle_get_started) * 1000
+                if not operation_current():
+                    return
+                puzzles = result.get("puzzles") or []
+                if not puzzles:
+                    raise LookupError("Lichess не подготовил следующую задачу.")
+                raw = puzzles[0]
+                playable = normalize_api_puzzle(raw)
+                scoped_account = self.game_repository.ensure_archive_account(username)
+                self.game_repository.cache_training_puzzle(
+                    scoped_account, playable.puzzle_id,
+                    json.dumps(raw, ensure_ascii=False, separators=(",", ":")))
+                local_rows = self.game_repository.local_puzzle_attempts(scoped_account, limit=8)
+                official_rows = self.game_repository.puzzle_history(scoped_account, limit=8)
+                recent = [{"puzzle_id": row["puzzle_id"], "result": row["result"],
+                           "created_at_ms": row["created_at_ms"], "source": "local"}
+                          for row in local_rows]
+                recent.extend({"puzzle_id": row["puzzle_id"],
+                               "result": "Решено" if row.get("win") else "Ошибка",
+                               "attempt_date_ms": row.get("attempt_date_ms"),
+                               "themes": json.loads(row.get("themes_json") or "[]"),
+                               "source": "lichess"} for row in official_rows)
+                recent.sort(key=lambda row: row.get("created_at_ms") or
+                            row.get("attempt_date_ms") or 0, reverse=True)
+                payload = {
+                    "puzzle": playable, "raw": raw, "account_id": scoped_account,
+                    "rating_eligible": not self.game_repository.has_local_puzzle_rating_event(
+                        scoped_account, playable.puzzle_id),
+                    "details": {
+                        "live_get_ms": puzzle_get_ms,
+                        "recent": recent[:8],
+                        "local_count": self.game_repository.local_puzzle_attempt_count(scoped_account),
+                        "official_rating": (self.game_repository.puzzle_player_rating(
+                            scoped_account) or {}).get("latest"),
+                        "rating_date": (self.game_repository.puzzle_player_rating(
+                            scoped_account) or {}).get("date"),
+                        "local_stats": self.game_repository.local_puzzle_statistics(scoped_account),
+                        "theme_stats": self.game_repository.local_puzzle_statistics(
+                            scoped_account, theme if theme != "mix" else None),
+                        "practice_rating": self.game_repository.local_puzzle_rating(scoped_account),
+                    },
+                }
+                self.puzzle_training_finished.emit(request_id, payload, None)
+            except Exception as exc:
+                self.puzzle_training_finished.emit(request_id, None, {
+                    "prefetch": True, "message": str(exc)})
+
+        def apply_result(payload, error) -> None:
+            if (page is not self._puzzle_training_page or generation != self._puzzle_training_generation
+                    or self.screen_stack.currentWidget() is not page
+                    or page.account_id != requested_account
+                    or page.selected_theme() != theme
+                    or str(page.difficulty.currentData() or "normal") != difficulty
+                    or page._is_replay):
+                return
+            if error or not isinstance(payload, dict):
+                page.network_status.setText("Следующая задача загрузится по запросу")
+                return
+            page.set_prepared_puzzle(
+                payload["account_id"], theme, difficulty, payload["puzzle"], payload["raw"],
+                {**payload.get("details", {}),
+                 "rating_eligible": payload.get("rating_eligible", True)})
+
+        self._register_training_callback(page, request_id, generation, apply_result)
+        handle = self._start_registered_work(
+            worker, kind="puzzle_training_prefetch", lane=OperationLane.INTERACTIVE,
+            thread_name="cc-puzzle-training-prefetch", stop_event=stop_event)
+        self._puzzle_prefetch_handle = handle
+        page.destroyed.connect(lambda *_: handle.cancel("shutdown"))
 
     def _request_local_training_puzzle(self, page: PuzzleTrainingPage, mode: str,
                                        theme: str, *, puzzle_id: str | None = None,
@@ -6436,11 +6643,12 @@ class MainWindow(QMainWindow):
                 self.puzzle_training_finished.emit(request_id, {
                     "puzzle": selected[0], "payload": selected[1],
                     "account_id": account_id, "recent": recent[:8],
-                    "local_count": len(local_attempts),
+                    "local_count": self.game_repository.local_puzzle_attempt_count(account_id),
                     "local_stats": self.game_repository.local_puzzle_statistics(account_id),
                     "theme_stats": self.game_repository.local_puzzle_statistics(
                         account_id, theme if theme not in {"", "mix"} else None),
                     "rating": self.game_repository.puzzle_player_rating(account_id),
+                    "practice_rating": self.game_repository.local_puzzle_rating(account_id),
                     "source": selected[2],
                     "scope": scope,
                 }, None)
@@ -6466,7 +6674,8 @@ class MainWindow(QMainWindow):
                                     official_rating=rating.get("latest"),
                                     rating_date=rating.get("date"),
                                     local_stats=payload.get("local_stats"),
-                                    theme_stats=payload.get("theme_stats"))
+                                    theme_stats=payload.get("theme_stats"),
+                                    practice_rating=payload.get("practice_rating"))
 
         self._register_training_callback(page, request_id, generation, apply_result)
         handle = self._start_registered_work(
@@ -6485,12 +6694,15 @@ class MainWindow(QMainWindow):
         def worker() -> None:
             error = None
             try:
+                db_commit_started = time.perf_counter()
                 saved_id, inserted = self.game_repository.save_local_puzzle_attempt(
                     payload["account_id"], payload["puzzle_id"],
                     result=payload["result"], solved=payload["solved"],
                     mistakes=payload["mistakes"],
                     hints=payload["hints"], duration_ms=payload["duration_ms"],
-                    puzzle_json=payload["puzzle_json"], attempt_id=payload["attempt_id"])
+                    puzzle_json=payload["puzzle_json"], attempt_id=payload["attempt_id"],
+                    rating_eligible=bool(payload.get("rating_eligible", False)))
+                payload["db_commit_ms"] = (time.perf_counter() - db_commit_started) * 1000
                 payload["attempt_id"] = saved_id
                 payload["inserted"] = inserted
                 payload["recent"] = self.game_repository.local_puzzle_attempts(
@@ -6503,6 +6715,10 @@ class MainWindow(QMainWindow):
                 payload["theme_stats"] = self.game_repository.local_puzzle_statistics(
                     payload["account_id"], payload.get("selected_theme") or
                     (themes[0] if themes else None))
+                payload["practice_rating"] = self.game_repository.local_puzzle_rating(
+                    payload["account_id"])
+                payload["rating_event"] = self.game_repository.local_puzzle_rating_event(
+                    payload["account_id"], payload["puzzle_id"])
             except Exception as exc:
                 error = f"{type(exc).__name__}: {exc}"
                 log_event("local_puzzle_attempt_save_failed", "puzzle_training",
@@ -6529,7 +6745,8 @@ class MainWindow(QMainWindow):
                 page.set_recent_history(
                     payload.get("recent", []), local_count=payload.get("local_count", 0),
                     local_stats=payload.get("local_stats"),
-                    theme_stats=payload.get("theme_stats"))
+                    theme_stats=payload.get("theme_stats"),
+                    practice_rating=payload.get("practice_rating"))
 
     def show_puzzle_history(self, account_id: str, *, pilot_run_id: str | None = None,
                             target_puzzle_id: str | None = None,

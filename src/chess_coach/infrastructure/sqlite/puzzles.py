@@ -9,6 +9,7 @@ import uuid
 import time
 
 from .constants import MAX_PAGE_SIZE
+from ...lichess.puzzle_training import practice_rating_delta
 
 
 def puzzle_attempt_uid(account_id: str, puzzle_id: str, attempt_date_ms: int,
@@ -103,7 +104,8 @@ class PuzzleActivityStoreMixin:
     def save_local_puzzle_attempt(self, account_id: str, puzzle_id: str, *,
                                   result: str, solved: bool, mistakes: int, hints: int,
                                   duration_ms: int, puzzle_json: str,
-                                  attempt_id: str | None = None) -> tuple[str, bool]:
+                                  attempt_id: str | None = None,
+                                  rating_eligible: bool = False) -> tuple[str, bool]:
         """Append a local training result without changing mirrored Lichess activity."""
         if result not in {"success", "mistake", "hinted", "revealed", "skipped"}:
             raise ValueError("Некорректный результат локальной задачи.")
@@ -135,7 +137,69 @@ class PuzzleActivityStoreMixin:
                 db.executemany(
                     "INSERT OR IGNORE INTO local_puzzle_attempt_themes VALUES (?,?)",
                     [(attempt_id, str(theme)) for theme in themes if theme])
+                rating_value = puzzle.get("rating") if isinstance(puzzle, dict) else None
+                if rating_eligible and rating_value is not None:
+                    try:
+                        puzzle_rating = max(0, int(rating_value))
+                    except (ValueError, TypeError):
+                        puzzle_rating = None
+                    if puzzle_rating is not None:
+                        scored = bool(solved and result == "success"
+                                      and int(mistakes) == 0 and int(hints) == 0)
+                        score = 1.0 if scored else 0.0
+                        already_rated = db.execute(
+                            "SELECT 1 FROM local_puzzle_rating_events "
+                            "WHERE account_id=? AND puzzle_id=?",
+                            (account_id, puzzle_id)).fetchone()
+                        if not already_rated:
+                            current_row = db.execute(
+                                "SELECT rating,rated_attempts FROM local_puzzle_practice_ratings "
+                                "WHERE account_id=?", (account_id,)).fetchone()
+                            previous = int(current_row["rating"]) if current_row else 1500
+                            delta = practice_rating_delta(previous, puzzle_rating, score)
+                            after = previous + delta
+                            created_at = datetime.now(timezone.utc).isoformat()
+                            db.execute(
+                                "INSERT INTO local_puzzle_rating_events "
+                                "(event_id,account_id,puzzle_id,attempt_id,puzzle_rating,score,"
+                                "rating_before,delta,rating_after,created_at) "
+                                "VALUES (?,?,?,?,?,?,?,?,?,?)",
+                                (uuid.uuid4().hex, account_id, puzzle_id, attempt_id,
+                                 puzzle_rating, score, previous, delta, after, created_at))
+                            db.execute(
+                                "INSERT INTO local_puzzle_practice_ratings "
+                                "(account_id,rating,last_delta,rated_attempts,updated_at) "
+                                "VALUES (?,?,?,?,?) ON CONFLICT(account_id) DO UPDATE SET "
+                                "rating=excluded.rating,last_delta=excluded.last_delta,"
+                                "rated_attempts=excluded.rated_attempts,updated_at=excluded.updated_at",
+                                (account_id, after, delta,
+                                 (int(current_row["rated_attempts"]) + 1) if current_row else 1,
+                                 created_at))
         return attempt_id, inserted
+
+    def local_puzzle_rating(self, account_id: str) -> dict:
+        """Return the independent Chess Coach practice rating (never Lichess rating)."""
+        with self._connection() as db:
+            row = db.execute(
+                "SELECT rating,last_delta,rated_attempts,updated_at "
+                "FROM local_puzzle_practice_ratings WHERE account_id=?",
+                (str(account_id or "local"),)).fetchone()
+        if row is None:
+            return {"rating": 1500, "delta": 0, "rated_attempts": 0, "date": None}
+        return {"rating": int(row["rating"]), "delta": int(row["last_delta"]),
+                "rated_attempts": int(row["rated_attempts"]), "date": row["updated_at"]}
+
+    def local_puzzle_rating_event(self, account_id: str, puzzle_id: str) -> dict | None:
+        with self._connection() as db:
+            row = db.execute(
+                "SELECT event_id,account_id,puzzle_id,attempt_id,puzzle_rating,score,"
+                "rating_before,delta,rating_after,created_at FROM local_puzzle_rating_events "
+                "WHERE account_id=? AND puzzle_id=?",
+                (str(account_id or "local"), str(puzzle_id))).fetchone()
+        return dict(row) if row else None
+
+    def has_local_puzzle_rating_event(self, account_id: str, puzzle_id: str) -> bool:
+        return self.local_puzzle_rating_event(account_id, puzzle_id) is not None
 
     def local_puzzle_attempts(self, account_id: str, *, limit: int = 8) -> list[dict]:
         limit = min(100, max(1, int(limit)))

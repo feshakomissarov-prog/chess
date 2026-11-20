@@ -55,6 +55,9 @@ def test_reducer_handles_multiplay_reply_and_does_not_finish_early():
     state = PuzzleTrainingState()
     state.load(puzzle)
     assert state.submit(chess.Move.from_uci("e2e4")) == "correct"
+    assert state.status == PuzzleStatus.OPPONENT_REPLY
+    assert state.board.peek() == chess.Move.from_uci("e2e4")
+    assert state.apply_opponent_reply() == "reply"
     assert state.status == PuzzleStatus.READY
     assert state.board.peek() == chess.Move.from_uci("e7e5")
     assert state.submit(chess.Move.from_uci("g1f3")) == "success"
@@ -78,6 +81,7 @@ def test_hints_are_staged_and_remain_counted_after_correct_move():
                                       ("e2e4",), ("opening",)))
     assert state.hint().from_square == chess.E2
     assert state.hint().to_square == chess.E4
+    assert state.hint() is None
     assert state.hints_used == 2
     assert state.submit(chess.Move.from_uci("e2e4")) == "success"
     assert state.hints_used == 2
