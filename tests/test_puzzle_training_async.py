@@ -57,22 +57,28 @@ def test_oauth_browser_open_is_dispatched_on_qt_main_thread(
     window.lichess = service
 
     class FakeStore:
+        token = None
+
         def __init__(self, **_kwargs):
             pass
 
         def get(self):
-            return None
+            return type(self).token
 
-        def set(self, _token):
-            return None
+        def set(self, token):
+            type(self).token = token
 
     monkeypatch.setattr(window_module, "WindowsCredentialStore", FakeStore)
     monkeypatch.setattr(window_module, "OAuthCallbackServer", _FakeCallback)
     monkeypatch.setattr(window_module, "create_authorization_request",
                         lambda *_args, **_kwargs: SimpleNamespace(
                             url="https://lichess.org/oauth/test", redirect_uri="http://127.0.0.1/callback"))
-    monkeypatch.setattr(window_module, "authorize_and_store",
-                        lambda *_args, **_kwargs: ("fake-read-token", "fixture-user"))
+    def authorize_and_store(_client, store, *_args, **_kwargs):
+        token = "fake-read-token"
+        store.set(token)
+        return token, "fixture-user"
+
+    monkeypatch.setattr(window_module, "authorize_and_store", authorize_and_store)
     calls = []
     opened = threading.Event()
 
@@ -97,8 +103,11 @@ def test_oauth_browser_open_is_dispatched_on_qt_main_thread(
     assert calls and calls[0][0].startswith("https://lichess.org/oauth/")
     assert calls[0][1], "QDesktopServices.openUrl ran outside QApplication's Qt thread"
     if not cancel_after_open:
-        assert client.batch_arguments == [{
-            "angle": page.selected_theme(), "difficulty": difficulty, "count": 1}]
+        qtbot.waitUntil(lambda: page.state.puzzle is not None, timeout=5000)
+        assert page.state.puzzle.puzzle_id == _official_example()["puzzle"]["id"]
+        assert client.batch_arguments
+        assert client.batch_arguments[-1] == {
+            "angle": page.selected_theme(), "difficulty": difficulty, "count": 1}
     window.close()
 
 

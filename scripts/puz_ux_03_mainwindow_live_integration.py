@@ -36,11 +36,16 @@ PUBLIC_PUZZLE_IDS = ("0haqU", "00008", "0000D")
 class FakeCredentialStore:
     """An inert placeholder; the string is never included in an HTTP request."""
 
+    token = "not-a-real-oauth-token-public-read-only-test"
+
     def __init__(self, **_kwargs) -> None:
         pass
 
     def get(self) -> str:
-        return "not-a-real-oauth-token-public-read-only-test"
+        return type(self).token
+
+    def set(self, token: str) -> None:
+        type(self).token = str(token)
 
 
 class FakeOAuthCallback:
@@ -449,8 +454,12 @@ def run(output: Path) -> None:
     window_module.OAuthCallbackServer = FakeOAuthCallback
     window_module.create_authorization_request = lambda *_args, **_kwargs: type(
         "FakeRequest", (), {"url": "https://lichess.org/oauth/fake"})()
-    window_module.authorize_and_store = lambda client_adapter, _store, _callback, _request, **_kw: (
-        "fake-oauth-callback-token", client_adapter.username)
+    def fake_authorize_and_store(client_adapter, store, _callback, _request, **_kw):
+        token = "fake-oauth-callback-token"
+        store.set(token)
+        return token, client_adapter.username
+
+    window_module.authorize_and_store = fake_authorize_and_store
     QDesktopServices.openUrl = lambda _url: True
     page.set_authorization_needed(True)
     before_authorized_session = page._session_id
