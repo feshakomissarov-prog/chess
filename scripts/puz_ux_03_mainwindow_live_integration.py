@@ -46,7 +46,14 @@ class PublicPuzzleAdapter:
         self.output = output
         self.request_ids: list[str] = []
         self.trace: list[dict] = []
+        self.username = "cc-puz-ux03-isolated"
+        self.account_resolution_calls = 0
         self.fail_next = False
+
+    def get_account(self, _token) -> dict:
+        """Resolve the fake profile locally; never send the credential."""
+        self.account_resolution_calls += 1
+        return {"username": self.username}
 
     def get_puzzle_batch(self, _token, *, angle: str, difficulty: str, count: int):
         if self.fail_next:
@@ -211,6 +218,7 @@ def run(output: Path) -> None:
     page.set_accounts(rows, page.account_id)
     window.lichess.puzzle_username = "cc-puz-ux03-second"
     window.lichess.username = "cc-puz-ux03-second"
+    client.username = "cc-puz-ux03-second"
     page.account_selector.setCurrentIndex(page.account_selector.findData(second_account))
     wait_until(app, lambda: page.account_id == second_account
                and page.state.puzzle is not None
@@ -239,6 +247,7 @@ def run(output: Path) -> None:
         "owner_database_accessed": False,
         "requests": client.trace,
         "request_ids": client.request_ids,
+        "fake_profile_resolutions": client.account_resolution_calls,
         "frames": frames,
         "rating_before_auto_next": stored_rating,
         "rating_after_auto_next": after_auto_next,
