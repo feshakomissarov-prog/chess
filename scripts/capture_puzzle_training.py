@@ -101,6 +101,12 @@ def main() -> None:
             )
 
         def save(name: str) -> None:
+            # Visibility/text changes can invalidate a Qt grid without causing
+            # a resize event. Let the native layout settle before measuring
+            # controls or capturing the frame.
+            app.processEvents()
+            page._controls_layout.activate()
+            app.processEvents()
             for button in (page.hint, page.reveal, page.repeat, page.retry_save, page.next):
                 if button.isVisible():
                     assert button.width() >= button.sizeHint().width(), (
