@@ -1453,9 +1453,9 @@ def main() -> None:
                 puzzle_page = window._puzzle_training_page
                 wait_for(lambda: puzzle_page.board.isVisible()
                          and puzzle_page._is_replay
-                         and not puzzle_page._allow_submit
+                         and puzzle_page._allow_submit
                          and puzzle_page.turn_label.text().startswith("Повтор · без рейтинга"),
-                         "selected Home puzzle in read-only history replay", timeout=30)
+                         "selected Home puzzle in interactive unrated replay", timeout=30)
                 assert puzzle_page.state.puzzle.puzzle_id == puzzle_id, (
                     "Home CTA must open the same saved puzzle ID as the preview."
                 )

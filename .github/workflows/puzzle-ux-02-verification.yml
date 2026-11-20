@@ -99,7 +99,7 @@ jobs:
   l2-native-puzzle-captures:
     name: L2 PUZ-UX-03 public and native UX
     needs: [detect-visual-scope, l1-targeted]
-    if: needs.detect-visual-scope.outputs.changed == 'true' && needs.l1-targeted.result == 'success' && github.event.pull_request.head.ref == 'codex/puz-ux-03-online-puzzle-playability-2026-11-20'
+    if: needs.detect-visual-scope.outputs.changed == 'true' && needs.l1-targeted.result == 'success' && github.event.pull_request.head.ref == 'codex/puz-ux-03-online-puzzle-playability-2026-11-20' && github.event.pull_request.draft
     runs-on: windows-latest
     timeout-minutes: 30
     steps:
