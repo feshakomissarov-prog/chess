@@ -144,3 +144,22 @@ def test_history_status_labels_and_theme_list_have_no_horizontal_scroll(qtbot):
     assert "С подсказкой" in page.history.item(1).text()
     assert page.history.horizontalScrollBarPolicy() == Qt.ScrollBarPolicy.ScrollBarAlwaysOff
     assert page.theme_list.horizontalScrollBarPolicy() == Qt.ScrollBarPolicy.ScrollBarAlwaysOff
+
+
+def test_save_retry_uses_compact_layout_when_five_controls_would_clip(qtbot):
+    page = PuzzleTrainingPage(demo=True)
+    qtbot.addWidget(page)
+    page.resize(1000, 941)
+    page.show()
+    qtbot.waitUntil(lambda: page.board.width() > 160)
+
+    page.retry_save.setVisible(True)
+    page._sync_control_layout()
+    qtbot.waitUntil(lambda: page.retry_save.width() > 0)
+
+    required_width = sum(button.sizeHint().width() for button in
+                         (page.hint, page.reveal, page.repeat, page.retry_save, page.next))
+    assert page._controls_compact, (
+        f"center={page.board.parentWidget().width()} required={required_width} "
+        f"retry={page.retry_save.width()} hint={page.retry_save.sizeHint().width()}")
+    assert page.retry_save.width() >= page.retry_save.sizeHint().width()

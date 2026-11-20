@@ -1135,7 +1135,7 @@ class PuzzleTrainingPage(QWidget):
         self.theme_search.setVisible(not compact)
         self.history.setMaximumHeight(120 if self.height() < 650 else 260)
         center_width = self.board.parentWidget().width() if self.board.parentWidget() else self.width()
-        compact_controls = center_width < 650 or self.height() < 700
+        compact_controls = self._needs_compact_controls(center_width) or self.height() < 700
         if compact:
             self._training_root_layout.setContentsMargins(8, 2, 8, 4)
             self._training_root_layout.setSpacing(4)
@@ -1156,7 +1156,24 @@ class PuzzleTrainingPage(QWidget):
             self._controls_compact = compact_controls
             self._sync_control_layout()
 
+    def _needs_compact_controls(self, center_width: int | None = None) -> bool:
+        if center_width is None:
+            parent = self.board.parentWidget()
+            center_width = parent.width() if parent is not None else self.width()
+        visible_buttons = [
+            button for button in (self.hint, self.reveal, self.repeat,
+                                  self.retry_save, self.next)
+            if not button.isHidden()
+        ]
+        spacing = max(0, self._controls_layout.horizontalSpacing())
+        required_width = sum(button.sizeHint().width() for button in visible_buttons)
+        required_width += spacing * max(0, len(visible_buttons) - 1)
+        return center_width < required_width
+
     def _sync_control_layout(self) -> None:
+        compact_controls = (self._needs_compact_controls()
+                            or self.height() < 700)
+        self._controls_compact = compact_controls
         layout = self._controls_layout
         while layout.count():
             layout.takeAt(0)
@@ -1168,8 +1185,8 @@ class PuzzleTrainingPage(QWidget):
         if self.retry_save.isVisible():
             for column, button in enumerate((self.hint, self.reveal, self.repeat)):
                 layout.addWidget(button, 0, column)
-            layout.addWidget(self.retry_save, 1, 0)
-            layout.addWidget(self.next, 1, 1, 1, 2)
+            layout.addWidget(self.retry_save, 1, 0, 1, 2)
+            layout.addWidget(self.next, 1, 2)
         else:
             layout.addWidget(self.hint, 0, 0)
             layout.addWidget(self.reveal, 0, 1, 1, 2)
