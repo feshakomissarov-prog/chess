@@ -176,3 +176,39 @@ The final full Windows L3 **PASSED** at exact evidence HEAD `f48d9e3c84b7e19a09e
 There were two complete Windows runs in this §14 acceptance cycle: the earlier run on `39c4959` found one failure after 1248 passes in the test's completion wait; the final run above passed after the harness was changed to wait for the Qt-visible prepared puzzle. This second full run was required to verify the corrected test on the final head; no full suite was rerun during the small implementation edits.
 
 Final status: PR #52 remains **Draft**, open, and unmerged. No owner computer, owner SQLite, or OAuth profile was accessed. The authorized OAuth profile remains unavailable; the recurring ~9.09 s first live automation interaction outlier is still **unresolved and unattributed**, despite fast separate cold/warm input probes. No new defect IDs were added. No merge is authorized or performed.
+
+## §15 consolidated follow-up — six scenarios (2026-11-20)
+
+All six cases from §15.2 were handled in one code/test package on the existing PR #52 branch. Existing defect IDs were retained; no new debt IDs were created.
+
+| Existing ID | RED → FIXED → PASS evidence |
+| --- | --- |
+| **PUZ03-07.SAVE-NONBLOCK** — post-COMMIT false failure | RED tests reproduced failures in the malformed-payload/read-model ACK path. Fixed theme extraction and separated durable commit acknowledgment from optional read-model enrichment. Final targeted L1 passed; MainWindow integration confirmed the committed row receives a success ACK. |
+| **PUZ03-07.SAVE-NONBLOCK** — pending/failed attempt durability | RED MainWindow lifecycle tests reproduced missing retry after page/account transitions and restart. Added an additive SQLite v29 attempt outbox, scoped restore/retry, idempotent ACK cleanup, and explicit close decision when durable enqueue itself fails. Final L1 and L2 account A→B→A/reopen recovery passed. |
+| **PUZ03-10.RATING** — account-scoped official rating | RED page/MainWindow coverage reproduced stale official rating on switching to a profile with no data. Account reset now clears official rating/date before the scoped read. L2 confirmed no-data state and account-specific local rating. |
+| **PUZ-07.ACCOUNT-BOUND / PUZ03-08.PREFETCH** — separate puzzle credential identity | RED two-identity tests reproduced gaming-account/puzzle-token mismatch and token rotation. Prefetch now requires the validated puzzle credential identity and rejects stale token-generation callbacks. Fake-credential tests passed; no credential was sent in public GET requests. |
+| **PUZ03-08.PREFETCH / PUZ03-05.NEXT** — Next single-flight | RED delayed-fetch tests reproduced duplicate requests from repeated Next clicks. Added a per-fetch gate and restore behavior after completion/failure. Qt delayed GET/retry/429 coverage and L2 MainWindow screenshots passed. |
+| **PUZ03-09.STREAK** — reducer history isolation | RED reducer case showed puzzle A events remained after loading B. `load` now resets per-puzzle history while the session result tape remains intact. Reducer and Qt result-history tests passed. |
+
+### §15 L1 — targeted RED→GREEN
+
+- RED reproductions were recorded in Windows runs [44789050959](https://github.com/feshakomissarov-prog/chess/actions/runs/44789050959) and [44790305318](https://github.com/feshakomissarov-prog/chess/actions/runs/44790305318). They exposed the expected six scenario failures and account/lifecycle integration gaps before the fixes.
+- Final Windows targeted run [44801146864](https://github.com/feshakomissarov-prog/chess/actions/runs/44801146864), exact code/test SHA `63d53cda8980891c8cea14c7e73b655f69d65878`: **91 passed in 100.42 s**; changed modules/tests compiled. The workflow also ran the single themed L2 described below.
+- An earlier full L3 at `304c2e150bbd9025661d8c14a29491e4548705dc` reached **1260 passed, 2 failed** because two pre-existing schema migration tests still asserted schema version 28 after the additive migration to 29. Both assertions were updated; the two exact tests passed locally (**2 passed**) before the final L3. This was the only reason for a final full rerun.
+
+### §15 L2 — one themed Windows Qt run with real public Lichess data
+
+- **PASS** [run 44801146864](https://github.com/feshakomissarov-prog/chess/actions/runs/44801146864), artifact [puz-ux-03-l2-63d53c](https://github.com/feshakomissarov-prog/chess/actions/runs/44801146864/artifacts/14661866201), exact code/test SHA `63d53cda8980891c8cea14c7e73b655f69d65878` (artifact SHA256 `5eac10021f1f8751edf5b37f1722f956576b60b649a11709aa7474a01000d418`). Actual native Qt sessions used public Lichess puzzles at 100%, 125%, and 150% DPI. The frames include ready, wrong-visible/reverted, both hint stages, solved-after-hint, and next puzzle. I opened and visually checked the ready frames at all three scales, plus MainWindow's outbox-recovery frame.
+- The same run drove MainWindow with real public GET puzzle responses and isolated temporary SQLite. It verified repeat has no attempt/statistics/rating change (`1→1`, `1500→1500`), auto-next keeps CC rating `1501`, duplicate IDs remain unrated, official rating clears on an account with no history, wrong→skip retains its red result, account-switch restarts the scoped request, advanced `hardest` prefetch works, outbox recovery remains account-scoped, and Next is single-flight. 12 public GETs returned HTTP 200; no Authorization header or fake credential was sent.
+- Request/interaction timing in the same Windows runner: 10 cold UI input samples p50/p95 `28.58/30.51 ms`; 50 warm input samples p50/p95 `5.46/6.57 ms`, event-loop maximum gap `36.48 ms`. Individual public GETs in the MainWindow trace were roughly `175–348 ms`. These timings characterize the hosted runner, not the owner's device. The previous first-interaction outlier remains **unattributed**; these measurements do not establish its cause.
+- An automatic synchronize-triggered L2 in this same workflow was the one intended thematic L2; no separate manual visual rerun was added. No authorized OAuth test profile was available: `ONLINE-LIVE-OAUTH: BLOCKED`. MainWindow integration used an inert fake credential and unauthenticated public GET only; it is not authenticated-user acceptance.
+
+### §15 L3 — final full Windows CI, exact code/test SHA
+
+- **PASS** [run 44801169562](https://github.com/feshakomissarov-prog/chess/actions/runs/44801169562), exact code/test SHA `63d53cda8980891c8cea14c7e73b655f69d65878`: Windows Server 2025 / Python 3.12.10, **1262 passed in 926.02 s (15:26)**; `compileall`, isolated offline MainWindow smoke, and required `visual-evidence` job all passed. The native trainer matrix captured 100%, 125%, and 150% DPI. Artifact: [visual-master-63d53c](https://github.com/feshakomissarov-prog/chess/actions/runs/44801169562/artifacts/14661727233).
+- The L3 workflow's PUZ-specific L2 job was skipped because the PR was marked Ready while dispatching the required exact-head CI; the dedicated L2 run immediately before it had already passed on the same exact code/test SHA. The PR was returned to **Draft** after the run. No code changed after this L3; the remaining journal/spec/PR-description edits are Markdown-only and do not trigger full Windows CI under the workflow path filters.
+
+### Handoff and limitations
+
+- §15.2 statuses are **RED → FIXED → PASS** for all six cases; the matrix and reviewer decision below are updated accordingly. Owner's authorized OAuth profile and machine-specific acceptance remain **NOT TESTED**. No owner SQLite, OAuth store, or computer was accessed.
+- PR #52 remains open, Draft, and unmerged. Handoff is for one consolidated independent reacceptance; no merge was performed.

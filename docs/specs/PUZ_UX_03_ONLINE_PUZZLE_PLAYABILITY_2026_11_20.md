@@ -394,14 +394,14 @@
 | --- | --- | --- |
 | `PUZ03-01.VERDICT`, `PUZ03-02.WRONG-ANIMATION`, `PUZ03-03.OPPONENT` | Evidence L2 real public 100/125/150%: wrong-visible→revert, correct→opponent, persistent verdict | PASS для test environment, OWNER NOT TESTED |
 | `PUZ03-04.NAVIGATION`, `PUZ03-06.HINT` | Source reducer/puzzle page, wheel/review and hint captures; no future-move leak in inspected path | PASS tested paths |
-| `PUZ03-05.NEXT`, `PUZ03-08.PREFETCH` | Successful clean auto-next and prepared puzzle in L2; **new P2 single-flight issue**, P1 independent puzzle-token owner mismatch | FAIL pending targeted cases |
-| `PUZ03-07.SAVE-NONBLOCK` | Independent workers, correct verdict during ACK, SQLite v28 and idempotent existing path; **new post-COMMIT false error + volatile failed queue** | FAIL / P1 |
-| `PUZ03-09.STREAK` | Old §14 first-failure/skip and current tape passed; **reducer `history` crosses puzzle** | PARTIAL / P2 |
-| `PUZ03-10.RATING` | Duplicate puzzle after ACK and local rating once/account passed; **new cross-account official rating carry-over** | FAIL / P1 |
-| `PUZ03-11.ONLINE-ONLY-UX` | Normal workflow is online-first, demo only in internal test init, replay unrated, no public offline fallback; **auth identity risk linked to PUZ-07** | PASS normal UX, conditional identity FAIL |
+| `PUZ03-05.NEXT`, `PUZ03-08.PREFETCH` | RED delayed double-Next and separate puzzle-token identity cases; L1 + exact-head MainWindow/Lichess L2 verified single-flight, validated identity, advanced difficulty, and next fetch | **PASS §15; see execution log** |
+| `PUZ03-07.SAVE-NONBLOCK` | RED post-COMMIT malformed/read-model ACK and failed-outbox lifecycle cases; additive SQLite v29 outbox, isolated retry/reopen and account scoping passed L1/L2 | **PASS §15; see execution log** |
+| `PUZ03-09.STREAK` | RED reducer history carry-over; per-puzzle reducer reset and persistent session result tape passed targeted L1 and themed L2 | **PASS §15; see execution log** |
+| `PUZ03-10.RATING` | RED cross-account official rating carry-over; reset/no-data, replay no-statistics, auto-next consistency and duplicate unrated checks passed L1/L2 | **PASS §15; see execution log** |
+| `PUZ03-11.ONLINE-ONLY-UX` | Normal workflow remains online-first; replay is unrated and no public offline fallback is exposed. PUZ credential scoping passed fake-identity L1/L2; no authorized OAuth profile was available | PASS tested public path / OAuth acceptance BLOCKED |
 | `PUZ03-12.LIVE-REAL`, `PUZ03-13.SELF-UX` | Actual public GET + Qt+MainWindow screenshots checked. No licensed live OAuth profile. Cold p95 18.69ms / warm 2.88ms, one 9.09s first-click outlier unattributed | Public PASS / OAuth BLOCKED / first click UNRESOLVED |
-| `PUZ-07.ACCOUNT-BOUND`, `PUZ-06` | §14 replay callback/correct identity and exact store count already tested; independent identity mismatch of separate token remains | account PRE-FETCH FAIL; `PUZ-06` PASS |
-| `CC-VERIFY-01`, Owner | L3 1249 green and native captures on exact code SHA, docs-only HEAD difference; no need for redundant suite on review MD. No owner's hardware, tokens, real DB | CI PASS / OWNER NOT TESTED |
+| `PUZ-07.ACCOUNT-BOUND`, `PUZ-06` | Separate puzzle-token identity and account-scoped outbox recovery passed in §15 L1/L2; existing 1501-attempt `PUZ-06` path remains covered by suite | `PUZ-07 PASS §15`; `PUZ-06 PASS` |
+| `CC-VERIFY-01`, Owner | Final exact-code SHA L3 and required native captures passed; owner's hardware, tokens, and real DB were not used | CI PASS / OWNER NOT TESTED |
 
 Reviewed areas: main interactive path, reducer and board transient UI, puzzle store/migrations, account/OAuth/pre-fetch, save workers and ACK/retry, AppRuntime shutdown, Qt at native DPI, source of 429 global cooldown, targeted tests and GitHub Actions triggers/artifacts. **Did not execute real authorized OAuth or owner-specific GUI; cannot guarantee absence of every latent defect.** Old §13/§14 items already green are **not** being recycled into new work.
 
@@ -414,4 +414,19 @@ Reviewed areas: main interactive path, reducer and board transient UI, puzzle st
 5. **Owner-only/risks:** `ONLINE-LIVE-OAUTH: BLOCKED` до отдельного разрешённого профиля; `~9.09s` first-interaction outlier `UNATTRIBUTED`, отдельные fast probes не доказывают причину. Ни чужого login, ни приватной SQLite, ни PC владельца/Dr.Web. Сохранять Fair Play fail-closed и GET-only `puzzle:read`; никакого POST `puzzle:write`, background user-data writes без consent или самовольного merge. В статусах различать `FIXED CODE`, `L1`, `L2`, `L3`, `BLOCKED`, `OWNER NOT TESTED`.
 6. **Завершение:** прямо в `§15` этой спецификации отметить по каждой строке `RED → FIXED → PASS/BLOCKED` и приложить ссылку на обновлённый журнал. Отчитаться кратко. Отдать на **одну финальную независимую** acceptance перепроверку, без дробления перечисленных проблем на очередные три захода. **Не merge без решения владельца**.
 
-**Решение независимого ревьюера:** зелёный L3 сам по себе не разрешает merge при доказуемых несоответствиях `PUZ03-07`, `PUZ03-10`, `PUZ-07` и `PUZ03-08`. PR #52 оставить Draft. **END §15 — single consolidated handoff.**
+**Решение независимого ревьюера на момент проверки:** зелёный L3 сам по себе не разрешал merge при доказуемых несоответствиях `PUZ03-07`, `PUZ03-10`, `PUZ-07` и `PUZ03-08`. Результаты закрытия этих пунктов приведены ниже; PR #52 оставить Draft до независимой повторной приёмки.
+
+### 15.5. Итог исполнения консолидированного пакета
+
+| Сценарий §15.2 | Итог и доказательство |
+| --- | --- |
+| `PUZ03-07.SAVE-NONBLOCK` — ошибка read-model после успешного COMMIT | **RED → FIXED → PASS.** Успешная запись больше не получает ложный failure ACK; malformed payload и отказ необязательного read-model обработаны адресными L1 и MainWindow L2. |
+| `PUZ03-07.SAVE-NONBLOCK` — потеря pending/failed попыток | **RED → FIXED → PASS.** Additive SQLite v29 outbox, повторное открытие/повтор, account A→B→A и безопасное удаление после ACK проверены на отдельной временной БД. |
+| `PUZ03-10.RATING` — перенос официального рейтинга между аккаунтами | **RED → FIXED → PASS.** Официальный рейтинг/дата сбрасываются при новом профиле без данных; replay не меняет попытки/статистику/рейтинг, CC рейтинг не откатывается после auto-next. |
+| `PUZ-07.ACCOUNT-BOUND` / `PUZ03-08.PREFETCH` — личность puzzle token | **RED → FIXED → PASS для fake identity cases.** Игровой аккаунт A не подменяет проверенную puzzle-личность B; поздний ответ после ротации токена отклоняется. Авторизованный OAuth-профиль отсутствует и остаётся `BLOCKED`, fake credential не отправлялся. |
+| `PUZ03-08.PREFETCH` / `PUZ03-05.NEXT` — повторный Next при загрузке | **RED → FIXED → PASS.** Быстрые клики коалесцируются в single-flight запрос; после завершения/ошибки действие снова доступно. Проверены задержанный GET и штатный cooldown. |
+| `PUZ03-09.STREAK` — история reducer между задачами | **RED → FIXED → PASS.** История reducer очищается при загрузке новой задачи; лента результатов сессии сохраняет предыдущие исходы. |
+
+**Финальные проверки:** L1 **91 passed** и тематический native Windows Qt L2 с реальными public Lichess задачами прошли в [run 44801146864](https://github.com/feshakomissarov-prog/chess/actions/runs/44801146864), точный code/test SHA `63d53cda8980891c8cea14c7e73b655f69d65878`; фактические кадры 100/125/150 DPI находятся в [артефакте L2](https://github.com/feshakomissarov-prog/chess/actions/runs/44801146864/artifacts/14661866201). Финальный Windows L3 на том же code/test SHA: [run 44801169562](https://github.com/feshakomissarov-prog/chess/actions/runs/44801169562), **1262 passed**, compileall, изолированный offline smoke и visual evidence прошли. Подробности, RED ссылки, timings, факт визуального просмотра и ограничения внесены в [существующий журнал исполнения](../handoffs/PUZ_UX_03_EXECUTION_LOG.md#-15-consolidated-follow-up--six-scenarios-2026-11-20).
+
+Результат ревью выше описывает состояние **до исполнения этого пакета**; пункты §15.2 теперь закрыты по указанным доказательствам. PR #52 остаётся Draft для единой независимой повторной приёмки. `ONLINE-LIVE-OAUTH` и приемка на компьютере владельца не проводились; ограничения не скрываются. **END §15 — single consolidated handoff.**
