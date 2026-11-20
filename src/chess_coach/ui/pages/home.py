@@ -869,8 +869,10 @@ class HomePage(QWidget):
             self.puzzle_preview_board.set_flipped(board.turn == chess.BLACK)
             self.puzzle_preview_board.setAccessibleDescription(
                 f"Сохранённая задача {self._puzzle_preview['puzzle_id']}; "
-                f"ход за {'белых' if board.turn == chess.WHITE else 'чёрных'}. Нажмите Enter.")
-            self.puzzle_preview_board.setToolTip("Открыть и решить эту сохранённую задачу")
+                f"ход за {'белых' if board.turn == chess.WHITE else 'чёрных'}. "
+                "Нажмите Enter, чтобы открыть повтор без рейтинга.")
+            self.puzzle_preview_board.setToolTip(
+                "Открыть просмотр сохранённой задачи без изменения рейтинга")
             self.puzzle_preview_board.show()
             self.activity_status.setText("Задача Lichess")
             self.activity_status.setToolTip(
@@ -886,8 +888,9 @@ class HomePage(QWidget):
             if themes:
                 meta.append("Темы: " + ", ".join(str(theme) for theme in themes[:3]))
             self.puzzle_meta.setText(" · ".join(meta))
-            self.home_activity_button.setText("Решать задачу")
-            self.home_activity_button.setToolTip("Открыть и решить именно эту сохранённую задачу")
+            self.home_activity_button.setText("Открыть повтор")
+            self.home_activity_button.setToolTip(
+                "Посмотреть сохранённую задачу; повтор не меняет рейтинг и статистику")
         else:
             self.puzzle_preview_board.hide()
             self.activity_status.setToolTip("")

@@ -4001,6 +4001,9 @@ def test_home_saved_puzzle_preview_opens_exact_offline_attempt(qtbot, tmp_path, 
     assert window._home_view.activity_status.text() == "Задача Lichess"
     assert "saved-puzzle-42" in window._home_view.activity_status.toolTip()
     assert "1770" in window._home_view.puzzle_meta.text()
+    assert window.home_activity_button.text() == "Открыть повтор"
+    assert "не меняет рейтинг" in window.home_activity_button.toolTip()
+    assert "повтор без рейтинга" in window._home_view.puzzle_preview_board.accessibleDescription()
     window.home_activity_button.click()
     assert opened == [("lichess:owner", "saved-puzzle-42")]
     window._home_view.puzzle_preview_board.open_requested.emit()
