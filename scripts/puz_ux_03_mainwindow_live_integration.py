@@ -410,6 +410,8 @@ def run(output: Path) -> None:
     page._retry_attempt_save()
     wait_until(app, lambda: window.game_repository.local_puzzle_attempt_count(account_id)
                == outbox_attempts_before_retry + 1, timeout_ms=10000)
+    wait_until(app, lambda: not window.game_repository.pending_puzzle_attempts(account_id),
+               timeout_ms=10000)
     if window.game_repository.pending_puzzle_attempts(account_id):
         raise AssertionError("Acknowledged outbox entry was not removed")
 
