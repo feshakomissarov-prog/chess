@@ -149,7 +149,7 @@ def test_history_status_labels_and_theme_list_have_no_horizontal_scroll(qtbot):
 def test_save_retry_uses_compact_layout_when_five_controls_would_clip(qtbot):
     page = PuzzleTrainingPage(demo=True)
     qtbot.addWidget(page)
-    page.resize(1000, 941)
+    page.resize(1672, 941)
     page.show()
     qtbot.waitUntil(lambda: page.board.width() > 160)
 

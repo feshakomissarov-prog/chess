@@ -1166,7 +1166,11 @@ class PuzzleTrainingPage(QWidget):
             if not button.isHidden()
         ]
         spacing = max(0, self._controls_layout.horizontalSpacing())
-        required_width = sum(button.sizeHint().width() for button in visible_buttons)
+        # The normal grid gives every visible action one equal-width column.
+        # Fit the longest label in every column instead of comparing the sum
+        # of unequal natural widths with the available space.
+        required_width = (max((button.sizeHint().width() for button in visible_buttons),
+                              default=0) * len(visible_buttons))
         required_width += spacing * max(0, len(visible_buttons) - 1)
         return center_width < required_width
 

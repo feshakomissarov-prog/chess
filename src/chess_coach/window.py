@@ -734,6 +734,7 @@ class MainWindow(QMainWindow):
         self._archive_account_handle = None
         self._puzzle_accounts_generation = 0
         self._puzzle_accounts_handle = None
+        self._puzzle_training_accounts_generation = 0
         self._puzzle_training_page = None
         self._puzzle_training_generation = 0
         self._puzzle_training_callbacks: dict[str, object] = {}
@@ -6054,7 +6055,8 @@ class MainWindow(QMainWindow):
     def _load_puzzle_training_accounts(self, page: PuzzleTrainingPage,
                                        selected_account: str) -> None:
         request_id = uuid.uuid4().hex
-        generation = self._puzzle_training_generation
+        self._puzzle_training_accounts_generation += 1
+        generation = self._puzzle_training_accounts_generation
         selected_theme = page.selected_theme()
         preferred_username = ((getattr(self.lichess, "puzzle_username", None)
                                or getattr(self.lichess, "username", None)) if self.lichess else None)
@@ -6102,7 +6104,7 @@ class MainWindow(QMainWindow):
 
         def apply_result(payload, error) -> None:
             if (page is not self._puzzle_training_page or not shiboken6.isValid(page)
-                    or generation != self._puzzle_training_generation
+                    or generation != self._puzzle_training_accounts_generation
                     or self.screen_stack.currentWidget() is not page):
                 return
             if error or not isinstance(payload, dict):
