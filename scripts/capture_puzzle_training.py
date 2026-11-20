@@ -191,6 +191,10 @@ def main() -> None:
         assert page.board._annotation_arrows and page.board._annotation_squares
         save("user-marks")
 
+        # Replays are intentionally read-only. Load the explicit visual
+        # attempt as a new online-source session before checking save/ack UI.
+        page.load_puzzle(normalize_api_puzzle(payload), payload, source="lichess",
+                         rating_eligible=False)
         page.board.move_intent.emit(chess.Move.from_uci("d7d5"))
         assert page.state.status.value == "success"
         save("solved")
