@@ -1353,8 +1353,8 @@ class PuzzleTrainingPage(QWidget):
         )
         compact_controls = self._needs_compact_controls(center_width) or self.height() < 700
         if compact:
-            self._training_root_layout.setContentsMargins(8, 2, 8, 4)
-            self._training_root_layout.setSpacing(4)
+            self._training_root_layout.setContentsMargins(8, 0, 8, 0)
+            self._training_root_layout.setSpacing(2)
             self._training_title.setStyleSheet("font-size: 20px")
             self.fetch.setMinimumHeight(30)
             self.status.setMinimumHeight(24)
