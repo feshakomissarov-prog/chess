@@ -6065,6 +6065,8 @@ class MainWindow(QMainWindow):
                                        selected_account: str, *,
                                        default_to_available: bool = True,
                                        request_puzzle: bool = False) -> None:
+        if self._shutdown_requested or not shiboken6.isValid(page):
+            return
         request_id = uuid.uuid4().hex
         self._puzzle_training_accounts_generation += 1
         generation = self._puzzle_training_accounts_generation
