@@ -3027,8 +3027,11 @@ def test_close_requires_explicit_decision_when_attempt_could_not_reach_outbox(
 
     answers = iter((QMessageBox.StandardButton.No, QMessageBox.StandardButton.Yes))
     prompts = []
-    monkeypatch.setattr(QMessageBox, "warning",
-                        lambda *args, **kwargs: (prompts.append(args[2]), next(answers)))
+    def answer_warning(*args, **kwargs):
+        prompts.append(args[2])
+        return next(answers)
+
+    monkeypatch.setattr(QMessageBox, "warning", answer_warning)
     rejected_close = QCloseEvent()
     window.closeEvent(rejected_close)
     assert not rejected_close.isAccepted()
