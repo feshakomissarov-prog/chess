@@ -129,6 +129,34 @@ def capture(page: PuzzleTrainingPage, output: Path, index: int, label: str,
     print(f"FRAME {timestamp} {filename}")
 
 
+def instrument_first_feedback(page: PuzzleTrainingPage) -> list[dict]:
+    """Measure synchronous stages of the first live input without changing behavior."""
+    samples: list[dict] = []
+    targets = (
+        (page.state, "submit", "state.submit"),
+        (page.board, "set_interaction_enabled", "board.interaction"),
+        (page.board, "set_position", "board.set_position"),
+        (page.board, "set_feedback_squares", "board.feedback"),
+        (page, "_show_verdict", "page.verdict"),
+        (page, "_record_input_feedback", "page.record_paint"),
+        (page, "_record_first_failure", "page.first_failure"),
+        (page, "_update_session_display", "page.session_display"),
+    )
+    for owner, name, label in targets:
+        original = getattr(owner, name)
+
+        def timed(*args, _original=original, _label=label, **kwargs):
+            started = time.perf_counter()
+            try:
+                return _original(*args, **kwargs)
+            finally:
+                samples.append({"stage": _label,
+                                "elapsed_ms": round((time.perf_counter() - started) * 1000, 2)})
+
+        setattr(owner, name, timed)
+    return samples
+
+
 def solve_public_line(app: QApplication, page: PuzzleTrainingPage, output: Path,
                       frames: list[dict], label_prefix: str) -> None:
     """Enter only the solver's plies; the production page plays replies itself."""
@@ -202,6 +230,7 @@ def play(output: Path, dpi_scale: str) -> None:
     raw, _ = prepared["0haqU"]
     page.load_puzzle(normalize_api_puzzle(raw), raw, source="lichess", rating_eligible=False)
     capture(page, output, len(frames), "live-ready", frames)
+    first_input_stages = instrument_first_feedback(page)
     board = page.state.board.copy()
     expected = chess.Move.from_uci(page.state.puzzle.expected_user_moves[0])
     wrong = next((move for move in board.legal_moves if move != expected), None)
@@ -269,6 +298,7 @@ def play(output: Path, dpi_scale: str) -> None:
                  {"kind": kind, "ms": round(value, 2)}
                  for kind, value in zip(page._input_feedback_kinds,
                                         page._input_feedback_ms)],
+             "first_input_stage_timings": first_input_stages,
              "elapsed_seconds": round(sum(float(meta["get_ms"]) for _raw, meta in puzzles) / 1000, 3),
              "rating_eligible": False}
     input_samples = sorted(page._input_feedback_ms)
