@@ -279,10 +279,16 @@ def run(output: Path) -> None:
     shutdown_logging()
 
 
-def _accept_question(app: QApplication) -> None:
-    dialog = app.activeModalWidget()
-    if isinstance(dialog, QMessageBox):
-        dialog.done(int(QMessageBox.StandardButton.Yes))
+def _accept_question(app: QApplication, attempts: int = 0) -> None:
+    dialog = next((widget for widget in app.topLevelWidgets()
+                   if isinstance(widget, QMessageBox) and widget.isVisible()), None)
+    if dialog is not None:
+        yes = dialog.button(QMessageBox.StandardButton.Yes)
+        if yes is not None:
+            QTest.mouseClick(yes, Qt.MouseButton.LeftButton)
+            return
+    if attempts < 100:
+        QTimer.singleShot(10, lambda: _accept_question(app, attempts + 1))
 
 
 def main() -> None:
