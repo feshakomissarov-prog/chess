@@ -1445,18 +1445,17 @@ def main() -> None:
             if width == target_sizes[0][0] and height == target_sizes[0][1]:
                 puzzle_id = window._home_view._puzzle_preview["puzzle_id"]
                 QTest.mouseClick(window.home_activity_button, Qt.MouseButton.LeftButton)
-                wait_for(lambda: window._puzzle_page is not None
-                         and window.screen_stack.currentWidget() is window._puzzle_page
-                         and window._puzzle_page.findChild(PuzzleHistoryPage) is not None,
+                wait_for(lambda: window._puzzle_training_page is not None
+                         and window.screen_stack.currentWidget() is window._puzzle_training_page
+                         and window._puzzle_training_page.state.puzzle is not None
+                         and window._puzzle_training_page.state.puzzle.puzzle_id == puzzle_id,
                          "exact saved puzzle route from Home", timeout=30)
-                puzzle_page = window._puzzle_page.findChild(PuzzleHistoryPage)
-                wait_for(lambda: puzzle_page.history.count() > 0
-                         and puzzle_page.reset_replay.isEnabled()
-                         and puzzle_page.board._interaction_enabled
-                         and puzzle_page.solution.text().startswith("Офлайн-упражнение"),
-                         "selected Home puzzle in playable local replay", timeout=30)
-                selected_attempt = puzzle_page.history.currentItem().data(Qt.ItemDataRole.UserRole)
-                assert selected_attempt["puzzle_id"] == puzzle_id, (
+                puzzle_page = window._puzzle_training_page
+                wait_for(lambda: puzzle_page.board.isVisible()
+                         and puzzle_page.hint.isEnabled()
+                         and puzzle_page.state.status.value == "ready",
+                         "selected Home puzzle in playable local trainer", timeout=30)
+                assert puzzle_page.state.puzzle.puzzle_id == puzzle_id, (
                     "Home CTA must open the same saved puzzle ID as the preview."
                 )
                 captured["home-puzzle-exact-replay"] = capture(
@@ -1549,17 +1548,26 @@ def main() -> None:
         QTest.mouseClick(window._nav_buttons["training"], Qt.MouseButton.LeftButton)
         wait_for(lambda: window._puzzle_page is not None
                  and window.screen_stack.currentWidget() is window._puzzle_page
+                 and window._puzzle_training_page is window._puzzle_page,
+                 "local puzzle trainer page creation", timeout=30)
+        training = window._puzzle_training_page
+        wait_for(lambda: training.board.isVisible() and training.fetch.isVisible(),
+                 "puzzle trainer board and actions", timeout=30)
+        captured["training"] = capture(window, output, "training", width, height)
+        QTest.mouseClick(training.history_button, Qt.MouseButton.LeftButton)
+        wait_for(lambda: window._puzzle_page is not None
+                 and window.screen_stack.currentWidget() is window._puzzle_page
                  and window._puzzle_page.findChild(PuzzleHistoryPage) is not None,
-                 "local training history page creation", timeout=30)
-        training = window._puzzle_page.findChild(PuzzleHistoryPage)
-        wait_for(lambda: training is not None and training.history.count() > 0
-                 and not training.summary.text().startswith(
+                 "full local puzzle history page creation", timeout=30)
+        history_page = window._puzzle_page.findChild(PuzzleHistoryPage)
+        wait_for(lambda: history_page is not None and history_page.history.count() > 0
+                 and not history_page.summary.text().startswith(
                      ("Загружаем", "Читаю")),
                  "populated local synthetic training history", timeout=30)
-        training.history.setCurrentRow(0)
-        wait_for(lambda: training.solution.text().startswith("Задача "),
+        history_page.history.setCurrentRow(0)
+        wait_for(lambda: history_page.solution.text().startswith("Задача "),
                  "selected synthetic exercise and board position")
-        captured["training"] = capture(window, output, "training", width, height)
+        captured["training-history"] = capture(window, output, "training-history", width, height)
 
         QTest.mouseClick(window._nav_buttons["progress"], Qt.MouseButton.LeftButton)
         wait_for(lambda: window.screen_stack.currentWidget() is window._statistics_dialog
@@ -1672,7 +1680,7 @@ def main() -> None:
         long_opponent_count = sum(
             1 for width, _height in target_sizes if width >= 1500 or width <= 1280)
         play_return_count = int(bool(target_sizes))
-        expected_count = (3 * len(target_sizes) + len(offline_sizes) + 18
+        expected_count = (3 * len(target_sizes) + len(offline_sizes) + 19
                           + 2 * compact_size_count
                           + tabs.count() + graph_case_count
                           + long_opponent_count + play_return_count)

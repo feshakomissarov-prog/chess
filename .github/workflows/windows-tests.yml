@@ -2,6 +2,10 @@ name: Windows tests
 
 on:
   pull_request:
+    # A deliberate Ready-for-review transition is the automated final L3 gate.
+    # This avoids asking the owner to use workflow_dispatch or relaunching
+    # the entire Windows matrix after every code edit in a Draft PR.
+    types: [opened, synchronize, reopened, ready_for_review]
     # Changes limited to Markdown must not start the expensive Windows matrix.
     paths-ignore:
       - "**/*.md"
@@ -23,7 +27,7 @@ concurrency:
 jobs:
   home-chart-review:
     name: L1/L2 Home chart review
-    if: github.event_name != 'pull_request' || github.event.pull_request.head.ref != 'codex/review-ux-01-game-analysis-2026-11-14'
+    if: github.event_name != 'pull_request' || github.event.action == 'ready_for_review' || (github.event.pull_request.head.ref != 'codex/review-ux-01-game-analysis-2026-11-14' && github.event.pull_request.head.ref != 'codex/puzzle-ux-02-lichess-training-2026-11-19')
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v7.0.1
@@ -80,7 +84,7 @@ jobs:
           path: visual-evidence/home-chart-review/
           if-no-files-found: warn
   test:
-    if: github.event_name != 'pull_request' || github.event.pull_request.head.ref != 'codex/review-ux-01-game-analysis-2026-11-14'
+    if: github.event_name != 'pull_request' || github.event.action == 'ready_for_review' || (github.event.pull_request.head.ref != 'codex/review-ux-01-game-analysis-2026-11-14' && github.event.pull_request.head.ref != 'codex/puzzle-ux-02-lichess-training-2026-11-19')
     needs: home-chart-review
     runs-on: windows-latest
     steps:
@@ -108,7 +112,7 @@ jobs:
         run: >-
           python -X faulthandler -c "from PySide6.QtWidgets import QApplication; from chess_coach.window import MainWindow; app = QApplication([]); window = MainWindow(offline_mode=True); assert window.lichess is None; window.close()"
   visual-evidence:
-    if: github.event_name != 'pull_request' || github.event.pull_request.head.ref != 'codex/review-ux-01-game-analysis-2026-11-14'
+    if: github.event_name != 'pull_request' || github.event.action == 'ready_for_review' || (github.event.pull_request.head.ref != 'codex/review-ux-01-game-analysis-2026-11-14' && github.event.pull_request.head.ref != 'codex/puzzle-ux-02-lichess-training-2026-11-19')
     needs: home-chart-review
     runs-on: windows-latest
     steps:
@@ -153,6 +157,21 @@ jobs:
           $referencePairs = Get-ChildItem -LiteralPath "visual-evidence" -Filter "pair-*.png" -Recurse -ErrorAction SilentlyContinue
           if ($referencePairs) {
             throw "Public visual-evidence must not include side-by-side reference images."
+          }
+      - name: Capture the puzzle trainer at three native DPI scales
+        shell: pwsh
+        run: |
+          $cases = @(
+            @{ Scale = "1"; Size = "1672x941" },
+            @{ Scale = "1.25"; Size = "1280x720" },
+            @{ Scale = "1.5"; Size = "1120x640" }
+          )
+          foreach ($case in $cases) {
+            $env:QT_SCALE_FACTOR = $case.Scale
+            $env:CC_PUZZLE_VISUAL_SIZE = $case.Size
+            $env:CC_PUZZLE_VISUAL_OUTPUT = "visual-evidence/puzzle-training/scale-$($case.Scale)"
+            python -X faulthandler scripts/capture_puzzle_training.py
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           }
       - uses: actions/upload-artifact@v4
         if: always()

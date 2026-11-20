@@ -49,6 +49,7 @@ class BoardView(BoardWidget):
         self._annotation_arrows: set[tuple[int, int]] = set()
         self._annotation_squares: set[int] = set()
         self._hint_arrows: set[tuple[int, int]] = set()
+        self._hint_squares: set[int] = set()
         self._right_start: Optional[int] = None
         self._right_end: Optional[int] = None
         self._right_dragged = False
@@ -165,6 +166,13 @@ class BoardView(BoardWidget):
     def set_hint_arrows(self, moves) -> None:
         """Display temporary instructional arrows, separate from user marks."""
         self._hint_arrows = {(move.from_square, move.to_square) for move in moves}
+        self._hint_squares.clear()
+        self.update()
+
+    def set_hint_squares(self, squares) -> None:
+        """Highlight a hint origin without revealing the destination."""
+        self._hint_squares = {int(square) for square in squares}
+        self._hint_arrows.clear()
         self.update()
 
     def _make_interactive_move(self, move: chess.Move) -> None:
@@ -245,6 +253,10 @@ class BoardView(BoardWidget):
                 self._draw_square_mark(painter, square, QColor(39, 119, 87, 165))
         for start, end in self._hint_arrows:
             self._draw_arrow(painter, start, end, QColor(142, 174, 200, 220), 0.9)
+        for square in self._hint_squares:
+            self._renderer.highlight_square(
+                painter, self._get_board_rect(), square,
+                QColor(170, 155, 239, 155), self._flipped)
         if self._queued_premove is not None:
             self._draw_arrow(
                 painter,

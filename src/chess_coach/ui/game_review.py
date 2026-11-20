@@ -546,7 +546,7 @@ class GameReviewWorkspace(QWidget):
         split = QSplitter(Qt.Orientation.Horizontal)
         board_column = QWidget()
         board_layout = QVBoxLayout(board_column)
-        board_layout.setContentsMargins(0, 0, 0, 0)
+        board_layout.setContentsMargins(4, 4, 4, 4)
         board_layout.setSpacing(0)
         self.board_column = board_column
         self.board_layout = board_layout

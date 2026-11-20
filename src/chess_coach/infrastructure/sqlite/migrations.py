@@ -271,6 +271,36 @@ class SQLiteMigrationMixin:
                     snapshot_id TEXT PRIMARY KEY, account_id TEXT NOT NULL REFERENCES accounts(account_id),
                     days INTEGER NOT NULL, fetched_at TEXT NOT NULL, payload_json TEXT NOT NULL
                 );
+                CREATE TABLE IF NOT EXISTS local_puzzle_attempts (
+                    local_attempt_id TEXT PRIMARY KEY,
+                    account_id TEXT NOT NULL,
+                    puzzle_id TEXT NOT NULL,
+                    result TEXT NOT NULL CHECK(result IN ('success','mistake','hinted','revealed','skipped')),
+                    solved INTEGER NOT NULL DEFAULT 0 CHECK(solved IN (0,1)),
+                    mistakes INTEGER NOT NULL DEFAULT 0 CHECK(mistakes >= 0),
+                    hints INTEGER NOT NULL DEFAULT 0 CHECK(hints >= 0),
+                    duration_ms INTEGER NOT NULL DEFAULT 0 CHECK(duration_ms >= 0),
+                    puzzle_json TEXT NOT NULL,
+                    created_at_ms INTEGER NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS local_puzzle_attempt_themes (
+                    local_attempt_id TEXT NOT NULL REFERENCES local_puzzle_attempts(local_attempt_id) ON DELETE CASCADE,
+                    theme_id TEXT NOT NULL,
+                    PRIMARY KEY(local_attempt_id,theme_id)
+                );
+                CREATE INDEX IF NOT EXISTS idx_local_puzzle_attempt_theme
+                    ON local_puzzle_attempt_themes(theme_id,local_attempt_id);
+                CREATE INDEX IF NOT EXISTS idx_local_puzzle_attempts_recent
+                    ON local_puzzle_attempts(account_id, created_at_ms DESC);
+                CREATE TABLE IF NOT EXISTS local_puzzle_cache (
+                    account_id TEXT NOT NULL,
+                    puzzle_id TEXT NOT NULL,
+                    puzzle_json TEXT NOT NULL,
+                    cached_at_ms INTEGER NOT NULL,
+                    PRIMARY KEY(account_id,puzzle_id)
+                );
+                CREATE INDEX IF NOT EXISTS idx_local_puzzle_cache_recent
+                    ON local_puzzle_cache(account_id,cached_at_ms DESC);
                 CREATE TABLE IF NOT EXISTS puzzle_pilot_runs (
                     run_id TEXT PRIMARY KEY,
                     account_id TEXT NOT NULL REFERENCES accounts(account_id) ON DELETE CASCADE,

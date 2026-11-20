@@ -1,0 +1,17 @@
+{
+  "source": "https://github.com/lichess-org/api/blob/master/doc/specs/examples/puzzles-getMultiplePuzzlesAtOnce.json.yaml",
+  "puzzle": {
+    "game": {
+      "id": "LbeqZ2Cb",
+      "pgn": "e4 c5 c3 e6 d4 d5 dxc5 Bxc5 exd5 exd5 Bb5+ Nc6 Nf3 Nf6 O-O O-O Bg5 h6 Bh4 a6 Bd3 Bg4 h3 Bh5 Nbd2 Re8 Qb3 b5 a4 Na5 Qc2 Nc4 b3 Ne5 Nxe5 Rxe5 axb5 axb5 Rxa8 Qxa8 Bxf6 gxf6 Bxb5 Rg5 Re1 Qb7 Be2 Bxe2 Rxe2 d4 Ne4 Rg6 f3"
+    },
+    "puzzle": {
+      "id": "0haqU",
+      "rating": 1167,
+      "plays": 24912,
+      "solution": ["d4d3", "e4c5", "d3c2", "c5b7", "c2c1q"],
+      "themes": ["endgame", "advancedPawn", "crushing", "long", "promotion", "discoveredAttack"],
+      "initialPly": 52
+    }
+  }
+}

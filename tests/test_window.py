@@ -2752,6 +2752,8 @@ def test_puzzle_history_summary_uses_attempt_denominators_and_available_fields()
 def test_my_puzzles_home_action_opens_local_history_without_network_or_oauth(
     qtbot, tmp_path
 ):
+    from chess_coach.ui.pages.puzzle_training import PuzzleTrainingPage
+
     window = MainWindow(QSettings(str(tmp_path / "puzzle-local-nav.ini"),
                                   QSettings.Format.IniFormat), offline_mode=True)
     qtbot.addWidget(window)
@@ -2762,10 +2764,10 @@ def test_my_puzzles_home_action_opens_local_history_without_network_or_oauth(
     }])
     window.open_puzzle_history_local()
     qtbot.waitUntil(lambda: window._puzzle_page is not None
-                    and window._puzzle_page.findChild(QComboBox) is not None
-                    and window._puzzle_page.findChild(QComboBox).count() == 1,
+                    and isinstance(window._puzzle_page, PuzzleTrainingPage)
+                    and window._puzzle_page.account_selector.findData("lichess:localuser") >= 0,
                     timeout=5000)
-    assert window._puzzle_page.findChild(QComboBox).currentData() == "lichess:localuser"
+    assert window._puzzle_page.account_selector.currentData() == "lichess:localuser"
     assert window.lichess is None
     assert window._puzzle_progress_dialog is None
     window.close()
@@ -2789,13 +2791,15 @@ def test_puzzle_history_falls_back_from_empty_connected_account_and_has_local_se
     })()
     window._lichess_connected = True
     window.open_puzzle_history_local()
-    qtbot.waitUntil(lambda: window._puzzle_page.findChild(QComboBox) is not None
-                    and window._puzzle_page.findChild(QComboBox).count() == 1,
+    from chess_coach.ui.pages.puzzle_training import PuzzleTrainingPage
+    qtbot.waitUntil(lambda: isinstance(window._puzzle_page, PuzzleTrainingPage)
+                    and window._puzzle_page.account_selector.findData("lichess:olderuser") >= 0,
                     timeout=3000)
     page = window._puzzle_page
-    selector = page.findChild(QComboBox)
+    selector = page.account_selector
     assert selector.currentData() == "lichess:olderuser"
-    assert selector.count() == 1  # no implicit mixing or empty-account fallback to online data
+    assert {selector.itemData(index) for index in range(selector.count())} == {
+        "local", "lichess:olderuser"}
     assert window._puzzle_progress_dialog is None
     window.close()
 
@@ -6938,7 +6942,7 @@ def test_rv2_delayed_puzzle_account_read_cannot_reopen_training(qtbot, tmp_path,
         assert entered.wait(1)
         window.show_statistics()
         current = window.screen_stack.currentWidget()
-        with qtbot.waitSignal(window.puzzle_history_finished):
+        with qtbot.waitSignal(window.puzzle_training_finished):
             release.set()
         assert window.screen_stack.currentWidget() is current
     finally:
