@@ -297,6 +297,7 @@ def run(output: Path) -> None:
                page.network_status.text(), timeout_ms=15000)
     if page._active_source == "demo":
         raise AssertionError("Network failure silently entered a demo puzzle")
+    network_failure_message = page.network_status.text()
     capture(page, output, len(frames), "mainwindow-public-network-failure-no-fallback", frames)
 
     # Change to a second synthetic profile and confirm the MainWindow account
@@ -336,12 +337,14 @@ def run(output: Path) -> None:
         "fake-oauth-callback-token", client_adapter.username)
     QDesktopServices.openUrl = lambda _url: True
     page.set_authorization_needed(True)
+    before_authorized_session = page._session_id
     previous_batch_count = len(client.batch_arguments)
     page.authorize.click()
     wait_until(app, lambda: len(client.batch_arguments) > previous_batch_count
                and client.batch_arguments[-1]["difficulty"] == "hardest",
                timeout_ms=20000)
-    wait_until(app, lambda: page.state.puzzle is not None and page.state.status.value == "ready",
+    wait_until(app, lambda: page._session_id != before_authorized_session
+               and page.state.puzzle is not None and page.state.status.value == "ready",
                timeout_ms=20000)
     if client.batch_arguments[-1]["token_sent"]:
         raise AssertionError("Fake OAuth credential was sent in a public GET header")
@@ -369,7 +372,7 @@ def run(output: Path) -> None:
         "duplicate_id_unrated": True,
         "wrong_then_skip_kept_red": True,
         "skip_status": "skipped",
-        "network_failure": page.network_status.text(),
+        "network_failure": network_failure_message,
         "second_account_scope": second_account,
         "account_switch_restarted": page.account_id == second_account,
         "advanced_difficulty": page.selected_difficulty(),
