@@ -6277,6 +6277,8 @@ class MainWindow(QMainWindow):
                                                  generation: int, expected_fingerprint: str,
                                                  apply: object) -> None:
         """Re-read the dedicated keyring credential off the GUI thread before UI apply."""
+        if self._shutdown_requested:
+            return
         request_id = uuid.uuid4().hex
 
         def worker() -> None:
@@ -6295,7 +6297,8 @@ class MainWindow(QMainWindow):
         def apply_validation(result, error) -> None:
             if (page is not self._puzzle_training_page or not shiboken6.isValid(page)
                     or generation != self._puzzle_training_generation
-                    or self.screen_stack.currentWidget() is not page):
+                    or self.screen_stack.currentWidget() is not page
+                    or self._shutdown_requested):
                 return
             if error or not isinstance(result, dict) or not result.get("matches"):
                 page.set_message("Разрешение puzzle:read изменилось. Повторите запрос для выбранного профиля.")
@@ -6304,9 +6307,14 @@ class MainWindow(QMainWindow):
             apply()
 
         self._register_training_callback(page, request_id, generation, apply_validation)
-        self._start_registered_work(
-            worker, kind="puzzle_training_credential_check", lane=OperationLane.INTERACTIVE,
-            thread_name="cc-puzzle-credential-check")
+        try:
+            self._start_registered_work(
+                worker, kind="puzzle_training_credential_check", lane=OperationLane.INTERACTIVE,
+                thread_name="cc-puzzle-credential-check")
+        except RuntimeError:
+            # Shutdown may race between the guard and coordinator admission.
+            # The original puzzle callback is stale once closing has begun.
+            self._puzzle_history_callbacks.pop(request_id, None)
 
     def _request_puzzle_training(self, page: PuzzleTrainingPage, theme: str,
                                  difficulty: str, *, authorize: bool) -> None:
