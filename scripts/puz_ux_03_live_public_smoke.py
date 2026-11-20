@@ -364,6 +364,19 @@ def play(output: Path, dpi_scale: str) -> None:
     if page.state.status.value != "success":
         raise AssertionError("Did not finish second public puzzle in production page")
     capture(page, output, len(frames), "clean-win", frames)
+    wait_until(app, lambda: auto_next["advanced"], timeout_ms=2500)
+    if page.state.puzzle.puzzle_id != "0000D":
+        raise AssertionError("Production auto-next did not load the third public API position")
+
+    # Third public position is now visible in the same live Qt page; exercise
+    # the user's first move and finish its known public solution as well.
+    # Review is tested only after auto-next has already been observed; entering
+    # review intentionally pauses the pending transition until the user returns.
+    page.auto_next.setChecked(False)
+    solve_public_line(app, page, output, frames, "third")
+    if page.state.status.value != "success":
+        raise AssertionError("Did not finish third public puzzle after auto-next")
+    capture(page, output, len(frames), "third-live-win", frames)
     if page.state.review_count < 3:
         raise AssertionError("Public multi-move puzzle did not expose at least two played plies")
     terminal_status = page.state.status
@@ -379,16 +392,6 @@ def play(output: Path, dpi_scale: str) -> None:
     page.return_to_solution.click()
     if page.state.is_reviewing or page.state.status != terminal_status:
         raise AssertionError("Leaving wheel review changed the completed puzzle status")
-    wait_until(app, lambda: auto_next["advanced"], timeout_ms=2500)
-    if page.state.puzzle.puzzle_id != "0000D":
-        raise AssertionError("Production auto-next did not load the third public API position")
-
-    # Third public position is now visible in the same live Qt page; exercise
-    # the user's first move and finish its known public solution as well.
-    solve_public_line(app, page, output, frames, "third")
-    if page.state.status.value != "success":
-        raise AssertionError("Did not finish third public puzzle after auto-next")
-    capture(page, output, len(frames), "third-live-win", frames)
 
     trace = {"dpi_scale": dpi_scale, "authenticated": False,
              "requests": [meta for _raw, meta in puzzles], "frames": frames,
