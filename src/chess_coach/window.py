@@ -6275,7 +6275,8 @@ class MainWindow(QMainWindow):
 
     def _validate_puzzle_credential_before_apply(self, page: PuzzleTrainingPage,
                                                  generation: int, expected_fingerprint: str,
-                                                 apply: object) -> None:
+                                                 apply: object, *,
+                                                 on_invalid: object | None = None) -> None:
         """Re-read the dedicated keyring credential off the GUI thread before UI apply."""
         if self._shutdown_requested:
             return
@@ -6301,8 +6302,12 @@ class MainWindow(QMainWindow):
                     or self._shutdown_requested):
                 return
             if error or not isinstance(result, dict) or not result.get("matches"):
-                page.set_message("Разрешение puzzle:read изменилось. Повторите запрос для выбранного профиля.")
-                page.set_authorization_needed(True)
+                if callable(on_invalid):
+                    on_invalid(error)
+                else:
+                    page.set_message(
+                        "Разрешение puzzle:read изменилось. Повторите запрос для выбранного профиля.")
+                    page.set_authorization_needed(True)
                 return
             apply()
 
@@ -6606,12 +6611,43 @@ class MainWindow(QMainWindow):
             if error or not isinstance(payload, dict):
                 page.network_status.setText("Следующая задача загрузится по запросу")
                 return
-            self._validate_puzzle_credential_before_apply(
-                page, generation, str(payload.get("credential_fingerprint") or ""),
-                lambda: page.set_prepared_puzzle(
+
+            def apply_prepared_if_current() -> None:
+                # The credential check is asynchronous too. Recheck the full
+                # speculative scope at its completion boundary so an old
+                # theme/difficulty/session cannot occupy the one-item prefetch slot.
+                if (page is not self._puzzle_training_page
+                        or not shiboken6.isValid(page)
+                        or generation != self._puzzle_training_generation
+                        or self.screen_stack.currentWidget() is not page
+                        or page.account_id.casefold() != requested_account.casefold()
+                        or str(payload.get("account_id") or "").casefold()
+                           != requested_account.casefold()
+                        or page.selected_theme() != theme
+                        or page.selected_difficulty() != difficulty
+                        or page._session_id != session_id
+                        or page.state.puzzle is None
+                        or page._active_source != "lichess"
+                        or page._is_replay
+                        or page._prepared_online_puzzle is not None
+                        or self._shutdown_requested):
+                    return
+                page.set_prepared_puzzle(
                     payload["account_id"], theme, difficulty, payload["puzzle"], payload["raw"],
                     {**payload.get("details", {}),
-                     "rating_eligible": payload.get("rating_eligible", True)}))
+                     "rating_eligible": payload.get("rating_eligible", True)})
+
+            def report_prefetch_credential_failure(_error=None) -> None:
+                # A speculative request is optional. Report that the next task
+                # needs attention without disabling the currently loaded board.
+                page.network_status.setText(
+                    "Следующая задача не подготовлена · проверьте разрешение puzzle:read.")
+                page.set_authorization_needed(True)
+
+            self._validate_puzzle_credential_before_apply(
+                page, generation, str(payload.get("credential_fingerprint") or ""),
+                apply_prepared_if_current,
+                on_invalid=report_prefetch_credential_failure)
 
         self._register_training_callback(page, request_id, generation, apply_result)
         handle = self._start_registered_work(
@@ -6785,13 +6821,30 @@ class MainWindow(QMainWindow):
         payload.setdefault("session_id", page._session_id)
         payload.setdefault("puzzle_id", page._session_puzzle_id)
         attempt_id = str(payload["attempt_id"])
+        with self._puzzle_attempt_ack_lock:
+            if attempt_id in self._puzzle_attempt_acknowledged:
+                return
         with self._puzzle_attempt_state_lock:
-            self._puzzle_attempt_save_states[attempt_id] = {
+            existing = self._puzzle_attempt_save_states.get(attempt_id)
+            if existing and (existing.get("worker_active") or existing.get("status") == "saved"):
+                return
+            save_state = {
                 "attempt_id": attempt_id,
                 "account_id": str(payload.get("account_id") or "local"),
                 "status": "enqueue_pending",
                 "outbox_persisted": None,
+                "worker_active": True,
             }
+
+            self._puzzle_attempt_save_states[attempt_id] = save_state
+
+        def update_save_state(**changes) -> None:
+            with self._puzzle_attempt_state_lock:
+                # ACK may remove the attempt state while an old callback is
+                # unwinding. Never index the shared map after that removal.
+                if self._puzzle_attempt_save_states.get(attempt_id) is save_state:
+                    save_state.update(changes)
+
         def worker() -> None:
             error = None
             outbox_written = False
@@ -6801,17 +6854,13 @@ class MainWindow(QMainWindow):
                     enqueue(payload)
                     outbox_written = True
                 payload["outbox_persisted"] = outbox_written
-                with self._puzzle_attempt_state_lock:
-                    self._puzzle_attempt_save_states[attempt_id].update(
-                        status="durable" if outbox_written else "unprotected",
-                        outbox_persisted=outbox_written)
+                update_save_state(status="durable" if outbox_written else "unprotected",
+                                  outbox_persisted=outbox_written)
             except Exception as exc:
                 payload["outbox_persisted"] = False
                 payload["outbox_error"] = f"{type(exc).__name__}: {exc}"
                 error = payload["outbox_error"]
-                with self._puzzle_attempt_state_lock:
-                    self._puzzle_attempt_save_states[attempt_id].update(
-                        status="unprotected", outbox_persisted=False)
+                update_save_state(status="unprotected", outbox_persisted=False)
             try:
                 if error:
                     raise RuntimeError(error)
@@ -6828,8 +6877,7 @@ class MainWindow(QMainWindow):
                 payload["inserted"] = inserted
                 with self._puzzle_attempt_ack_lock:
                     self._puzzle_attempt_acknowledged.add(str(saved_id))
-                with self._puzzle_attempt_state_lock:
-                    self._puzzle_attempt_save_states[attempt_id].update(status="saved")
+                update_save_state(status="saved", worker_active=False)
                 # The attempt row and any eligible rating event are committed.
                 # Read-model enrichment is optional and must not turn that commit
                 # into a false failure/retry loop.
@@ -6880,11 +6928,8 @@ class MainWindow(QMainWindow):
                         payload["outbox_error"] = "Не удалось обновить очередь восстановления."
                 log_event("local_puzzle_attempt_save_failed", "puzzle_training",
                           status="failed")
-                with self._puzzle_attempt_state_lock:
-                    state = self._puzzle_attempt_save_states.get(attempt_id)
-                    if state is not None:
-                        state.update(status=("durable" if outbox_written else "unprotected"),
-                                     outbox_persisted=outbox_written)
+                update_save_state(status=("durable" if outbox_written else "unprotected"),
+                                  outbox_persisted=outbox_written, worker_active=False)
             self.puzzle_attempt_save_finished.emit(payload, error)
 
         self._start_registered_work(

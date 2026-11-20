@@ -3688,6 +3688,7 @@ def test_prefetch_credential_failure_keeps_current_puzzle_playable(
     page._submit_move(chess.Move.from_uci("e2e4"))
     qtbot.waitUntil(lambda: window.game_repository.local_puzzle_attempt_count(account) == 1,
                     timeout=5000)
+    qtbot.waitUntil(lambda: not page._pending_attempt_saves, timeout=5000)
     assert len(saved) == 1
     assert saved[0]["puzzle_id"] == "active-before-prefetch"
     assert saved[0]["account_id"] == account
@@ -3723,16 +3724,22 @@ def test_duplicate_attempt_save_is_single_flight_and_ack_remains_success(
     workers = []
     monkeypatch.setattr(window, "_start_registered_work",
                         lambda worker, **_kwargs: workers.append(worker))
+    save_results = []
+    window.puzzle_attempt_save_finished.connect(
+        lambda payload, error: save_results.append((payload.get("attempt_id"), error)))
 
     try:
         window._save_training_attempt(page, attempt)
         window._save_training_attempt(page, attempt)
-        assert len(workers) == 1, "same attempt_id must not create a competing save worker"
-
-        # Execute the captured isolated worker against this test's temporary SQLite.
-        workers[0]()
+        # Force the post-COMMIT interleaving: the first success ACK removes its
+        # state before the second already-scheduled worker reaches its state update.
+        for worker in tuple(workers):
+            worker()
         assert window.game_repository.local_puzzle_attempt_count(account) == 1
         assert window.game_repository.local_puzzle_rating_event(account, "same-attempt-puzzle")
+        assert len(workers) == 1, "same attempt_id must not create a competing save worker"
+        assert [error for _attempt_id, error in save_results] == [None], (
+            "a duplicate worker must not report failure after the row was committed")
         assert page._pending_attempt_saves == {}
         assert page.retry_save.isHidden()
         assert "Сохранено" in page.persistence_status.text()
@@ -3796,23 +3803,34 @@ def test_prefetch_validation_rechecks_scope_before_installing_prepared_puzzle(
     monkeypatch.setattr("chess_coach.window.WindowsCredentialStore", FakeCredentialStore)
     captured = {}
     result_ready = threading.Event()
+    validation_result_ready = threading.Event()
     register = window._register_training_callback
+    registration_count = 0
 
     def hold_prefetch_result(target, request_id, generation, callback):
-        if not captured.get("held"):
+        nonlocal registration_count
+        registration_count += 1
+        if registration_count == 1:
             captured["held"] = True
             def held(payload, error):
                 captured.update(payload=payload, error=error, apply=callback,
                                 generation=generation)
                 result_ready.set()
             return register(target, request_id, generation, held)
+        if scope_change == "account" and registration_count == 2:
+            captured["validation_callback"] = callback
+            def hold_validation(payload, error):
+                captured.update(validation_payload=payload, validation_error=error)
+                validation_result_ready.set()
+            return register(target, request_id, generation, hold_validation)
         return register(target, request_id, generation, callback)
 
     monkeypatch.setattr(window, "_register_training_callback", hold_prefetch_result)
     validator_callbacks = []
-    monkeypatch.setattr(window, "_validate_puzzle_credential_before_apply",
-                        lambda _page, _generation, _fingerprint, apply:
-                        validator_callbacks.append(apply))
+    if scope_change != "account":
+        monkeypatch.setattr(window, "_validate_puzzle_credential_before_apply",
+                            lambda _page, _generation, _fingerprint, apply:
+                            validator_callbacks.append(apply))
     restarted_scopes = []
     monkeypatch.setattr(window, "_schedule_puzzle_prefetch_when_idle",
                         lambda *args: restarted_scopes.append(args))
@@ -3820,7 +3838,8 @@ def test_prefetch_validation_rechecks_scope_before_installing_prepared_puzzle(
     window._prefetch_puzzle_training(page, account, *original_scope[:2], original_scope[2])
     qtbot.waitUntil(result_ready.is_set, timeout=5000)
     captured["apply"](captured["payload"], captured["error"])
-    assert len(validator_callbacks) == 1
+    if scope_change != "account":
+        assert len(validator_callbacks) == 1
 
     if scope_change == "theme":
         index = page.theme.findData("fork")
@@ -3840,12 +3859,19 @@ def test_prefetch_validation_rechecks_scope_before_installing_prepared_puzzle(
             source="lichess")
         assert page._session_id != original_scope[2]
     else:
+        qtbot.waitUntil(validation_result_ready.is_set, timeout=5000)
         monkeypatch.setattr(window, "_load_puzzle_training_accounts", lambda *_args, **_kwargs: None)
         window._puzzle_training_account_changed(page, other_account)
         assert window._puzzle_training_generation > captured["generation"]
 
-    # The fake validator now releases its successful callback after scope changed.
-    validator_callbacks[0]()
+    if scope_change == "account":
+        # Exercise the real credential validator: its generation guard should
+        # discard this already-queued success after account switch.
+        captured["validation_callback"](
+            captured["validation_payload"], captured["validation_error"])
+    else:
+        # The fake validator now releases its successful callback after scope changed.
+        validator_callbacks[0]()
     assert page._prepared_online_puzzle is None, (
         f"stale prepared puzzle was installed after {scope_change} scope change: "
         f"{page._prepared_online_puzzle!r}")
