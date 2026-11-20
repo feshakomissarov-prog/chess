@@ -3,7 +3,7 @@
 <!-- verification-contract: docs/process/VERIFICATION_PROTOCOL.md -->
 
 **Дата:** 21.11.2026 · **Статус:** DRAFT FOR CODEX / NOT IMPLEMENTED · **Новый кодовый PR:** создать отдельно от этой docs-ветки · **Источник:** main после squash-merge PR #52, commit 30cf8f0aef34a5ef219882971e3e5624bff0d22b.  
-**Регламенты:** [AGENTS.md](../../AGENTS.md) → [OWNER-WORKFLOW-01 §4а](../process/OWNER_WORKFLOW_CONTRACT.md) (пока в [отдельном PR #53](https://github.com/feshakomissarov-prog/chess/blob/policy/owner-workflow-2026-11-20/docs/process/OWNER_WORKFLOW_CONTRACT.md)) → [CC-VERIFY-01](../process/VERIFICATION_PROTOCOL.md). Если ветка правил ещё не merged, читать точную ссылку на PR #53. **Никакого самостоятельного merge Codex.**
+**Регламенты:** [AGENTS.md](../../AGENTS.md) → [OWNER-WORKFLOW-01 §4а из PR #53](https://github.com/feshakomissarov-prog/chess/blob/policy/owner-workflow-2026-11-20/docs/process/OWNER_WORKFLOW_CONTRACT.md) (пока не включён в main) → [CC-VERIFY-01](../process/VERIFICATION_PROTOCOL.md). Если ветка правил ещё не merged, читать точную ссылку на PR #53. **Никакого самостоятельного merge Codex.**
 
 ## 1. Почему §52 нельзя считать пользовательски завершённым
 
@@ -137,7 +137,7 @@
 - python -m pytest -q -o addopts= tests/test_puz_ux_04_home.py::test_large_archive_home_shows_cached_or_informative_status
 - Имена **новых** tests указаны как обязательные node ID для разработки, они пока не существуют. До исправлений RED должен подтверждать симптомы, **без искусственного моделирования экзотики**. Минимум 1 native Qt clicked-flow smoke после действий с BoardView.
 
-**L2 — один тематический Windows Windows Qt запуск после единого пакета:**
+**L2 — один тематический Windows Qt запуск после единого пакета:**
 - python -m pytest -q -o addopts= tests/test_puz_ux_04_flow.py tests/test_puz_ux_04_home.py tests/test_puzzle_training_ui.py tests/test_puzzle_training_async.py tests/test_puzzle_training_navigation.py tests/test_board_view.py (последние имена/существование сверить в текущем HEAD; при отсутствии файла корректировать команду открыто, не пропускать покрытие).
 - Windows MainWindow **реальный пользовательский flow 1–10** с QTest.mouseClick/drag/wheel или реальными Qt events, инертными credentials, временной SQLite и live **публичными GET Lichess**. Если ограничение Qt тестового окружения мешает wheel, добавить нативный event; **не засчитывать programmatic page method call как ручной mouse proof**.
 - Достаточно **одного** L2 с тремя DPI; без 30 избыточных полноэкранных матриц. Видеозапись короткого e2e приветствуется, но JSON trace + PNG + исходный скрипт обязательны. Тестовые trace содержат ID задач, запросы, статусы, переходы, timestamps и флаги input_enabled (без токенов).
