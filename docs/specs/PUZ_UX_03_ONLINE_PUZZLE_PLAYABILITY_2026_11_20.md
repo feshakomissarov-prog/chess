@@ -455,14 +455,14 @@ Reviewed areas: main interactive path, reducer and board transient UI, puzzle st
 | --- | --- | --- |
 | `PUZ03-01/02/03`: verdict, wrong rollback, opponent | Reducer/BoardView + page timers + real-public L2 screenshots/timestamps | **PASS runner** |
 | `PUZ03-04/06`: wheel/клавиатура/hints | State review snapshots, Qt controls, real public hint/wheel frames | **PASS inspected paths**, owner visual pending |
-| `PUZ03-05/08`: Next, prefetch, network, 429, OAuth | Per-request UI single-flight and fake identity tests + actual `LichessClient` cooldown; **queued post-rotation** uncovered | **PASS tested**, §16.1 P1 remains |
-| `PUZ03-07`: SQLite/outbox, read-model, retry, close | v29 additive migration, commit/ACK separation, Qt L2 outbox screenshot and store tests; **shutdown race + stale snapshot** uncovered | **PASS tested**, §16.1 P1/P2 remain |
+| `PUZ03-05/08`: Next, prefetch, network, 429, OAuth | Per-request UI single-flight and fake identity tests + actual `LichessClient` cooldown; queued post-rotation RED reproduced, then rejected at final credential check | **PASS L1/L2/L3**; authorized OAuth remains BLOCKED |
+| `PUZ03-07`: SQLite/outbox, read-model, retry, close | v29 additive migration, commit/ACK separation, RED reproduced for shutdown race + stale snapshot; thread-safe save state and ACK reconciliation added | **PASS L1/L2/L3** |
 | `PUZ03-09`: streak and per-puzzle reducer history | `PuzzleTrainingState.load` reset; §14 wrong→skip; Qt session result tape | **PASS runner** |
-| `PUZ03-10`: CC and official rating/account | Save idempotency, B no-data after successful scoped callback; **immediate A→B loading phase** uncovered | **PASS tested**, §16.1 P1 remains |
+| `PUZ03-10`: CC and official rating/account | RED reproduced for immediate A→B loading phase; scoped values and history clear before loading B and error state stays scoped | **PASS L1/L2/L3** |
 | `PUZ03-11/12/13`: online-only, real public UI, accessibility | Public GET/no-Authorization, MainWindow, native 100/125/150%, no user demo, Qt screenshot inspection | **PUBLIC PASS**; authorized OAuth **BLOCKED**, owner **NOT TESTED** |
-| `PUZ-07/06`, Fair Play, workspace, schemas, CI | Account scope, 1501 attempt count, SQLite v29 migration, no POST `puzzle:write`, exact-head L3 1262 success | **PASS tested**; owner real DB/Windows/stockfish **NOT TESTED** |
+| `PUZ-07/06`, Fair Play, workspace, schemas, CI | Account scope, 1501 attempt count, SQLite v29 migration, no POST `puzzle:write`, exact-code L3 1267 success | **PASS tested**; owner real DB/Windows/stockfish **NOT TESTED** |
 
-**Уровни доказательств:** первые 2 строки §16.1 опираются на конкретное видимое в source нарушение/окно, последние 2 — на детерминированную последовательность callbacks, **нуждающуюся в RED Qt reproduction**. Не писать «эти четыре ошибки воспроизведены на Windows», пока не получены фактические RED tests. Не гарантировать «найдены все ошибки». Ранее закрытые §13–15 не открывать заново без нового прямого контрпримера. После этого full-scope sweep **список передаётся одним пакетом**.
+**Уровни доказательств:** четыре сценария §16.1 воспроизведены адресными RED Qt-тестами перед исправлением; пятый параметризованный случай — истечение/замена credentials, поэтому RED итого составил 5 test cases. Финальные статусы и точные CI/artifact ссылки записаны в §16.4 и существующем журнале. Авторизованный OAuth владельца и его компьютер не проверялись; это не заменялось offline fixtures. Ранее закрытые §13–15 не открывались без нового прямого контрпримера. Полный консолидированный пакет передан на независимую приёмку.
 
 ### 16.3. Единое исполняемое ТЗ Codex: четыре пути, один цикл
 
@@ -473,3 +473,40 @@ Reviewed areas: main interactive path, reducer and board transient UI, puzzle st
 5. **Статусы и передача:** непосредственно здесь добавить §16.4 `source-confirmed → RED/false positive → FIXED → L1/L2/L3` по каждой из 4 строк и обновить **существующий** `docs/handoffs/PUZ_UX_03_EXECUTION_LOG.md`; все проверенные screenshots/runner ссылки + настоящие remaining `NOT VERIFIED/BLOCKED`. Без новых дублей в `docs/TECHNICAL_DEBT.md`. `~9.09 s` остается unattributed, не скрывать. После единого пакета — одна независимая приёмка, без коротких порций замечаний.
 
 **Gate на merge:** §16.1 P1 closed с доказательствами, P2 закрыт либо явно обоснован/одобрен как низкоприоритетный остаток, exact-code L3 green, Fair Play/data provenance preserved; authorized OAuth/owner hardware остаются честными owner gates. **Никакого самостоятельного merge Codex.**
+
+### 16.4. Результаты единого исполнения (2026-11-20)
+
+Все четыре сценария §16.1 исправлены единым пакетом в том же Draft PR #52; ранее существовавшие defect IDs сохранены, новых ID не добавлял. Финальный код и тесты проверены на exact SHA `1ddb81c7a2a4b653c263d587d67932f3ae7abdc8`.
+
+| Существующий ID / сценарий | RED до исправления | Реализация и финальная проверка |
+| --- | --- | --- |
+| `PUZ03-10.RATING` + `PUZ-07.ACCOUNT-BOUND` — A→B при задержанном чтении | RED: профиль A (official/CC rating и история) оставался видим до ответа B | Сброс профильно-зависимых значений до запуска B worker; loading/error остаются явно scoped. L1/L2/L3 PASS; кадры loading проверены на 100/125/150%. |
+| `PUZ03-07.SAVE-NONBLOCK` P1 — shutdown/outbox race | RED: close мог пройти до доставки queued failure callback | Потокобезопасная state-модель pending/durable/unprotected/saved; close gate повторно учитывает незащищённые попытки. L1/L2/L3 PASS; тесты Yes/No и durable path включены в тематический прогон. |
+| `PUZ-07.ACCOUNT-BOUND` + `PUZ03-08.PREFETCH` — смена токена после emit | RED: устаревший first-fetch/prefetch результат принимался после смены credential | GUI apply подтверждается фоновым чтением credential fingerprint; секрет/fingerprint не сохраняется. L1/L2/L3 PASS; авторизованный OAuth отдельно BLOCKED из-за отсутствия разрешённого тестового профиля. |
+| `PUZ03-07.SAVE-NONBLOCK` P2 — устаревший outbox snapshot после ACK | RED: callback аккаунта повторно прикреплял уже ACKed попытку | ACK IDs учитываются потокобезопасно до Qt callback; snapshot фильтруется при чтении и перед применением. L1/L2/L3 PASS. |
+
+#### L1 — адресные RED→GREEN
+
+- RED до правок на базовом HEAD `6aecb2056342c5f714987723210e9b62a336e59e`: **5 failed in 4.14 s** (четыре сценария, token-rotation параметризован на два случая). Все четыре дефекта были воспроизведены; тесты оставались адресными.
+- Первое Windows focused L1 на промежуточном коде `ea069b5` выявило shutdown race: завершившийся delayed GET пытался стартовать credential-check после начала остановки coordinator. Исправлено в `ccb5fa4`; это был подтверждённый дефект тестируемой реализации, не подавленное падение.
+- Финальный Windows focused L1 [run 44812359325](https://github.com/feshakomissarov-prog/chess/actions/runs/44812359325), SHA `1ddb81c7…`: **96 passed**. Финальный локальный адресный набор OAuth/delayed GET/§16: **14 passed in 9.39 s**; `py_compile` и `git diff --check` прошли.
+- Промежуточный тематический L2 сначала обнаружил не production-дефект, а fake OAuth adapter без обновления fake keyring. Harness исправлен и тест усилен; повторный L2 на финальном SHA прошёл.
+
+#### L2 — один тематический Windows Qt прогон
+
+- **PASS** [run 44812359325](https://github.com/feshakomissarov-prog/chess/actions/runs/44812359325), [артефакт L2](https://github.com/feshakomissarov-prog/chess/actions/runs/44812359325/artifacts/14668582153), код/тест SHA `1ddb81c7…`. Тематический прогон использовал реальные публичные Lichess GET (ID `0haqU`, `00008`, `0000D`, HTTP 200) в native Qt и MainWindow с изолированной временной SQLite и fake credentials. Авторизационные данные не отправлялись.
+- Фактические account-switch-loading PNG сняты Windows Qt runner и открыты для визуальной проверки: 100% (`scale-1/1672x941-account-switch-loading.png`), 125% (`scale-1.25/1280x720-account-switch-loading.png`, 1600×900 physical), 150% (`scale-1.5/1120x640-account-switch-loading.png`, 1680×960 physical). Проверены также ready кадры этих размеров, плюс 150% save-error и OAuth-consent кадры. Во время загрузки B значения/история A не отображаются; Chess Coach branding и палитра сохранены. При 125/150% прокрутка панели доступна.
+- Замеры Windows runner: холодный ввод p50/p95 `17.96/19.25 ms` (10 проб); тёплый `2.96/3.38 ms` (50), максимальный warm event-loop gap `24.63 ms`; 9 публичных GET — `177.65–612.69 ms`. Отдельные synthetic SQLite/input probes не являются оценкой владельческого компьютера.
+- Предыдущий первый отклик около `9.09 s` остаётся **необъяснённым и неатрибутированным**; эти измерения не устанавливают его причину.
+
+#### L3 — единственный финальный полный Windows CI
+
+- **PASS** [run 44813478950](https://github.com/feshakomissarov-prog/chess/actions/runs/44813478950), exact code/test SHA `1ddb81c7a2a4b653c263d587d67932f3ae7abdc8`: Windows Server 2025 / Python 3.12.10, **1267 passed in 622.63 s (10:22)**. `compileall`, isolated offline MainWindow smoke и обязательная native visual-evidence матрица прошли.
+- [Артефакт native visual matrix](https://github.com/feshakomissarov-prog/chess/actions/runs/44813478950/artifacts/14668189027). Final runner account-switch-loading frames по трём DPI также открыты и визуально проверены: [100%](C:/Users/Михаил/AppData/Local/Temp/visual-master-1ddb81c7/puzzle-training/scale-1/1672x941-account-switch-loading.png), [125%](C:/Users/Михаил/AppData/Local/Temp/visual-master-1ddb81c7/puzzle-training/scale-1.25/1280x720-account-switch-loading.png), [150%](C:/Users/Михаил/AppData/Local/Temp/visual-master-1ddb81c7/puzzle-training/scale-1.5/1120x640-account-switch-loading.png). Это реальные кадры Windows Qt runner, не synthetic QWidget mock; реальный публичный API отдельно был в L2.
+- PUZ-specific L2 job в полном workflow пропущен ожидаемо (PR временно переводился в Ready для CI dispatch); отдельный тематический L2 выше прошёл на том же SHA. PR после запуска возвращён в Draft.
+
+#### Границы проверки и передача
+
+- `ONLINE-LIVE-OAUTH`: **BLOCKED** — разрешённого отдельного авторизованного тестового профиля не предоставлено. MainWindow проверен с fake credential adapter и публичными unauthenticated GET; это не авторизованная интеграционная приёмка.
+- Личная SQLite, OAuth-хранилище и компьютер владельца не открывались. Реальные публичные задачи и Qt-страницы проверены, но owner acceptance остаётся за владельцем.
+- Изменения кода и тестов — SHA выше. Документационные изменения §16.4 и журнала ниже могут иметь последующий docs-only SHA; полного L3 после Markdown не требуется по workflow path filters. Draft PR #52 остаётся открытым и неслитым; пакет передан на одну независимую повторную приёмку.

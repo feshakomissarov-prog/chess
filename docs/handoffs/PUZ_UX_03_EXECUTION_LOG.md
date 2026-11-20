@@ -212,3 +212,33 @@ All six cases from §15.2 were handled in one code/test package on the existing 
 
 - §15.2 statuses are **RED → FIXED → PASS** for all six cases; the matrix and reviewer decision below are updated accordingly. Owner's authorized OAuth profile and machine-specific acceptance remain **NOT TESTED**. No owner SQLite, OAuth store, or computer was accessed.
 - PR #52 remains open, Draft, and unmerged. Handoff is for one consolidated independent reacceptance; no merge was performed.
+
+## §16 consolidated follow-up — four scenarios (2026-11-20)
+
+All four §16 scenarios were handled together in the same Draft PR #52. Existing defect IDs were retained; no new IDs or debt entries were created. Final executable/test SHA: `1ddb81c7a2a4b653c263d587d67932f3ae7abdc8`.
+
+| Existing ID / scenario | RED → FIXED → evidence |
+| --- | --- |
+| **PUZ03-10.RATING / PUZ-07.ACCOUNT-BOUND** — account switch while scoped data is loading | RED reproduced stale A rating/history before B callback. Account reset now clears scoped metrics/history immediately, and loading/failure stays explicit. L1/L2/L3 PASS; three DPI frames inspected. |
+| **PUZ03-07.SAVE-NONBLOCK P1** — outbox failure during shutdown | RED reproduced close-path race. Thread-safe attempt save states now feed close confirmation independently of queued Qt delivery. L1/L2/L3 PASS. |
+| **PUZ-07.ACCOUNT-BOUND / PUZ03-08.PREFETCH** — credential changes after result emit | RED reproduced stale first-fetch/prefetch apply. A background credential fingerprint recheck now gates GUI application without exposing key material. L1/L2/L3 PASS; authorized OAuth BLOCKED. |
+| **PUZ03-07.SAVE-NONBLOCK P2** — account snapshot reattaches ACKed outbox row | RED reproduced stale retry UI after ACK. ACK IDs are tracked before queued callback and snapshot is reconciled at read/apply boundaries. L1/L2/L3 PASS. |
+
+### §16 L1 — targeted RED→GREEN
+
+- RED on baseline `6aecb2056342c5f714987723210e9b62a336e59e`: **5 failed in 4.14 s** across four scenarios, with token-rotation parameterized into two cases.
+- An intermediate focused Windows L1 on `ea069b5` exposed a real shutdown race when a delayed GET completed as the coordinator was stopping. The worker shutdown guard was fixed in `ccb5fa4` and the focused CI passed.
+- Final focused Windows run [44812359325](https://github.com/feshakomissarov-prog/chess/actions/runs/44812359325): **96 passed** on final code/test SHA. Final local addressable tests: **14 passed in 9.39 s**; changed modules compiled and `git diff --check` passed.
+- The first intermediate L2 exposed a fake OAuth adapter that returned a token without updating its fake keyring. This was a harness issue; adapter and OAuth test were corrected before the final L2.
+
+### §16 L2 — one themed Windows Qt run
+
+- **PASS** [run 44812359325](https://github.com/feshakomissarov-prog/chess/actions/runs/44812359325), [artifact 14668582153](https://github.com/feshakomissarov-prog/chess/actions/runs/44812359325/artifacts/14668582153). Real public puzzle GETs (`0haqU`, `00008`, `0000D`) returned HTTP 200 and were opened in native Qt/MainWindow flows using isolated temporary SQLite and fake credentials; no auth header was sent.
+- Actual Windows Qt account-switch-loading and ready frames were captured and opened at 100%, 125%, and 150% DPI. The loading frames show no stale A rating/history while B loads; branding/colors remain in place and the side panel is scrollable at the larger scales. Save-error and OAuth-consent frames were also checked at 150%.
+- Runner input timing: cold p50/p95 `17.96/19.25 ms` (10), warm `2.96/3.38 ms` (50), maximum warm event-loop gap `24.63 ms`; nine public GETs took `177.65–612.69 ms`. The first interaction outlier near `9.09 s` remains unresolved and unattributed.
+
+### §16 L3 — final exact-code Windows CI
+
+- **PASS** [run 44813478950](https://github.com/feshakomissarov-prog/chess/actions/runs/44813478950), exact executable/test SHA `1ddb81c7a2a4b653c263d587d67932f3ae7abdc8`: Windows Server 2025 / Python 3.12.10, **1267 passed in 622.63 s (10:22)**. `compileall`, isolated offline MainWindow smoke, and required native visual evidence all passed. [Visual artifact 14668189027](https://github.com/feshakomissarov-prog/chess/actions/runs/44813478950/artifacts/14668189027).
+- I opened and inspected the final runner account-switch-loading Qt screenshots at [100%](C:/Users/Михаил/AppData/Local/Temp/visual-master-1ddb81c7/puzzle-training/scale-1/1672x941-account-switch-loading.png), [125%](C:/Users/Михаил/AppData/Local/Temp/visual-master-1ddb81c7/puzzle-training/scale-1.25/1280x720-account-switch-loading.png), and [150%](C:/Users/Михаил/AppData/Local/Temp/visual-master-1ddb81c7/puzzle-training/scale-1.5/1120x640-account-switch-loading.png). These are actual Windows Qt runner captures. The separate focused L2 provided the real-public-Lichess data path on the same code/test SHA.
+- PR #52 remains Draft and unmerged. Authorized test OAuth profile was unavailable (`ONLINE-LIVE-OAUTH: BLOCKED`); owner SQLite, OAuth store, and computer were not accessed. Owner acceptance remains pending. Documentation-only updates after this exact-code L3 do not alter executable/test SHA; one independent consolidated reacceptance is requested.
