@@ -2859,10 +2859,12 @@ def test_account_switch_discards_delayed_profile_a_and_requests_profile_b(
             if not release_account_a.wait(timeout=5):
                 raise TimeoutError("test did not release delayed account A read")
             return [{"puzzle_id": "account-a-history", "result": "success",
-                     "created_at_ms": 1_700_000_000_000, "source": "local"}]
+                     "created_at_ms": 1_700_000_000_000, "source": "local",
+                     "puzzle_json": '{"puzzle":{"themes":[]}}'}]
         if account_id == account_b:
             return [{"puzzle_id": "account-b-history", "result": "success",
-                     "created_at_ms": 1_700_000_000_001, "source": "local"}]
+                     "created_at_ms": 1_700_000_000_001, "source": "local",
+                     "puzzle_json": '{"puzzle":{"themes":[]}}'}]
         return original_attempts(account_id, limit=limit)
 
     monkeypatch.setattr(window.game_repository, "local_puzzle_attempts", delayed_attempts)
@@ -2881,7 +2883,6 @@ def test_account_switch_discards_delayed_profile_a_and_requests_profile_b(
     assert page.account_id == account_b
     release_account_a.set()
     qtbot.waitUntil(lambda: len(worker_results) >= 2, timeout=5000)
-    qtbot.waitUntil(lambda: bool(requests) or page.history.count() > 0, timeout=3000)
     history_ids = [
         (page.history.item(index).data(Qt.ItemDataRole.UserRole) or {}).get("puzzle_id")
         for index in range(page.history.count())]
