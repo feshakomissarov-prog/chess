@@ -140,7 +140,12 @@ def cold_child(index: int) -> None:
     }
     print("PERF_COLD_RESULT " + json.dumps(trace, sort_keys=True))
     heartbeat.stop()
+    for timer in page.findChildren(QTimer):
+        timer.stop()
     page.close()
+    page.deleteLater()
+    app.processEvents()
+    app.quit()
     app.processEvents()
 
 
@@ -193,7 +198,12 @@ def warm_process() -> dict:
         "setup_stages": stages,
     }
     heartbeat.stop()
+    for timer in page.findChildren(QTimer):
+        timer.stop()
     page.close()
+    page.deleteLater()
+    app.processEvents()
+    app.quit()
     app.processEvents()
     return trace
 
