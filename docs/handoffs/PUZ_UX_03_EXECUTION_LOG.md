@@ -3,7 +3,7 @@
 **PR:** Draft #52 — `codex/puz-ux-03-online-puzzle-playability-2026-11-20`
 **Specification:** [`PUZ_UX_03_ONLINE_PUZZLE_PLAYABILITY_2026_11_20.md`](../specs/PUZ_UX_03_ONLINE_PUZZLE_PLAYABILITY_2026_11_20.md)
 **Base:** `b9e4b72d578e98db2ba345959c8474028d304cdc`
-**Code SHA:** `ed96ecfe29dd2c6d42e8fdf2802c92f3fcc9f571`
+**Final production-code SHA:** `c6ccb8aca7667caa2abc97e59208441768f15768` (latest head `6e2464fd9bfe1b6a9becb3329b18ba6d70a95fac` adds only capture/workflow verification changes)
 **Merge:** not performed
 
 ## §13 follow-up review evidence — 2026-11-20
@@ -46,7 +46,7 @@ The old outlier remains **unattributed**: the new trace establishes that normal 
 | What do red/green and streak mean? | YES for visible tape | Wrong/hinted/clean outcomes and streak counters are visible in native frames. |
 | Is there a delay and at which stage? | PARTIAL / measured | Cold/warm input values above; the previous isolated 2.36 s dispatch remains unattributed. |
 
-**Final Windows L3:** pending. It will be run once at the final PR head after this evidence-log commit. PR #52 remains Draft after CI; no merge is authorized or performed.
+**Final Windows L3:** completed after this follow-up on exact head `6e2464fd9bfe1b6a9becb3329b18ba6d70a95fac`; see the final record appended below. PR #52 was returned to Draft after CI; no merge was performed.
 
 ## Scope delivered in this pass
 
@@ -128,3 +128,11 @@ Values are intentionally left blank until collected from actual run output/artif
 | Live auto-next | `1257.34 ms` | real Qt timestamps: clean win 06:35:25.628383Z → next public puzzle ready 06:35:26.885724Z. |
 | Fake SQLite delay responsiveness | 50/500/3000 ms cases | targeted pytest; GUI event loop remains live |
 | Fake GET delay responsiveness | 100/1200/3000 ms cases | targeted pytest; GUI event loop remains live |
+
+## Final §13 verification — exact head 6e2464f (2026-11-20)
+
+- **L1:** [focused workflow run 44716254768](https://github.com/feshakomissarov-prog/chess/actions/runs/44716254768) passed on exact head `6e2464fd9bfe1b6a9becb3329b18ba6d70a95fac`; targeted RED/GREEN contracts and compile checks passed. The workflow's PUZ L2 job was correctly skipped on this test-harness-only delta; the immediately preceding production-code L2 on `c6ccb8a` is recorded above.
+- **L2:** PASS on production-code SHA `c6ccb8aca7667caa2abc97e59208441768f15768`, [run 44714071416](https://github.com/feshakomissarov-prog/chess/actions/runs/44714071416), artifact [puz-ux-03-l2-c6ccb8ac](https://github.com/feshakomissarov-prog/chess/actions/runs/44714071416/artifacts/14619391283). Its real public Lichess + Qt screenshots were opened and visually checked at 100%, 125%, and 150% DPI, including replay completion and the corrected instruction line.
+- **L3:** PASS on exact head `6e2464fd9bfe1b6a9becb3329b18ba6d70a95fac`, [Windows run 44716659563](https://github.com/feshakomissarov-prog/chess/actions/runs/44716659563). Windows Server 2025 / Python 3.12.10: **1232 passed in 510.35 s**; compileall and isolated offline `MainWindow` smoke passed. Both Windows native jobs passed, including the complete visual capture suite and puzzle trainer at 100%, 125%, and 150% DPI. The run's visual artifact is [visual-master-6e2464fd9bfe1b6a9becb3329b18ba6d70a95fac](https://github.com/feshakomissarov-prog/chess/actions/runs/44716659563/artifacts/14620556355); Home chart capture artifact is [home-chart-l1-l2-6e2464fd9bfe1b6a9becb3329b18ba6d70a95fac](https://github.com/feshakomissarov-prog/chess/actions/runs/44716659563/artifacts/14620086334).
+- The 2357.82 ms first-input outlier remains unattributed; the separate measured cold/warm input trace and its limits are documented in §13.2 above.
+- OAuth remains `BLOCKED` because no authorized separate test profile is available. Public puzzle data was unauthenticated; owner SQLite, OAuth store, and computer were not accessed. PR #52 is **Draft**, open, and unmerged.
