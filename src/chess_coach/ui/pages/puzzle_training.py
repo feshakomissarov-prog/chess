@@ -273,8 +273,9 @@ class PuzzleTrainingPage(QWidget):
         self.reveal = QPushButton("Показать решение")
         self.repeat = QPushButton("Повторить")
         self.next = QPushButton("Следующая задача")
-        self.retry_save = QPushButton("Повторить сохранение")
+        self.retry_save = QPushButton("Повторить запись")
         self.retry_save.setObjectName("retryPuzzleSave")
+        self.retry_save.setAccessibleName("Повторить сохранение результата в SQLite")
         self.retry_save.hide()
         self.retry_save.clicked.connect(self._retry_attempt_save)
         self.next.setObjectName("primaryAction")
@@ -973,15 +974,17 @@ class PuzzleTrainingPage(QWidget):
             value for value in self._retry_attempt_queue
             if value in self._pending_attempt_saves))
         if self._retry_in_progress_id:
-            self.retry_save.setText("Повторяем сохранение…")
+            self.retry_save.setText("Записываем…")
             self.retry_save.setEnabled(False)
             self.retry_save.setVisible(True)
             self._sync_control_layout()
             return
         self._retry_attempt_id = next(iter(self._retry_attempt_queue), None)
         count = len(self._retry_attempt_queue)
-        self.retry_save.setText(
-            "Повторить сохранение" if count <= 1 else f"Повторить сохранение ({count})")
+        self.retry_save.setText("Повторить запись")
+        self.retry_save.setToolTip(
+            "Повторить сохранение результата в SQLite" if count <= 1 else
+            f"Повторить сохранение {count} результатов в SQLite")
         self.retry_save.setEnabled(count > 0)
         self.retry_save.setVisible(count > 0)
         self._sync_control_layout()
