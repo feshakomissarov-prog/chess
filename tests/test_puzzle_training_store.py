@@ -1,6 +1,7 @@
 import json
 import sqlite3
 import chess
+import pytest
 
 from chess_coach.lichess.repository import GameRepository
 
@@ -103,6 +104,36 @@ def test_stable_local_attempt_id_makes_retry_idempotent(tmp_path):
         assert first == ("stable-session-attempt", True)
         assert second == ("stable-session-attempt", False)
         assert repository.local_puzzle_attempt_count(account) == 1
+    finally:
+        repository.shutdown()
+
+
+@pytest.mark.parametrize("puzzle_json", ["{broken", "[]", "null"])
+def test_malformed_legacy_payload_saves_attempt_without_rating(tmp_path, puzzle_json):
+    repository = GameRepository(tmp_path / "malformed-puzzle-payload.sqlite3")
+    account = repository.ensure_archive_account("legacy-puzzle-json")
+    try:
+        attempt_id, inserted = repository.save_local_puzzle_attempt(
+            account, "legacy-puzzle", result="success", solved=True, mistakes=0,
+            hints=0, duration_ms=100, puzzle_json=puzzle_json,
+            attempt_id="legacy-attempt", rating_eligible=True)
+        assert (attempt_id, inserted) == ("legacy-attempt", True)
+        assert repository.local_puzzle_attempt_count(account) == 1
+        assert repository.local_puzzle_rating(account)["rated_attempts"] == 0
+    finally:
+        repository.shutdown()
+
+
+def test_valid_legacy_payload_still_contributes_rating(tmp_path):
+    repository = GameRepository(tmp_path / "valid-puzzle-payload.sqlite3")
+    account = repository.ensure_archive_account("valid-puzzle-json")
+    try:
+        payload = json.dumps({"puzzle": {"rating": 1600, "themes": ["fork"]}})
+        repository.save_local_puzzle_attempt(
+            account, "valid-puzzle", result="success", solved=True, mistakes=0,
+            hints=0, duration_ms=100, puzzle_json=payload,
+            attempt_id="valid-attempt", rating_eligible=True)
+        assert repository.local_puzzle_rating(account)["rated_attempts"] == 1
     finally:
         repository.shutdown()
 

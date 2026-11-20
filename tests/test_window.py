@@ -1,5 +1,6 @@
 import chess
 import chess.engine
+import json
 import threading
 import time
 import pytest
@@ -3080,6 +3081,184 @@ def test_puzzle_replay_is_local_legal_and_does_not_change_history_or_send_reques
     exercise(window._puzzle_page)
     assert window.game_repository.puzzle_statistics("lichess:replayuser")["attempts"] == before
     assert not calls
+    window.close()
+
+
+def test_training_replay_does_not_change_attempt_totals_statistics_or_rating(
+        qtbot, tmp_path):
+    from chess_coach.lichess.puzzle_training import PuzzlePlayablePosition
+    from chess_coach.ui.pages.puzzle_training import PuzzleTrainingPage
+
+    window = MainWindow(QSettings(str(tmp_path / "replay-statistics.ini"),
+                                  QSettings.Format.IniFormat), offline_mode=True)
+    qtbot.addWidget(window)
+    account = window.game_repository.ensure_archive_account("replay-statistics")
+    puzzle_json = json.dumps({"puzzle": {"id": "saved-replay", "rating": 1600,
+                                          "solution": ["e2e4"], "themes": ["fork"]}})
+    window.game_repository.save_local_puzzle_attempt(
+        account, "saved-replay", result="success", solved=True, mistakes=0,
+        hints=0, duration_ms=100, puzzle_json=puzzle_json,
+        attempt_id="original-rated-attempt", rating_eligible=True)
+    before = {
+        "count": window.game_repository.local_puzzle_attempt_count(account),
+        "stats": window.game_repository.local_puzzle_statistics(account),
+        "theme_stats": window.game_repository.local_puzzle_statistics(account, "fork"),
+        "rating": window.game_repository.local_puzzle_rating(account),
+    }
+
+    window.show_puzzle_training(account)
+    page = window._puzzle_training_page
+    page.load_puzzle(PuzzlePlayablePosition(
+        "saved-replay", chess.STARTING_FEN, ("e2e4",), ("fork",), rating=1600),
+        json.loads(puzzle_json), source="replay", rating_eligible=False)
+    page._submit_move(chess.Move.from_uci("e2e4"))
+    after = {
+        "count": window.game_repository.local_puzzle_attempt_count(account),
+        "stats": window.game_repository.local_puzzle_statistics(account),
+        "theme_stats": window.game_repository.local_puzzle_statistics(account, "fork"),
+        "rating": window.game_repository.local_puzzle_rating(account),
+    }
+
+    assert page._is_replay and page.state.status.value == "success"
+    assert after == before
+    assert page._session_results == []
+    assert page.persistence_status.text() == "Повтор не записывается"
+    window.close()
+
+
+def test_cross_account_replay_wins_against_delayed_account_callback(
+        qtbot, tmp_path, monkeypatch):
+    import threading
+    from chess_coach.ui.pages.puzzle_training import PuzzleTrainingPage
+
+    window = MainWindow(QSettings(str(tmp_path / "cross-account-replay.ini"),
+                                  QSettings.Format.IniFormat), offline_mode=True)
+    qtbot.addWidget(window)
+    account_a = window.game_repository.ensure_archive_account("replay-a")
+    account_b = window.game_repository.ensure_archive_account("replay-b")
+    puzzle_id = "account-b-replay"
+    puzzle_json = json.dumps({
+        "game": {"id": "game-b", "pgn": "1. e4 e5"},
+        "puzzle": {"id": puzzle_id, "initialPly": 0, "lastMove": "e2e4",
+                   "solution": ["e7e5"], "themes": ["fork"], "rating": 1500},
+    })
+    window.game_repository.cache_training_puzzle(account_b, puzzle_id, puzzle_json)
+    page = PuzzleTrainingPage(parent=window)
+    page.set_accounts([
+        {"account_id": account_a, "username": "replay-a"},
+        {"account_id": account_b, "username": "replay-b"},
+    ], account_a)
+    page.account_id = account_a
+    page.account_changed.connect(
+        lambda selected: window._puzzle_training_account_changed(page, selected))
+    window._puzzle_training_page = page
+    window._puzzle_page = page
+    window.screen_stack.addWidget(page)
+    window.screen_stack.setCurrentWidget(page)
+
+    original_attempts = window.game_repository.local_puzzle_attempts
+    release_worker = threading.Event()
+    account_worker_started = threading.Event()
+    account_worker_count = 0
+    account_worker_lock = threading.Lock()
+    worker_results = []
+
+    def delayed_attempts(account_id, *, limit=8):
+        nonlocal account_worker_count
+        if account_id == account_b:
+            with account_worker_lock:
+                account_worker_count += 1
+            account_worker_started.set()
+            assert release_worker.wait(5), "test must release delayed account worker"
+        return original_attempts(account_id, limit=limit)
+
+    monkeypatch.setattr(window.game_repository, "local_puzzle_attempts", delayed_attempts)
+    window.puzzle_training_finished.connect(lambda *args: worker_results.append(args))
+    online_requests = []
+    monkeypatch.setattr(window, "_request_puzzle_training",
+                        lambda target, theme, difficulty, **kwargs:
+                        online_requests.append((target.account_id, theme, difficulty, kwargs)))
+
+    # Model an account-list request already in flight when History opens B.
+    window._load_puzzle_training_accounts(page, account_b, request_puzzle=True)
+    qtbot.waitUntil(account_worker_started.is_set, timeout=3000)
+    window._replay_puzzle_training(page, account_b, puzzle_id, "local")
+    qtbot.waitUntil(lambda: page.state.puzzle is not None and
+                    page.state.puzzle.puzzle_id == puzzle_id and page._is_replay,
+                    timeout=5000)
+    started_before_release = account_worker_count
+    release_worker.set()
+    qtbot.waitUntil(lambda: len(worker_results) >= started_before_release + 1,
+                    timeout=5000)
+
+    assert online_requests == []
+    assert page.account_id == account_b
+    assert page.account_selector.currentData() == account_b
+    assert page.state.puzzle.puzzle_id == puzzle_id and page._is_replay
+    window.close()
+
+
+def test_duplicate_prefetched_id_is_unrated_after_save_ack(qtbot, tmp_path):
+    from chess_coach.lichess.puzzle_training import PuzzlePlayablePosition
+    from chess_coach.ui.pages.puzzle_training import PuzzleTrainingPage
+
+    window = MainWindow(QSettings(str(tmp_path / "duplicate-puzzle-rating.ini"),
+                                  QSettings.Format.IniFormat), offline_mode=True)
+    qtbot.addWidget(window)
+    account = window.game_repository.ensure_archive_account("duplicate-rating")
+    payload = json.dumps({"puzzle": {"id": "duplicate-puzzle", "rating": 1600,
+                                     "solution": ["e2e4"], "themes": ["fork"]}})
+    page = PuzzleTrainingPage(parent=window)
+    page.account_id = account
+    window._puzzle_training_page = page
+    window._puzzle_page = page
+    window.screen_stack.addWidget(page)
+    window.screen_stack.setCurrentWidget(page)
+    page.load_puzzle(PuzzlePlayablePosition(
+        "duplicate-puzzle", chess.STARTING_FEN, ("e2e4",), ("fork",), rating=1600),
+        json.loads(payload), source="lichess", rating_eligible=True)
+    page.set_prepared_puzzle(account, "mix", "normal", page.state.puzzle,
+                             json.loads(payload), {"rating_eligible": True})
+    page.set_recent_history([], local_count=0,
+                            practice_rating=window.game_repository.local_puzzle_rating(account))
+
+    _, inserted = window.game_repository.save_local_puzzle_attempt(
+        account, "duplicate-puzzle", result="success", solved=True, mistakes=0,
+        hints=0, duration_ms=100, puzzle_json=payload,
+        attempt_id="first-duplicate-attempt", rating_eligible=True)
+    assert inserted
+    ack = {
+        "attempt_id": "first-duplicate-attempt", "account_id": account,
+        "puzzle_id": "duplicate-puzzle", "session_id": "already-saved-session",
+        "local_count": 1, "recent": [],
+        "local_stats": window.game_repository.local_puzzle_statistics(account),
+        "theme_stats": window.game_repository.local_puzzle_statistics(account, "fork"),
+        "practice_rating": window.game_repository.local_puzzle_rating(account),
+        "rating_event": window.game_repository.local_puzzle_rating_event(
+            account, "duplicate-puzzle"),
+    }
+    window._puzzle_attempt_save_result_ready(ack, None)
+
+    # Simulate the worker callback arriving after the ACK rather than before
+    # it; the page's account-scoped rated set must invalidate this late payload.
+    page.set_prepared_puzzle(account, "mix", "normal", page.state.puzzle,
+                             json.loads(payload), {"rating_eligible": True})
+    prepared = page.take_prepared_puzzle(account, "mix", "normal")
+    page._apply_prepared_puzzle(prepared)
+    emitted = []
+    page.attempt_saved.connect(emitted.append)
+    page._submit_move(chess.Move.from_uci("e2e4"))
+    assert page._rating_preview is None
+    assert "ожидает сохранения" not in page.practice_rating.text().casefold()
+    assert emitted[-1]["rating_eligible"] is False
+    window.game_repository.save_local_puzzle_attempt(
+        account, "duplicate-puzzle", result=emitted[-1]["result"],
+        solved=emitted[-1]["solved"], mistakes=emitted[-1]["mistakes"],
+        hints=emitted[-1]["hints"], duration_ms=emitted[-1]["duration_ms"],
+        puzzle_json=emitted[-1]["puzzle_json"], attempt_id="second-duplicate-attempt",
+        rating_eligible=emitted[-1]["rating_eligible"])
+    assert window.game_repository.local_puzzle_rating(account)["rated_attempts"] == 1
+    assert window.game_repository.local_puzzle_rating_event(account, "duplicate-puzzle")
     window.close()
 
 

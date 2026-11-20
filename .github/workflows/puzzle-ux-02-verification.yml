@@ -95,6 +95,9 @@ jobs:
           tests/test_window.py::test_puzzle_account_switch_clears_old_board_and_keeps_scope
           tests/test_window.py::test_account_switch_discards_delayed_profile_a_and_requests_profile_b
           tests/test_window.py::test_advanced_difficulty_prefetch_accepts_selected_key
+          tests/test_window.py::test_training_replay_does_not_change_attempt_totals_statistics_or_rating
+          tests/test_window.py::test_cross_account_replay_wins_against_delayed_account_callback
+          tests/test_window.py::test_duplicate_prefetched_id_is_unrated_after_save_ack
 
   l2-native-puzzle-captures:
     name: L2 PUZ-UX-03 public and native UX

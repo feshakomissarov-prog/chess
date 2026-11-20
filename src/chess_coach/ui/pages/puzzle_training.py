@@ -121,6 +121,7 @@ class PuzzleTrainingPage(QWidget):
         self._prepared_next_ms: float | None = None
         self._next_requested_at: float | None = None
         self._rating_eligible = False
+        self._rated_puzzle_ids_by_account: dict[str, set[str]] = {}
         self._current_cc_rating = 1500
         self._terminal_verdict = ""
         self._rating_preview: tuple[int, int] | None = None
@@ -383,7 +384,7 @@ class PuzzleTrainingPage(QWidget):
         self.source.currentIndexChanged.connect(self._source_changed)
         self.fetch.clicked.connect(self._next)
         self.authorize.clicked.connect(lambda: self.authorize_requested.emit(
-            self.selected_theme(), str(self.difficulty.currentData() or "normal")))
+            self.selected_theme(), self.selected_difficulty()))
         self.theme.activated.connect(self._theme_selected)
         self.theme_search.textChanged.connect(self._filter_themes)
         self.theme_list.itemClicked.connect(self._theme_list_clicked)
@@ -493,6 +494,8 @@ class PuzzleTrainingPage(QWidget):
             "difficulty": str(difficulty), "puzzle": puzzle,
             "payload": dict(payload), "details": dict(details or {}),
         }
+        if str(puzzle.puzzle_id) in self._rated_puzzle_ids_by_account.get(str(account_id), set()):
+            self._prepared_online_puzzle["details"]["rating_eligible"] = False
         self._live_get_ms = (details or {}).get("live_get_ms")
         if self.state.status in {PuzzleStatus.SUCCESS, PuzzleStatus.REVEALED,
                                  PuzzleStatus.SKIPPED, PuzzleStatus.UNAVAILABLE}:
@@ -518,6 +521,21 @@ class PuzzleTrainingPage(QWidget):
         self.load_puzzle(prepared["puzzle"], prepared["payload"], source="lichess",
                          rating_eligible=bool(details.get("rating_eligible", True)))
 
+    def mark_puzzle_rated(self, account_id: str, puzzle_id: str) -> None:
+        """Invalidate stale rating eligibility for this account-scoped puzzle."""
+        account_id, puzzle_id = str(account_id or "local"), str(puzzle_id)
+        self._rated_puzzle_ids_by_account.setdefault(account_id, set()).add(puzzle_id)
+        prepared = self._prepared_online_puzzle
+        if (prepared is not None and prepared.get("account_id") == account_id
+                and getattr(prepared.get("puzzle"), "puzzle_id", None) == puzzle_id):
+            details = dict(prepared.get("details") or {})
+            details["rating_eligible"] = False
+            prepared["details"] = details
+        if (self.account_id == account_id and self._session_puzzle_id == puzzle_id
+                and self._active_source == "lichess"):
+            self._rating_eligible = False
+            self._rating_preview = None
+
     def load_puzzle(self, puzzle: PuzzlePlayablePosition, payload: dict | None = None,
                     *, source: str = "local",
                     rating_eligible: bool | None = None) -> None:
@@ -527,8 +545,12 @@ class PuzzleTrainingPage(QWidget):
         self._wrong_timer_pending = False
         self._wrong_flash = False
         self._is_replay = source == "replay" or source not in {"lichess", "demo"}
-        self._rating_eligible = (source == "lichess" if rating_eligible is None
-                                 else bool(rating_eligible))
+        self._rating_eligible = (
+            source == "lichess" if rating_eligible is None else bool(rating_eligible))
+        if (source == "lichess"
+                and puzzle.puzzle_id in self._rated_puzzle_ids_by_account.get(
+                    str(self.account_id or "local"), set())):
+            self._rating_eligible = False
         self.state.load(puzzle)
         self._puzzle_payload = dict(payload or {})
         self._active_source = source
@@ -881,6 +903,12 @@ class PuzzleTrainingPage(QWidget):
             self.practice_rating.setText(
                 f"Рейтинг тренировки CC: {self._current_cc_rating} → "
                 f"{self._current_cc_rating + delta} ({delta:+d}) · ожидает сохранения")
+        if self._is_replay:
+            self.persistence_status.setText("Повтор не записывается")
+            self._set_controls(True, finished=True)
+            self.next.setText("Следующая задача →")
+            self._update_session_display()
+            return
         self._record_session_result(outcome)
         payload = json.dumps(self._puzzle_payload, ensure_ascii=False, separators=(",", ":"))
         result = ("revealed" if outcome == PuzzleOutcome.REVEALED else
@@ -931,7 +959,14 @@ class PuzzleTrainingPage(QWidget):
         existing = next((row for row in self._session_results
                          if row["session_id"] == self._session_id), None)
         if existing is not None:
-            existing.update(mark=mark, label=label, pending=True)
+            if existing.get("mark") == "✕" or self.state.first_failure:
+                existing.update(mark="✕", label={
+                    PuzzleOutcome.SKIPPED: "ошибка → пропуск",
+                    PuzzleOutcome.REVEALED: "ошибка → решение показано",
+                    PuzzleOutcome.SUCCESS: "ошибка → решено",
+                }.get(outcome, "первая ошибка"), pending=True)
+            else:
+                existing.update(mark=mark, label=label, pending=True)
         else:
             if clean:
                 self._session_streak += 1
@@ -953,6 +988,8 @@ class PuzzleTrainingPage(QWidget):
         self._update_session_display()
 
     def _record_first_failure(self) -> None:
+        if self._is_replay:
+            return
         if self._session_id in self._session_outcome_ids:
             return
         self._session_streak = 0

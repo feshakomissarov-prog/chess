@@ -1,5 +1,6 @@
 import chess
 import time
+import pytest
 from PySide6.QtCore import QTimer
 
 from chess_coach.lichess.puzzle_training import (
@@ -65,7 +66,7 @@ def test_save_ack_does_not_replace_terminal_verdict(qtbot):
     assert page.status.text().startswith("✓ Задача решена")
 
 
-def test_replay_success_does_not_promise_auto_next_or_change_rating(qtbot):
+def test_replay_success_does_not_promise_auto_next_or_change_any_session_stats(qtbot):
     page = online_page(qtbot)
     page.load_puzzle(page.state.puzzle, page._puzzle_payload, source="replay",
                      rating_eligible=False)
@@ -75,7 +76,44 @@ def test_replay_success_does_not_promise_auto_next_or_change_rating(qtbot):
     assert page.status.text() == "✓ Повтор решён. Рейтинг не изменён."
     assert "автоматически" not in page.status.text().casefold()
     assert not page._auto_next_timer.isActive()
-    assert attempts[-1]["rating_eligible"] is False
+    assert attempts == []
+    assert page._session_results == []
+    assert (page._session_streak, page._session_clean, page._session_failed,
+            page._session_hinted) == (0, 0, 0, 0)
+
+
+@pytest.mark.parametrize("terminal", ["skip", "reveal"])
+def test_first_failure_stays_red_after_skip_or_reveal(qtbot, terminal):
+    page = online_page(qtbot, puzzle_id=f"wrong-{terminal}")
+    page._submit_move(chess.Move.from_uci("d2d4"))
+    assert page._session_failed == 1
+    assert page._session_results[-1]["mark"] == "✕"
+
+    if terminal == "skip":
+        page.state.skip()
+        page._finish(PuzzleOutcome.SKIPPED)
+    else:
+        page.state.reveal()
+        page._finish(PuzzleOutcome.REVEALED)
+
+    assert page._session_failed == 1
+    assert page._session_results[-1]["mark"] == "✕"
+    assert "ошибка" in page._session_results[-1]["label"].casefold()
+
+
+def test_clean_skip_is_neutral_and_hint_then_skip_is_not_clean(qtbot):
+    clean = online_page(qtbot, puzzle_id="clean-skip")
+    clean.state.skip()
+    clean._finish(PuzzleOutcome.SKIPPED)
+    assert clean._session_results[-1]["mark"] == "–"
+    assert clean._session_failed == clean._session_clean == 0
+
+    hinted = online_page(qtbot, puzzle_id="hint-skip")
+    hinted._hint()
+    hinted.state.skip()
+    hinted._finish(PuzzleOutcome.SKIPPED)
+    assert hinted._session_results[-1]["mark"] == "–"
+    assert hinted._session_failed == hinted._session_clean == 0
 
 
 def test_review_wheel_shows_only_played_moves_and_return_restores_current_board(qtbot):
@@ -250,8 +288,10 @@ def test_replayed_local_and_lichess_activity_are_interactive_but_unrated(qtbot):
         page._submit_move(chess.Move.from_uci("e2e4"))
 
         assert page.state.status == PuzzleStatus.SUCCESS
-        assert attempts[-1]["rating_eligible"] is False
+        assert attempts == []
         assert page._session_streak == 0
+        assert page._session_results == []
+        assert page.persistence_status.text() == "Повтор не записывается"
         assert "без рейтинга" in page.turn_label.text().casefold() or page._is_replay
 
 

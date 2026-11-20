@@ -114,12 +114,19 @@ class PuzzleActivityStoreMixin:
             raise ValueError("Для локальной попытки требуется стабильный идентификатор.")
         account_id = str(account_id or "local")
         puzzle_id = str(puzzle_id)
+        puzzle: dict = {}
+        themes: list = []
         try:
             puzzle_payload = json.loads(str(puzzle_json))
-            puzzle = puzzle_payload.get("puzzle", {})
-            themes = puzzle.get("themes", []) if isinstance(puzzle, dict) else []
+            if isinstance(puzzle_payload, dict):
+                parsed_puzzle = puzzle_payload.get("puzzle", {})
+                if isinstance(parsed_puzzle, dict):
+                    puzzle = parsed_puzzle
+                    parsed_themes = puzzle.get("themes", [])
+                    if isinstance(parsed_themes, (list, tuple)):
+                        themes = parsed_themes
         except (ValueError, TypeError, AttributeError):
-            themes = []
+            pass
         with self._connection() as db:
             existing = db.execute(
                 "SELECT account_id,puzzle_id FROM local_puzzle_attempts WHERE local_attempt_id=?",

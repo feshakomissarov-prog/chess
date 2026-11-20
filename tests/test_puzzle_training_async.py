@@ -30,23 +30,29 @@ class _FakeCallback:
 
 
 class _FakePuzzleClient:
+    def __init__(self):
+        self.batch_arguments = []
+
     def get_account(self, _token):
         return {"username": "fixture-user"}
 
-    def get_puzzle_batch(self, _token, **_kwargs):
+    def get_puzzle_batch(self, _token, **kwargs):
+        self.batch_arguments.append(dict(kwargs))
         return {"puzzles": [_official_example()],
                 "glicko": {"rating": 1600, "deviation": 75}}
 
 
 @pytest.mark.parametrize("cancel_after_open", [False, True])
+@pytest.mark.parametrize("difficulty", ["easiest", "normal", "hardest"])
 def test_oauth_browser_open_is_dispatched_on_qt_main_thread(
-        qtbot, tmp_path, monkeypatch, cancel_after_open):
+        qtbot, tmp_path, monkeypatch, cancel_after_open, difficulty):
     app = QApplication.instance()
     window = MainWindow(QSettings(str(tmp_path / "oauth-thread.ini"),
                                   QSettings.Format.IniFormat), offline_mode=True)
     qtbot.addWidget(window)
     window.offline_mode = False
-    service = SimpleNamespace(client=_FakePuzzleClient(),
+    client = _FakePuzzleClient()
+    service = SimpleNamespace(client=client,
                               capture_operation_context=lambda **_kwargs: None)
     window.lichess = service
 
@@ -78,7 +84,11 @@ def test_oauth_browser_open_is_dispatched_on_qt_main_thread(
     monkeypatch.setattr(QDesktopServices, "openUrl", open_url)
     window.show_puzzle_training("local")
     page = window._puzzle_training_page
-    window._request_puzzle_training(page, "mix", "normal", authorize=True)
+    page.more_difficulty.setChecked(difficulty != "normal")
+    if difficulty != "normal":
+        page.advanced_difficulty.setCurrentIndex(page.advanced_difficulty.findData(difficulty))
+    window._request_puzzle_training(page, page.selected_theme(),
+                                    page.selected_difficulty(), authorize=True)
     qtbot.waitUntil(opened.is_set, timeout=5000)
     if cancel_after_open:
         page.session_hidden.emit()
@@ -86,6 +96,9 @@ def test_oauth_browser_open_is_dispatched_on_qt_main_thread(
                     timeout=5000)
     assert calls and calls[0][0].startswith("https://lichess.org/oauth/")
     assert calls[0][1], "QDesktopServices.openUrl ran outside QApplication's Qt thread"
+    if not cancel_after_open:
+        assert client.batch_arguments == [{
+            "angle": page.selected_theme(), "difficulty": difficulty, "count": 1}]
     window.close()
 
 

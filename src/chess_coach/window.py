@@ -6030,6 +6030,9 @@ class MainWindow(QMainWindow):
                                 puzzle_id: str, source: str) -> None:
         if page is not self._puzzle_training_page:
             return
+        # Invalidate any in-flight account-list callback before selecting the
+        # replay scope; it must not launch a newer online request afterward.
+        self._puzzle_training_accounts_generation += 1
         selected = str(account_id or "local")
         index = page.account_selector.findData(selected)
         if index < 0:
@@ -6039,8 +6042,13 @@ class MainWindow(QMainWindow):
             rows.append({"account_id": selected, "username": selected, "attempts": 0})
             page.set_accounts(rows, selected)
         else:
-            page.account_selector.setCurrentIndex(index)
+            was_blocked = page.account_selector.blockSignals(True)
+            try:
+                page.account_selector.setCurrentIndex(index)
+            finally:
+                page.account_selector.blockSignals(was_blocked)
         page.account_id = selected
+        self._set_puzzle_auto_next_for_account(page, selected)
         page.source.setCurrentIndex(page.source.findData("new"))
         self._request_local_training_puzzle(page, "replay", "", puzzle_id=puzzle_id,
                                             source_hint=source)
@@ -6732,6 +6740,9 @@ class MainWindow(QMainWindow):
             page._attempt_save_completed(attempt_id, not bool(error), payload,
                                          str(error or ""))
             if not error and page.account_id == payload.get("account_id"):
+                if payload.get("rating_event"):
+                    page.mark_puzzle_rated(payload.get("account_id"),
+                                           payload.get("puzzle_id"))
                 page.set_recent_history(
                     payload.get("recent", []), local_count=payload.get("local_count", 0),
                     local_stats=payload.get("local_stats"),

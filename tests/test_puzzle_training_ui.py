@@ -1,4 +1,5 @@
 import chess
+import pytest
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QMessageBox
 
@@ -83,6 +84,24 @@ def test_history_replay_carries_original_source_and_account(qtbot):
     replay_signal.connect(lambda *args: captured.append(args))
     page._open_history_item(page.history.item(0))
     assert captured == [("lichess:history-user", "old-puzzle", "lichess")]
+
+
+@pytest.mark.parametrize("difficulty", ["easiest", "normal", "hardest"])
+def test_authorize_emits_selected_advanced_difficulty(qtbot, difficulty):
+    page = PuzzleTrainingPage()
+    qtbot.addWidget(page)
+    selected_theme = page.selected_theme()
+    page.more_difficulty.setChecked(difficulty != "normal")
+    if difficulty != "normal":
+        page.advanced_difficulty.setCurrentIndex(
+            page.advanced_difficulty.findData(difficulty))
+    emitted = []
+    page.authorize_requested.connect(lambda theme, level: emitted.append((theme, level)))
+
+    page.set_authorization_needed(True)
+    page.authorize.click()
+
+    assert emitted == [(selected_theme, difficulty)]
 
 
 def test_history_and_statistics_wait_for_real_save_ack_and_retry_same_attempt(qtbot):
