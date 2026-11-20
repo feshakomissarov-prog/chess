@@ -92,6 +92,7 @@ jobs:
           tests/test_puzzle_training_async.py tests/test_puzzle_api_adapter.py
           tests/test_puz_ux_03_interaction.py tests/test_puz_ux_03_rating.py
           tests/test_window.py::test_puzzle_account_switch_clears_old_board_and_keeps_scope
+          tests/test_window.py::test_account_switch_discards_delayed_profile_a_and_requests_profile_b
           tests/test_window.py::test_advanced_difficulty_prefetch_accepts_selected_key
 
   l2-native-puzzle-captures:

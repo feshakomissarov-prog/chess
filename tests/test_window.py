@@ -2832,6 +2832,62 @@ def test_puzzle_account_switch_clears_old_board_and_keeps_scope(qtbot, tmp_path,
     window.close()
 
 
+def test_account_switch_discards_delayed_profile_a_and_requests_profile_b(
+        qtbot, tmp_path, monkeypatch):
+    import threading
+    from chess_coach.ui.pages.puzzle_training import PuzzleTrainingPage
+
+    window = MainWindow(QSettings(str(tmp_path / "puzzle-account-switch-delayed.ini"),
+                                  QSettings.Format.IniFormat), offline_mode=True)
+    qtbot.addWidget(window)
+    account_a = window.game_repository.ensure_archive_account("account-a")
+    account_b = window.game_repository.ensure_archive_account("account-b")
+    page = PuzzleTrainingPage(parent=window)
+    page.account_id = account_a
+    window._puzzle_training_page = page
+    window._puzzle_page = page
+    window.screen_stack.addWidget(page)
+    window.screen_stack.setCurrentWidget(page)
+
+    account_a_started = threading.Event()
+    release_account_a = threading.Event()
+    original_attempts = window.game_repository.local_puzzle_attempts
+
+    def delayed_attempts(account_id, *, limit=8):
+        if account_id == account_a:
+            account_a_started.set()
+            if not release_account_a.wait(timeout=5):
+                raise TimeoutError("test did not release delayed account A read")
+            return [{"puzzle_id": "account-a-history", "result": "success",
+                     "created_at_ms": 1_700_000_000_000, "source": "local"}]
+        if account_id == account_b:
+            return [{"puzzle_id": "account-b-history", "result": "success",
+                     "created_at_ms": 1_700_000_000_001, "source": "local"}]
+        return original_attempts(account_id, limit=limit)
+
+    monkeypatch.setattr(window.game_repository, "local_puzzle_attempts", delayed_attempts)
+    requests = []
+    monkeypatch.setattr(window, "_request_puzzle_training",
+                        lambda target, theme, difficulty, **kwargs:
+                        requests.append((target.account_id, theme, difficulty, kwargs)))
+
+    window._load_puzzle_training_accounts(page, account_a)
+    qtbot.waitUntil(account_a_started.is_set, timeout=3000)
+    window._puzzle_training_account_changed(page, account_b)
+    assert page.account_id == account_b
+    release_account_a.set()
+    qtbot.waitUntil(lambda: requests == [(account_b, page.selected_theme(),
+                                         page.selected_difficulty(),
+                                         {"authorize": False})], timeout=5000)
+    qtbot.waitUntil(lambda: page.history.count() == 1, timeout=3000)
+    assert page.account_id == account_b
+    assert requests[0][0] == account_b
+    history_ids = [page.history.item(index).data(Qt.ItemDataRole.UserRole).get("puzzle_id")
+                   for index in range(page.history.count())]
+    assert history_ids == ["account-b-history"]
+    window.close()
+
+
 @pytest.mark.parametrize("difficulty", ["easiest", "hardest"])
 def test_advanced_difficulty_prefetch_accepts_selected_key(
         qtbot, tmp_path, monkeypatch, difficulty):
