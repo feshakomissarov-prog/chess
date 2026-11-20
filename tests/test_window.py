@@ -2876,6 +2876,8 @@ def test_advanced_difficulty_prefetch_accepts_selected_key(
 
     service = FakeService()
     window.lichess = service
+    worker_results = []
+    window.puzzle_training_finished.connect(lambda *args: worker_results.append(args))
     monkeypatch.setattr("chess_coach.window.WindowsCredentialStore", FakeCredentialStore)
     page.load_puzzle(PuzzlePlayablePosition("current", chess.STARTING_FEN,
                                             ("e2e4",), ("fork",)),
@@ -2883,7 +2885,13 @@ def test_advanced_difficulty_prefetch_accepts_selected_key(
                      source="lichess")
 
     window._prefetch_puzzle_training(page, account_id, "mix", difficulty, page._session_id)
-    qtbot.waitUntil(lambda: page._prepared_online_puzzle is not None, timeout=4000)
+    handle = window._puzzle_prefetch_handle
+    qtbot.waitUntil(lambda: handle is not None and not handle.is_alive(), timeout=4000)
+    assert page._prepared_online_puzzle is not None, (
+        f"worker_results={worker_results!r}; requested={service.client.difficulties!r}; "
+        f"account={page.account_id!r}/{account_id!r}; theme={page.selected_theme()!r}; "
+        f"difficulty={page.selected_difficulty()!r}; replay={page._is_replay}; "
+        f"network_status={page.network_status.text()!r}")
 
     assert service.client.difficulties == [difficulty]
     assert page._prepared_online_puzzle["difficulty"] == difficulty
