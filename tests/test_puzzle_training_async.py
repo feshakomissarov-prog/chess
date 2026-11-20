@@ -256,9 +256,10 @@ def test_late_failed_ack_attaches_durable_retry_to_reopened_same_account_page(
     new_page._retry_attempt_save()
     qtbot.waitUntil(lambda: window.game_repository.local_puzzle_attempt_count(account) == 1,
                     timeout=5000)
+    qtbot.waitUntil(lambda: window.game_repository.pending_puzzle_attempts(account) == [],
+                    timeout=5000)
     assert window.game_repository.local_puzzle_rating_event(
         account, "late-failed-puzzle") is None
-    assert window.game_repository.pending_puzzle_attempts(account) == []
     window.close()
 
 

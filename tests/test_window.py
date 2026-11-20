@@ -3030,7 +3030,11 @@ def test_close_requires_explicit_decision_when_attempt_could_not_reach_outbox(
     assert not window.close()
     assert window.isVisible()
     assert len(prompts) == 1 and "автоматически восстановить" in prompts[0]
-    assert window.close()
+    # Workers may make the close event defer shutdown. The explicit Yes is the
+    # acceptance gate; the warning must not return on the deferred close pass.
+    window.close()
+    assert window._puzzle_loss_warning_acknowledged
+    assert len(prompts) == 2
 
 
 def test_my_puzzles_home_action_opens_local_history_without_network_or_oauth(
