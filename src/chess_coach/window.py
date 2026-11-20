@@ -6,6 +6,7 @@ import chess
 import chess.pgn
 import json
 import io
+import hashlib
 import os
 import tempfile
 import time
@@ -742,6 +743,10 @@ class MainWindow(QMainWindow):
         self._puzzle_oauth_open_requests: dict[str, dict] = {}
         self._puzzle_failed_attempts: dict[str, dict] = {}
         self._puzzle_loss_warning_acknowledged = False
+        self._puzzle_attempt_state_lock = threading.RLock()
+        self._puzzle_attempt_save_states: dict[str, dict] = {}
+        self._puzzle_attempt_acknowledged: set[str] = set()
+        self._puzzle_attempt_ack_lock = threading.RLock()
         self.analysis_progress.connect(self._analysis_progress)
         self.analysis_finished.connect(self._analysis_finished)
         self.engine_install_progress.connect(self._engine_install_progress_changed)
@@ -6104,6 +6109,11 @@ class MainWindow(QMainWindow):
                                "source": "lichess"} for row in official_attempts)
                 recent.sort(key=lambda row: row.get("created_at_ms") or row.get("attempt_date_ms") or 0,
                             reverse=True)
+                with self._puzzle_attempt_ack_lock:
+                    pending_attempts = [
+                        row for row in pending_attempts
+                        if str(row.get("attempt_id") or "")
+                        not in self._puzzle_attempt_acknowledged]
                 self.puzzle_training_finished.emit(request_id, {
                     "accounts": accounts, "selected": preferred,
                     "recent": recent[:8],
@@ -6124,6 +6134,8 @@ class MainWindow(QMainWindow):
                     or self.screen_stack.currentWidget() is not page):
                 return
             if error or not isinstance(payload, dict):
+                page.set_profile_metadata_error(
+                    "Не удалось загрузить данные выбранного профиля. Повторите запрос.")
                 if request_puzzle:
                     page.set_message("Не удалось загрузить историю выбранного профиля. Повторите запрос.")
                 return
@@ -6139,7 +6151,12 @@ class MainWindow(QMainWindow):
                 local_stats=payload.get("local_stats"),
                 theme_stats=payload.get("theme_stats"),
                 practice_rating=payload.get("practice_rating"))
-            page.attach_pending_attempts(payload.get("pending_attempts", []))
+            with self._puzzle_attempt_ack_lock:
+                pending_attempts = [
+                    row for row in payload.get("pending_attempts", [])
+                    if str(row.get("attempt_id") or "")
+                    not in self._puzzle_attempt_acknowledged]
+            page.attach_pending_attempts(pending_attempts)
             if request_puzzle:
                 self._request_puzzle_training(
                     page, page.selected_theme(), page.selected_difficulty(), authorize=False)
@@ -6211,9 +6228,6 @@ class MainWindow(QMainWindow):
         if page is not self._puzzle_training_page:
             return
         page.reset_for_account_switch()
-        known_count = max(0, page._metadata_attempt_count_by_account.get(page.account_id, 0))
-        page.set_recent_history([], local_count=known_count, official_rating=None,
-                                rating_date=None, official_rating_loaded=True)
         handle = getattr(self, "_puzzle_training_handle", None)
         if handle is not None and handle.is_alive():
             handle.cancel("account_changed")
@@ -6259,6 +6273,41 @@ class MainWindow(QMainWindow):
                                     generation: int, callback) -> None:
         self._puzzle_history_callbacks[request_id] = (page, generation, callback)
 
+    def _validate_puzzle_credential_before_apply(self, page: PuzzleTrainingPage,
+                                                 generation: int, expected_fingerprint: str,
+                                                 apply: object) -> None:
+        """Re-read the dedicated keyring credential off the GUI thread before UI apply."""
+        request_id = uuid.uuid4().hex
+
+        def worker() -> None:
+            try:
+                store = WindowsCredentialStore(
+                    service="ChessCoach.Lichess.Puzzles", user="puzzle-activity-token")
+                token = store.get()
+                fingerprint = (hashlib.sha256(token.encode("utf-8")).hexdigest()
+                               if token else "")
+                self.puzzle_training_finished.emit(
+                    request_id, {"matches": bool(fingerprint and
+                                                 fingerprint == expected_fingerprint)}, None)
+            except Exception as exc:
+                self.puzzle_training_finished.emit(request_id, None, str(exc))
+
+        def apply_validation(result, error) -> None:
+            if (page is not self._puzzle_training_page or not shiboken6.isValid(page)
+                    or generation != self._puzzle_training_generation
+                    or self.screen_stack.currentWidget() is not page):
+                return
+            if error or not isinstance(result, dict) or not result.get("matches"):
+                page.set_message("Разрешение puzzle:read изменилось. Повторите запрос для выбранного профиля.")
+                page.set_authorization_needed(True)
+                return
+            apply()
+
+        self._register_training_callback(page, request_id, generation, apply_validation)
+        self._start_registered_work(
+            worker, kind="puzzle_training_credential_check", lane=OperationLane.INTERACTIVE,
+            thread_name="cc-puzzle-credential-check")
+
     def _request_puzzle_training(self, page: PuzzleTrainingPage, theme: str,
                                  difficulty: str, *, authorize: bool) -> None:
         """Fetch exactly one new puzzle (and authorize only after the explicit CTA)."""
@@ -6303,6 +6352,8 @@ class MainWindow(QMainWindow):
                 store = WindowsCredentialStore(
                     service="ChessCoach.Lichess.Puzzles", user="puzzle-activity-token")
                 token = store.get()
+                credential_fingerprint = (hashlib.sha256(token.encode("utf-8")).hexdigest()
+                                          if token else "")
                 username = None
                 if not token and not authorize:
                     raise PermissionError("Для новых задач требуется отдельное разрешение puzzle:read.")
@@ -6327,6 +6378,8 @@ class MainWindow(QMainWindow):
                         raise RuntimeError("Не удалось открыть браузер для разрешения puzzle:read.")
                     token, username = authorize_and_store(
                         client, store, callback, request, is_current=operation_current)
+                    credential_fingerprint = hashlib.sha256(
+                        token.encode("utf-8")).hexdigest()
                 if not operation_current():
                     return
                 if not username:
@@ -6375,6 +6428,7 @@ class MainWindow(QMainWindow):
                 self.puzzle_training_finished.emit(request_id, {
                     "puzzle": playable, "payload": payload, "account_id": scoped_account,
                     "username": username, "recent": recent[:8], "rating": rating,
+                    "credential_fingerprint": credential_fingerprint,
                     "live_get_ms": puzzle_get_ms,
                     "practice_rating": self.game_repository.local_puzzle_rating(scoped_account),
                     "rating_eligible": not self.game_repository.has_local_puzzle_rating_event(
@@ -6414,30 +6468,35 @@ class MainWindow(QMainWindow):
                     bool(error.get("authorization_needed")) if isinstance(error, dict)
                     else False)
                 return
-            page.account_id = payload["account_id"]
-            rows = []
-            for index in range(page.account_selector.count()):
-                rows.append({"account_id": page.account_selector.itemData(index),
-                             "username": page.account_selector.itemText(index), "attempts": 0})
-            if not any(str(row.get("account_id")) == str(payload["account_id"]) for row in rows):
-                rows.append({"account_id": payload["account_id"],
-                             "username": payload.get("username", payload["account_id"]),
-                             "attempts": payload.get("local_count", 0)})
-            page.set_accounts(rows, payload["account_id"])
-            self._set_puzzle_auto_next_for_account(page, payload["account_id"])
-            page.load_puzzle(payload["puzzle"], payload["payload"], source="lichess",
-                             rating_eligible=bool(payload.get("rating_eligible", True)))
-            page._live_get_ms = payload.get("live_get_ms")
-            rating = payload.get("rating") or {}
-            page.set_recent_history(payload.get("recent", []),
-                                    local_count=payload.get("local_count", 0),
-                                    official_rating=rating.get("latest"),
-                                    rating_date=rating.get("date"),
-                                    official_rating_loaded=True,
-                                    local_stats=payload.get("local_stats"),
-                                    theme_stats=payload.get("theme_stats"),
-                                    practice_rating=payload.get("practice_rating"))
-            page.set_authorization_needed(False)
+            def apply_validated() -> None:
+                page.account_id = payload["account_id"]
+                rows = []
+                for index in range(page.account_selector.count()):
+                    rows.append({"account_id": page.account_selector.itemData(index),
+                                 "username": page.account_selector.itemText(index), "attempts": 0})
+                if not any(str(row.get("account_id")) == str(payload["account_id"]) for row in rows):
+                    rows.append({"account_id": payload["account_id"],
+                                 "username": payload.get("username", payload["account_id"]),
+                                 "attempts": payload.get("local_count", 0)})
+                page.set_accounts(rows, payload["account_id"])
+                self._set_puzzle_auto_next_for_account(page, payload["account_id"])
+                page.load_puzzle(payload["puzzle"], payload["payload"], source="lichess",
+                                 rating_eligible=bool(payload.get("rating_eligible", True)))
+                page._live_get_ms = payload.get("live_get_ms")
+                rating = payload.get("rating") or {}
+                page.set_recent_history(payload.get("recent", []),
+                                        local_count=payload.get("local_count", 0),
+                                        official_rating=rating.get("latest"),
+                                        rating_date=rating.get("date"),
+                                        official_rating_loaded=True,
+                                        local_stats=payload.get("local_stats"),
+                                        theme_stats=payload.get("theme_stats"),
+                                        practice_rating=payload.get("practice_rating"))
+                page.set_authorization_needed(False)
+
+            self._validate_puzzle_credential_before_apply(
+                page, generation, str(payload.get("credential_fingerprint") or ""),
+                apply_validated)
 
         self._register_training_callback(page, request_id, generation, apply_result)
         handle = self._start_registered_work(
@@ -6484,6 +6543,7 @@ class MainWindow(QMainWindow):
                 token = store.get()
                 if not token:
                     raise PermissionError("Нет разрешения puzzle:read.")
+                credential_fingerprint = hashlib.sha256(token.encode("utf-8")).hexdigest()
                 # Validate the identity belonging to this credential on every
                 # prefetch. The game OAuth identity and a stale account label are
                 # never sufficient to authorize scoped cache writes.
@@ -6515,6 +6575,7 @@ class MainWindow(QMainWindow):
                     json.dumps(raw, ensure_ascii=False, separators=(",", ":")))
                 payload = {
                     "puzzle": playable, "raw": raw, "account_id": scoped_account,
+                    "credential_fingerprint": credential_fingerprint,
                     "rating_eligible": not self.game_repository.has_local_puzzle_rating_event(
                         scoped_account, playable.puzzle_id),
                     "details": {
@@ -6537,10 +6598,12 @@ class MainWindow(QMainWindow):
             if error or not isinstance(payload, dict):
                 page.network_status.setText("Следующая задача загрузится по запросу")
                 return
-            page.set_prepared_puzzle(
-                payload["account_id"], theme, difficulty, payload["puzzle"], payload["raw"],
-                {**payload.get("details", {}),
-                 "rating_eligible": payload.get("rating_eligible", True)})
+            self._validate_puzzle_credential_before_apply(
+                page, generation, str(payload.get("credential_fingerprint") or ""),
+                lambda: page.set_prepared_puzzle(
+                    payload["account_id"], theme, difficulty, payload["puzzle"], payload["raw"],
+                    {**payload.get("details", {}),
+                     "rating_eligible": payload.get("rating_eligible", True)}))
 
         self._register_training_callback(page, request_id, generation, apply_result)
         handle = self._start_registered_work(
@@ -6713,6 +6776,14 @@ class MainWindow(QMainWindow):
         payload.setdefault("attempt_id", uuid.uuid4().hex)
         payload.setdefault("session_id", page._session_id)
         payload.setdefault("puzzle_id", page._session_puzzle_id)
+        attempt_id = str(payload["attempt_id"])
+        with self._puzzle_attempt_state_lock:
+            self._puzzle_attempt_save_states[attempt_id] = {
+                "attempt_id": attempt_id,
+                "account_id": str(payload.get("account_id") or "local"),
+                "status": "enqueue_pending",
+                "outbox_persisted": None,
+            }
         def worker() -> None:
             error = None
             outbox_written = False
@@ -6722,10 +6793,17 @@ class MainWindow(QMainWindow):
                     enqueue(payload)
                     outbox_written = True
                 payload["outbox_persisted"] = outbox_written
+                with self._puzzle_attempt_state_lock:
+                    self._puzzle_attempt_save_states[attempt_id].update(
+                        status="durable" if outbox_written else "unprotected",
+                        outbox_persisted=outbox_written)
             except Exception as exc:
                 payload["outbox_persisted"] = False
                 payload["outbox_error"] = f"{type(exc).__name__}: {exc}"
                 error = payload["outbox_error"]
+                with self._puzzle_attempt_state_lock:
+                    self._puzzle_attempt_save_states[attempt_id].update(
+                        status="unprotected", outbox_persisted=False)
             try:
                 if error:
                     raise RuntimeError(error)
@@ -6740,6 +6818,10 @@ class MainWindow(QMainWindow):
                 payload["db_commit_ms"] = (time.perf_counter() - db_commit_started) * 1000
                 payload["attempt_id"] = saved_id
                 payload["inserted"] = inserted
+                with self._puzzle_attempt_ack_lock:
+                    self._puzzle_attempt_acknowledged.add(str(saved_id))
+                with self._puzzle_attempt_state_lock:
+                    self._puzzle_attempt_save_states[attempt_id].update(status="saved")
                 # The attempt row and any eligible rating event are committed.
                 # Read-model enrichment is optional and must not turn that commit
                 # into a false failure/retry loop.
@@ -6790,6 +6872,11 @@ class MainWindow(QMainWindow):
                         payload["outbox_error"] = "Не удалось обновить очередь восстановления."
                 log_event("local_puzzle_attempt_save_failed", "puzzle_training",
                           status="failed")
+                with self._puzzle_attempt_state_lock:
+                    state = self._puzzle_attempt_save_states.get(attempt_id)
+                    if state is not None:
+                        state.update(status=("durable" if outbox_written else "unprotected"),
+                                     outbox_persisted=outbox_written)
             self.puzzle_attempt_save_finished.emit(payload, error)
 
         self._start_registered_work(
@@ -6807,6 +6894,10 @@ class MainWindow(QMainWindow):
                 self._puzzle_loss_warning_acknowledged = False
         else:
             self._puzzle_failed_attempts.pop(attempt_id, None)
+            with self._puzzle_attempt_ack_lock:
+                self._puzzle_attempt_acknowledged.add(attempt_id)
+            with self._puzzle_attempt_state_lock:
+                self._puzzle_attempt_save_states.pop(attempt_id, None)
         if page is not None and shiboken6.isValid(page):
             if (error and page.account_id == payload.get("account_id")
                     and attempt_id not in page._pending_attempt_saves):
@@ -11552,8 +11643,16 @@ class MainWindow(QMainWindow):
         self.show_home()
 
     def closeEvent(self, event) -> None:
-        unsafe_attempts = [attempt for attempt in self._puzzle_failed_attempts.values()
-                           if attempt.get("outbox_persisted") is False]
+        with self._puzzle_attempt_state_lock:
+            active_saves = list(self._puzzle_attempt_save_states.values())
+        unsafe_attempts = [attempt for attempt in active_saves
+                           if attempt.get("status") in {"enqueue_pending", "unprotected"}
+                           or attempt.get("outbox_persisted") is False]
+        unsafe_attempts.extend(attempt for attempt in self._puzzle_failed_attempts.values()
+                               if attempt.get("outbox_persisted") is False
+                               and str(attempt.get("attempt_id") or "")
+                               not in {str(row.get("attempt_id") or "")
+                                       for row in unsafe_attempts})
         if unsafe_attempts and not self._puzzle_loss_warning_acknowledged:
             answer = QMessageBox.warning(
                 self, "Результат ещё не защищён сохранением",

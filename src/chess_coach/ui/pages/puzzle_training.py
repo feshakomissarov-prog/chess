@@ -739,6 +739,17 @@ class PuzzleTrainingPage(QWidget):
         self._wrong_flash = False
         self._wrong_timer_pending = False
         self.state = PuzzleTrainingState()
+        # Profile metrics and history are account-scoped. Do not leave the
+        # previous account visible while the next scoped read is in flight.
+        self._official_rating = None
+        self._rating_date = None
+        self._local_count = 0
+        self._local_stats = {"attempts": 0, "solved": 0, "success_percent": None}
+        self._theme_stats = {"attempts": 0, "solved": 0, "success_percent": None}
+        self._current_cc_rating = 1500
+        self.history.clear()
+        self.metrics.setText("Загрузка данных профиля…")
+        self.practice_rating.setText("Рейтинг тренировки CC: загрузка…")
         self.board.set_interaction_enabled(False)
         self.board.set_position(chess.Board())
         self.board.set_feedback_squares(())
@@ -1196,6 +1207,12 @@ class PuzzleTrainingPage(QWidget):
             f"{theme_label}: {self._theme_stats.get('solved', 0)}/"
             f"{self._theme_stats.get('attempts', 0)}"
             f" ({theme_rate if theme_rate is not None else 'н/д'}%)")
+
+    def set_profile_metadata_error(self, message: str) -> None:
+        """Show a scoped-read failure without retaining another profile's data."""
+        self.metrics.setText(str(message))
+        self.practice_rating.setText("Рейтинг тренировки CC: недоступен")
+        self.history.clear()
 
     def _auto_advance(self) -> None:
         if (self._auto_next_session_id != self._session_id

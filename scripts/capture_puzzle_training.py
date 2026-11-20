@@ -7,6 +7,7 @@ import json
 from pathlib import Path
 import sys
 import tempfile
+import threading
 import time
 
 import chess
@@ -79,8 +80,11 @@ def main() -> None:
                 ("skipped", "discoveredAttack"), ("success", "rookEndgame"),
                 ("hinted", "hangingPiece")), start=1)
         ], local_count=14,
+           official_rating=1850, rating_date="2026-11-19",
+           official_rating_loaded=True,
            local_stats={"attempts": 14, "solved": 9, "success_percent": 64.3},
-           theme_stats={"attempts": 4, "solved": 3, "success_percent": 75.0})
+           theme_stats={"attempts": 4, "solved": 3, "success_percent": 75.0},
+           practice_rating={"rating": 1600, "rated_attempts": 6})
         app.processEvents()
         size_text = os.environ.get("CC_PUZZLE_VISUAL_SIZE", "1672x941")
         width, height = (int(part) for part in size_text.lower().split("x", 1))
@@ -127,9 +131,27 @@ def main() -> None:
 
         page.set_accounts([{"account_id": "local", "username": "Локальный профиль"},
                            {"account_id": "lichess:visual-b", "username": "Профиль B"}], "local")
+        original_list_accounts = window.game_repository.list_puzzle_accounts
+        account_read_started = threading.Event()
+        release_account_read = threading.Event()
+
+        def delayed_list_accounts():
+            rows = original_list_accounts()
+            account_read_started.set()
+            if not release_account_read.wait(5):
+                raise TimeoutError("visual account-read gate was not released")
+            return rows
+
+        window.game_repository.list_puzzle_accounts = delayed_list_accounts
         page.account_selector.setCurrentIndex(page.account_selector.findData("lichess:visual-b"))
-        app.processEvents()
+        wait_for(account_read_started.is_set)
+        if ("1850" in page.metrics.text() or "1600" in page.practice_rating.text()
+                or "14" in page.metrics.text()):
+            raise AssertionError("Previous account metrics remained visible during scoped loading")
+        save("account-switch-loading")
+        release_account_read.set()
         settle_account_reads()
+        window.game_repository.list_puzzle_accounts = original_list_accounts
         save("account-switch")
         page.account_selector.setCurrentIndex(page.account_selector.findData("local"))
         app.processEvents()

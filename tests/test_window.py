@@ -3338,6 +3338,267 @@ def test_duplicate_prefetched_id_is_unrated_after_save_ack(qtbot, tmp_path):
     window.close()
 
 
+def test_account_switch_hides_all_previous_profile_metrics_before_worker_ack(
+        qtbot, tmp_path, monkeypatch):
+    """§16: B must not temporarily display A's history or either rating."""
+    from chess_coach.ui.pages.puzzle_training import PuzzleTrainingPage
+
+    window = MainWindow(QSettings(str(tmp_path / "puzzle-account-loading.ini"),
+                                  QSettings.Format.IniFormat), offline_mode=True)
+    qtbot.addWidget(window)
+    account_a = window.game_repository.ensure_archive_account("immediate-a")
+    account_b = window.game_repository.ensure_archive_account("immediate-b")
+    page = PuzzleTrainingPage(parent=window)
+    page.account_id = account_a
+    page.set_accounts([
+        {"account_id": account_a, "username": "immediate-a", "attempts": 6},
+        {"account_id": account_b, "username": "immediate-b", "attempts": 2},
+    ], account_a)
+    page.set_recent_history(
+        [{"puzzle_id": "private-a-history", "result": "success",
+          "source": "local", "created_at_ms": 1_700_000_000_000}],
+        local_count=6, official_rating=1850, rating_date="2026-11-19",
+        official_rating_loaded=True,
+        local_stats={"attempts": 6, "solved": 5, "success_percent": 83.3},
+        theme_stats={"attempts": 6, "solved": 5, "success_percent": 83.3},
+        practice_rating={"rating": 1600, "rated_attempts": 6})
+    window._puzzle_training_page = page
+    window._puzzle_page = page
+    window.screen_stack.addWidget(page)
+    window.screen_stack.setCurrentWidget(page)
+    delayed = []
+    monkeypatch.setattr(window, "_load_puzzle_training_accounts",
+                        lambda *args, **kwargs: delayed.append((args, kwargs)))
+
+    window._puzzle_training_account_changed(page, account_b)
+
+    assert delayed, "the B-scoped read should now be waiting asynchronously"
+    assert page.account_id == account_b
+    assert "1850" not in page.metrics.text()
+    assert "1600" not in page.practice_rating.text()
+    assert "5/6" not in page.metrics.text()
+    assert page.history.count() == 0
+    assert "Загрузка" in page.metrics.text() or "загружа" in page.status.text().casefold()
+    window.close()
+
+
+@pytest.mark.parametrize("request_kind", ["first-fetch", "prefetch"])
+def test_puzzle_token_rotation_after_worker_emit_rejects_queued_result(
+        qtbot, tmp_path, monkeypatch, request_kind):
+    """§16: validate credential again at the GUI apply boundary, not only in transport."""
+    from chess_coach.lichess.puzzle_training import PuzzlePlayablePosition
+    from chess_coach.ui.pages.puzzle_training import PuzzleTrainingPage
+
+    window = MainWindow(QSettings(str(tmp_path / f"queued-token-{request_kind}.ini"),
+                                  QSettings.Format.IniFormat), offline_mode=True)
+    qtbot.addWidget(window)
+    window.offline_mode = False
+    account_b = window.game_repository.ensure_archive_account("token-account-b")
+    page = PuzzleTrainingPage(parent=window)
+    page.account_id = account_b
+    page.set_accounts([], account_b)
+    window._puzzle_training_page = page
+    window._puzzle_page = page
+    window.screen_stack.addWidget(page)
+    window.screen_stack.setCurrentWidget(page)
+    credential = {"token": "fake-puzzle-token-b"}
+
+    class FakeCredentialStore:
+        def __init__(self, **_kwargs): pass
+        def get(self): return credential["token"]
+
+    class FakeClient:
+        def get_account(self, token):
+            return {"username": "token-account-b" if token.endswith("-b")
+                    else "token-account-a"}
+
+        def get_puzzle_batch(self, token, *, angle, difficulty, count):
+            assert token == "fake-puzzle-token-b"
+            return {"puzzles": [{
+                "game": {"id": "queued-rotation-game", "pgn": "1. e4"},
+                "puzzle": {"id": "queued-rotation", "initialPly": 0,
+                           "lastMove": "e2e4", "solution": ["e7e5"],
+                           "themes": [angle], "rating": 1510},
+            }]}
+
+    class FakeService:
+        username = "gaming-account-a"
+        puzzle_username = None
+        def __init__(self): self.client = FakeClient()
+
+    window.lichess = FakeService()
+    monkeypatch.setattr("chess_coach.window.WindowsCredentialStore", FakeCredentialStore)
+    captured = {}
+    result_ready = threading.Event()
+    register = window._register_training_callback
+
+    def hold_callback(target, request_id, generation, callback):
+        if captured.get("held_once"):
+            return register(target, request_id, generation, callback)
+        captured["held_once"] = True
+        def held(payload, error):
+            captured["payload"] = payload
+            captured["error"] = error
+            captured["apply"] = callback
+            result_ready.set()
+        register(target, request_id, generation, held)
+
+    monkeypatch.setattr(window, "_register_training_callback", hold_callback)
+    if request_kind == "first-fetch":
+        window._request_puzzle_training(page, "mix", "normal", authorize=False)
+    else:
+        page.load_puzzle(PuzzlePlayablePosition(
+            "current-online", chess.STARTING_FEN, ("e2e4",), ("fork",)),
+            {"puzzle": {"id": "current-online", "solution": ["e2e4"]}},
+            source="lichess")
+        window._prefetch_puzzle_training(
+            page, account_b, "mix", "normal", page._session_id)
+
+    qtbot.waitUntil(result_ready.is_set, timeout=5000)
+    assert captured["error"] is None
+    assert captured["payload"] is not None
+    # Transport has emitted B's result; delay only Qt-side application, then
+    # rotate the isolated fake keyring value to account A.
+    credential["token"] = "fake-puzzle-token-a"
+    captured["apply"](captured["payload"], captured["error"])
+
+    def stale_applied():
+        if request_kind == "first-fetch":
+            return (page.state.puzzle is not None
+                    and page.state.puzzle.puzzle_id == "queued-rotation")
+        prepared = page._prepared_online_puzzle
+        return (prepared is not None
+                and prepared["puzzle"].puzzle_id == "queued-rotation")
+
+    def rejected():
+        return (not stale_applied()
+                and ("измен" in page.status.text().casefold()
+                     or "измен" in page.network_status.text().casefold()
+                     or "профиль" in page.status.text().casefold()))
+
+    qtbot.waitUntil(lambda: stale_applied() or rejected(), timeout=5000)
+    assert not stale_applied(), "a queued result for credential B appeared after rotation to A"
+    window.close()
+
+
+def test_close_prompt_catches_outbox_failure_finishing_during_shutdown(
+        qtbot, tmp_path, monkeypatch):
+    """§16: pending enqueue cannot finish inside closeEvent without a loss prompt."""
+    window = MainWindow(QSettings(str(tmp_path / "close-puzzle-outbox-race.ini"),
+                                  QSettings.Format.IniFormat), offline_mode=True)
+    qtbot.addWidget(window)
+    enqueue_started = threading.Event()
+    release_enqueue = threading.Event()
+    enqueue_finished = threading.Event()
+
+    def delayed_enqueue(_attempt):
+        enqueue_started.set()
+        try:
+            assert release_enqueue.wait(3), "test did not release outbox worker"
+            raise OSError("simulated durable outbox failure")
+        finally:
+            enqueue_finished.set()
+
+    monkeypatch.setattr(window.game_repository, "enqueue_puzzle_attempt", delayed_enqueue)
+    prompts = []
+
+    def answer_warning(*args, **kwargs):
+        prompts.append(args[2])
+        if len(prompts) == 1:
+            release_enqueue.set()
+            assert enqueue_finished.wait(2)
+            return QMessageBox.StandardButton.No
+        return QMessageBox.StandardButton.Yes
+
+    monkeypatch.setattr(QMessageBox, "warning", answer_warning)
+    from types import SimpleNamespace
+    page_session = SimpleNamespace(_session_account_id="local",
+                                   _session_id="shutdown-race-session",
+                                   _session_puzzle_id="shutdown-race-puzzle")
+    window._save_training_attempt(page_session, {
+        "attempt_id": "shutdown-race-attempt", "account_id": "local",
+        "puzzle_id": "shutdown-race-puzzle", "session_id": "shutdown-race-session",
+        "result": "mistake", "solved": False, "mistakes": 1, "hints": 0,
+        "duration_ms": 1, "puzzle_json": "{}",
+    })
+    qtbot.waitUntil(enqueue_started.is_set, timeout=3000)
+    release_timer = threading.Timer(0.05, release_enqueue.set)
+    release_timer.start()
+    first = QCloseEvent()
+    window.closeEvent(first)
+    release_timer.join(timeout=1)
+
+    assert not first.isAccepted(), "No must leave the app and runtime usable"
+    assert prompts and "автоматически восстановить" in prompts[0]
+    assert not window.runtime._closed
+    qtbot.waitUntil(lambda: "shutdown-race-attempt" in window._puzzle_failed_attempts,
+                    timeout=3000)
+    final = QCloseEvent()
+    window.closeEvent(final)
+    assert final.isAccepted()
+    assert window._puzzle_loss_warning_acknowledged
+
+
+def test_stale_pending_snapshot_cannot_resurrect_attempt_after_save_ack(
+        qtbot, tmp_path, monkeypatch):
+    """§16: reconcile an old account-read snapshot against a concurrent save ACK."""
+    from chess_coach.ui.pages.puzzle_training import PuzzleTrainingPage
+
+    window = MainWindow(QSettings(str(tmp_path / "stale-outbox-snapshot.ini"),
+                                  QSettings.Format.IniFormat), offline_mode=True)
+    qtbot.addWidget(window)
+    account = window.game_repository.ensure_archive_account("stale-outbox-account")
+    window.game_repository.ensure_archive_account("other-outbox-account")
+    attempt = {"attempt_id": "stale-snapshot-attempt", "account_id": account,
+               "puzzle_id": "stale-snapshot-puzzle", "result": "mistake", "solved": False,
+               "mistakes": 1, "hints": 0, "duration_ms": 23, "puzzle_json": "{}",
+               "session_id": "stale-snapshot-session", "outbox_persisted": True}
+    window.game_repository.enqueue_puzzle_attempt(attempt, error="simulated previous failure")
+    page = PuzzleTrainingPage(parent=window)
+    page.account_id = account
+    window._puzzle_training_page = page
+    window._puzzle_page = page
+    window.screen_stack.addWidget(page)
+    window.screen_stack.setCurrentWidget(page)
+
+    snapshot_taken = threading.Event()
+    release_account_read = threading.Event()
+    original_pending = window.game_repository.pending_puzzle_attempts
+
+    def delayed_pending(account_id):
+        rows = original_pending(account_id)
+        if account_id == account and not snapshot_taken.is_set():
+            snapshot_taken.set()
+            assert release_account_read.wait(3), "test did not release stale account snapshot"
+        return rows
+
+    monkeypatch.setattr(window.game_repository, "pending_puzzle_attempts", delayed_pending)
+    accounts_applied = threading.Event()
+    window.puzzle_training_finished.connect(lambda *_: accounts_applied.set())
+    window._load_puzzle_training_accounts(page, account, default_to_available=False)
+    qtbot.waitUntil(snapshot_taken.is_set, timeout=3000)
+
+    _, inserted = window.game_repository.save_local_puzzle_attempt(
+        account, attempt["puzzle_id"], result="mistake", solved=False, mistakes=1,
+        hints=0, duration_ms=23, puzzle_json="{}", attempt_id=attempt["attempt_id"],
+        rating_eligible=False)
+    assert inserted
+    window.game_repository.acknowledge_puzzle_attempt(attempt["attempt_id"])
+    window._puzzle_attempt_save_result_ready({
+        **attempt, "local_count": 1, "local_stats": {"attempts": 1, "solved": 0},
+        "recent": [], "theme_stats": {}, "practice_rating": {"rating": 1500},
+    }, None)
+    release_account_read.set()
+    assert not original_pending(account)
+
+    qtbot.waitUntil(accounts_applied.is_set, timeout=5000)
+    assert page._local_count == 1
+    assert "stale-snapshot-attempt" not in page._pending_attempt_saves
+    assert "stale-snapshot-attempt" not in page._retry_attempt_queue
+    assert page.retry_save.isHidden()
+    window.close()
+
+
 def test_active_games_dialog_shows_server_confirmed_turn_and_game_type(qtbot):
     dialog = ActiveGamesDialog()
     qtbot.addWidget(dialog)
