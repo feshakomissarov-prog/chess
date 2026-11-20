@@ -144,9 +144,11 @@ def test_failed_attempt_outbox_survives_reopen_and_is_account_scoped(tmp_path):
     account_a = repository.ensure_archive_account("outbox-a")
     account_b = repository.ensure_archive_account("outbox-b")
     attempt = {"attempt_id": "durable-attempt", "account_id": account_a,
-               "puzzle_id": "p-outbox", "result": "mistake", "solved": False,
-               "mistakes": 1, "hints": 0, "duration_ms": 120,
-               "puzzle_json": "{broken"}
+               "puzzle_id": "p-outbox", "result": "success", "solved": True,
+               "mistakes": 0, "hints": 0, "duration_ms": 120,
+               "puzzle_json": json.dumps({"puzzle": {"rating": 1500,
+                                                        "themes": ["fork"]}}),
+               "rating_eligible": True}
     try:
         repository.enqueue_puzzle_attempt(attempt, error="disk busy")
         repository.shutdown()
@@ -156,6 +158,15 @@ def test_failed_attempt_outbox_survives_reopen_and_is_account_scoped(tmp_path):
         assert recovered[0]["attempt_id"] == "durable-attempt"
         assert recovered[0]["last_error"] == "disk busy"
         assert repository.pending_puzzle_attempts(account_b) == []
+        for _ in range(2):
+            repository.save_local_puzzle_attempt(
+                account_a, attempt["puzzle_id"], result=attempt["result"],
+                solved=attempt["solved"], mistakes=attempt["mistakes"],
+                hints=attempt["hints"], duration_ms=attempt["duration_ms"],
+                puzzle_json=attempt["puzzle_json"], attempt_id=attempt["attempt_id"],
+                rating_eligible=attempt["rating_eligible"])
+        assert repository.local_puzzle_attempt_count(account_a) == 1
+        assert repository.local_puzzle_rating(account_a)["rated_attempts"] == 1
         repository.acknowledge_puzzle_attempt("durable-attempt")
         repository.acknowledge_puzzle_attempt("durable-attempt")
         assert repository.pending_puzzle_attempts(account_a) == []

@@ -76,6 +76,8 @@ jobs:
         run: >-
           python -m py_compile src/chess_coach/ui/pages/puzzle_training.py
           src/chess_coach/window.py
+          src/chess_coach/infrastructure/sqlite/constants.py
+          src/chess_coach/infrastructure/sqlite/migrations.py
           src/chess_coach/infrastructure/sqlite/puzzles.py
           src/chess_coach/lichess/puzzle_training.py
           tests/test_puzzle_training.py tests/test_puzzle_training_store.py
@@ -98,6 +100,8 @@ jobs:
           tests/test_window.py::test_training_replay_does_not_change_attempt_totals_statistics_or_rating
           tests/test_window.py::test_cross_account_replay_wins_against_delayed_account_callback
           tests/test_window.py::test_duplicate_prefetched_id_is_unrated_after_save_ack
+          tests/test_window.py::test_failed_attempt_outbox_recovers_only_when_its_account_is_selected
+          tests/test_window.py::test_close_requires_explicit_decision_when_attempt_could_not_reach_outbox
 
   l2-native-puzzle-captures:
     name: L2 PUZ-UX-03 public and native UX

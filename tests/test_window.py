@@ -3011,6 +3011,26 @@ def test_failed_attempt_outbox_recovers_only_when_its_account_is_selected(
     window.close()
 
 
+def test_close_requires_explicit_decision_when_attempt_could_not_reach_outbox(
+        qtbot, tmp_path, monkeypatch):
+    window = MainWindow(QSettings(str(tmp_path / "puzzle-close-warning.ini"),
+                                  QSettings.Format.IniFormat), offline_mode=True)
+    qtbot.addWidget(window)
+    window.show()
+    window._puzzle_failed_attempts["volatile-attempt"] = {
+        "attempt_id": "volatile-attempt", "account_id": "local",
+        "outbox_persisted": False,
+    }
+    answers = iter((QMessageBox.StandardButton.No, QMessageBox.StandardButton.Yes))
+    prompts = []
+    monkeypatch.setattr(QMessageBox, "warning",
+                        lambda *args, **kwargs: (prompts.append(args[2]), next(answers)))
+    assert not window.close()
+    assert window.isVisible()
+    assert len(prompts) == 1 and "автоматически восстановить" in prompts[0]
+    assert window.close()
+
+
 def test_my_puzzles_home_action_opens_local_history_without_network_or_oauth(
     qtbot, tmp_path
 ):

@@ -104,7 +104,7 @@ jobs:
         env:
           QT_QPA_PLATFORM: offscreen
         run: |
-          python -m py_compile src/chess_coach/board_view.py src/chess_coach/lichess/puzzle_training.py src/chess_coach/ui/pages/puzzle_training.py src/chess_coach/window.py src/chess_coach/infrastructure/sqlite/puzzles.py scripts/puz_ux_03_live_public_smoke.py
+          python -m py_compile src/chess_coach/board_view.py src/chess_coach/lichess/puzzle_training.py src/chess_coach/ui/pages/puzzle_training.py src/chess_coach/window.py src/chess_coach/infrastructure/sqlite/constants.py src/chess_coach/infrastructure/sqlite/migrations.py src/chess_coach/infrastructure/sqlite/puzzles.py scripts/puz_ux_03_live_public_smoke.py scripts/puz_ux_03_mainwindow_live_integration.py
           python -X faulthandler -m pytest -o addopts= -q -W error::pytest.PytestUnhandledThreadExceptionWarning tests/test_puzzle_training.py tests/test_puzzle_training_ui.py tests/test_puzzle_training_navigation.py tests/test_puzzle_training_async.py tests/test_puzzle_training_store.py tests/test_puzzle_api_adapter.py tests/test_board_view.py tests/test_m45_analysis_store.py tests/test_m45_openings.py tests/test_window.py tests/test_puz_ux_03_interaction.py tests/test_puz_ux_03_rating.py
       - name: Configure isolated native Qt display
         shell: pwsh
