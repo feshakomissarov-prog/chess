@@ -769,8 +769,8 @@ class HomePage(QWidget):
         zones = QHBoxLayout()
         zones.setContentsMargins(0, 0, 0, 0)
         zones.setSpacing(12)
-        zones.addWidget(overview_scroll, 38)
-        zones.addWidget(recent_card, 62)
+        zones.addWidget(overview_scroll, 36)
+        zones.addWidget(recent_card, 64)
         layout.addLayout(zones, 1)
 
         # Preserve shell callbacks and old tests as hidden compatibility hooks.

@@ -4395,7 +4395,7 @@ class MainWindow(QMainWindow):
         # historical scores. Active games remain hidden regardless of stale cache.
         can_show_scores = game_analysis_allowed and has_saved_position_metrics
         recent_width = self._home_view.recent_scroll.viewport().width()
-        compact = recent_width < 760
+        compact = recent_width < 740
         compact_height = self.height() < 780
         card = _DashboardGameCard()
         # QWidget starts at Qt's default 640 px even while its scroll-area
