@@ -180,8 +180,10 @@ def run(output: Path) -> None:
     # is accepted automatically in the nested modal event loop by QtTest.
     page.fetch.click()
     wait_until(app, lambda: page.state.puzzle is not None and
-               page.state.puzzle.puzzle_id == "0000D" and not page._is_replay,
+               not page._is_replay and page._active_source == "lichess"
+               and page.state.status.value == "ready",
                timeout_ms=15000)
+    skipped_puzzle_id = page.state.puzzle.puzzle_id
     page._prepared_online_puzzle = None
     QTimer.singleShot(0, lambda: _accept_question(app))
     page._next()
@@ -189,7 +191,9 @@ def run(output: Path) -> None:
         raise AssertionError("Skip confirmation did not produce the SKIPPED state")
     capture(page, output, len(frames), "mainwindow-skip-visible", frames)
     wait_until(app, lambda: page.state.puzzle is not None and
-               page.state.puzzle.puzzle_id == "00008", timeout_ms=15000)
+               page.state.puzzle.puzzle_id != skipped_puzzle_id
+               and not page._is_replay and page._active_source == "lichess"
+               and page.state.status.value == "ready", timeout_ms=15000)
     wait_until(app, lambda: page._prepared_online_puzzle is not None, timeout_ms=30000)
     capture(page, output, len(frames), "mainwindow-after-skip-next-public", frames)
 
