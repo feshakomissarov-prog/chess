@@ -193,8 +193,6 @@ def instrument_first_feedback(page: PuzzleTrainingPage) -> list[dict]:
 
         def timed(*args, _original=original, _label=label, **kwargs):
             started = time.perf_counter()
-            if _label == "page.record_paint" and len(args) > 1 and args[1] == "wrong":
-                page._wrong_feedback_started = time.perf_counter()
             try:
                 return _original(*args, **kwargs)
             finally:
@@ -298,6 +296,13 @@ def play(output: Path, dpi_scale: str) -> None:
     wrong = next((move for move in board.legal_moves if move != expected), None)
     if wrong is None:
         raise AssertionError("Live puzzle has no alternate legal move for wrong-move UX check")
+    wrong_paint_started = [None]
+
+    def record_wrong_paint() -> None:
+        if page._wrong_flash and wrong_paint_started[0] is None:
+            wrong_paint_started[0] = time.perf_counter()
+
+    page.board.paint_completed.connect(record_wrong_paint)
     event_loop_gaps.clear()
     last_heartbeat[0] = time.perf_counter()
     heartbeat.start()
@@ -306,7 +311,9 @@ def play(output: Path, dpi_scale: str) -> None:
         raise AssertionError("Real Qt input did not register the wrong legal move")
     capture(page, output, len(frames), "wrong-visible", frames, pump_events=False)
     wait_until(app, lambda: not page._wrong_flash, timeout_ms=1000)
-    wrong_flash_ms = round((time.perf_counter() - page._wrong_feedback_started) * 1000, 2)
+    if wrong_paint_started[0] is None:
+        raise AssertionError("Wrong-move board position was never painted")
+    wrong_flash_ms = round((time.perf_counter() - wrong_paint_started[0]) * 1000, 2)
     if not 350 <= wrong_flash_ms <= 500:
         raise AssertionError(f"Wrong-move feedback lasted {wrong_flash_ms:.2f} ms, expected 350–500 ms")
     capture(page, output, len(frames), "wrong-reverted", frames)

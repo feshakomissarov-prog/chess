@@ -25,11 +25,16 @@ def online_page(qtbot, moves=("e2e4",), puzzle_id="play"):
 
 def test_wrong_legal_move_is_visible_then_reverted_without_changing_authority(qtbot):
     page = online_page(qtbot)
+    page.show()
+    qtbot.waitExposed(page)
     start_fen = page.state.board.fen()
     page._submit_move(chess.Move.from_uci("d2d4"))
     assert page.board._board.piece_at(chess.D4) == chess.Piece(chess.PAWN, chess.WHITE)
     assert page.state.board.fen() == start_fen
     assert "Неверный" in page.status.text()
+    assert page._wrong_timer_pending
+    qtbot.waitUntil(page._wrong_timer.isActive)
+    assert page._wrong_flash
     qtbot.wait(520)
     assert page.board._board.piece_at(chess.D2) == chess.Piece(chess.PAWN, chess.WHITE)
     assert page.state.status == PuzzleStatus.MISTAKE_RETRY

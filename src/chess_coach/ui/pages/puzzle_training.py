@@ -92,6 +92,7 @@ class PuzzleTrainingPage(QWidget):
         self._local_seen_by_scope: dict[tuple[str, str, str], set[str]] = {}
         self._is_replay = False
         self._wrong_flash = False
+        self._wrong_timer_pending = False
         self._wrong_timer = QTimer(self)
         self._wrong_timer.setSingleShot(True)
         self._wrong_timer.timeout.connect(self._restore_after_wrong_move)
@@ -528,6 +529,7 @@ class PuzzleTrainingPage(QWidget):
         self._wrong_timer.stop()
         self._reply_timer.stop()
         self._auto_next_timer.stop()
+        self._wrong_timer_pending = False
         self._wrong_flash = False
         self._is_replay = source == "replay" or source not in {"lichess", "demo"}
         self._rating_eligible = (source == "lichess" if rating_eligible is None
@@ -610,6 +612,7 @@ class PuzzleTrainingPage(QWidget):
         if session_id != self._session_id or self.state.puzzle is None:
             return
         self._wrong_flash = False
+        self._wrong_timer_pending = False
         self.board.set_position(self.state.board)
         self.board.set_feedback_squares(())
         self.board.set_interaction_enabled(not self._is_replay)
@@ -686,6 +689,7 @@ class PuzzleTrainingPage(QWidget):
         self._prepared_online_puzzle = None
         self._allow_submit = False
         self._wrong_flash = False
+        self._wrong_timer_pending = False
         self.state = PuzzleTrainingState()
         self.board.set_interaction_enabled(False)
         self.board.set_position(chess.Board())
@@ -716,12 +720,12 @@ class PuzzleTrainingPage(QWidget):
             trial.push(move)
             self._wrong_flash = True
             self._wrong_session_id = self._session_id
+            self._wrong_timer_pending = True
             self.board.set_interaction_enabled(False)
             self.board.set_position(trial)
             self.board.set_feedback_squares((move.from_square, move.to_square))
             self.turn_label.setText("Ваш ход · ошибка")
             self._show_verdict("✕ Неверный ход. Сейчас позиция вернётся.", "error")
-            self._wrong_timer.start(420)
             self._record_input_feedback(started, "wrong")
             if self.state.mistakes == 1:
                 self._record_first_failure()
@@ -755,6 +759,9 @@ class PuzzleTrainingPage(QWidget):
         self.board.update()
 
     def _first_feedback_paint_completed(self) -> None:
+        if self._wrong_timer_pending and self._wrong_flash:
+            self._wrong_timer_pending = False
+            self._wrong_timer.start(420)
         if self._pending_paint_started is None:
             return
         self._input_feedback_ms.append(
