@@ -62,3 +62,15 @@ Draft PR: [#51](https://github.com/feshakomissarov-prog/chess/pull/51)
 - Проверялись CI runner DPI и размеры окна по таблице, а не физические мониторы владельца. На 125%/150% правая карточка может требовать прокрутки.
 - PR остаётся Draft; merge не выполнялся. Приложение на компьютере владельца не запускалось; пользовательская SQLite/секреты не читались и не менялись.
 
+
+
+## 20.11.2026 — независимый итог PR #51 после исправлений §7
+
+- **Код:** `078369cc5422b44d2948aa2807227a632f3cb1de`; **рабочий workflow-only commit:** `2fc3b821de4f40af31db9d248ab59ccbf9a9bd18`. Предыдущее утверждение выше «итоговый HEAD `7afc30f`» — **исторический первый L3**, после которого Codex исправил найденные в §7 ошибки.
+- **Focused L1/L2:** [run #44634443759](https://github.com/feshakomissarov-prog/chess/actions/runs/44634443759) на `078369cc`: 29 target tests + native puzzle Qt 100/125/150, **PASS**.
+- **Полный L3 автоматически, без действий владельца:** `Windows tests` на PR transition `ready_for_review` (один полный прогон вместо ручного `workflow_dispatch`). [run #44645115437](https://github.com/feshakomissarov-prog/chess/actions/runs/44645115437), точный `2fc3b82`: **1198 passed in 577.69s**, compileall, offline-window smoke, native visual и Home review **ALL PASS**.
+- **Визуальные доказательства:** [artifact #14588796342](https://github.com/feshakomissarov-prog/chess/actions/runs/44645115437/artifacts/14588796342); просмотрены native screenshots `ready`, `account-switch`, `solved-after-hint`, `compact ready`. Это только synthetic/offline, не рабочий профиль.
+- **Незакрытые мелкие UX/метрические пункты** под существующими PUZ-07/PUZ-06, без дублирующих IDs — [спецификация §8](../specs/PUZZLE_UX_02_LICHESS_STYLE_TRAINING_2026_11_19.md). Смена аккаунта обновляет историю, но пока визуально оставляет старую позицию; локальный счётчик в некоторых режимах ограничивается 100. Важное различие: сохранение результата уже привязано к исходному account, **нет доказанной записи в чужой профиль**.
+- **OWNER NOT VERIFIED:** реальные Lichess/SQLite/physical DPI, предыдущие Qt safety gates. Владелец разрешил merge при положительной независимой проверке; личный визуальный тест выполнит отдельно. После merge необходимо сначала обновить **локальные исходники, которые запускает ярлык**, не затрагивая SQLite и QSettings.
+
+**Стоимость CI:** один full post-fix L3 после одного тематического PR run; не запускались дополнительные полные прогоны ради обновления Markdown.
