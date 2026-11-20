@@ -106,6 +106,9 @@ jobs:
           tests/test_window.py::test_puzzle_token_rotation_after_worker_emit_rejects_queued_result
           tests/test_window.py::test_close_prompt_catches_outbox_failure_finishing_during_shutdown
           tests/test_window.py::test_stale_pending_snapshot_cannot_resurrect_attempt_after_save_ack
+          tests/test_window.py::test_prefetch_credential_failure_keeps_current_puzzle_playable
+          tests/test_window.py::test_duplicate_attempt_save_is_single_flight_and_ack_remains_success
+          tests/test_window.py::test_prefetch_validation_rechecks_scope_before_installing_prepared_puzzle
 
   l2-native-puzzle-captures:
     name: L2 PUZ-UX-03 public and native UX

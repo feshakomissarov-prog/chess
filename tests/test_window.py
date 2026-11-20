@@ -3599,6 +3599,264 @@ def test_stale_pending_snapshot_cannot_resurrect_attempt_after_save_ack(
     window.close()
 
 
+@pytest.mark.parametrize("credential_failure", ["rotated", "keyring-error"])
+def test_prefetch_credential_failure_keeps_current_puzzle_playable(
+        qtbot, tmp_path, monkeypatch, credential_failure):
+    """A speculative-next credential error must not lock the active puzzle."""
+    from chess_coach.lichess.puzzle_training import PuzzlePlayablePosition
+    from chess_coach.ui.pages.puzzle_training import PuzzleTrainingPage
+
+    window = MainWindow(QSettings(str(tmp_path / f"prefetch-current-{credential_failure}.ini"),
+                                  QSettings.Format.IniFormat), offline_mode=True)
+    qtbot.addWidget(window)
+    window.offline_mode = False
+    account = window.game_repository.ensure_archive_account("active-prefetch-user")
+    page = PuzzleTrainingPage(parent=window)
+    page.account_id = account
+    page.set_accounts([], account)
+    window._puzzle_training_page = page
+    window._puzzle_page = page
+    window.screen_stack.addWidget(page)
+    window.screen_stack.setCurrentWidget(page)
+    page.load_puzzle(PuzzlePlayablePosition(
+        "active-before-prefetch", chess.STARTING_FEN, ("e2e4",), ("fork",), rating=1500),
+        {"puzzle": {"id": "active-before-prefetch", "solution": ["e2e4"],
+                    "themes": ["fork"], "rating": 1500}}, source="lichess")
+
+    credential = {"token": "fake-active-puzzle-token", "fail": False}
+
+    class FakeCredentialStore:
+        def __init__(self, **_kwargs): pass
+        def get(self):
+            if credential["fail"]:
+                raise OSError("simulated keyring read failure")
+            return credential["token"]
+
+    class FakeClient:
+        def get_account(self, _token): return {"username": "active-prefetch-user"}
+        def get_puzzle_batch(self, _token, *, angle, difficulty, count):
+            return {"puzzles": [{
+                "game": {"id": "active-prefetch-game", "pgn": "1. e4"},
+                "puzzle": {"id": "next-prefetch", "initialPly": 0,
+                           "lastMove": "e2e4", "solution": ["e7e5"],
+                           "themes": [angle], "rating": 1510},
+            }]}
+
+    class FakeService:
+        puzzle_username = None
+        username = "unrelated-game-account"
+        def __init__(self): self.client = FakeClient()
+
+    window.lichess = FakeService()
+    monkeypatch.setattr("chess_coach.window.WindowsCredentialStore", FakeCredentialStore)
+    captured = {}
+    result_ready = threading.Event()
+    register = window._register_training_callback
+
+    def hold_prefetch_result(target, request_id, generation, callback):
+        if not captured.get("held"):
+            captured["held"] = True
+            def held(payload, error):
+                captured.update(payload=payload, error=error, apply=callback,
+                                generation=generation)
+                result_ready.set()
+            return register(target, request_id, generation, held)
+        return register(target, request_id, generation, callback)
+
+    monkeypatch.setattr(window, "_register_training_callback", hold_prefetch_result)
+    window._prefetch_puzzle_training(
+        page, account, page.selected_theme(), page.selected_difficulty(), page._session_id)
+    qtbot.waitUntil(result_ready.is_set, timeout=5000)
+    assert captured["error"] is None
+    if credential_failure == "rotated":
+        credential["token"] = "rotated-to-another-account"
+    else:
+        credential["fail"] = True
+
+    captured["apply"](captured["payload"], captured["error"])
+    qtbot.waitUntil(lambda: "разрешение" in page.status.text().casefold()
+                    or "разрешение" in page.network_status.text().casefold(), timeout=5000)
+
+    assert page.state.puzzle.puzzle_id == "active-before-prefetch"
+    assert page._allow_submit, "a speculative-next validation failure must not end current input"
+    assert page.board._interaction_enabled
+    assert page._fetch_inflight is False
+
+    saved = []
+    page.attempt_saved.connect(lambda attempt: (saved.append(dict(attempt)),
+                                                 window._save_training_attempt(page, attempt)))
+    page._submit_move(chess.Move.from_uci("e2e4"))
+    qtbot.waitUntil(lambda: window.game_repository.local_puzzle_attempt_count(account) == 1,
+                    timeout=5000)
+    assert len(saved) == 1
+    assert saved[0]["puzzle_id"] == "active-before-prefetch"
+    assert saved[0]["account_id"] == account
+    assert saved[0]["result"] == "success"
+    window.close()
+
+
+def test_duplicate_attempt_save_is_single_flight_and_ack_remains_success(
+        qtbot, tmp_path, monkeypatch):
+    """A duplicate attempt signal while a save is pending must coalesce."""
+    from chess_coach.ui.pages.puzzle_training import PuzzleTrainingPage
+
+    window = MainWindow(QSettings(str(tmp_path / "attempt-save-single-flight.ini"),
+                                  QSettings.Format.IniFormat), offline_mode=True)
+    qtbot.addWidget(window)
+    account = window.game_repository.ensure_archive_account("single-flight-user")
+    page = PuzzleTrainingPage(parent=window)
+    page.account_id = account
+    page._session_account_id = account
+    page._session_id = "same-attempt-session"
+    window._puzzle_training_page = page
+    window._puzzle_page = page
+    window.screen_stack.addWidget(page)
+    window.screen_stack.setCurrentWidget(page)
+    attempt = {"attempt_id": "same-attempt-id", "account_id": account,
+               "puzzle_id": "same-attempt-puzzle", "session_id": "same-attempt-session",
+               "result": "success", "solved": True, "mistakes": 0, "hints": 0,
+               "duration_ms": 19,
+               "puzzle_json": json.dumps({"puzzle": {"id": "same-attempt-puzzle",
+                                                          "themes": ["fork"]}}),
+               "selected_theme": "fork", "rating_eligible": True}
+    page.attach_pending_attempts([attempt])
+    workers = []
+    monkeypatch.setattr(window, "_start_registered_work",
+                        lambda worker, **_kwargs: workers.append(worker))
+
+    try:
+        window._save_training_attempt(page, attempt)
+        window._save_training_attempt(page, attempt)
+        assert len(workers) == 1, "same attempt_id must not create a competing save worker"
+
+        # Execute the captured isolated worker against this test's temporary SQLite.
+        workers[0]()
+        assert window.game_repository.local_puzzle_attempt_count(account) == 1
+        assert window.game_repository.local_puzzle_rating_event(account, "same-attempt-puzzle")
+        assert page._pending_attempt_saves == {}
+        assert page.retry_save.isHidden()
+        assert "Сохранено" in page.persistence_status.text()
+
+        # A late duplicate after the durable ACK is idempotent too.
+        window._save_training_attempt(page, attempt)
+        assert len(workers) == 1
+        assert window.game_repository.local_puzzle_attempt_count(account) == 1
+        assert window.game_repository.local_puzzle_rating(account)["rated_attempts"] == 1
+    finally:
+        with window._puzzle_attempt_state_lock:
+            window._puzzle_attempt_save_states.clear()
+        window._puzzle_failed_attempts.clear()
+        window.close()
+
+
+@pytest.mark.parametrize("scope_change", ["theme", "difficulty", "new-session", "account"])
+def test_prefetch_validation_rechecks_scope_before_installing_prepared_puzzle(
+        qtbot, tmp_path, monkeypatch, scope_change):
+    """A delayed credential check cannot install a puzzle for an obsolete selection."""
+    from chess_coach.lichess.puzzle_training import PuzzlePlayablePosition
+    from chess_coach.ui.pages.puzzle_training import PuzzleTrainingPage
+
+    window = MainWindow(QSettings(str(tmp_path / f"prefetch-scope-{scope_change}.ini"),
+                                  QSettings.Format.IniFormat), offline_mode=True)
+    qtbot.addWidget(window)
+    window.offline_mode = False
+    account = window.game_repository.ensure_archive_account("scope-prefetch-user")
+    other_account = window.game_repository.ensure_archive_account("other-prefetch-user")
+    page = PuzzleTrainingPage(parent=window)
+    page.account_id = account
+    page.set_accounts([], account)
+    window._puzzle_training_page = page
+    window._puzzle_page = page
+    window.screen_stack.addWidget(page)
+    window.screen_stack.setCurrentWidget(page)
+    page.load_puzzle(PuzzlePlayablePosition(
+        "scope-current", chess.STARTING_FEN, ("e2e4",), ("fork",)),
+        {"puzzle": {"id": "scope-current", "solution": ["e2e4"]}}, source="lichess")
+
+    class FakeCredentialStore:
+        def __init__(self, **_kwargs): pass
+        def get(self): return "fake-scope-token"
+
+    class FakeClient:
+        def get_account(self, _token): return {"username": "scope-prefetch-user"}
+        def get_puzzle_batch(self, _token, *, angle, difficulty, count):
+            return {"puzzles": [{
+                "game": {"id": "scope-prefetch-game", "pgn": "1. e4"},
+                "puzzle": {"id": "old-scope-prefetch", "initialPly": 0,
+                           "lastMove": "e2e4", "solution": ["e7e5"],
+                           "themes": [angle], "rating": 1500},
+            }]}
+
+    class FakeService:
+        puzzle_username = None
+        username = "unrelated-game-account"
+        def __init__(self): self.client = FakeClient()
+
+    window.lichess = FakeService()
+    monkeypatch.setattr("chess_coach.window.WindowsCredentialStore", FakeCredentialStore)
+    captured = {}
+    result_ready = threading.Event()
+    register = window._register_training_callback
+
+    def hold_prefetch_result(target, request_id, generation, callback):
+        if not captured.get("held"):
+            captured["held"] = True
+            def held(payload, error):
+                captured.update(payload=payload, error=error, apply=callback,
+                                generation=generation)
+                result_ready.set()
+            return register(target, request_id, generation, held)
+        return register(target, request_id, generation, callback)
+
+    monkeypatch.setattr(window, "_register_training_callback", hold_prefetch_result)
+    validator_callbacks = []
+    monkeypatch.setattr(window, "_validate_puzzle_credential_before_apply",
+                        lambda _page, _generation, _fingerprint, apply:
+                        validator_callbacks.append(apply))
+    restarted_scopes = []
+    monkeypatch.setattr(window, "_schedule_puzzle_prefetch_when_idle",
+                        lambda *args: restarted_scopes.append(args))
+    original_scope = (page.selected_theme(), page.selected_difficulty(), page._session_id)
+    window._prefetch_puzzle_training(page, account, *original_scope[:2], original_scope[2])
+    qtbot.waitUntil(result_ready.is_set, timeout=5000)
+    captured["apply"](captured["payload"], captured["error"])
+    assert len(validator_callbacks) == 1
+
+    if scope_change == "theme":
+        index = page.theme.findData("fork")
+        assert index >= 0 and page.theme.currentData() != "fork"
+        page.theme.setCurrentIndex(index)
+        window._puzzle_theme_selection_changed(page)
+    elif scope_change == "difficulty":
+        old = page.difficulty.currentData()
+        new_index = next(i for i in range(page.difficulty.count())
+                         if page.difficulty.itemData(i) != old)
+        page.difficulty.setCurrentIndex(new_index)
+        window._puzzle_difficulty_selection_changed(page)
+    elif scope_change == "new-session":
+        page.load_puzzle(PuzzlePlayablePosition(
+            "new-session-current", chess.STARTING_FEN, ("e2e4",), ("fork",)),
+            {"puzzle": {"id": "new-session-current", "solution": ["e2e4"]}},
+            source="lichess")
+        assert page._session_id != original_scope[2]
+    else:
+        monkeypatch.setattr(window, "_load_puzzle_training_accounts", lambda *_args, **_kwargs: None)
+        window._puzzle_training_account_changed(page, other_account)
+        assert window._puzzle_training_generation > captured["generation"]
+
+    # The fake validator now releases its successful callback after scope changed.
+    validator_callbacks[0]()
+    assert page._prepared_online_puzzle is None, (
+        f"stale prepared puzzle was installed after {scope_change} scope change: "
+        f"{page._prepared_online_puzzle!r}")
+    if scope_change in {"theme", "difficulty"}:
+        assert restarted_scopes, "selection change should schedule prefetch for the new scope"
+        scheduled = restarted_scopes[-1]
+        assert scheduled[2] == page.selected_theme()
+        assert scheduled[3] == page.selected_difficulty()
+    window.close()
+
+
 def test_active_games_dialog_shows_server_confirmed_turn_and_game_type(qtbot):
     dialog = ActiveGamesDialog()
     qtbot.addWidget(dialog)
