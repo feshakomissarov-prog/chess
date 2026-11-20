@@ -127,7 +127,9 @@
 
 ## План проверок и стоимость CI
 
-### Уровень 1 — после отдельных правок (локально / адресно)
+### Уровень 1
+
+**После отдельных правок (локально / адресно):**
 - git diff --check
 - python -m py_compile src/chess_coach/ui/pages/puzzle_training.py src/chess_coach/lichess/puzzle_training.py src/chess_coach/board_view.py src/chess_coach/window.py
 - python -m pytest -q -o addopts= tests/test_puz_ux_04_flow.py::test_wheel_forward_returns_playable_board
@@ -137,13 +139,17 @@
 - python -m pytest -q -o addopts= tests/test_puz_ux_04_home.py::test_large_archive_home_shows_cached_or_informative_status
 - Имена **новых** tests указаны как обязательные node ID для разработки, они пока не существуют. До исправлений RED должен подтверждать симптомы, **без искусственного моделирования экзотики**. Минимум 1 native Qt clicked-flow smoke после действий с BoardView.
 
-### Уровень 2 — один тематический Windows Qt запуск после единого пакета
+### Уровень 2
+
+**Один тематический Windows Qt запуск после единого пакета:**
 - python -m pytest -q -o addopts= tests/test_puz_ux_04_flow.py tests/test_puz_ux_04_home.py tests/test_puzzle_training_ui.py tests/test_puzzle_training_async.py tests/test_puzzle_training_navigation.py tests/test_board_view.py (последние имена/существование сверить в текущем HEAD; при отсутствии файла корректировать команду открыто, не пропускать покрытие).
 - Windows MainWindow **реальный пользовательский flow 1–10** с QTest.mouseClick/drag/wheel или реальными Qt events, инертными credentials, временной SQLite и live **публичными GET Lichess**. Если ограничение Qt тестового окружения мешает wheel, добавить нативный event; **не засчитывать programmatic page method call как ручной mouse proof**.
 - Достаточно **одного** L2 с тремя DPI; без 30 избыточных полноэкранных матриц. Видеозапись короткого e2e приветствуется, но JSON trace + PNG + исходный скрипт обязательны. Тестовые trace содержат ID задач, запросы, статусы, переходы, timestamps и флаги input_enabled (без токенов).
 - Критерии регрессий: существующие профили, rating idempotency, recovery, Fair Play, no requests to owner's storage/credentials.
 
-### Уровень 3 — один финальный Windows exact-head
+### Уровень 3
+
+**Один финальный Windows exact-head:**
 - Один полный CI Windows на final code/test SHA: весь pytest, compileall, isolated offline smoke только как внутренний safety check, native visual matrix, spec-contract gate.
 - После L3 Markdown-only правки не требуют повторного полного прогона; при изменении исполняемого кода/тестов — repeat L3 по CC-VERIFY-01.
 - В журнале записать first bad/current SHA, RED/GREEN commands, run URLs, evidence filenames/links, измеренное время Home и next; НЕ выдавать mock GET за настоящую OAuth-проверку.
