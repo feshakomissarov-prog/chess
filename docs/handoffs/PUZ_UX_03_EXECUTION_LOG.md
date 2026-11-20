@@ -45,6 +45,8 @@ The three DPI screenshots were opened and visually inspected: 100% `1672x941-rea
 
 **Final code delta after this pass:** Home's saved-puzzle button now says “Открыть повтор” and describes the read-only/no-rating behavior; the shared visual capture now expects that replay rather than a playable offline trainer. Addressed by `cead2ace`; the PR was Draft during the next synchronize-triggered L2, so its public live smoke and DPI captures must be repeated for this final UI/capture delta before L3.
 
+The first targeted L2 attempt on `91335c0` stopped before native/live capture at an existing `test_home_dashboard_refresh_is_background_and_drops_stale_generation` 1-second worker-start wait (`361 passed, 1 failed`). The exact test passed once standalone and five additional consecutive times locally under offscreen Qt. No product regression was reproduced; a draft synchronize rerun is needed before L3.
+
 ### L3 — full Windows CI
 
 **Status: PENDING final code SHA.** After L2 for `cead2ace` is green, mark this PR Ready for review to trigger the automatic exact-head Windows test/compile/offline-smoke/native visual jobs. No manual `workflow_dispatch` is needed. Return the open PR to Draft after the run; do not merge. If executable code changes after L3, run L2 and L3 again for the new code SHA.
