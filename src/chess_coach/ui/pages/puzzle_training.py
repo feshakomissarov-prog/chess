@@ -727,6 +727,7 @@ class PuzzleTrainingPage(QWidget):
             self.turn_label.setText("Ваш ход · ошибка")
             self._show_verdict("✕ Неверный ход. Сейчас позиция вернётся.", "error")
             self._record_input_feedback(started, "wrong")
+            self.board.repaint()
             if self.state.mistakes == 1:
                 self._record_first_failure()
             return

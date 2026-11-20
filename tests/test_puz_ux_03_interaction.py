@@ -32,8 +32,8 @@ def test_wrong_legal_move_is_visible_then_reverted_without_changing_authority(qt
     assert page.board._board.piece_at(chess.D4) == chess.Piece(chess.PAWN, chess.WHITE)
     assert page.state.board.fen() == start_fen
     assert "Неверный" in page.status.text()
-    assert page._wrong_timer_pending
     qtbot.waitUntil(page._wrong_timer.isActive)
+    assert not page._wrong_timer_pending
     assert page._wrong_flash
     qtbot.wait(520)
     assert page.board._board.piece_at(chess.D2) == chess.Piece(chess.PAWN, chess.WHITE)
