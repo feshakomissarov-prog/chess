@@ -137,6 +137,7 @@ class PuzzleTrainingPage(QWidget):
         header = QHBoxLayout()
         title = QLabel("Решение задач")
         title.setObjectName("pageTitle")
+        title.setAccessibleName("Решение задач")
         self._training_title = title
         header.addWidget(title)
         header.addStretch(1)
@@ -1131,6 +1132,9 @@ class PuzzleTrainingPage(QWidget):
         super().resizeEvent(event)
         compact = self.width() < 1050 or self.height() < 650
         reflow_header = self.width() < 900 or self.height() < 650
+        # The desktop shell already labels this section "Обучение". On a short
+        # viewport hide the duplicate page title so the board keeps its space.
+        self._training_title.setVisible(self.height() >= 650)
         if reflow_header != self._training_header_reflowed:
             if reflow_header:
                 self._training_header_layout.removeWidget(self._training_header_controls)
