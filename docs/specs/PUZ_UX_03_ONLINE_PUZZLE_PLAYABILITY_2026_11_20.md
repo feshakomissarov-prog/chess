@@ -555,3 +555,31 @@ Reviewed areas: main interactive path, reducer and board transient UI, puzzle st
 5. **Merge gate:** 2 P1 GREEN, P2 GREEN либо justified false positive, full exact-code L3 PASS, no unresolved security/privacy regression. Не обещать полный авторизованный OAuth или owner PC; **после этого вернуть на финальное независимое решение о merge** без нового планового раунда.
 
 **Зачем ещё один цикл при зелёных 1267:** найденные пути созданы именно новым §16 async credential recheck/state dictionary; все 1267 тестов не моделировали указанные interleavings. Это **не просьба переписать тренажёр** и не пересмотр прошлых принятых UX решений.
+
+### 17.4. Результаты единого исполнения §17 (2026-11-21)
+
+Все три сценария §17 исполнены единым пакетом в существующем Draft PR #52. Сохранены прежние defect IDs: **PUZ03-08.PREFETCH**, **PUZ-07.ACCOUNT-BOUND**, **PUZ03-07.SAVE-NONBLOCK**, **PUZ03-05.NEXT**. Новые defect IDs не добавлялись.
+
+| Сценарий | RED → FIXED → итог |
+| --- | --- |
+| **PUZ03-08.PREFETCH + PUZ-07.ACCOUNT-BOUND / P1** — фоновая ошибка не блокирует текущую задачу | RED воспроизведён на token rotation и keyring read exception: следующая задача не применялась, но общий error handler выключал ввод текущей. Для speculative prefetch добавлен неблокирующий `network_status` и CTA без `set_message`; initial fetch оставлен fail-closed. L1/L2/L3 PASS. |
+| **PUZ03-07.SAVE-NONBLOCK / P1** — один активный save на immutable `attempt_id` | RED воспроизвёл конкурирующий worker и ложный failure ACK после durable commit. Дублирующий save теперь coalesce-ится, worker обновляет только принадлежащее ему state, успешный COMMIT остаётся success независимо от позднего ACK cleanup. Повтор после реальной ошибки не ослаблен. L1/L2/L3 PASS. |
+| **PUZ03-08.PREFETCH + PUZ03-05.NEXT / P2** — scope повторно проверяется после async credential validation | RED воспроизвёл запоздалую установку prepared puzzle после смены темы, сложности и session; для account-switch тест изначально обходил настоящий helper и был false positive. Его заменили проверкой реального generation guard, который отбрасывает результат после смены аккаунта. Перед установкой prepared теперь повторно проверяются account/theme/difficulty/session/source/replay/page/shutdown. Новый scope остаётся свободен для prefetch. L1 PASS. |
+
+#### L1 — адресный RED→GREEN
+
+- RED на исходном production code с новыми тестами (`a5db53a`): Windows run [44820184382](https://github.com/feshakomissarov-prog/chess/actions/runs/44820184382) — **7 failed, 96 passed**; выявлены два P1 и stale selection/session сценарии. Account-switch параметр был ложноположительным, так как тест подменял production validator; фактический account generation guard уже блокировал устаревший callback.
+- Следующий Windows L1 [44821250083](https://github.com/feshakomissarov-prog/chess/actions/runs/44821250083) дал **5 failed, 98 passed** по причинам тестового harness: устаревший текстовый predicate для нового non-blocking уведомления, отсутствие `rating` в fixture и mock validator без нового optional keyword. Исправлены проверки/fixtures; production behavior не ослаблялся.
+- GREEN Windows L1 [44823084863](https://github.com/feshakomissarov-prog/chess/actions/runs/44823084863), exact code/test SHA `450bc4a210c4edf97a0a725aef3d129b649c55ac`: **103 passed in 80.37 s**; compile changed modules/tests passed. Дополнительно локальные три новых node groups — **7 passed in 4.78 s**, `py_compile` и `git diff --check` прошли.
+
+#### L2 — одна тематическая Windows Qt/MainWindow проверка
+
+- **PASS** [run 44823084863](https://github.com/feshakomissarov-prog/chess/actions/runs/44823084863), artifact [14672593269](https://github.com/feshakomissarov-prog/chess/actions/runs/44823084863/artifacts/14672593269). Вызов MainWindow использовал фактические публичные GET Lichess (`0haqU`, `00008`, `0000D`, HTTP 200), production credential recheck, fake инертный профиль и изолированную временную SQLite; ни Authorization header, ни fake credential не отправлялись.
+- Реальный MainWindow trace при ошибочном credential fingerprint сохранил puzzle `0haqU`, FEN, `READY`, account scope, `board_enabled=true` и `allow_submit=true`. Повтор attempt `l2-prefetch-save-single-flight` остановлен barrier между enqueue и commit: один вызов worker, одна SQLite строка, 0 rating events при `rating_eligible=false`, `✓ Сохранено в SQLite`, credential material в trace отсутствует.
+- Нативные Qt скриншоты страницы с неблокирующей ошибкой prefetch открыты при 100% (`1672×941`), 125% (`1280×720`) и 150% (`1120×640`); также осмотрен MainWindow-кадр с настоящей публичной задачей. Ошибка показана в правой панели, доска и controls остаются видимыми. Кадр retry UI также проверен. L2 измерения: 10 отдельных cold input probes p50/p95/max `25.67/26.40/26.40 ms`; 50 warm probes `5.02/5.50/25.40 ms`, максимальный warm event-loop gap `32.99 ms`. В live public UI trace остался выброс **2772 ms** на 100% DPI (event-loop gap **2801.91 ms**); он не атрибутирован и не объявляется исправленным.
+
+#### L3 — один финальный exact-head Windows CI
+
+- **PASS** [Windows run 44824004020](https://github.com/feshakomissarov-prog/chess/actions/runs/44824004020), exact executable/test SHA `450bc4a210c4edf97a0a725aef3d129b649c55ac`: Windows Server 2025 / Python 3.12.10, **1274 passed in 633.28 s (10:33)**; `compileall`, isolated offline MainWindow smoke и native `visual-evidence` прошли. [Native visual artifact 14673412032](https://github.com/feshakomissarov-prog/chess/actions/runs/44824004020/artifacts/14673412032).
+- Я открыл и проверил actual Windows Qt ready captures на 100% (`1672×941`), 125% (`1280×720`) и 150% (`1120×640`); тематические prefetch-error кадры трёх масштабов находятся в L2 artifact выше. L3 workflow's PUZ L2 job was skipped after the exact-head run was triggered by Ready-for-review transition; the dedicated L2 had already passed on the same code/test SHA.
+- После L3 допускаются только Markdown изменения этого отчёта. PR #52 оставлен **Draft**, открыт и не слит. Разрешённого OAuth профиля нет (**ONLINE-LIVE-OAUTH: BLOCKED**); owner SQLite, OAuth store и компьютер владельца не использовались. Принимающий владелец может повторно проверить один consolidated пакет; merge не выполнялся.
