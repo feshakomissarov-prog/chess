@@ -219,9 +219,9 @@
 - Избегать prompt «пожалуйста запустите workflow» владельцу: текущий проект уже содержит automatic L3 trigger при Ready for review; использовать его, проверяя exact HEAD и не изменять main самостоятельно.
 - При приложении в другой shell/sidebar единая тема Chess Coach, не создавать новую window/сервер/зависимость для анимаций без необходимости.
 
-## 10. План проверок и стоимость CI
+## План проверок и стоимость CI
 
-### Уровень 1 — RED→GREEN адресные тесты после логических групп
+### Уровень 1
 
 Команды после изменений (на Windows isolated runner/безопасном test env, с корректными путями и тестовым Qt display):
 - `git diff --check`
@@ -230,14 +230,14 @@
 - Создать `tests/test_puz_ux_03_interaction.py` и `tests/test_puz_ux_03_rating.py` с **реальными тестами**, не фальсифицировать запуски путей до их создания. Для движения/состояний RED initial: wrong move visible and reverted, correct move then opponent separately, win banner not replaced by DB, autoNext ON/OFF, first fail streak zeroed once, wheel before/after solve, replay cannot spoil, 2 account immutable, persisted rating once, 3-second DB/GET delayed callbacks, loss of connection no demo, initial online entry/auth.
 - Работать небольшими группами: **1)** reducer/board & feedback; **2)** next & data/persistence & rating; **3)** UI/personal UX. Полный 1000+ pytest не гонять после кнопки/текста/каждой строки.
 
-### Уровень 2 — тематическая Qt + настоящий online smoke
+### Уровень 2
 
 - `python -m pytest -o addopts= -q tests/test_puzzle_training.py tests/test_puzzle_training_ui.py tests/test_puzzle_training_navigation.py tests/test_puzzle_training_async.py tests/test_puzzle_training_store.py tests/test_puzzle_api_adapter.py tests/test_board_view.py tests/test_window.py` + новые `test_puz_ux_03_*`.
 - Одна тематическая Windows Qt матрица **1672×941 100%, 1280×720 125%, 1120×640 150%** с **обязательными** 10+ состояниями: auth/no-token; online loaded; correct/awaiting opponent; wrong legal move on board; 300–500 ms rollback; solved banner; streak/10+ results; hint1/2; wheel review; prefetch next while save pending 3s; failed save/retry; network failed; source/history replay; second profile; rating CC delta label. Проверять реальные QRect/text visibility и скриншоты, не только «job succeeded».
 - **Отдельно от fake L2 — ONLINE-LIVE-PUBLIC** согласно `8.1: выполнить настоящий HTTPS GET без owner auth и проиграть реальный puzzle через Qt. Сохранить аудируемый network trace без credentials и короткие кадры/видео; если среда CI не имеет доступа наружу, использовать **изолированный браузер агента** и **прямо зафиксировать blocked**, не объявлять live pass. **Не делать live Lichess автоматически в pytest матрице**, не рассылать запросы на каждый PR push.
 - По результату GUI-захода записать **не менее 10 пунктов UX чек-листа `8.2**. Если нет доступа к GUI/HTTP, агент должен признать `NOT TESTED`, а не просить пользователя запустить тесты GitHub или выдавать synthetic за online.
 
-### Уровень 3 — один полный exact-head Windows CI
+### Уровень 3
 
 - **ТОЛЬКО после GREEN L1/L2** на финальном code SHA перевести свой Draft PR в Ready for review, чтобы автоматически запустился полный `Windows tests` на exact-head через `pull_request.ready_for_review`; не требовать manual `workflow_dispatch` от владельца.
 - Проверить все jobs: полный `python -X faulthandler -m pytest -o addopts= -q -W error::pytest.PytestUnhandledThreadExceptionWarning`, `python -m compileall -q src tests`, isolated offline-window smoke (как **тест**, не как пользовательская offline тренировка), native visual evidence и spec contract. Если после L3 исправляется код — повторить exact-head L3; после только Markdown не делать лишний L3, но проверить spec-contract.
@@ -251,7 +251,7 @@
 - L3: одна финальная полная Windows матрица после устойчивого L2; при необходимости повтор только из-за функционального изменения кода.
 - Фактические timings до/после и решение о performance gate сохранять в handoff. Это **контракт**, а не пожелание.
 
-## 11. Критерии приёмки и доказательства
+## Критерии приёмки и доказательства
 
 | ID | Приоритет | Что должно быть | Проверка / доказательство | Статус на baseline |
 | --- | --- | --- | --- | --- |
