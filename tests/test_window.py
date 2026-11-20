@@ -3023,18 +3023,23 @@ def test_close_requires_explicit_decision_when_attempt_could_not_reach_outbox(
         "attempt_id": "volatile-attempt", "account_id": "local",
         "outbox_persisted": False,
     }
+    from PySide6.QtGui import QCloseEvent
+
     answers = iter((QMessageBox.StandardButton.No, QMessageBox.StandardButton.Yes))
     prompts = []
     monkeypatch.setattr(QMessageBox, "warning",
                         lambda *args, **kwargs: (prompts.append(args[2]), next(answers)))
-    assert not window.close()
-    assert window.isVisible()
+    rejected_close = QCloseEvent()
+    window.closeEvent(rejected_close)
+    assert not rejected_close.isAccepted()
     assert len(prompts) == 1 and "автоматически восстановить" in prompts[0]
-    # Workers may make the close event defer shutdown. The explicit Yes is the
-    # acceptance gate; the warning must not return on the deferred close pass.
-    window.close()
+    accepted_close = QCloseEvent()
+    window.closeEvent(accepted_close)
     assert window._puzzle_loss_warning_acknowledged
     assert len(prompts) == 2
+    # Keep the test teardown independent from the background shutdown probe.
+    window._puzzle_failed_attempts.clear()
+    window.close()
 
 
 def test_my_puzzles_home_action_opens_local_history_without_network_or_oauth(
