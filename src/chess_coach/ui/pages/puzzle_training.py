@@ -1143,14 +1143,16 @@ class PuzzleTrainingPage(QWidget):
         if compact:
             self._training_root_layout.setContentsMargins(8, 2, 8, 4)
             self._training_root_layout.setSpacing(4)
+            self.status.setMinimumHeight(24)
             center_layout = self.board.parentWidget().layout()
             if center_layout is not None:
                 center_layout.setSpacing(0)
             for button in (self.hint, self.reveal, self.repeat, self.retry_save, self.next):
-                button.setMinimumHeight(34)
+                button.setMinimumHeight(30)
         else:
             self._training_root_layout.setContentsMargins(10, 6, 10, 10)
             self._training_root_layout.setSpacing(6)
+            self.status.setMinimumHeight(32)
             center_layout = self.board.parentWidget().layout()
             if center_layout is not None:
                 center_layout.setSpacing(6)
