@@ -161,8 +161,9 @@ def click_move(app: QApplication, page: PuzzleTrainingPage, move: chess.Move) ->
 
 
 def capture(page: PuzzleTrainingPage, output: Path, index: int, label: str,
-            events: list[dict]) -> None:
-    QApplication.processEvents()
+            events: list[dict], *, pump_events: bool = True) -> None:
+    if pump_events:
+        QApplication.processEvents()
     timestamp = datetime.now(timezone.utc).isoformat()
     filename = f"{index:02d}-{timestamp.replace(':', '').replace('+00:00', 'Z')}-{label}.png"
     image = page.grab().toImage()
@@ -192,6 +193,8 @@ def instrument_first_feedback(page: PuzzleTrainingPage) -> list[dict]:
 
         def timed(*args, _original=original, _label=label, **kwargs):
             started = time.perf_counter()
+            if _label == "page.record_paint" and len(args) > 1 and args[1] == "wrong":
+                page._wrong_feedback_started = time.perf_counter()
             try:
                 return _original(*args, **kwargs)
             finally:
@@ -301,8 +304,11 @@ def play(output: Path, dpi_scale: str) -> None:
     click_move(app, page, wrong)
     if page.state.status.value != "mistake_retry":
         raise AssertionError("Real Qt input did not register the wrong legal move")
-    capture(page, output, len(frames), "wrong-visible", frames)
+    capture(page, output, len(frames), "wrong-visible", frames, pump_events=False)
     wait_until(app, lambda: not page._wrong_flash, timeout_ms=1000)
+    wrong_flash_ms = round((time.perf_counter() - page._wrong_feedback_started) * 1000, 2)
+    if not 350 <= wrong_flash_ms <= 500:
+        raise AssertionError(f"Wrong-move feedback lasted {wrong_flash_ms:.2f} ms, expected 350–500 ms")
     capture(page, output, len(frames), "wrong-reverted", frames)
     page._hint()
     capture(page, output, len(frames), "hint-one", frames)
@@ -361,6 +367,7 @@ def play(output: Path, dpi_scale: str) -> None:
                  for kind, value in zip(page._input_feedback_kinds,
                                         page._input_feedback_ms)],
              "first_input_stage_timings": first_input_stages,
+             "wrong_flash_ms": wrong_flash_ms,
              "automation_click_samples": page._automation_click_ms,
              "interaction_samples": page._interaction_samples,
              "event_loop_gap_p95_ms": round(sorted(event_loop_gaps)[
