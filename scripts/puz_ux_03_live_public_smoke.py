@@ -27,6 +27,7 @@ from PySide6.QtWidgets import QApplication, QDialog, QPushButton
 
 from chess_coach.diagnostics import shutdown_logging
 from chess_coach.lichess.puzzle_training import normalize_api_puzzle
+from chess_coach.ui.theme import VISUAL_TOKENS, stylesheet as desktop_stylesheet
 from chess_coach.ui.pages.puzzle_training import PuzzleTrainingPage
 
 
@@ -167,9 +168,14 @@ def play(output: Path, dpi_scale: str) -> None:
     faulthandler.dump_traceback_later(45, repeat=True, file=debug_trace)
     os.environ["QT_SCALE_FACTOR"] = dpi_scale
     app = QApplication([])
+    app.setStyleSheet(desktop_stylesheet(VISUAL_TOKENS))
     page = PuzzleTrainingPage()
     page.resize(1440, 900)
     page.show()
+    page.raise_()
+    page.activateWindow()
+    wait_until(app, lambda: page.isActiveWindow())
+    page.board.setFocus()
     app.processEvents()
     puzzles = fetch_public_puzzles()
     frames: list[dict] = []
@@ -259,6 +265,10 @@ def play(output: Path, dpi_scale: str) -> None:
              "requests": [meta for _raw, meta in puzzles], "frames": frames,
              "input_to_first_paint_ms": [round(value, 2)
                                          for value in page._input_feedback_ms],
+             "input_to_first_paint_samples": [
+                 {"kind": kind, "ms": round(value, 2)}
+                 for kind, value in zip(page._input_feedback_kinds,
+                                        page._input_feedback_ms)],
              "elapsed_seconds": round(sum(float(meta["get_ms"]) for _raw, meta in puzzles) / 1000, 3),
              "rating_eligible": False}
     input_samples = sorted(page._input_feedback_ms)
