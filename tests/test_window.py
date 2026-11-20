@@ -3001,12 +3001,14 @@ def test_failed_attempt_outbox_recovers_only_when_its_account_is_selected(
     window.show_puzzle_training(account_a)
     page = window._puzzle_training_page
     qtbot.waitUntil(lambda: "persisted-retry" in page._pending_attempt_saves, timeout=5000)
-    assert page.retry_save.isVisible()
+    assert not page.retry_save.isHidden() and page.retry_save.isEnabled()
     window._puzzle_training_account_changed(page, account_b)
     qtbot.waitUntil(lambda: page.account_id == account_b
+                    and page.account_selector.currentData() == account_b
                     and "persisted-retry" not in page._pending_attempt_saves, timeout=5000)
     window._puzzle_training_account_changed(page, account_a)
-    qtbot.waitUntil(lambda: "persisted-retry" in page._pending_attempt_saves, timeout=5000)
+    qtbot.waitUntil(lambda: page.account_selector.currentData() == account_a
+                    and "persisted-retry" in page._pending_attempt_saves, timeout=5000)
     assert page._pending_attempt_saves["persisted-retry"]["account_id"] == account_a
     window.close()
 

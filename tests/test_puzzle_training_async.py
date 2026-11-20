@@ -193,9 +193,10 @@ def test_committed_attempt_is_success_even_when_optional_read_model_fails(
                                   QSettings.Format.IniFormat), offline_mode=True)
     qtbot.addWidget(window)
     page = PuzzleTrainingPage(demo=True)
-    page.account_id = "local"
+    account_id = window.game_repository.ensure_archive_account("post-commit-ack")
+    page.account_id = account_id
     window._puzzle_training_page = page
-    attempt = {"attempt_id": f"ack-{len(puzzle_json)}", "account_id": "local",
+    attempt = {"attempt_id": f"ack-{len(puzzle_json)}", "account_id": account_id,
                "puzzle_id": "legacy-ack", "session_id": "session", "result": "success",
                "solved": True, "mistakes": 0, "hints": 0, "duration_ms": 10,
                "puzzle_json": puzzle_json, "rating_eligible": True}
@@ -208,13 +209,56 @@ def test_committed_attempt_is_success_even_when_optional_read_model_fails(
         lambda payload, error: acknowledgements.append((payload, error)))
     window._save_training_attempt(page, attempt)
     qtbot.waitUntil(lambda: bool(acknowledgements), timeout=5000)
-    stored = window.game_repository.local_puzzle_attempt_count("local")
+    stored = window.game_repository.local_puzzle_attempt_count(account_id)
     assert stored == 1
     assert acknowledgements[0][1] is None
     assert acknowledgements[0][0]["attempt_id"] == attempt["attempt_id"]
-    assert window.game_repository.local_puzzle_rating("local")["rated_attempts"] == int(
+    assert window.game_repository.local_puzzle_rating(account_id)["rated_attempts"] == int(
         puzzle_json.startswith('{"puzzle"'))
     monkeypatch.setattr(window.game_repository, "local_puzzle_attempts", original_read)
+    window.close()
+
+
+def test_late_failed_ack_attaches_durable_retry_to_reopened_same_account_page(
+        qtbot, tmp_path, monkeypatch):
+    window = MainWindow(QSettings(str(tmp_path / "late-failed-save.ini"),
+                                  QSettings.Format.IniFormat), offline_mode=True)
+    qtbot.addWidget(window)
+    account = window.game_repository.ensure_archive_account("late-save-account")
+    old_page = PuzzleTrainingPage(demo=True)
+    old_page.account_id = account
+    new_page = PuzzleTrainingPage(demo=True)
+    new_page.account_id = account
+    window._puzzle_training_page = old_page
+    attempt = {"attempt_id": "late-failed-stable-id", "account_id": account,
+               "puzzle_id": "late-failed-puzzle", "session_id": "old-page",
+               "result": "success", "solved": True, "mistakes": 0, "hints": 0,
+               "duration_ms": 20, "puzzle_json": "{}", "rating_eligible": False}
+    original_save = window.game_repository.save_local_puzzle_attempt
+    calls = []
+
+    def fail_once(*args, **kwargs):
+        calls.append(1)
+        if len(calls) == 1:
+            raise RuntimeError("controlled SQLite write failure")
+        return original_save(*args, **kwargs)
+
+    monkeypatch.setattr(window.game_repository, "save_local_puzzle_attempt", fail_once)
+    old_page.attempt_saved.connect(lambda retry: window._save_training_attempt(old_page, retry))
+    window._save_training_attempt(old_page, attempt)
+    window._puzzle_training_page = new_page
+    new_page.attempt_saved.connect(lambda retry: window._save_training_attempt(new_page, retry))
+    qtbot.waitUntil(lambda: "late-failed-stable-id" in new_page._pending_attempt_saves,
+                    timeout=5000)
+    assert not new_page.retry_save.isHidden() and new_page.retry_save.isEnabled()
+    assert window.game_repository.pending_puzzle_attempts(account)[0]["attempt_id"] == (
+        "late-failed-stable-id")
+    new_page._retry_attempt_save()
+    qtbot.waitUntil(lambda: window.game_repository.local_puzzle_attempt_count(account) == 1,
+                    timeout=5000)
+    assert window.game_repository.local_puzzle_rating_event(
+        account, "late-failed-puzzle") is None
+    assert window.game_repository.pending_puzzle_attempts(account) == []
     window.close()
 
 

@@ -58,6 +58,9 @@ class PublicPuzzleAdapter:
         self.username = "cc-puz-ux03-isolated"
         self.account_resolution_calls = 0
         self.fail_next = False
+        self.block_next = False
+        self.block_started = threading.Event()
+        self.release_blocked = threading.Event()
         # The second item deliberately repeats the just-solved public puzzle.
         # This gives L2 a deterministic prefetch-before-ACK duplicate race.
         self.puzzle_sequence = ["0haqU", "0haqU", "00008", "0000D"]
@@ -71,6 +74,11 @@ class PublicPuzzleAdapter:
     def get_puzzle_batch(self, _token, *, angle: str, difficulty: str, count: int):
         self.batch_arguments.append({"angle": angle, "difficulty": difficulty,
                                      "count": count, "token_sent": False})
+        if self.block_next:
+            self.block_next = False
+            self.block_started.set()
+            if not self.release_blocked.wait(20):
+                raise TimeoutError("Controlled L2 puzzle GET was not released")
         if self.fail_next:
             self.fail_next = False
             raise RuntimeError("controlled L2 network failure")
@@ -105,7 +113,8 @@ class PublicPuzzleAdapter:
 
 class FakeLichessService:
     puzzle_username = "cc-puz-ux03-isolated"
-    username = puzzle_username
+    # Main game OAuth may be A while the separate puzzle:read token is B.
+    username = "cc-puz-ux03-game-only"
 
     def __init__(self, client: PublicPuzzleAdapter) -> None:
         self.client = client
@@ -300,6 +309,107 @@ def run(output: Path) -> None:
     network_failure_message = page.network_status.text()
     capture(page, output, len(frames), "mainwindow-public-network-failure-no-fallback", frames)
 
+    # Single-flight: a delayed real public GET accepts one Next request only.
+    client.block_next = True
+    requests_before_single_flight = len(client.batch_arguments)
+    page._next()
+    wait_until(app, client.block_started.is_set, timeout_ms=5000)
+    page._next()
+    if len(client.batch_arguments) != requests_before_single_flight + 1:
+        raise AssertionError("Double Next launched more than one in-flight request")
+    if page.next.isEnabled() or page.fetch.isEnabled():
+        raise AssertionError("Next controls remained enabled during the active GET")
+    capture(page, output, len(frames), "mainwindow-single-flight-fetching", frames)
+    client.release_blocked.set()
+    wait_until(app, lambda: page.state.puzzle is not None
+               and page.state.status.value == "ready" and not page._fetch_inflight,
+               timeout_ms=20000)
+    if page.state.history:
+        raise AssertionError("Reducer history leaked from the prior task into the new puzzle")
+    capture(page, output, len(frames), "mainwindow-single-flight-complete", frames)
+
+    # An optional read-model failure after COMMIT must still deliver success.
+    malformed_attempt = {
+        "attempt_id": "l2-malformed-post-commit", "account_id": account_id,
+        "puzzle_id": "l2-malformed-payload", "session_id": "l2-read-model",
+        "result": "success", "solved": True, "mistakes": 0, "hints": 0,
+        "duration_ms": 1, "puzzle_json": "{broken", "rating_eligible": True,
+    }
+    save_ack = []
+    window.puzzle_attempt_save_finished.connect(
+        lambda payload, error: save_ack.append((payload, error))
+        if payload.get("attempt_id") == malformed_attempt["attempt_id"] else None)
+    original_attempt_read = window.game_repository.local_puzzle_attempts
+    window.game_repository.local_puzzle_attempts = lambda *_args, **_kwargs: (_ for _ in ()).throw(
+        RuntimeError("controlled post-COMMIT read-model failure"))
+    try:
+        window._save_training_attempt(page, malformed_attempt)
+        wait_until(app, lambda: bool(save_ack), timeout_ms=10000)
+    finally:
+        window.game_repository.local_puzzle_attempts = original_attempt_read
+    if save_ack[0][1] is not None:
+        raise AssertionError(f"Committed attempt received a false failure ACK: {save_ack[0][1]}")
+    if window.game_repository.local_puzzle_attempt_count(account_id) < 1:
+        raise AssertionError("The post-COMMIT scenario did not persist its local attempt")
+    if window.game_repository.local_puzzle_rating_event(account_id,
+                                                        "l2-malformed-payload") is not None:
+        raise AssertionError("Malformed payload created an official/local rating event")
+
+    # Seed an official rating in isolated SQLite, then prove an account with no
+    # rating history does not inherit the prior profile's number or date.
+    window.game_repository.save_puzzle_player_rating(account_id, [[2026, 10, 19, 1850]])
+    page.account_id = account_id
+    page.set_recent_history([], official_rating=1850, rating_date="2026-11-19",
+                            official_rating_loaded=True)
+    if "1850" not in page.metrics.text():
+        raise AssertionError("Isolated account A's official rating was not displayed")
+    page.account_id = second_account
+    page.set_recent_history([], official_rating=None, rating_date=None,
+                            official_rating_loaded=True)
+    if "1850" in page.metrics.text() or "нет данных" not in page.metrics.text():
+        raise AssertionError("Account B inherited account A's official puzzle rating")
+    capture(page, output, len(frames), "mainwindow-official-rating-cleared-account-switch", frames)
+
+    # Durable failed attempts are recovered only in their account scope. Reopen
+    # the page model for A/B/A without touching any persistent owner database.
+    outbox_attempt = {
+        "attempt_id": "l2-outbox-account-a", "account_id": account_id,
+        "puzzle_id": "l2-outbox-puzzle", "session_id": "closed-l2-session",
+        "result": "mistake", "solved": False, "mistakes": 1, "hints": 0,
+        "duration_ms": 20, "puzzle_json": "{}", "rating_eligible": False,
+    }
+    window.game_repository.enqueue_puzzle_attempt(outbox_attempt, error="controlled failure")
+    outbox_attempts_before_retry = window.game_repository.local_puzzle_attempt_count(account_id)
+    window._puzzle_attempt_save_result_ready(outbox_attempt, "controlled late failure")
+    if "l2-outbox-account-a" in page._pending_attempt_saves:
+        raise AssertionError("A's late failure was attached while account B was selected")
+    page.reset_for_account_switch()
+    page.account_id = account_id
+    window._load_puzzle_training_accounts(page, account_id,
+                                          default_to_available=False, request_puzzle=False)
+    wait_until(app, lambda: "l2-outbox-account-a" in page._pending_attempt_saves,
+               timeout_ms=10000)
+    capture(page, output, len(frames), "mainwindow-outbox-recovered-account-a", frames)
+    page.reset_for_account_switch()
+    page.account_id = second_account
+    window._load_puzzle_training_accounts(page, second_account,
+                                          default_to_available=False, request_puzzle=False)
+    wait_until(app, lambda: page.account_selector.currentData() == second_account,
+               timeout_ms=10000)
+    if "l2-outbox-account-a" in page._pending_attempt_saves:
+        raise AssertionError("A's failed attempt was exposed in account B's retry queue")
+    page.reset_for_account_switch()
+    page.account_id = account_id
+    window._load_puzzle_training_accounts(page, account_id,
+                                          default_to_available=False, request_puzzle=False)
+    wait_until(app, lambda: "l2-outbox-account-a" in page._pending_attempt_saves,
+               timeout_ms=10000)
+    page._retry_attempt_save()
+    wait_until(app, lambda: window.game_repository.local_puzzle_attempt_count(account_id)
+               == outbox_attempts_before_retry + 1, timeout_ms=10000)
+    if window.game_repository.pending_puzzle_attempts(account_id):
+        raise AssertionError("Acknowledged outbox entry was not removed")
+
     # Change to a second synthetic profile and confirm the MainWindow account
     # callback clears the previous position and starts a scoped request.
     second_account = window.game_repository.ensure_archive_account("cc-puz-ux03-second")
@@ -377,6 +487,14 @@ def run(output: Path) -> None:
         "account_switch_restarted": page.account_id == second_account,
         "advanced_difficulty": page.selected_difficulty(),
         "oauth_get_difficulty": client.batch_arguments[-1]["difficulty"],
+        "single_flight_batch_requests": len(client.batch_arguments) - requests_before_single_flight,
+        "post_commit_read_model_ack": save_ack[0][1] is None,
+        "malformed_rating_events": 0,
+        "official_rating_cleared_for_account_without_data": True,
+        "outbox_a_to_b_to_a_recovery": True,
+        "reducer_history_cleared_on_next_puzzle": True,
+        "gaming_account_a": "cc-puz-ux03-game-only",
+        "puzzle_read_profile_b": "cc-puz-ux03-isolated",
     }
     (output / "mainwindow-public-integration.json").write_text(
         json.dumps(trace, ensure_ascii=False, indent=2), encoding="utf-8")

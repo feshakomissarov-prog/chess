@@ -180,7 +180,10 @@ def test_official_rating_is_cleared_when_account_has_no_rating_history(qtbot):
                             official_rating_loaded=True)
     assert "1850" in page.metrics.text()
     page.account_id = "lichess:account-b"
-    page.set_recent_history([], official_rating=None, rating_date=None,
+    # B already has local attempts, so a zero-count reset must not be needed
+    # to clear A's official rating ahead of its fresh scoped read.
+    page._metadata_attempt_count_by_account[page.account_id] = 5
+    page.set_recent_history([], local_count=5, official_rating=None, rating_date=None,
                             official_rating_loaded=True,
                             practice_rating={"rating": 1520, "rated_attempts": 2})
     assert "Рейтинг Lichess (синхронизация): нет данных" in page.metrics.text()

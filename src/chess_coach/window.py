@@ -741,6 +741,7 @@ class MainWindow(QMainWindow):
         self._puzzle_training_oauth_callback = None
         self._puzzle_oauth_open_requests: dict[str, dict] = {}
         self._puzzle_failed_attempts: dict[str, dict] = {}
+        self._puzzle_loss_warning_acknowledged = False
         self.analysis_progress.connect(self._analysis_progress)
         self.analysis_finished.connect(self._analysis_finished)
         self.engine_install_progress.connect(self._engine_install_progress_changed)
@@ -6083,6 +6084,8 @@ class MainWindow(QMainWindow):
                 local_attempts = self.game_repository.local_puzzle_attempts(preferred, limit=8)
                 official_attempts = self.game_repository.puzzle_history(preferred, limit=8)
                 recent = []
+                pending_attempts = getattr(self.game_repository,
+                                           "pending_puzzle_attempts", lambda _account: [])(preferred)
                 for row in local_attempts:
                     try:
                         puzzle_payload = json.loads(row["puzzle_json"])
@@ -6108,6 +6111,7 @@ class MainWindow(QMainWindow):
                         preferred, selected_theme if selected_theme != "mix" else None),
                     "rating": self.game_repository.puzzle_player_rating(preferred),
                     "practice_rating": self.game_repository.local_puzzle_rating(preferred),
+                    "pending_attempts": pending_attempts,
                 }, None)
             except Exception as exc:
                 self.puzzle_training_finished.emit(request_id, None, str(exc))
@@ -6129,9 +6133,11 @@ class MainWindow(QMainWindow):
                 payload.get("recent", []), local_count=payload.get("local_count", 0),
                 official_rating=(payload.get("rating") or {}).get("latest"),
                 rating_date=(payload.get("rating") or {}).get("date"),
+                official_rating_loaded=True,
                 local_stats=payload.get("local_stats"),
                 theme_stats=payload.get("theme_stats"),
                 practice_rating=payload.get("practice_rating"))
+            page.attach_pending_attempts(payload.get("pending_attempts", []))
             if request_puzzle:
                 self._request_puzzle_training(
                     page, page.selected_theme(), page.selected_difficulty(), authorize=False)
@@ -6203,6 +6209,9 @@ class MainWindow(QMainWindow):
         if page is not self._puzzle_training_page:
             return
         page.reset_for_account_switch()
+        known_count = max(0, page._metadata_attempt_count_by_account.get(page.account_id, 0))
+        page.set_recent_history([], local_count=known_count, official_rating=None,
+                                rating_date=None, official_rating_loaded=True)
         handle = getattr(self, "_puzzle_training_handle", None)
         if handle is not None and handle.is_alive():
             handle.cancel("account_changed")
@@ -6321,6 +6330,9 @@ class MainWindow(QMainWindow):
                 if not username:
                     with authenticated_request_admission(operation_current, stop_event):
                         username = str(client.get_account(token)["username"])
+                # This marker is scoped to the separate puzzle:read credential;
+                # the ordinary game-service username is not an identity fallback.
+                service.puzzle_username = str(username).strip()
                 actual_account = f"lichess:{username.strip().lower()}"
                 if (requested_account.startswith("lichess:")
                         and requested_account.casefold() != actual_account.casefold()):
@@ -6419,6 +6431,7 @@ class MainWindow(QMainWindow):
                                     local_count=payload.get("local_count", 0),
                                     official_rating=rating.get("latest"),
                                     rating_date=rating.get("date"),
+                                    official_rating_loaded=True,
                                     local_stats=payload.get("local_stats"),
                                     theme_stats=payload.get("theme_stats"),
                                     practice_rating=payload.get("practice_rating"))
@@ -6469,16 +6482,25 @@ class MainWindow(QMainWindow):
                 token = store.get()
                 if not token:
                     raise PermissionError("Нет разрешения puzzle:read.")
-                username = str(getattr(service, "puzzle_username", None)
-                               or getattr(service, "username", None) or expected_username).strip()
+                # Validate the identity belonging to this credential on every
+                # prefetch. The game OAuth identity and a stale account label are
+                # never sufficient to authorize scoped cache writes.
+                with authenticated_request_admission(operation_current, stop_event):
+                    identity = client.get_account(token)
+                username = str((identity or {}).get("username") or "").strip()
+                if not username:
+                    raise PermissionError("Не удалось подтвердить профиль puzzle:read.")
                 if username.casefold() != expected_username.casefold():
                     raise PermissionError("Профиль задач изменился.")
+                if not operation_current() or store.get() != token:
+                    raise PermissionError("Разрешение puzzle:read изменилось во время запроса.")
+                service.puzzle_username = username
                 with authenticated_request_admission(operation_current, stop_event):
                     puzzle_get_started = time.perf_counter()
                     result = client.get_puzzle_batch(
                         token, angle=theme, difficulty=difficulty, count=1)
                     puzzle_get_ms = (time.perf_counter() - puzzle_get_started) * 1000
-                if not operation_current():
+                if not operation_current() or store.get() != token:
                     return
                 puzzles = result.get("puzzles") or []
                 if not puzzles:
@@ -6691,7 +6713,20 @@ class MainWindow(QMainWindow):
         payload.setdefault("puzzle_id", page._session_puzzle_id)
         def worker() -> None:
             error = None
+            outbox_written = False
             try:
+                enqueue = getattr(self.game_repository, "enqueue_puzzle_attempt", None)
+                if enqueue is not None:
+                    enqueue(payload)
+                    outbox_written = True
+                payload["outbox_persisted"] = outbox_written
+            except Exception as exc:
+                payload["outbox_persisted"] = False
+                payload["outbox_error"] = f"{type(exc).__name__}: {exc}"
+                error = payload["outbox_error"]
+            try:
+                if error:
+                    raise RuntimeError(error)
                 db_commit_started = time.perf_counter()
                 saved_id, inserted = self.game_repository.save_local_puzzle_attempt(
                     payload["account_id"], payload["puzzle_id"],
@@ -6703,22 +6738,54 @@ class MainWindow(QMainWindow):
                 payload["db_commit_ms"] = (time.perf_counter() - db_commit_started) * 1000
                 payload["attempt_id"] = saved_id
                 payload["inserted"] = inserted
-                payload["recent"] = self.game_repository.local_puzzle_attempts(
-                    payload["account_id"], limit=8)
-                payload["local_count"] = self.game_repository.local_puzzle_attempt_count(
-                    payload["account_id"])
-                payload["local_stats"] = self.game_repository.local_puzzle_statistics(
-                    payload["account_id"])
-                themes = json.loads(payload.get("puzzle_json") or "{}").get("puzzle", {}).get("themes", [])
-                payload["theme_stats"] = self.game_repository.local_puzzle_statistics(
-                    payload["account_id"], payload.get("selected_theme") or
-                    (themes[0] if themes else None))
-                payload["practice_rating"] = self.game_repository.local_puzzle_rating(
-                    payload["account_id"])
-                payload["rating_event"] = self.game_repository.local_puzzle_rating_event(
-                    payload["account_id"], payload["puzzle_id"])
+                # The attempt row and any eligible rating event are committed.
+                # Read-model enrichment is optional and must not turn that commit
+                # into a false failure/retry loop.
+                try:
+                    payload["recent"] = self.game_repository.local_puzzle_attempts(
+                        payload["account_id"], limit=8)
+                    payload["local_count"] = self.game_repository.local_puzzle_attempt_count(
+                        payload["account_id"])
+                    payload["local_stats"] = self.game_repository.local_puzzle_statistics(
+                        payload["account_id"])
+                    puzzle_data = {}
+                    try:
+                        decoded = json.loads(payload.get("puzzle_json") or "{}")
+                        if isinstance(decoded, dict) and isinstance(decoded.get("puzzle"), dict):
+                            puzzle_data = decoded["puzzle"]
+                    except (ValueError, TypeError):
+                        pass
+                    themes = puzzle_data.get("themes", [])
+                    if not isinstance(themes, list):
+                        themes = []
+                    payload["theme_stats"] = self.game_repository.local_puzzle_statistics(
+                        payload["account_id"], payload.get("selected_theme") or
+                        (themes[0] if themes else None))
+                    payload["practice_rating"] = self.game_repository.local_puzzle_rating(
+                        payload["account_id"])
+                    payload["rating_event"] = self.game_repository.local_puzzle_rating_event(
+                        payload["account_id"], payload["puzzle_id"])
+                except Exception as exc:
+                    payload["read_model_error"] = f"{type(exc).__name__}: {exc}"
+                    log_event("local_puzzle_attempt_read_model_failed", "puzzle_training",
+                              status="partial")
+                acknowledge = getattr(self.game_repository, "acknowledge_puzzle_attempt", None)
+                if acknowledge is not None:
+                    try:
+                        acknowledge(saved_id)
+                    except Exception:
+                        # A leftover outbox row is safe: the stable attempt ID makes
+                        # the next retry idempotent and startup will offer recovery.
+                        log_event("local_puzzle_attempt_outbox_ack_failed", "puzzle_training",
+                                  status="pending")
             except Exception as exc:
                 error = f"{type(exc).__name__}: {exc}"
+                if outbox_written:
+                    try:
+                        self.game_repository.mark_puzzle_attempt_failed(
+                            payload["attempt_id"], error)
+                    except Exception:
+                        payload["outbox_error"] = "Не удалось обновить очередь восстановления."
                 log_event("local_puzzle_attempt_save_failed", "puzzle_training",
                           status="failed")
             self.puzzle_attempt_save_finished.emit(payload, error)
@@ -6734,9 +6801,14 @@ class MainWindow(QMainWindow):
         if error:
             if attempt_id:
                 self._puzzle_failed_attempts[attempt_id] = payload
+            if payload.get("outbox_error"):
+                self._puzzle_loss_warning_acknowledged = False
         else:
             self._puzzle_failed_attempts.pop(attempt_id, None)
         if page is not None and shiboken6.isValid(page):
+            if (error and page.account_id == payload.get("account_id")
+                    and attempt_id not in page._pending_attempt_saves):
+                page.attach_pending_attempts([payload])
             page._attempt_save_completed(attempt_id, not bool(error), payload,
                                          str(error or ""))
             if not error and page.account_id == payload.get("account_id"):
@@ -6748,6 +6820,12 @@ class MainWindow(QMainWindow):
                     local_stats=payload.get("local_stats"),
                     theme_stats=payload.get("theme_stats"),
                     practice_rating=payload.get("practice_rating"))
+                if payload.get("read_model_error"):
+                    account_id = str(payload.get("account_id") or "local")
+                    QTimer.singleShot(0, lambda target=page, scope=account_id:
+                                      self._load_puzzle_training_accounts(
+                                          target, scope, default_to_available=False,
+                                          request_puzzle=False))
 
     def show_puzzle_history(self, account_id: str, *, pilot_run_id: str | None = None,
                             target_puzzle_id: str | None = None,
@@ -11472,6 +11550,20 @@ class MainWindow(QMainWindow):
         self.show_home()
 
     def closeEvent(self, event) -> None:
+        unsafe_attempts = [attempt for attempt in self._puzzle_failed_attempts.values()
+                           if attempt.get("outbox_persisted") is False]
+        if unsafe_attempts and not self._puzzle_loss_warning_acknowledged:
+            answer = QMessageBox.warning(
+                self, "Результат ещё не защищён сохранением",
+                "Не удалось записать результат в локальную очередь восстановления. "
+                "Если закрыть приложение, эту попытку нельзя будет автоматически восстановить. "
+                "Продолжить закрытие?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No)
+            if answer != QMessageBox.StandardButton.Yes:
+                event.ignore()
+                return
+            self._puzzle_loss_warning_acknowledged = True
         self._workspace_save_timer.stop()
         for timer in self._finalization_timers.values():
             timer.stop()

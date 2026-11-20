@@ -211,6 +211,7 @@ class PuzzleTrainingState:
         self.mistakes = 0
         self.hint_level = 0
         self.hints_used = 0
+        self.history.clear()
         self.first_failure = False
         self._pending_reply = None
         fens = puzzle.review_fens or (puzzle.player_to_move_fen,)

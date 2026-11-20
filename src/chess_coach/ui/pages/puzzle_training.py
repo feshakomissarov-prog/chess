@@ -120,6 +120,7 @@ class PuzzleTrainingPage(QWidget):
         self._db_commit_ms: float | None = None
         self._prepared_next_ms: float | None = None
         self._next_requested_at: float | None = None
+        self._fetch_inflight = False
         self._rating_eligible = False
         self._rated_puzzle_ids_by_account: dict[str, set[str]] = {}
         self._current_cc_rating = 1500
@@ -460,6 +461,8 @@ class PuzzleTrainingPage(QWidget):
         self._set_controls(self.state.puzzle is not None)
 
     def _next(self) -> None:
+        if self._fetch_inflight:
+            return
         if (self.state.puzzle is not None and self._allow_submit
                 and self.state.status not in {PuzzleStatus.SUCCESS, PuzzleStatus.REVEALED,
                                               PuzzleStatus.SKIPPED, PuzzleStatus.UNAVAILABLE}):
@@ -476,6 +479,8 @@ class PuzzleTrainingPage(QWidget):
         self._reply_timer.stop()
         self.board.set_interaction_enabled(False)
         self._next_requested_at = time.perf_counter()
+        self._fetch_inflight = True
+        self._set_controls(self.state.puzzle is not None)
         self.network_status.setText("Загружаем следующую онлайн-задачу…")
         difficulty = str(self.difficulty.currentData() or "normal")
         if self.more_difficulty.isChecked():
@@ -516,6 +521,7 @@ class PuzzleTrainingPage(QWidget):
         if self._next_requested_at is not None:
             self._prepared_next_ms = (time.perf_counter() - self._next_requested_at) * 1000
         self._live_get_ms = details.get("live_get_ms")
+        self._fetch_inflight = False
         self.account_id = prepared["account_id"]
         self.network_status.clear()
         self.load_puzzle(prepared["puzzle"], prepared["payload"], source="lichess",
@@ -540,6 +546,7 @@ class PuzzleTrainingPage(QWidget):
                     *, source: str = "local",
                     rating_eligible: bool | None = None) -> None:
         self._wrong_timer.stop()
+        self._fetch_inflight = False
         self._reply_timer.stop()
         self._auto_next_timer.stop()
         self._wrong_timer_pending = False
@@ -594,6 +601,7 @@ class PuzzleTrainingPage(QWidget):
                                          difficulty, self._session_id)
 
     def set_loading(self, text: str = "Загружаю задачу…") -> None:
+        self._fetch_inflight = True
         self._allow_submit = False
         self.board.set_interaction_enabled(False)
         if self._terminal_verdict:
@@ -601,8 +609,10 @@ class PuzzleTrainingPage(QWidget):
         else:
             self._show_verdict(text, "neutral")
         self.fetch.setEnabled(False)
+        self.next.setEnabled(False)
 
     def set_message(self, text: str) -> None:
+        self._fetch_inflight = False
         self._allow_submit = False
         self.board.set_interaction_enabled(False)
         if self._terminal_verdict:
@@ -610,6 +620,7 @@ class PuzzleTrainingPage(QWidget):
         else:
             self._show_verdict(text, "error")
         self.fetch.setEnabled(True)
+        self.next.setEnabled(True)
         self._set_controls(False)
 
     def set_authorization_needed(self, needed: bool) -> None:
@@ -716,6 +727,14 @@ class PuzzleTrainingPage(QWidget):
         self._reply_timer.stop()
         self._auto_next_timer.stop()
         self._prepared_online_puzzle = None
+        # A retry control is account scoped. Failed rows remain in the durable
+        # SQLite outbox and are reattached only after that account is selected.
+        self._pending_attempt_saves.clear()
+        self._retry_attempt_queue.clear()
+        self._retry_attempt_id = None
+        self._retry_in_progress_id = None
+        self._refresh_retry_save_control()
+        self.persistence_status.clear()
         self._allow_submit = False
         self._wrong_flash = False
         self._wrong_timer_pending = False
@@ -1110,12 +1129,13 @@ class PuzzleTrainingPage(QWidget):
         self.hint.setEnabled(loaded and not finished)
         self.reveal.setEnabled(loaded and not finished)
         self.repeat.setEnabled(loaded)
-        self.next.setEnabled(True)
-        self.fetch.setEnabled(True)
+        self.next.setEnabled(not self._fetch_inflight)
+        self.fetch.setEnabled(not self._fetch_inflight)
 
     def set_recent_history(self, rows: list[dict], *, local_count: int = 0,
                            official_rating: int | None = None,
                            rating_date: str | None = None,
+                           official_rating_loaded: bool = False,
                            local_stats: dict | None = None,
                            theme_stats: dict | None = None,
                            practice_rating: dict | None = None) -> None:
@@ -1130,10 +1150,14 @@ class PuzzleTrainingPage(QWidget):
             self._local_stats = dict(local_stats)
         if theme_stats is not None:
             self._theme_stats = dict(theme_stats)
-        if official_rating is not None:
+        if official_rating_loaded:
+            self._official_rating = (int(official_rating)
+                                     if official_rating is not None else None)
+            self._rating_date = str(rating_date) if rating_date else None
+        elif official_rating is not None:
             self._official_rating = int(official_rating)
-        if rating_date:
-            self._rating_date = str(rating_date)
+            if rating_date:
+                self._rating_date = str(rating_date)
         if practice_rating is not None:
             value = max(0, int(practice_rating.get("rating", 1500)))
             delta = int(practice_rating.get("delta", 0))

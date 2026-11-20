@@ -22,6 +22,63 @@ def puzzle_attempt_uid(account_id: str, puzzle_id: str, attempt_date_ms: int,
 
 class PuzzleActivityStoreMixin:
 
+    def enqueue_puzzle_attempt(self, attempt: dict, *, error: str | None = None) -> None:
+        """Durably retain an unacknowledged local result, scoped to its account."""
+        payload = dict(attempt or {})
+        attempt_id = str(payload.get("attempt_id") or "").strip()
+        account_id = str(payload.get("account_id") or "local").strip() or "local"
+        puzzle_id = str(payload.get("puzzle_id") or "").strip()
+        if not attempt_id or not puzzle_id:
+            raise ValueError("Для очереди сохранения нужны attempt_id и puzzle_id.")
+        serialized = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+        now = int(time.time() * 1000)
+        with self._connection() as db:
+            existing = db.execute(
+                "SELECT account_id,puzzle_id FROM local_puzzle_attempt_outbox WHERE attempt_id=?",
+                (attempt_id,)).fetchone()
+            if existing and (str(existing["account_id"]) != account_id
+                             or str(existing["puzzle_id"]) != puzzle_id):
+                raise ValueError("Идентификатор сохранения уже принадлежит другому профилю.")
+            db.execute(
+                "INSERT INTO local_puzzle_attempt_outbox "
+                "(attempt_id,account_id,puzzle_id,payload_json,status,last_error,created_at_ms,updated_at_ms) "
+                "VALUES (?,?,?,?,?,?,?,?) ON CONFLICT(attempt_id) DO UPDATE SET "
+                "status=excluded.status,last_error=excluded.last_error,updated_at_ms=excluded.updated_at_ms",
+                (attempt_id, account_id, puzzle_id, serialized,
+                 "failed" if error else "pending", str(error) if error else None, now, now))
+
+    def pending_puzzle_attempts(self, account_id: str) -> list[dict]:
+        """Load only pending attempts belonging to the requested local profile."""
+        with self._connection() as db:
+            rows = db.execute(
+                "SELECT payload_json,status,last_error,created_at_ms FROM local_puzzle_attempt_outbox "
+                "WHERE account_id=? ORDER BY created_at_ms,attempt_id", (str(account_id or "local"),)
+            ).fetchall()
+        result = []
+        for row in rows:
+            try:
+                payload = json.loads(row["payload_json"])
+            except (ValueError, TypeError):
+                continue
+            if isinstance(payload, dict):
+                payload["save_status"] = str(row["status"])
+                payload["last_error"] = row["last_error"]
+                payload["outbox_created_at_ms"] = int(row["created_at_ms"])
+                result.append(payload)
+        return result
+
+    def mark_puzzle_attempt_failed(self, attempt_id: str, error: str) -> None:
+        with self._connection() as db:
+            db.execute(
+                "UPDATE local_puzzle_attempt_outbox SET status='failed',last_error=?,updated_at_ms=? "
+                "WHERE attempt_id=?", (str(error), int(time.time() * 1000), str(attempt_id)))
+
+    def acknowledge_puzzle_attempt(self, attempt_id: str) -> None:
+        """Idempotently remove a durable outbox row after the attempt commit."""
+        with self._connection() as db:
+            db.execute("DELETE FROM local_puzzle_attempt_outbox WHERE attempt_id=?",
+                       (str(attempt_id),))
+
     def cache_training_puzzle(self, account_id: str, puzzle_id: str,
                               puzzle_json: str) -> None:
         with self._connection() as db:
