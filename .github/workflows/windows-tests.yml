@@ -27,7 +27,7 @@ concurrency:
 jobs:
   home-chart-review:
     name: L1/L2 Home chart review
-    if: github.event_name != 'pull_request' || github.event.action == 'ready_for_review' || (github.event.pull_request.head.ref != 'codex/review-ux-01-game-analysis-2026-11-14' && github.event.pull_request.head.ref != 'codex/puzzle-ux-02-lichess-training-2026-11-19')
+    if: github.event_name != 'pull_request' || github.event.action == 'ready_for_review' || (github.event.pull_request.head.ref != 'codex/review-ux-01-game-analysis-2026-11-14' && github.event.pull_request.head.ref != 'codex/puzzle-ux-02-lichess-training-2026-11-19' && github.event.pull_request.head.ref != 'codex/puz-ux-03-online-puzzle-playability-2026-11-20')
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v7.0.1
@@ -83,8 +83,70 @@ jobs:
           name: home-chart-l1-l2-${{ github.event.pull_request.head.sha || github.sha }}
           path: visual-evidence/home-chart-review/
           if-no-files-found: warn
+  puz-ux-03-l2:
+    name: L2 PUZ-UX-03 online and Qt review
+    # PUZ-UX-03 L2 runs sequentially after L1 in puzzle-ux-02-verification;
+    # never race its native/live checks with the final ready_for_review L3.
+    if: github.event_name == 'pull_request' && github.event.action == 'ready_for_review' && github.event.pull_request.draft && github.event.pull_request.head.ref == 'codex/puz-ux-03-online-puzzle-playability-2026-11-20'
+    runs-on: windows-latest
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+      - uses: actions/setup-python@v7.1.0
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Install application and test dependencies
+        run: python -m pip install -e ".[dev]"
+      - name: L1 compile and targeted L2 regressions
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: |
+          python -m py_compile src/chess_coach/board_view.py src/chess_coach/lichess/puzzle_training.py src/chess_coach/ui/pages/puzzle_training.py src/chess_coach/window.py src/chess_coach/infrastructure/sqlite/constants.py src/chess_coach/infrastructure/sqlite/migrations.py src/chess_coach/infrastructure/sqlite/puzzles.py scripts/puz_ux_03_live_public_smoke.py scripts/puz_ux_03_mainwindow_live_integration.py
+          python -X faulthandler -m pytest -o addopts= -q -W error::pytest.PytestUnhandledThreadExceptionWarning tests/test_puzzle_training.py tests/test_puzzle_training_ui.py tests/test_puzzle_training_navigation.py tests/test_puzzle_training_async.py tests/test_puzzle_training_store.py tests/test_puzzle_api_adapter.py tests/test_board_view.py tests/test_m45_analysis_store.py tests/test_m45_openings.py tests/test_window.py tests/test_puz_ux_03_interaction.py tests/test_puz_ux_03_rating.py
+      - name: Configure isolated native Qt display
+        shell: pwsh
+        run: |
+          Set-DisplayResolution -Width 1920 -Height 1080 -Force
+          Add-Type -AssemblyName System.Windows.Forms
+          $bounds = [System.Windows.Forms.Screen]::PrimaryScreen.Bounds
+          Write-Host "PUZ-UX-03 L2 native display: $($bounds.Width)x$($bounds.Height)"
+          if ($bounds.Width -lt 1672 -or $bounds.Height -lt 941) {
+            throw "Runner display cannot fit the 1672x941 puzzle capture."
+          }
+      - name: Play three public Lichess puzzles in the real Qt page
+        env:
+          CC_PUZ_UX_03_LIVE_OUTPUT: visual-evidence/puz-ux-03-live-public
+          CC_PUZ_UX_03_LIVE_DPI: "1"
+          LOCALAPPDATA: ${{ runner.temp }}\puz-ux-03-live-localappdata
+        run: python -u -X faulthandler scripts/puz_ux_03_live_public_smoke.py
+      - name: Capture puzzle trainer at 100, 125, and 150 percent DPI
+        shell: pwsh
+        env:
+          LOCALAPPDATA: ${{ runner.temp }}\puz-ux-03-visual-localappdata
+        run: |
+          $cases = @(
+            @{ Scale = "1"; Size = "1672x941" },
+            @{ Scale = "1.25"; Size = "1280x720" },
+            @{ Scale = "1.5"; Size = "1120x640" }
+          )
+          foreach ($case in $cases) {
+            $env:QT_SCALE_FACTOR = $case.Scale
+            $env:CC_PUZZLE_VISUAL_SIZE = $case.Size
+            $env:CC_PUZZLE_VISUAL_OUTPUT = "visual-evidence/puz-ux-03-dpi/scale-$($case.Scale)"
+            python -X faulthandler scripts/capture_puzzle_training.py
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          }
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: puz-ux-03-l2-${{ github.event.pull_request.head.sha }}
+          path: visual-evidence/puz-ux-03-*
+          if-no-files-found: warn
   test:
-    if: github.event_name != 'pull_request' || github.event.action == 'ready_for_review' || (github.event.pull_request.head.ref != 'codex/review-ux-01-game-analysis-2026-11-14' && github.event.pull_request.head.ref != 'codex/puzzle-ux-02-lichess-training-2026-11-19')
+    if: github.event_name != 'pull_request' || github.event.action == 'ready_for_review' || (github.event.pull_request.head.ref != 'codex/review-ux-01-game-analysis-2026-11-14' && github.event.pull_request.head.ref != 'codex/puzzle-ux-02-lichess-training-2026-11-19' && github.event.pull_request.head.ref != 'codex/puz-ux-03-online-puzzle-playability-2026-11-20')
     needs: home-chart-review
     runs-on: windows-latest
     steps:
@@ -112,7 +174,7 @@ jobs:
         run: >-
           python -X faulthandler -c "from PySide6.QtWidgets import QApplication; from chess_coach.window import MainWindow; app = QApplication([]); window = MainWindow(offline_mode=True); assert window.lichess is None; window.close()"
   visual-evidence:
-    if: github.event_name != 'pull_request' || github.event.action == 'ready_for_review' || (github.event.pull_request.head.ref != 'codex/review-ux-01-game-analysis-2026-11-14' && github.event.pull_request.head.ref != 'codex/puzzle-ux-02-lichess-training-2026-11-19')
+    if: github.event_name != 'pull_request' || github.event.action == 'ready_for_review' || (github.event.pull_request.head.ref != 'codex/review-ux-01-game-analysis-2026-11-14' && github.event.pull_request.head.ref != 'codex/puzzle-ux-02-lichess-training-2026-11-19' && github.event.pull_request.head.ref != 'codex/puz-ux-03-online-puzzle-playability-2026-11-20')
     needs: home-chart-review
     runs-on: windows-latest
     steps:

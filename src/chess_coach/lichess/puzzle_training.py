@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from enum import Enum
 import io
+import math
 from typing import Iterable
 
 import chess
@@ -25,6 +26,12 @@ class PuzzleOutcome(str, Enum):
     SKIPPED = "skipped"
 
 
+def practice_rating_delta(current: int, puzzle_rating: int, score: float) -> int:
+    """Transparent local Elo-like practice delta; never the official Lichess rating."""
+    expected = 1.0 / (1.0 + math.pow(10.0, (int(puzzle_rating) - int(current)) / 400.0))
+    return int(round(16.0 * (float(score) - expected)))
+
+
 @dataclass(frozen=True)
 class PuzzlePlayablePosition:
     puzzle_id: str
@@ -36,6 +43,8 @@ class PuzzlePlayablePosition:
     source: PuzzleSource = PuzzleSource.LICHESS_NEW
     last_move: str | None = None
     game_id: str | None = None
+    review_fens: tuple[str, ...] = ()
+    review_san: tuple[str, ...] = ()
 
     def board(self) -> chess.Board:
         return chess.Board(self.player_to_move_fen)
@@ -90,10 +99,14 @@ def normalize_api_puzzle(payload: dict) -> PuzzlePlayablePosition:
     if initial_ply < 0 or initial_ply >= len(moves):
         raise ValueError("Индекс начальной позиции выходит за пределы партии.")
     board = parsed.board()
+    review_fens = [board.fen()]
+    review_san: list[str] = []
     for move in moves[:initial_ply + 1]:
         if move not in board.legal_moves:
             raise ValueError("Исходная партия содержит нелегальный ход.")
+        review_san.append(f"{board.fullmove_number}{'.' if board.turn else '...'} {board.san(move)}")
         board.push(move)
+        review_fens.append(board.fen())
     source_last_move = str(puzzle.get("lastMove") or "").strip() or None
     inferred_last_move = moves[initial_ply].uci()
     if source_last_move:
@@ -114,6 +127,7 @@ def normalize_api_puzzle(payload: dict) -> PuzzlePlayablePosition:
         source=PuzzleSource.LICHESS_NEW,
         last_move=inferred_last_move,
         game_id=str(game.get("id") or "") or None,
+        review_fens=tuple(review_fens), review_san=tuple(review_san),
     )
 
 
@@ -136,6 +150,8 @@ def normalize_activity_puzzle(puzzle_id: str, fen: str, solution: object,
     prep = chess.Move.from_uci(str(solution[0]))
     if prep not in board.legal_moves:
         raise ValueError("Подготовительный ход в сохранённой задаче нелегален.")
+    initial_fen = board.fen()
+    prep_san = f"{board.fullmove_number}{'.' if board.turn else '...'} {board.san(prep)}"
     board.push(prep)
     moves = _validated_moves(board.copy(), solution[1:])
     theme_values = themes
@@ -152,7 +168,8 @@ def normalize_activity_puzzle(puzzle_id: str, fen: str, solution: object,
         expected_user_moves=moves,
         themes=tuple(str(item) for item in theme_values if item),
         rating=rating, plays=plays, source=PuzzleSource.LICHESS_ACTIVITY,
-        last_move=prep.uci(),
+        last_move=prep.uci(), review_fens=(initial_fen, board.fen()),
+        review_san=(prep_san,),
     )
 
 
@@ -165,6 +182,7 @@ class PuzzleStatus(str, Enum):
     REVEALED = "revealed"
     SKIPPED = "skipped"
     UNAVAILABLE = "unavailable"
+    REVIEW = "review"
 
 
 @dataclass
@@ -177,6 +195,13 @@ class PuzzleTrainingState:
     hint_level: int = 0
     hints_used: int = 0
     history: list[str] = field(default_factory=list)
+    first_failure: bool = False
+    _pending_reply: str | None = field(default=None, repr=False)
+    _review_snapshots: list[chess.Board] = field(default_factory=list, repr=False)
+    _review_labels: list[str] = field(default_factory=list, repr=False)
+    _review_cursor: int = field(default=0, repr=False)
+    _reviewing: bool = field(default=False, repr=False)
+    _review_return_status: PuzzleStatus | None = field(default=None, repr=False)
 
     def load(self, puzzle: PuzzlePlayablePosition) -> None:
         self.puzzle = puzzle
@@ -186,9 +211,68 @@ class PuzzleTrainingState:
         self.mistakes = 0
         self.hint_level = 0
         self.hints_used = 0
+        self.history.clear()
+        self.first_failure = False
+        self._pending_reply = None
+        fens = puzzle.review_fens or (puzzle.player_to_move_fen,)
+        self._review_snapshots = [chess.Board(fen) for fen in fens]
+        self._review_labels = ["Позиция до задачи"]
+        self._review_labels.extend(puzzle.review_san)
+        self._review_cursor = max(0, len(self._review_snapshots) - 1)
+        self._reviewing = False
+        self._review_return_status = None
+
+    @property
+    def is_reviewing(self) -> bool:
+        return self._reviewing
+
+    @property
+    def review_count(self) -> int:
+        return len(self._review_snapshots)
+
+    @property
+    def review_cursor(self) -> int:
+        return self._review_cursor
+
+    @property
+    def review_label(self) -> str:
+        return self._review_labels[self._review_cursor] if self._review_labels else ""
+
+    def navigate_review(self, direction: int) -> chess.Board:
+        """Browse only positions already visible or present before this puzzle."""
+        if not self._review_snapshots:
+            self._review_snapshots = [self.board.copy(stack=True)]
+            self._review_labels = ["Позиция до задачи"]
+        if not self._reviewing:
+            self._review_return_status = self.status
+        self._reviewing = True
+        self.status = PuzzleStatus.REVIEW
+        self._review_cursor = max(
+            0, min(len(self._review_snapshots) - 1, self._review_cursor + int(direction)))
+        return self._review_snapshots[self._review_cursor].copy(stack=True)
+
+    def return_to_solution(self) -> chess.Board:
+        self._reviewing = False
+        self._review_cursor = max(0, len(self._review_snapshots) - 1)
+        if self.puzzle is not None and self.status == PuzzleStatus.REVIEW:
+            self.status = self._review_return_status or (
+                PuzzleStatus.SUCCESS if self.solution_index >= len(
+                    self.puzzle.expected_user_moves) else
+                PuzzleStatus.OPPONENT_REPLY if self._pending_reply else
+                PuzzleStatus.MISTAKE_RETRY if self.mistakes else PuzzleStatus.READY)
+        self._review_return_status = None
+        return self.board.copy(stack=True)
+
+    def _record_visible_move(self, move: chess.Move) -> None:
+        san = self.board.san(move)
+        label = f"{self.board.fullmove_number}{'.' if self.board.turn else '...'} {san}"
+        self.board.push(move)
+        self._review_snapshots.append(self.board.copy(stack=True))
+        self._review_labels.append(label)
+        self._review_cursor = len(self._review_snapshots) - 1
 
     def submit(self, move: chess.Move) -> str:
-        if self.status not in {PuzzleStatus.READY, PuzzleStatus.MISTAKE_RETRY}:
+        if self._reviewing or self.status not in {PuzzleStatus.READY, PuzzleStatus.MISTAKE_RETRY}:
             return "ignored"
         if move not in self.board.legal_moves:
             return "illegal"
@@ -202,10 +286,12 @@ class PuzzleTrainingState:
             alternative_mate = trial.is_checkmate()
         if move.uci() != expected and not alternative_mate:
             self.mistakes += 1
+            self.first_failure = True
             self.status = PuzzleStatus.MISTAKE_RETRY
-            self.history.append(PuzzleOutcome.MISTAKE.value)
+            if PuzzleOutcome.MISTAKE.value not in self.history:
+                self.history.append(PuzzleOutcome.MISTAKE.value)
             return "mistake"
-        self.board.push(move)
+        self._record_visible_move(move)
         self.solution_index = (len(self.puzzle.expected_user_moves)
                                if alternative_mate else self.solution_index + 1)
         self.hint_level = 0
@@ -213,21 +299,32 @@ class PuzzleTrainingState:
             self.status = PuzzleStatus.SUCCESS
             self.history.append(PuzzleOutcome.SUCCESS.value)
             return "success"
-        reply = chess.Move.from_uci(self.puzzle.expected_user_moves[self.solution_index])
+        self.status = PuzzleStatus.OPPONENT_REPLY
+        self._pending_reply = self.puzzle.expected_user_moves[self.solution_index]
+        return "correct"
+
+    def apply_opponent_reply(self) -> str:
+        if self.status != PuzzleStatus.OPPONENT_REPLY or not self._pending_reply:
+            return "ignored"
+        reply = chess.Move.from_uci(self._pending_reply)
         if reply not in self.board.legal_moves:
             self.status = PuzzleStatus.UNAVAILABLE
+            self._pending_reply = None
             return "unavailable"
-        self.board.push(reply)
+        self._record_visible_move(reply)
+        self._pending_reply = None
         self.solution_index += 1
         if self.solution_index >= len(self.puzzle.expected_user_moves):
             self.status = PuzzleStatus.SUCCESS
             self.history.append(PuzzleOutcome.SUCCESS.value)
             return "success"
         self.status = PuzzleStatus.READY
-        return "correct"
+        return "reply"
 
     def hint(self) -> chess.Move | None:
         if self.status not in {PuzzleStatus.READY, PuzzleStatus.MISTAKE_RETRY} or not self.puzzle:
+            return None
+        if self.hint_level >= 2:
             return None
         self.hint_level = min(2, self.hint_level + 1)
         self.hints_used += 1
@@ -236,6 +333,12 @@ class PuzzleTrainingState:
 
     def reveal(self) -> None:
         if self.puzzle:
+            while self.solution_index < len(self.puzzle.expected_user_moves):
+                move = chess.Move.from_uci(self.puzzle.expected_user_moves[self.solution_index])
+                if move not in self.board.legal_moves:
+                    break
+                self._record_visible_move(move)
+                self.solution_index += 1
             self.status = PuzzleStatus.REVEALED
             self.history.append(PuzzleOutcome.REVEALED.value)
 

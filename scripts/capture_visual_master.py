@@ -1452,14 +1452,15 @@ def main() -> None:
                          "exact saved puzzle route from Home", timeout=30)
                 puzzle_page = window._puzzle_training_page
                 wait_for(lambda: puzzle_page.board.isVisible()
-                         and puzzle_page.hint.isEnabled()
-                         and puzzle_page.state.status.value == "ready",
-                         "selected Home puzzle in playable local trainer", timeout=30)
+                         and puzzle_page._is_replay
+                         and puzzle_page._allow_submit
+                         and puzzle_page.turn_label.text().startswith("Повтор · без рейтинга"),
+                         "selected Home puzzle in interactive unrated replay", timeout=30)
                 assert puzzle_page.state.puzzle.puzzle_id == puzzle_id, (
                     "Home CTA must open the same saved puzzle ID as the preview."
                 )
-                captured["home-puzzle-exact-replay"] = capture(
-                    window, output, "home-puzzle-exact-replay", width, height)
+                captured["home-puzzle-history-replay"] = capture(
+                    window, output, "home-puzzle-history-replay", width, height)
                 window.show_home()
                 wait_home(window, account_id)
                 QTest.mouseClick(window.sidebar_toggle, Qt.MouseButton.LeftButton)

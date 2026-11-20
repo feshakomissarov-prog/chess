@@ -1,8 +1,16 @@
 import chess
+import pytest
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QMessageBox
 
 from chess_coach.ui.pages.puzzle_training import PuzzleTrainingPage
+
+
+def test_initial_puzzle_instruction_fits_compact_feedback_area(qtbot):
+    page = PuzzleTrainingPage(demo=True)
+    qtbot.addWidget(page)
+    assert page.status.text() == "Найдите лучший ход · ПКМ — отметки."
+    assert page.status.wordWrap()
 
 
 def test_right_annotations_do_not_move_and_lmb_click_click_solves(qtbot):
@@ -78,6 +86,24 @@ def test_history_replay_carries_original_source_and_account(qtbot):
     assert captured == [("lichess:history-user", "old-puzzle", "lichess")]
 
 
+@pytest.mark.parametrize("difficulty", ["easiest", "normal", "hardest"])
+def test_authorize_emits_selected_advanced_difficulty(qtbot, difficulty):
+    page = PuzzleTrainingPage()
+    qtbot.addWidget(page)
+    selected_theme = page.selected_theme()
+    page.more_difficulty.setChecked(difficulty != "normal")
+    if difficulty != "normal":
+        page.advanced_difficulty.setCurrentIndex(
+            page.advanced_difficulty.findData(difficulty))
+    emitted = []
+    page.authorize_requested.connect(lambda theme, level: emitted.append((theme, level)))
+
+    page.set_authorization_needed(True)
+    page.authorize.click()
+
+    assert emitted == [(selected_theme, difficulty)]
+
+
 def test_history_and_statistics_wait_for_real_save_ack_and_retry_same_attempt(qtbot):
     page = PuzzleTrainingPage(demo=True)
     qtbot.addWidget(page)
@@ -90,12 +116,13 @@ def test_history_and_statistics_wait_for_real_save_ack_and_retry_same_attempt(qt
     attempt = saved[-1]
     assert page.history.count() == 0
     assert page._local_count == 0
-    assert page.status.text().startswith("Сохраняю")
+    assert page.status.text().startswith("✓ Задача решена")
+    assert page.persistence_status.text().startswith("● Сохраняется")
 
     page._attempt_save_completed(attempt["attempt_id"], False, {}, "OperationalError")
     assert page.history.count() == 0
     assert page._local_count == 0
-    assert "не удалось сохранить" in page.status.text().casefold()
+    assert "не удалось сохранить" in page.persistence_status.text().casefold()
     page._retry_attempt_save()
     assert saved[-1]["attempt_id"] == attempt["attempt_id"]
 
@@ -110,7 +137,7 @@ def test_history_and_statistics_wait_for_real_save_ack_and_retry_same_attempt(qt
     assert page.history.count() == 1
     assert "Решено" in page.history.item(0).text()
     assert page._local_count == 1
-    assert "сохран" in page.status.text().casefold()
+    assert "сохран" in page.persistence_status.text().casefold()
 
 
 def test_repeat_requires_consent_when_attempt_is_still_active(qtbot, monkeypatch):
@@ -143,3 +170,59 @@ def test_history_status_labels_and_theme_list_have_no_horizontal_scroll(qtbot):
     assert "С подсказкой" in page.history.item(1).text()
     assert page.history.horizontalScrollBarPolicy() == Qt.ScrollBarPolicy.ScrollBarAlwaysOff
     assert page.theme_list.horizontalScrollBarPolicy() == Qt.ScrollBarPolicy.ScrollBarAlwaysOff
+
+
+def test_official_rating_is_cleared_when_account_has_no_rating_history(qtbot):
+    page = PuzzleTrainingPage(demo=True)
+    qtbot.addWidget(page)
+    page.account_id = "lichess:account-a"
+    page.set_recent_history([], official_rating=1850, rating_date="2026-11-19",
+                            official_rating_loaded=True)
+    assert "1850" in page.metrics.text()
+    page.account_id = "lichess:account-b"
+    # B already has local attempts, so a zero-count reset must not be needed
+    # to clear A's official rating ahead of its fresh scoped read.
+    page._metadata_attempt_count_by_account[page.account_id] = 5
+    page.set_recent_history([], local_count=5, official_rating=None, rating_date=None,
+                            official_rating_loaded=True,
+                            practice_rating={"rating": 1520, "rated_attempts": 2})
+    assert "Рейтинг Lichess (синхронизация): нет данных" in page.metrics.text()
+    assert "1850" not in page.metrics.text()
+    assert "1520" in page.practice_rating.text()
+
+
+def test_next_is_single_flight_while_online_fetch_is_active(qtbot):
+    page = PuzzleTrainingPage()
+    qtbot.addWidget(page)
+    requests = []
+    page.new_puzzle_requested.connect(lambda *args: requests.append(args))
+    page.set_loading("Получаю задачу…")
+    page._next()
+    page._next()
+    assert requests == []
+    assert not page.next.isEnabled()
+    page.set_message("Временная ошибка сети. Повторите запрос.")
+    page._next()
+    page._next()
+    assert requests == [(page.selected_theme(), page.selected_difficulty())]
+
+
+def test_save_retry_fits_native_capture_width(qtbot):
+    page = PuzzleTrainingPage(demo=True)
+    qtbot.addWidget(page)
+    page.resize(1672, 941)
+    page.show()
+    qtbot.waitUntil(lambda: page.board.width() > 160)
+
+    attempt_id = "save-retry-layout"
+    page._pending_attempt_saves[attempt_id] = {
+        "session_id": page._session_id,
+        "account_id": page._session_account_id,
+    }
+    page._attempt_save_completed(attempt_id, False, {}, "OperationalError")
+    qtbot.waitUntil(lambda: page.retry_save.width() > 0)
+
+    assert page.retry_save.width() >= page.retry_save.sizeHint().width(), (
+        f"center={page.board.parentWidget().width()} "
+        f"retry={page.retry_save.width()} hint={page.retry_save.sizeHint().width()}")
+    assert page.retry_save.text() == "Повторить запись"

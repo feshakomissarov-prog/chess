@@ -283,6 +283,18 @@ class SQLiteMigrationMixin:
                     puzzle_json TEXT NOT NULL,
                     created_at_ms INTEGER NOT NULL
                 );
+                CREATE TABLE IF NOT EXISTS local_puzzle_attempt_outbox (
+                    attempt_id TEXT PRIMARY KEY,
+                    account_id TEXT NOT NULL,
+                    puzzle_id TEXT NOT NULL,
+                    payload_json TEXT NOT NULL,
+                    status TEXT NOT NULL CHECK(status IN ('pending','failed')),
+                    last_error TEXT,
+                    created_at_ms INTEGER NOT NULL,
+                    updated_at_ms INTEGER NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS idx_puzzle_attempt_outbox_account
+                    ON local_puzzle_attempt_outbox(account_id,created_at_ms);
                 CREATE TABLE IF NOT EXISTS local_puzzle_attempt_themes (
                     local_attempt_id TEXT NOT NULL REFERENCES local_puzzle_attempts(local_attempt_id) ON DELETE CASCADE,
                     theme_id TEXT NOT NULL,
@@ -479,6 +491,26 @@ class SQLiteMigrationMixin:
                 account_id TEXT PRIMARY KEY REFERENCES accounts(account_id) ON DELETE CASCADE,
                 fetched_at TEXT NOT NULL,
                 points_json TEXT NOT NULL
+            )""")
+            db.execute("""CREATE TABLE IF NOT EXISTS local_puzzle_practice_ratings (
+                account_id TEXT PRIMARY KEY REFERENCES accounts(account_id) ON DELETE CASCADE,
+                rating INTEGER NOT NULL DEFAULT 1500,
+                last_delta INTEGER NOT NULL DEFAULT 0,
+                rated_attempts INTEGER NOT NULL DEFAULT 0,
+                updated_at TEXT NOT NULL
+            )""")
+            db.execute("""CREATE TABLE IF NOT EXISTS local_puzzle_rating_events (
+                event_id TEXT PRIMARY KEY,
+                account_id TEXT NOT NULL REFERENCES accounts(account_id) ON DELETE CASCADE,
+                puzzle_id TEXT NOT NULL,
+                attempt_id TEXT NOT NULL UNIQUE REFERENCES local_puzzle_attempts(local_attempt_id) ON DELETE CASCADE,
+                puzzle_rating INTEGER NOT NULL,
+                score REAL NOT NULL CHECK(score IN (0,1)),
+                rating_before INTEGER NOT NULL,
+                delta INTEGER NOT NULL,
+                rating_after INTEGER NOT NULL,
+                created_at TEXT NOT NULL,
+                UNIQUE(account_id,puzzle_id)
             )""")
             # Semantic source revisions let the two Home read models survive
             # restarts. Metadata-only sync writes must not invalidate analytics,

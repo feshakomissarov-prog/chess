@@ -7,6 +7,7 @@ import json
 from pathlib import Path
 import sys
 import tempfile
+import threading
 import time
 
 import chess
@@ -79,8 +80,11 @@ def main() -> None:
                 ("skipped", "discoveredAttack"), ("success", "rookEndgame"),
                 ("hinted", "hangingPiece")), start=1)
         ], local_count=14,
+           official_rating=1850, rating_date="2026-11-19",
+           official_rating_loaded=True,
            local_stats={"attempts": 14, "solved": 9, "success_percent": 64.3},
-           theme_stats={"attempts": 4, "solved": 3, "success_percent": 75.0})
+           theme_stats={"attempts": 4, "solved": 3, "success_percent": 75.0},
+           practice_rating={"rating": 1600, "rated_attempts": 6})
         app.processEvents()
         size_text = os.environ.get("CC_PUZZLE_VISUAL_SIZE", "1672x941")
         width, height = (int(part) for part in size_text.lower().split("x", 1))
@@ -101,6 +105,12 @@ def main() -> None:
             )
 
         def save(name: str) -> None:
+            # Visibility/text changes can invalidate a Qt grid without causing
+            # a resize event. Let the native layout settle before measuring
+            # controls or capturing the frame.
+            app.processEvents()
+            page._controls_layout.activate()
+            app.processEvents()
             for button in (page.hint, page.reveal, page.repeat, page.retry_save, page.next):
                 if button.isVisible():
                     assert button.width() >= button.sizeHint().width(), (
@@ -119,11 +129,53 @@ def main() -> None:
 
         save("ready")
 
+        # The background next-puzzle error is deliberately non-blocking: show
+        # its real status treatment over the loaded task and verify that the
+        # current move controls remain available at each native DPI scale.
+        actionable_puzzle_id = page.state.puzzle.puzzle_id
+        actionable_fen = page.state.board.fen()
+        page.network_status.setText(
+            "Следующая задача недоступна · проверьте разрешение")
+        assert page._allow_submit and page.board._interaction_enabled
+        assert page.state.puzzle.puzzle_id == actionable_puzzle_id
+        assert page.state.board.fen() == actionable_fen
+        save("prefetch-error-current-task-actionable")
+        (output / f"{size_text}-prefetch-error-trace.json").write_text(
+            json.dumps({
+                "puzzle_id": actionable_puzzle_id,
+                "fen": actionable_fen,
+                "account_id": page._session_account_id,
+                "generation": window._puzzle_training_generation,
+                "board_enabled": bool(page.board._interaction_enabled),
+                "allow_submit": bool(page._allow_submit),
+                "attempt_id": None,
+                "credential_material_recorded": False,
+            }, ensure_ascii=False, indent=2), encoding="utf-8")
+        page.network_status.clear()
+
         page.set_accounts([{"account_id": "local", "username": "Локальный профиль"},
                            {"account_id": "lichess:visual-b", "username": "Профиль B"}], "local")
+        original_list_accounts = window.game_repository.list_puzzle_accounts
+        account_read_started = threading.Event()
+        release_account_read = threading.Event()
+
+        def delayed_list_accounts():
+            rows = original_list_accounts()
+            account_read_started.set()
+            if not release_account_read.wait(5):
+                raise TimeoutError("visual account-read gate was not released")
+            return rows
+
+        window.game_repository.list_puzzle_accounts = delayed_list_accounts
         page.account_selector.setCurrentIndex(page.account_selector.findData("lichess:visual-b"))
-        app.processEvents()
+        wait_for(account_read_started.is_set)
+        if ("1850" in page.metrics.text() or "1600" in page.practice_rating.text()
+                or "14" in page.metrics.text()):
+            raise AssertionError("Previous account metrics remained visible during scoped loading")
+        save("account-switch-loading")
+        release_account_read.set()
         settle_account_reads()
+        window.game_repository.list_puzzle_accounts = original_list_accounts
         save("account-switch")
         page.account_selector.setCurrentIndex(page.account_selector.findData("local"))
         app.processEvents()
@@ -185,9 +237,23 @@ def main() -> None:
         assert page.board._annotation_arrows and page.board._annotation_squares
         save("user-marks")
 
+        # Replays are intentionally read-only. Load the explicit visual
+        # attempt as a new online-source session before checking save/ack UI.
+        page.load_puzzle(normalize_api_puzzle(payload), payload, source="lichess",
+                         rating_eligible=False)
         page.board.move_intent.emit(chess.Move.from_uci("d7d5"))
         assert page.state.status.value == "success"
         save("solved")
+        wait_for(lambda: page.persistence_status.text().startswith("✓ Сохранено в SQLite"))
+        timing = {
+            "synthetic_visual_fixture": True,
+            "input_to_first_paint_ms": round(page._input_feedback_ms[-1], 2)
+            if page._input_feedback_ms else None,
+            "sqlite_commit_ms": page._db_commit_ms,
+        }
+        (output / "puzzle-timing.json").write_text(
+            json.dumps(timing, ensure_ascii=False, indent=2), encoding="utf-8")
+        print("TIMING " + json.dumps(timing, ensure_ascii=False))
 
         page.load_puzzle(normalize_api_puzzle(payload), payload, source="lichess")
         page.board.move_intent.emit(chess.Move.from_uci("d7d6"))
@@ -200,6 +266,22 @@ def main() -> None:
         page.board.move_intent.emit(chess.Move.from_uci("d7d5"))
         assert page.state.status.value == "success"
         save("solved-after-hint")
+
+        prepared_payload = fixture("NEXT-PREPARED")
+        page.account_id = "lichess:visual-b"
+        page._next_requested_at = time.perf_counter()
+        page.set_prepared_puzzle(
+            page.account_id, page.selected_theme(),
+            str(page.difficulty.currentData() or "normal"),
+            normalize_api_puzzle(prepared_payload), prepared_payload,
+            {"rating_eligible": True, "live_get_ms": 1200.0})
+        page._next()
+        assert page.state.puzzle.puzzle_id == "NEXT-PREPARED"
+        save("prepared-next")
+        timing["prepared_next_visible_ms"] = page._prepared_next_ms
+        (output / "puzzle-timing.json").write_text(
+            json.dumps(timing, ensure_ascii=False, indent=2), encoding="utf-8")
+        print("TIMING " + json.dumps(timing, ensure_ascii=False))
 
         page.close()
         window.close()

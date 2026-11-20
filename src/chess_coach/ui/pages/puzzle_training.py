@@ -7,9 +7,9 @@ import time
 import uuid
 
 import chess
-from PySide6.QtCore import QSize, Qt, Signal
+from PySide6.QtCore import QSize, Qt, Signal, QTimer
 from PySide6.QtWidgets import (
-    QComboBox, QFrame, QGridLayout, QHBoxLayout, QLabel, QLineEdit, QListWidget,
+    QBoxLayout, QCheckBox, QComboBox, QFrame, QGridLayout, QHBoxLayout, QLabel, QLineEdit, QListWidget,
     QListWidgetItem, QMessageBox, QPushButton, QScrollArea, QSizePolicy, QSplitter,
     QVBoxLayout, QWidget,
 )
@@ -17,6 +17,7 @@ from PySide6.QtWidgets import (
 from ...board_view import BoardView
 from ...lichess.puzzle_training import (
     PuzzleOutcome, PuzzlePlayablePosition, PuzzleStatus, PuzzleTrainingState,
+    practice_rating_delta,
 )
 
 
@@ -73,6 +74,7 @@ class PuzzleTrainingPage(QWidget):
     home_requested = Signal()
     account_changed = Signal(str)
     session_hidden = Signal()
+    prefetch_requested = Signal(str, str, str, str)
 
     def __init__(self, *, parent=None, demo: bool = False) -> None:
         super().__init__(parent)
@@ -85,9 +87,48 @@ class PuzzleTrainingPage(QWidget):
         self._session_account_id = "local"
         self._session_puzzle_id = ""
         self._pending_attempt_saves: dict[str, dict] = {}
+        self._retry_attempt_queue: list[str] = []
+        self._retry_in_progress_id: str | None = None
         self._local_seen_by_scope: dict[tuple[str, str, str], set[str]] = {}
+        self._is_replay = False
+        self._wrong_flash = False
+        self._wrong_timer_pending = False
+        self._wrong_timer = QTimer(self)
+        self._wrong_timer.setSingleShot(True)
+        self._wrong_timer.timeout.connect(self._restore_after_wrong_move)
+        self._reply_timer = QTimer(self)
+        self._reply_timer.setSingleShot(True)
+        self._reply_timer.timeout.connect(self._apply_opponent_reply)
+        self._auto_next_timer = QTimer(self)
+        self._auto_next_timer.setSingleShot(True)
+        self._auto_next_timer.timeout.connect(self._auto_advance)
+        self._prepared_online_puzzle: dict | None = None
+        self._session_results: list[dict] = []
+        self._session_result_index_by_id: dict[str, int] = {}
+        self._session_streak = 0
+        self._best_streak = 0
+        self._session_clean = 0
+        self._session_failed = 0
+        self._session_hinted = 0
+        self._session_outcome_ids: set[str] = set()
+        self._finished_session_ids: set[str] = set()
+        self._input_feedback_ms: list[float] = []
+        self._input_feedback_kinds: list[str] = []
+        self._pending_paint_started: float | None = None
+        self._pending_paint_kind: str | None = None
+        self._live_get_ms: float | None = None
+        self._db_commit_ms: float | None = None
+        self._prepared_next_ms: float | None = None
+        self._next_requested_at: float | None = None
+        self._fetch_inflight = False
+        self._rating_eligible = False
+        self._rated_puzzle_ids_by_account: dict[str, set[str]] = {}
+        self._current_cc_rating = 1500
+        self._terminal_verdict = ""
+        self._rating_preview: tuple[int, int] | None = None
         self._allow_submit = False
         self._local_count = 0
+        self._metadata_attempt_count_by_account: dict[str, int] = {}
         self._local_stats = {"attempts": 0, "solved": 0, "success_percent": None}
         self._theme_stats = {"attempts": 0, "solved": 0, "success_percent": None}
         self._official_rating: int | None = None
@@ -100,6 +141,8 @@ class PuzzleTrainingPage(QWidget):
         header = QHBoxLayout()
         title = QLabel("Решение задач")
         title.setObjectName("pageTitle")
+        title.setAccessibleName("Решение задач")
+        self._training_title = title
         header.addWidget(title)
         header.addStretch(1)
         self._training_root_layout = root
@@ -110,8 +153,7 @@ class PuzzleTrainingPage(QWidget):
         header_controls.setContentsMargins(0, 0, 0, 0)
         self.source = QComboBox()
         self.source.addItem("Новые Lichess", "new")
-        self.source.addItem("Мои ошибки", "errors")
-        self.source.addItem("Сохранённые", "saved")
+        self.source.setVisible(False)
         self.source.setAccessibleName("Источник задач")
         header_controls.addWidget(self.source)
         self.account_selector = QComboBox()
@@ -136,6 +178,11 @@ class PuzzleTrainingPage(QWidget):
         self.more_difficulty.setCheckable(True)
         self.more_difficulty.toggled.connect(self.advanced_difficulty.setVisible)
         header_controls.addWidget(self.more_difficulty)
+        self.auto_next = QCheckBox("Автопереход после чистого решения")
+        self.auto_next.setObjectName("puzzleAutoNext")
+        self.auto_next.setAccessibleName("Автопереход после чистого решения")
+        self.auto_next.setChecked(True)
+        header_controls.addWidget(self.auto_next)
         header.addWidget(self._training_header_controls)
         root.addLayout(header)
 
@@ -162,7 +209,7 @@ class PuzzleTrainingPage(QWidget):
         self.fetch.setObjectName("primaryAction")
         self.fetch.setMinimumHeight(38)
         self.filter_row.addWidget(self.fetch)
-        self.authorize = QPushButton("Разрешить puzzle:read")
+        self.authorize = QPushButton("Подключить задачи Lichess")
         self.authorize.setVisible(False)
         self.authorize.setToolTip("Отдельное разрешение Lichess только для чтения задач")
         self.filter_row.addWidget(self.authorize)
@@ -193,10 +240,22 @@ class PuzzleTrainingPage(QWidget):
         center = QWidget()
         center_layout = QVBoxLayout(center)
         center_layout.setContentsMargins(4, 0, 4, 0)
+        feedback = QWidget(center)
+        self._feedback_layout = QBoxLayout(QBoxLayout.Direction.TopToBottom, feedback)
+        self._feedback_layout.setContentsMargins(0, 0, 0, 0)
+        self._feedback_layout.setSpacing(0)
         self.turn_label = QLabel("Задача не загружена · ход стороны решающего")
         self.turn_label.setObjectName("secondary")
         self.turn_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        center_layout.addWidget(self.turn_label)
+        self._feedback_layout.addWidget(self.turn_label)
+        self.status = QLabel("Подключите задачи Lichess, чтобы начать.")
+        self.status.setObjectName("puzzleVerdict")
+        self.status.setWordWrap(True)
+        self.status.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.status.setMinimumHeight(32)
+        self.status.setAccessibleName("Состояние решения задачи")
+        self._feedback_layout.addWidget(self.status)
+        center_layout.addWidget(feedback)
         self.board = BoardView(chess.Board(), center)
         self.board.setObjectName("puzzleBoard")
         self.board.setMinimumSize(160, 160)
@@ -206,12 +265,9 @@ class PuzzleTrainingPage(QWidget):
         self.board.set_show_legal_moves(True)
         self.board.setAccessibleName("Шахматная доска задачи")
         self.board.move_intent.connect(self._submit_move)
+        self.board.wheel_navigate.connect(self._navigate_review)
+        self.board.paint_completed.connect(self._first_feedback_paint_completed)
         center_layout.addWidget(self.board, 1)
-        self.status = QLabel("Выберите тему и нажмите «Новая задача».")
-        self.status.setObjectName("puzzleStatus")
-        self.status.setWordWrap(True)
-        self.status.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        center_layout.addWidget(self.status)
         self.solution_line = QLabel("")
         self.solution_line.setObjectName("puzzleSolutionLine")
         self.solution_line.setWordWrap(True)
@@ -228,8 +284,9 @@ class PuzzleTrainingPage(QWidget):
         self.reveal = QPushButton("Показать решение")
         self.repeat = QPushButton("Повторить")
         self.next = QPushButton("Следующая задача")
-        self.retry_save = QPushButton("Повторить сохранение")
+        self.retry_save = QPushButton("Повторить запись")
         self.retry_save.setObjectName("retryPuzzleSave")
+        self.retry_save.setAccessibleName("Повторить сохранение результата в SQLite")
         self.retry_save.hide()
         self.retry_save.clicked.connect(self._retry_attempt_save)
         self.next.setObjectName("primaryAction")
@@ -238,6 +295,24 @@ class PuzzleTrainingPage(QWidget):
             button.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         center_layout.addLayout(controls)
         self._sync_control_layout()
+        review_row = QHBoxLayout()
+        self.review_back = QPushButton("←")
+        self.review_back.setAccessibleName("Предыдущий известный ход")
+        self.review_position = QLabel("Ходы задачи появятся здесь")
+        self.review_position.setObjectName("secondary")
+        self.review_position.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.review_forward = QPushButton("→")
+        self.review_forward.setAccessibleName("Следующий уже сыгранный ход")
+        self.return_to_solution = QPushButton("Вернуться к решению")
+        self.return_to_solution.hide()
+        review_row.addWidget(self.review_back)
+        review_row.addWidget(self.review_position, 1)
+        review_row.addWidget(self.review_forward)
+        review_row.addWidget(self.return_to_solution)
+        center_layout.addLayout(review_row)
+        self.review_back.clicked.connect(lambda: self._navigate_review(-1))
+        self.review_forward.clicked.connect(lambda: self._navigate_review(1))
+        self.return_to_solution.clicked.connect(self._return_to_solution)
         self.hint.clicked.connect(self._hint)
         self.reveal.clicked.connect(self._reveal)
         self.repeat.clicked.connect(self._repeat)
@@ -263,6 +338,27 @@ class PuzzleTrainingPage(QWidget):
         self.metrics.setWordWrap(True)
         self.metrics.setObjectName("secondary")
         right_layout.addWidget(self.metrics)
+        self.practice_rating = QLabel("Рейтинг тренировки CC: 1500 (стартовый)")
+        self.practice_rating.setObjectName("puzzlePracticeRating")
+        self.practice_rating.setWordWrap(True)
+        right_layout.addWidget(self.practice_rating)
+        self.session_summary = QLabel("Серия: 0 · Лучшая: 0 · Решено чисто: 0 · Ошибок: 0")
+        self.session_summary.setObjectName("puzzleSessionSummary")
+        self.session_summary.setWordWrap(True)
+        right_layout.addWidget(self.session_summary)
+        self.results_tape = QLabel("Последние результаты: —")
+        self.results_tape.setObjectName("puzzleResultsTape")
+        self.results_tape.setWordWrap(True)
+        self.results_tape.setAccessibleName("Последние результаты тренировки")
+        right_layout.addWidget(self.results_tape)
+        self.persistence_status = QLabel("")
+        self.persistence_status.setObjectName("puzzlePersistenceStatus")
+        self.persistence_status.setWordWrap(True)
+        right_layout.addWidget(self.persistence_status)
+        self.network_status = QLabel("")
+        self.network_status.setObjectName("puzzleNetworkStatus")
+        self.network_status.setWordWrap(True)
+        right_layout.addWidget(self.network_status)
         history_heading = QLabel("Предыдущие задачи")
         history_heading.setStyleSheet("font-weight: 700; font-size: 16px")
         right_layout.addWidget(history_heading)
@@ -289,7 +385,7 @@ class PuzzleTrainingPage(QWidget):
         self.source.currentIndexChanged.connect(self._source_changed)
         self.fetch.clicked.connect(self._next)
         self.authorize.clicked.connect(lambda: self.authorize_requested.emit(
-            self.selected_theme(), str(self.difficulty.currentData() or "normal")))
+            self.selected_theme(), self.selected_difficulty()))
         self.theme.activated.connect(self._theme_selected)
         self.theme_search.textChanged.connect(self._filter_themes)
         self.theme_list.itemClicked.connect(self._theme_list_clicked)
@@ -309,6 +405,12 @@ class PuzzleTrainingPage(QWidget):
         text = self.theme.currentText().strip()
         return next((theme_id for theme_id, label in THEME_LABELS.items()
                      if label.casefold() == text.casefold()), "mix")
+
+    def selected_difficulty(self) -> str:
+        if self.more_difficulty.isChecked():
+            return str(self.advanced_difficulty.currentData() or
+                       self.difficulty.currentData() or "normal")
+        return str(self.difficulty.currentData() or "normal")
 
     def set_accounts(self, rows: list[dict], selected_account: str) -> None:
         self.account_selector.blockSignals(True)
@@ -359,6 +461,8 @@ class PuzzleTrainingPage(QWidget):
         self._set_controls(self.state.puzzle is not None)
 
     def _next(self) -> None:
+        if self._fetch_inflight:
+            return
         if (self.state.puzzle is not None and self._allow_submit
                 and self.state.status not in {PuzzleStatus.SUCCESS, PuzzleStatus.REVEALED,
                                               PuzzleStatus.SKIPPED, PuzzleStatus.UNAVAILABLE}):
@@ -370,17 +474,90 @@ class PuzzleTrainingPage(QWidget):
                 return
             self.state.skip()
             self._finish(PuzzleOutcome.SKIPPED)
-        mode = str(self.source.currentData() or "new")
-        if mode == "new":
-            difficulty = str(self.difficulty.currentData() or "normal")
-            if self.more_difficulty.isChecked():
-                difficulty = str(self.advanced_difficulty.currentData() or difficulty)
-            self.new_puzzle_requested.emit(self.selected_theme(), difficulty)
+        self._auto_next_timer.stop()
+        self._wrong_timer.stop()
+        self._reply_timer.stop()
+        self.board.set_interaction_enabled(False)
+        self._next_requested_at = time.perf_counter()
+        self._fetch_inflight = True
+        self._set_controls(self.state.puzzle is not None)
+        self.network_status.setText("Загружаем следующую онлайн-задачу…")
+        difficulty = str(self.difficulty.currentData() or "normal")
+        if self.more_difficulty.isChecked():
+            difficulty = str(self.advanced_difficulty.currentData() or difficulty)
+        prepared = self.take_prepared_puzzle(self.account_id, self.selected_theme(), difficulty)
+        if prepared is not None:
+            self._apply_prepared_puzzle(prepared)
         else:
-            self.local_puzzle_requested.emit(mode, self.selected_theme())
+            self.new_puzzle_requested.emit(self.selected_theme(), difficulty)
+
+    def set_prepared_puzzle(self, account_id: str, theme: str, difficulty: str,
+                            puzzle: PuzzlePlayablePosition, payload: dict,
+                            details: dict | None = None) -> None:
+        self._prepared_online_puzzle = {
+            "account_id": str(account_id), "theme": str(theme),
+            "difficulty": str(difficulty), "puzzle": puzzle,
+            "payload": dict(payload), "details": dict(details or {}),
+        }
+        if str(puzzle.puzzle_id) in self._rated_puzzle_ids_by_account.get(str(account_id), set()):
+            self._prepared_online_puzzle["details"]["rating_eligible"] = False
+        self._live_get_ms = (details or {}).get("live_get_ms")
+        if self.state.status in {PuzzleStatus.SUCCESS, PuzzleStatus.REVEALED,
+                                 PuzzleStatus.SKIPPED, PuzzleStatus.UNAVAILABLE}:
+            self.network_status.setText("Следующая задача готова")
+
+    def take_prepared_puzzle(self, account_id: str, theme: str,
+                             difficulty: str) -> dict | None:
+        prepared = self._prepared_online_puzzle
+        self._prepared_online_puzzle = None
+        if (prepared is None or prepared["account_id"] != str(account_id)
+                or prepared["theme"] != str(theme)
+                or prepared["difficulty"] != str(difficulty)):
+            return None
+        return prepared
+
+    def _apply_prepared_puzzle(self, prepared: dict) -> None:
+        details = prepared.get("details") or {}
+        if self._next_requested_at is not None:
+            self._prepared_next_ms = (time.perf_counter() - self._next_requested_at) * 1000
+        self._live_get_ms = details.get("live_get_ms")
+        self._fetch_inflight = False
+        self.account_id = prepared["account_id"]
+        self.network_status.clear()
+        self.load_puzzle(prepared["puzzle"], prepared["payload"], source="lichess",
+                         rating_eligible=bool(details.get("rating_eligible", True)))
+
+    def mark_puzzle_rated(self, account_id: str, puzzle_id: str) -> None:
+        """Invalidate stale rating eligibility for this account-scoped puzzle."""
+        account_id, puzzle_id = str(account_id or "local"), str(puzzle_id)
+        self._rated_puzzle_ids_by_account.setdefault(account_id, set()).add(puzzle_id)
+        prepared = self._prepared_online_puzzle
+        if (prepared is not None and prepared.get("account_id") == account_id
+                and getattr(prepared.get("puzzle"), "puzzle_id", None) == puzzle_id):
+            details = dict(prepared.get("details") or {})
+            details["rating_eligible"] = False
+            prepared["details"] = details
+        if (self.account_id == account_id and self._session_puzzle_id == puzzle_id
+                and self._active_source == "lichess"):
+            self._rating_eligible = False
+            self._rating_preview = None
 
     def load_puzzle(self, puzzle: PuzzlePlayablePosition, payload: dict | None = None,
-                    *, source: str = "local") -> None:
+                    *, source: str = "local",
+                    rating_eligible: bool | None = None) -> None:
+        self._wrong_timer.stop()
+        self._fetch_inflight = False
+        self._reply_timer.stop()
+        self._auto_next_timer.stop()
+        self._wrong_timer_pending = False
+        self._wrong_flash = False
+        self._is_replay = source == "replay" or source not in {"lichess", "demo"}
+        self._rating_eligible = (
+            source == "lichess" if rating_eligible is None else bool(rating_eligible))
+        if (source == "lichess"
+                and puzzle.puzzle_id in self._rated_puzzle_ids_by_account.get(
+                    str(self.account_id or "local"), set())):
+            self._rating_eligible = False
         self.state.load(puzzle)
         self._puzzle_payload = dict(payload or {})
         self._active_source = source
@@ -388,70 +565,287 @@ class PuzzleTrainingPage(QWidget):
         self._session_account_id = str(self.account_id or "local")
         self._session_puzzle_id = puzzle.puzzle_id
         self._started_at = time.monotonic()
+        self._terminal_verdict = ""
+        self._rating_preview = None
+        # History/review puzzles are playable practice, but always unrated.
         self._allow_submit = True
         self.board.set_position(self.state.board)
         self.board.set_flipped(not self.state.board.turn)
         self.board.clear_annotations(record_action=False)
         self.board.set_hint_arrows(())
         self.board.set_hint_squares(())
-        self.turn_label.setText("Ход белых" if self.state.board.turn else "Ход чёрных")
+        self.board.set_feedback_squares(())
+        self.board.set_interaction_enabled(True)
+        self.return_to_solution.hide()
+        self.review_back.setEnabled(self.state.review_count > 1)
+        self.review_forward.setEnabled(False)
+        self.review_position.setText("Начало задачи · колесо — просмотр сыгранных ходов")
+        self.turn_label.setText(("Повтор · без рейтинга · " if self._is_replay else "Ваш ход · ") +
+                                ("белые" if self.state.board.turn else "чёрные"))
         self.solution_line.clear()
         self.solution_line.hide()
         theme_text = ", ".join(THEME_LABELS.get(theme, theme) for theme in puzzle.themes) or "без темы"
-        origin = "Новая задача Lichess" if source == "lichess" else "Сохранённая задача"
+        origin = ("Повтор задачи · без рейтинга" if self._is_replay else
+                  "Новая задача Lichess" if source == "lichess" else "Демо · только для тестов")
         self.details.setText(f"ID: {puzzle.puzzle_id}\nИсточник: {origin}\n"
                              f"Тема: {theme_text}\nРейтинг задачи: {puzzle.rating or 'нет данных'}")
-        self.status.setText("Найдите лучший ход. ПКМ — свои стрелки и отметки.")
+        self._show_verdict("Найдите лучший ход · ПКМ — отметки.", "neutral")
+        self.persistence_status.clear()
+        self.network_status.clear()
         self._set_controls(True)
+        self.fetch.setText("Следующая задача")
+        self._sync_hint_button()
+        if source == "lichess":
+            difficulty = self.selected_difficulty()
+            self.prefetch_requested.emit(self.account_id, self.selected_theme(),
+                                         difficulty, self._session_id)
 
     def set_loading(self, text: str = "Загружаю задачу…") -> None:
+        self._fetch_inflight = True
         self._allow_submit = False
-        self.status.setText(text)
+        self.board.set_interaction_enabled(False)
+        if self._terminal_verdict:
+            self.network_status.setText("Загружаем следующую онлайн-задачу…")
+        else:
+            self._show_verdict(text, "neutral")
         self.fetch.setEnabled(False)
+        self.next.setEnabled(False)
 
     def set_message(self, text: str) -> None:
+        self._fetch_inflight = False
         self._allow_submit = False
-        self.status.setText(text)
+        self.board.set_interaction_enabled(False)
+        if self._terminal_verdict:
+            self.network_status.setText(str(text))
+        else:
+            self._show_verdict(text, "error")
         self.fetch.setEnabled(True)
+        self.next.setEnabled(True)
         self._set_controls(False)
 
     def set_authorization_needed(self, needed: bool) -> None:
         self.authorize.setVisible(bool(needed))
 
+    def _show_verdict(self, text: str, kind: str) -> None:
+        colors = {"neutral": "#c8cde0", "success": "#69cf91",
+                  "error": "#f0787d", "reply": "#bba8ff"}
+        self.status.setText(str(text))
+        self.status.setStyleSheet(
+            f"font-weight: 700; color: {colors.get(kind, colors['neutral'])}; "
+            "padding: 5px 8px; border-radius: 6px;"
+        )
+        self.status.setAccessibleName(f"Состояние решения: {text}")
+
+    def _restore_after_wrong_move(self) -> None:
+        session_id = getattr(self, "_wrong_session_id", None)
+        if session_id != self._session_id or self.state.puzzle is None:
+            return
+        self._wrong_flash = False
+        self._wrong_timer_pending = False
+        self.board.set_position(self.state.board)
+        self.board.set_feedback_squares(())
+        self.board.set_interaction_enabled(self._allow_submit)
+        self.turn_label.setText("Ваш ход · " + ("белые" if self.state.board.turn else "чёрные"))
+        self._show_verdict("✕ Неверный ход. Позиция восстановлена — попробуйте ещё.", "error")
+
+    def _apply_opponent_reply(self) -> None:
+        session_id = getattr(self, "_reply_session_id", None)
+        if session_id != self._session_id or self.state.status != PuzzleStatus.OPPONENT_REPLY:
+            return
+        reply = chess.Move.from_uci(self.state._pending_reply)
+        result = self.state.apply_opponent_reply()
+        if result == "unavailable":
+            self._allow_submit = False
+            self.board.set_interaction_enabled(False)
+            self._show_verdict("Ответ соперника недоступен в этой задаче.", "error")
+            return
+        if not self.board.animate_move(reply):
+            self.board.set_position(self.state.board)
+        self.board.set_feedback_squares(())
+        self.board.clear_annotations(record_action=False)
+        self.board.set_interaction_enabled(self._allow_submit)
+        self.turn_label.setText("Ваш ход · " + ("белые" if self.state.board.turn else "чёрные"))
+        if result == "success":
+            self._finish(PuzzleOutcome.SUCCESS)
+        elif result == "reply":
+            self._show_verdict("Ответ соперника сыгран · ваш ход.", "neutral")
+
+    def _navigate_review(self, direction: int) -> None:
+        if not self.state.puzzle or not self.state._review_snapshots:
+            return
+        if self._wrong_flash or self.state.status == PuzzleStatus.OPPONENT_REPLY:
+            self._show_verdict("Дождитесь завершения текущего хода.", "neutral")
+            return
+        self._auto_next_timer.stop()
+        position = self.state.navigate_review(int(direction))
+        self.board.set_position(position)
+        self.board.set_interaction_enabled(False)
+        self.return_to_solution.show()
+        self.review_position.setText(
+            f"Просмотр {self.state.review_cursor + 1}/{self.state.review_count} · "
+            f"{self.state.review_label}")
+        self.review_back.setEnabled(self.state.review_cursor > 0)
+        self.review_forward.setEnabled(self.state.review_cursor < self.state.review_count - 1)
+        self._show_verdict(
+            "Просмотр уже сыгранной части · будущие ходы скрыты · вернитесь к решению.",
+            "neutral")
+
+    def _return_to_solution(self) -> None:
+        if not self.state.puzzle:
+            return
+        position = self.state.return_to_solution()
+        self.board.set_position(position)
+        can_move = self._allow_submit and self.state.status in {
+            PuzzleStatus.READY, PuzzleStatus.MISTAKE_RETRY,
+        }
+        self.board.set_interaction_enabled(can_move and self._allow_submit)
+        self.return_to_solution.hide()
+        self.review_position.setText("Текущая позиция решения")
+        self.review_back.setEnabled(self.state.review_count > 1)
+        self.review_forward.setEnabled(False)
+        success_kind = ("success" if not self.state.mistakes and not self.state.hints_used
+                        else "neutral")
+        restored = {
+            PuzzleStatus.SUCCESS: (self._terminal_verdict or "✓ Задача решена.", success_kind),
+            PuzzleStatus.REVEALED: (self._terminal_verdict or
+                                    "Решение показано · можно просмотреть линию.", "neutral"),
+            PuzzleStatus.SKIPPED: (self._terminal_verdict or
+                                   "Задача пропущена · следующая задача доступна.", "error"),
+            PuzzleStatus.UNAVAILABLE: ("Ответ соперника недоступен в этой задаче.", "error"),
+            PuzzleStatus.MISTAKE_RETRY: ("Неверный ход ранее · попробуйте снова.", "error"),
+            PuzzleStatus.OPPONENT_REPLY: ("Верно! Соперник отвечает…", "success"),
+        }
+        text, kind = restored.get(self.state.status,
+                                  ("Ваш ход · продолжайте решение.", "neutral"))
+        self._show_verdict(text, kind)
+
+    def _sync_hint_button(self) -> None:
+        self.hint.setText(f"Подсказка ({min(self.state.hint_level, 2)}/2)")
+
+    def reset_for_account_switch(self) -> None:
+        self._wrong_timer.stop()
+        self._reply_timer.stop()
+        self._auto_next_timer.stop()
+        self._prepared_online_puzzle = None
+        # A retry control is account scoped. Failed rows remain in the durable
+        # SQLite outbox and are reattached only after that account is selected.
+        self._pending_attempt_saves.clear()
+        self._retry_attempt_queue.clear()
+        self._retry_attempt_id = None
+        self._retry_in_progress_id = None
+        self._refresh_retry_save_control()
+        self.persistence_status.clear()
+        self._allow_submit = False
+        self._wrong_flash = False
+        self._wrong_timer_pending = False
+        self.state = PuzzleTrainingState()
+        # Profile metrics and history are account-scoped. Do not leave the
+        # previous account visible while the next scoped read is in flight.
+        self._official_rating = None
+        self._rating_date = None
+        self._local_count = 0
+        self._local_stats = {"attempts": 0, "solved": 0, "success_percent": None}
+        self._theme_stats = {"attempts": 0, "solved": 0, "success_percent": None}
+        self._current_cc_rating = 1500
+        self.history.clear()
+        self.metrics.setText("Загрузка данных профиля…")
+        self.practice_rating.setText("Рейтинг тренировки CC: загрузка…")
+        self.board.set_interaction_enabled(False)
+        self.board.set_position(chess.Board())
+        self.board.set_feedback_squares(())
+        self.board.clear_annotations(record_action=False)
+        self._show_verdict("Профиль изменён · загружаем задачи выбранного профиля.", "neutral")
+        self.network_status.clear()
+        self.turn_label.setText("Задача не загружена")
+        self.details.setText("Источник: —\nТема: —\nРейтинг задачи: —")
+        self.return_to_solution.hide()
+
     def _submit_move(self, move: chess.Move) -> None:
         if not self._allow_submit:
+            if self.state.status in {PuzzleStatus.SUCCESS, PuzzleStatus.REVEALED,
+                                     PuzzleStatus.SKIPPED}:
+                self._show_verdict("Эта задача уже завершена. Выберите «Следующая задача» или «Повторить».",
+                                   "neutral")
             return
+        if self._wrong_flash or self.state.is_reviewing:
+            return
+        started = time.perf_counter()
         result = self.state.submit(move)
         if result == "illegal":
-            self.status.setText("Этот ход невозможен по правилам шахмат.")
+            self._show_verdict("Так ходить нельзя по правилам шахмат.", "error")
             return
         if result == "mistake":
-            self.board.set_position(self.state.board)
-            self.status.setText("Не лучший ход. Попробуйте ещё.")
+            trial = self.state.board.copy(stack=True)
+            trial.push(move)
+            self._wrong_flash = True
+            self._wrong_session_id = self._session_id
+            self._wrong_timer_pending = True
+            self.board.set_interaction_enabled(False)
+            self.board.set_position(trial)
+            self.board.set_feedback_squares((move.from_square, move.to_square))
+            self.turn_label.setText("Ваш ход · ошибка")
+            self._show_verdict("✕ Неверный ход. Сейчас позиция вернётся.", "error")
+            self._record_input_feedback(started, "wrong")
+            self.board.repaint()
+            if self.state.mistakes == 1:
+                self._record_first_failure()
             return
         if result == "unavailable":
             self._allow_submit = False
-            self.status.setText("Задача недоступна: решение содержит нелегальный ответ.")
+            self.board.set_interaction_enabled(False)
+            self._show_verdict("Задача недоступна: решение содержит нелегальный ответ.", "error")
             return
         self.board.set_hint_arrows(())
         self.board.set_hint_squares(())
         self.board.clear_annotations(record_action=False)
-        self.board.set_position(self.state.board)
-        self.turn_label.setText("Ход белых" if self.state.board.turn else "Ход чёрных")
+        self.board.set_feedback_squares((move.from_square, move.to_square), "#52c97b")
+        if not self.board.animate_move(move):
+            self.board.set_position(self.state.board)
+        self._sync_hint_button()
+        self._record_input_feedback(started, "correct")
         if result == "success":
             self._finish(PuzzleOutcome.SUCCESS)
         else:
-            self.status.setText("Ход верный · ответ соперника воспроизведён из решения.")
+            self.turn_label.setText("Ход соперника")
+            self._show_verdict("✓ Верно! Соперник отвечает…", "success")
+            self.board.set_interaction_enabled(False)
+            self._reply_session_id = self._session_id
+            self._reply_timer.start(460)
+
+    def _record_input_feedback(self, started: float, kind: str) -> None:
+        """Start a local input-to-first-board-paint measurement."""
+        self._pending_paint_started = started
+        self._pending_paint_kind = kind
+        self.board.update()
+
+    def _first_feedback_paint_completed(self) -> None:
+        if self._wrong_timer_pending and self._wrong_flash:
+            self._wrong_timer_pending = False
+            self._wrong_timer.start(420)
+        if self._pending_paint_started is None:
+            return
+        self._input_feedback_ms.append(
+            (time.perf_counter() - self._pending_paint_started) * 1000)
+        self._input_feedback_kinds.append(str(self._pending_paint_kind or "move"))
+        self._pending_paint_started = None
+        self._pending_paint_kind = None
 
     def _hint(self) -> None:
+        if self.state.is_reviewing:
+            self._show_verdict("Сначала вернитесь к текущей позиции решения.", "neutral")
+            return
         move = self.state.hint()
         if move is None:
+            self._show_verdict("Максимум подсказок использован.", "neutral")
             return
+        self._sync_hint_button()
+        self._rating_eligible = self._rating_eligible and self._active_source == "lichess"
         self.board.set_hint_squares((move.from_square,))
         if self.state.hint_level >= 2:
             self.board.set_hint_arrows((move,))
-        self.status.setText("Подсказка: начните с отмеченного поля." if self.state.hint_level == 1
-                            else "Подсказка: нужный ход показан стрелкой.")
+        self._show_verdict(
+            "Подсказка 1/2: выберите фигуру на отмеченном поле." if self.state.hint_level == 1
+            else "Подсказка 2/2: направление хода показано стрелкой.", "neutral")
 
     def _reveal(self) -> None:
         if not self.state.puzzle:
@@ -464,6 +858,8 @@ class PuzzleTrainingPage(QWidget):
             return
         self.state.reveal()
         self._show_solution_line()
+        self.board.set_position(self.state.board)
+        self.board.set_interaction_enabled(False)
         self._finish(PuzzleOutcome.REVEALED)
 
     def _repeat(self) -> None:
@@ -479,7 +875,9 @@ class PuzzleTrainingPage(QWidget):
                 return
             self.state.skip()
             self._finish(PuzzleOutcome.SKIPPED)
-        self.load_puzzle(self.state.puzzle, self._puzzle_payload, source=self._active_source)
+        source = self._active_source
+        self.load_puzzle(self.state.puzzle, self._puzzle_payload,
+                         source="replay" if source != "demo" else "demo")
 
     def _show_solution_line(self) -> None:
         if not self.state.puzzle:
@@ -494,18 +892,54 @@ class PuzzleTrainingPage(QWidget):
         self.solution_line.show()
 
     def _finish(self, outcome: PuzzleOutcome) -> None:
+        if not self._session_id or self._session_id in self._finished_session_ids:
+            return
+        self._finished_session_ids.add(self._session_id)
         self._allow_submit = False
+        self._wrong_timer.stop()
+        self._reply_timer.stop()
         self.board.set_hint_arrows(())
         self.board.set_hint_squares(())
+        self.board.set_feedback_squares(())
         self.board.clear_annotations(record_action=False)
+        self.board.set_interaction_enabled(False)
         if outcome == PuzzleOutcome.SUCCESS:
             clean = self.state.mistakes == 0 and self.state.hints_used == 0
-            self.status.setText("Задача решена чисто." if clean else "Задача решена с ошибкой или подсказкой.")
-            self._show_solution_line()
+            verdict = ("✓ Повтор решён. Рейтинг не изменён." if clean and self._is_replay else
+                       "✓ Задача решена! Следующая задача начнётся автоматически."
+                       if clean else
+                       "Задача решена с ошибкой." if self.state.mistakes else
+                       "Задача решена с подсказкой.")
+            self._terminal_verdict = verdict
+            self._show_verdict(verdict, "success" if clean else "neutral")
+            if self.state.mistakes == 0:
+                self._show_solution_line()
         elif outcome == PuzzleOutcome.REVEALED:
-            self.status.setText("Решение показано · результат не засчитан как решённый.")
+            verdict = "Решение показано · можно просмотреть линию."
+            self._terminal_verdict = verdict
+            self._show_verdict(verdict, "neutral")
         else:
-            self.status.setText("Задача пропущена · результат сохранён локально.")
+            verdict = "Задача пропущена · следующая задача доступна."
+            self._terminal_verdict = verdict
+            self._show_verdict(verdict, "error")
+        self.turn_label.setText("Задача завершена")
+        puzzle_rating = self.state.puzzle.rating if self.state.puzzle else None
+        if self._rating_eligible and puzzle_rating is not None:
+            clean = (outcome == PuzzleOutcome.SUCCESS and self.state.mistakes == 0
+                     and self.state.hints_used == 0)
+            delta = practice_rating_delta(self._current_cc_rating, puzzle_rating,
+                                          1.0 if clean else 0.0)
+            self._rating_preview = (self._current_cc_rating, delta)
+            self.practice_rating.setText(
+                f"Рейтинг тренировки CC: {self._current_cc_rating} → "
+                f"{self._current_cc_rating + delta} ({delta:+d}) · ожидает сохранения")
+        if self._is_replay:
+            self.persistence_status.setText("Повтор не записывается")
+            self._set_controls(True, finished=True)
+            self.next.setText("Следующая задача →")
+            self._update_session_display()
+            return
+        self._record_session_result(outcome)
         payload = json.dumps(self._puzzle_payload, ensure_ascii=False, separators=(",", ":"))
         result = ("revealed" if outcome == PuzzleOutcome.REVEALED else
                   "skipped" if outcome == PuzzleOutcome.SKIPPED else
@@ -521,24 +955,130 @@ class PuzzleTrainingPage(QWidget):
             "hints": self.state.hints_used, "duration_ms": int((time.monotonic() - self._started_at) * 1000),
             "puzzle_json": payload, "source": self._active_source,
             "themes": list(self.state.puzzle.themes), "selected_theme": self.selected_theme(),
+            "first_failure": bool(self.state.first_failure),
+            "rating_eligible": bool(self._rating_eligible and not self._is_replay),
         }
         self._pending_attempt_saves[attempt["attempt_id"]] = attempt
-        self.retry_save.setVisible(False)
-        self.retry_save.setEnabled(False)
+        self._refresh_retry_save_control()
         self._sync_control_layout()
-        self.status.setText("Сохраняю результат в SQLite…")
+        self.persistence_status.setText("● Сохраняется…")
         self.attempt_saved.emit(attempt)
         self._set_controls(True, finished=True)
+        if (outcome == PuzzleOutcome.SUCCESS and self.state.mistakes == 0
+                and self.state.hints_used == 0 and self.auto_next.isChecked()
+                and self._active_source == "lichess" and not self._is_replay):
+            self._auto_next_session_id = self._session_id
+            self._auto_next_timer.start(1250)
+        else:
+            self.next.setText("Следующая задача →")
+        self._update_session_display()
+
+    def _record_session_result(self, outcome: PuzzleOutcome) -> None:
+        if not self._session_id:
+            return
+        clean = (outcome == PuzzleOutcome.SUCCESS and self.state.mistakes == 0
+                 and self.state.hints_used == 0 and not self._is_replay)
+        if outcome == PuzzleOutcome.REVEALED or outcome == PuzzleOutcome.SKIPPED or self._is_replay:
+            mark, label = "–", "без рейтинга"
+        elif outcome == PuzzleOutcome.SUCCESS and self.state.hints_used and not self.state.mistakes:
+            mark, label = "•", "с подсказкой"
+        elif clean:
+            mark, label = "✓", "чисто"
+        else:
+            mark, label = "✕", "ошибка/подсказка"
+        existing = next((row for row in self._session_results
+                         if row["session_id"] == self._session_id), None)
+        if existing is not None:
+            if existing.get("mark") == "✕" or self.state.first_failure:
+                existing.update(mark="✕", label={
+                    PuzzleOutcome.SKIPPED: "ошибка → пропуск",
+                    PuzzleOutcome.REVEALED: "ошибка → решение показано",
+                    PuzzleOutcome.SUCCESS: "ошибка → решено",
+                }.get(outcome, "первая ошибка"), pending=True)
+            else:
+                existing.update(mark=mark, label=label, pending=True)
+        else:
+            if clean:
+                self._session_streak += 1
+                self._best_streak = max(self._best_streak, self._session_streak)
+                self._session_clean += 1
+            elif mark in {"✕", "•"}:
+                self._session_streak = 0
+                if mark == "✕" and not self.state.first_failure:
+                    self._session_failed += 1
+                elif mark == "•":
+                    self._session_hinted += 1
+            else:
+                self._session_streak = 0
+            row = {"mark": mark, "label": label, "puzzle_id": self._session_puzzle_id,
+                   "session_id": self._session_id, "pending": True}
+            self._session_results.append(row)
+            self._session_results = self._session_results[-20:]
+            self._session_outcome_ids.add(self._session_id)
+        self._update_session_display()
+
+    def _record_first_failure(self) -> None:
+        if self._is_replay:
+            return
+        if self._session_id in self._session_outcome_ids:
+            return
+        self._session_streak = 0
+        self._session_failed += 1
+        self._session_results.append({
+            "mark": "✕", "label": "первая ошибка", "puzzle_id": self._session_puzzle_id,
+            "session_id": self._session_id, "pending": True,
+        })
+        self._session_results = self._session_results[-20:]
+        self._session_outcome_ids.add(self._session_id)
+        self._update_session_display()
+
+    def _update_session_display(self) -> None:
+        self.session_summary.setText(
+            f"Серия: {self._session_streak} · Лучшая: {self._best_streak} · "
+            f"Решено чисто: {self._session_clean} · Ошибок: {self._session_failed} · "
+            f"С подсказкой: {self._session_hinted}")
+        self.results_tape.setText(
+            "Последние результаты: " + (" ".join(item["mark"] for item in self._session_results)
+                                          if self._session_results else "—"))
+        self.results_tape.setToolTip(" · ".join(
+            f"{item['puzzle_id']}: {item['label']}" for item in self._session_results))
 
     def _retry_attempt_save(self) -> None:
-        attempt_id = getattr(self, "_retry_attempt_id", None)
-        attempt = self._pending_attempt_saves.get(attempt_id or "")
-        if attempt is None:
+        if self._retry_in_progress_id:
             return
-        self.retry_save.setEnabled(False)
-        self.retry_save.setText("Повторяю сохранение…")
-        self.status.setText("Повторно сохраняю результат…")
+        attempt_id = next((value for value in self._retry_attempt_queue
+                           if value in self._pending_attempt_saves), None)
+        attempt = self._pending_attempt_saves.get(attempt_id or "")
+        if attempt is None or attempt_id is None:
+            self._refresh_retry_save_control()
+            return
+        self._retry_attempt_id = attempt_id
+        self._retry_in_progress_id = attempt_id
+        self._refresh_retry_save_control()
+        if self._session_id == attempt["session_id"]:
+            self.persistence_status.setText("● Повторяем сохранение…")
         self.attempt_saved.emit(dict(attempt))
+
+    def _refresh_retry_save_control(self) -> None:
+        self._retry_attempt_queue = list(dict.fromkeys(
+            value for value in self._retry_attempt_queue
+            if value in self._pending_attempt_saves))
+        if self._retry_in_progress_id:
+            self.retry_save.setText("Записываем…")
+            self.retry_save.setEnabled(False)
+            self.retry_save.setVisible(True)
+            self._sync_control_layout()
+            return
+        self._retry_attempt_id = next(iter(self._retry_attempt_queue), None)
+        count = len(self._retry_attempt_queue)
+        self.retry_save.setText(
+            "Повторить запись" if count <= 1 else f"Повторить запись ({count})")
+        self.retry_save.setToolTip(
+            "Повторить сохранение результата в SQLite" if count <= 1 else
+            f"Повторить сохранение {count} результатов в SQLite")
+        self.retry_save.setEnabled(count > 0)
+        self.retry_save.setVisible(count > 0)
+        self._sync_control_layout()
 
     def _attempt_save_completed(self, attempt_id: str, success: bool,
                                 data: dict | None = None, error: str | None = None) -> None:
@@ -546,47 +1086,49 @@ class PuzzleTrainingPage(QWidget):
         if attempt is None:
             return
         if not success:
-            self._retry_attempt_id = str(attempt_id)
-            self.retry_save.setText("Повторить сохранение")
-            self.retry_save.setEnabled(True)
-            self.retry_save.setVisible(True)
-            self._sync_control_layout()
+            retry_id = str(attempt_id)
+            if retry_id not in self._retry_attempt_queue:
+                self._retry_attempt_queue.append(retry_id)
+            if self._retry_in_progress_id == retry_id:
+                self._retry_in_progress_id = None
             if self._session_id == attempt["session_id"]:
-                self.status.setText(
-                    f"Не удалось сохранить результат в SQLite ({error or 'ошибка записи'}). "
-                    "Попробуйте ещё раз.")
+                self.persistence_status.setText(
+                    f"Не удалось сохранить · {error or 'ошибка записи'} · повторите попытку")
+            self._refresh_retry_save_control()
             return
 
         self._pending_attempt_saves.pop(str(attempt_id), None)
+        self._retry_attempt_queue = [value for value in self._retry_attempt_queue
+                                     if value != str(attempt_id)]
+        if self._retry_in_progress_id == str(attempt_id):
+            self._retry_in_progress_id = None
         if getattr(self, "_retry_attempt_id", None) == str(attempt_id):
             self._retry_attempt_id = None
-        self.retry_save.setVisible(False)
-        self.retry_save.setEnabled(False)
-        self._sync_control_layout()
-        if self._session_id != attempt["session_id"]:
+        self._db_commit_ms = (data or {}).get("db_commit_ms")
+        for result_row in self._session_results:
+            if result_row["session_id"] == str(attempt.get("session_id")):
+                result_row["pending"] = False
+        self._refresh_retry_save_control()
+        if self._session_id != attempt["session_id"] or self.account_id != attempt["account_id"]:
             return
-        if self.account_id != attempt["account_id"]:
-            self.status.setText(
-                f"Результат сохранён в профиле {attempt['account_id']}.")
-            return
+        self.persistence_status.setText("✓ Сохранено в SQLite")
         payload = data or {}
         self.set_recent_history(
             payload.get("recent", []), local_count=payload.get("local_count", self._local_count),
-            local_stats=payload.get("local_stats"), theme_stats=payload.get("theme_stats"))
-        self.status.setText("Результат сохранён локально в SQLite.")
+            local_stats=payload.get("local_stats"), theme_stats=payload.get("theme_stats"),
+            practice_rating=payload.get("practice_rating"))
+        self._update_session_display()
 
     def attach_pending_attempts(self, attempts: list[dict]) -> None:
         for attempt in attempts:
             attempt_id = str(attempt.get("attempt_id") or "")
             if attempt_id:
                 self._pending_attempt_saves[attempt_id] = dict(attempt)
+                if attempt_id not in self._retry_attempt_queue:
+                    self._retry_attempt_queue.append(attempt_id)
         if attempts:
-            self._retry_attempt_id = str(attempts[0].get("attempt_id") or "")
-            self.retry_save.setText("Повторить сохранение")
-            self.retry_save.setEnabled(bool(self._retry_attempt_id))
-            self.retry_save.setVisible(bool(self._retry_attempt_id))
-            self._sync_control_layout()
-            self.status.setText("Есть несохранённый результат. Его можно сохранить повторно.")
+            self.persistence_status.setText("Результат ожидает сохранения · можно повторить")
+        self._refresh_retry_save_control()
 
     def local_seen_ids(self, scope: tuple[str, str, str]) -> set[str]:
         return self._local_seen_by_scope.setdefault(scope, set())
@@ -598,23 +1140,44 @@ class PuzzleTrainingPage(QWidget):
         self.hint.setEnabled(loaded and not finished)
         self.reveal.setEnabled(loaded and not finished)
         self.repeat.setEnabled(loaded)
-        self.next.setEnabled(True)
-        self.fetch.setEnabled(True)
+        self.next.setEnabled(not self._fetch_inflight)
+        self.fetch.setEnabled(not self._fetch_inflight)
 
     def set_recent_history(self, rows: list[dict], *, local_count: int = 0,
                            official_rating: int | None = None,
                            rating_date: str | None = None,
+                           official_rating_loaded: bool = False,
                            local_stats: dict | None = None,
-                           theme_stats: dict | None = None) -> None:
-        self._local_count = max(0, int(local_count))
+                           theme_stats: dict | None = None,
+                           practice_rating: dict | None = None) -> None:
+        incoming_count = max(0, int(local_count))
+        account_scope = str(self.account_id or "local")
+        known_count = self._metadata_attempt_count_by_account.get(account_scope, -1)
+        if incoming_count < known_count:
+            return
+        self._metadata_attempt_count_by_account[account_scope] = incoming_count
+        self._local_count = incoming_count
         if local_stats is not None:
             self._local_stats = dict(local_stats)
         if theme_stats is not None:
             self._theme_stats = dict(theme_stats)
-        if official_rating is not None:
+        if official_rating_loaded:
+            self._official_rating = (int(official_rating)
+                                     if official_rating is not None else None)
+            self._rating_date = str(rating_date) if rating_date else None
+        elif official_rating is not None:
             self._official_rating = int(official_rating)
-        if rating_date:
-            self._rating_date = str(rating_date)
+            if rating_date:
+                self._rating_date = str(rating_date)
+        if practice_rating is not None:
+            value = max(0, int(practice_rating.get("rating", 1500)))
+            delta = int(practice_rating.get("delta", 0))
+            rated_count = int(practice_rating.get("rated_attempts", 0))
+            self._current_cc_rating = value
+            self.practice_rating.setText(
+                f"Рейтинг тренировки CC: {value}"
+                + (" (стартовый)" if rated_count == 0 else "")
+                + (f" · {delta:+d} за задачу" if delta else ""))
         self.history.clear()
         for row in rows[:8]:
             source = "Chess Coach" if row.get("source") == "local" else "Lichess · sync"
@@ -645,6 +1208,19 @@ class PuzzleTrainingPage(QWidget):
             f"{self._theme_stats.get('attempts', 0)}"
             f" ({theme_rate if theme_rate is not None else 'н/д'}%)")
 
+    def set_profile_metadata_error(self, message: str) -> None:
+        """Show a scoped-read failure without retaining another profile's data."""
+        self.metrics.setText(str(message))
+        self.practice_rating.setText("Рейтинг тренировки CC: недоступен")
+        self.history.clear()
+
+    def _auto_advance(self) -> None:
+        if (self._auto_next_session_id != self._session_id
+                or self.state.status != PuzzleStatus.SUCCESS
+                or self.state.mistakes or self.state.hints_used or self._is_replay):
+            return
+        self._next()
+
     def _open_history_item(self, item: QListWidgetItem) -> None:
         row = item.data(Qt.ItemDataRole.UserRole) or {}
         puzzle_id = str(row.get("puzzle_id", ""))
@@ -656,6 +1232,9 @@ class PuzzleTrainingPage(QWidget):
         super().resizeEvent(event)
         compact = self.width() < 1050 or self.height() < 650
         reflow_header = self.width() < 900 or self.height() < 650
+        # The desktop shell already labels this section "Обучение". On a short
+        # viewport hide the duplicate page title so the board keeps its space.
+        self._training_title.setVisible(self.height() >= 650)
         if reflow_header != self._training_header_reflowed:
             if reflow_header:
                 self._training_header_layout.removeWidget(self._training_header_controls)
@@ -670,28 +1249,67 @@ class PuzzleTrainingPage(QWidget):
         self.theme_search.setVisible(not compact)
         self.history.setMaximumHeight(120 if self.height() < 650 else 260)
         center_width = self.board.parentWidget().width() if self.board.parentWidget() else self.width()
-        compact_controls = center_width < 650 or self.height() < 700
+        self._feedback_layout.setDirection(
+            QBoxLayout.Direction.LeftToRight
+            if compact and self.height() < 760 and center_width >= 500
+            else QBoxLayout.Direction.TopToBottom
+        )
+        compact_controls = self._needs_compact_controls(center_width) or self.height() < 700
         if compact:
             self._training_root_layout.setContentsMargins(8, 2, 8, 4)
             self._training_root_layout.setSpacing(4)
+            self._training_title.setStyleSheet("font-size: 20px")
+            self.fetch.setMinimumHeight(30)
+            self.status.setMinimumHeight(24)
+            for control in (self.account_selector, self.difficulty, self.more_difficulty,
+                            self.auto_next):
+                control.setMaximumHeight(32)
             center_layout = self.board.parentWidget().layout()
             if center_layout is not None:
                 center_layout.setSpacing(0)
             for button in (self.hint, self.reveal, self.repeat, self.retry_save, self.next):
-                button.setMinimumHeight(34)
+                button.setFixedHeight(32)
         else:
             self._training_root_layout.setContentsMargins(10, 6, 10, 10)
             self._training_root_layout.setSpacing(6)
+            self._training_title.setStyleSheet("")
+            self.fetch.setMinimumHeight(38)
+            self.status.setMinimumHeight(32)
+            for control in (self.account_selector, self.difficulty, self.more_difficulty,
+                            self.auto_next):
+                control.setMaximumHeight(16777215)
             center_layout = self.board.parentWidget().layout()
             if center_layout is not None:
                 center_layout.setSpacing(6)
             for button in (self.hint, self.reveal, self.repeat, self.retry_save, self.next):
+                button.setMaximumHeight(16777215)
                 button.setMinimumHeight(38)
         if compact_controls != self._controls_compact:
             self._controls_compact = compact_controls
             self._sync_control_layout()
 
+    def _needs_compact_controls(self, center_width: int | None = None) -> bool:
+        if center_width is None:
+            parent = self.board.parentWidget()
+            center_width = parent.width() if parent is not None else self.width()
+        visible_buttons = [
+            button for button in (self.hint, self.reveal, self.repeat,
+                                  self.retry_save, self.next)
+            if not button.isHidden()
+        ]
+        spacing = max(0, self._controls_layout.horizontalSpacing())
+        # The normal grid gives every visible action one equal-width column.
+        # Fit the longest label in every column instead of comparing the sum
+        # of unequal natural widths with the available space.
+        required_width = (max((button.sizeHint().width() for button in visible_buttons),
+                              default=0) * len(visible_buttons))
+        required_width += spacing * max(0, len(visible_buttons) - 1)
+        return center_width < required_width
+
     def _sync_control_layout(self) -> None:
+        compact_controls = (self._needs_compact_controls()
+                            or self.height() < 700)
+        self._controls_compact = compact_controls
         layout = self._controls_layout
         while layout.count():
             layout.takeAt(0)
@@ -703,8 +1321,8 @@ class PuzzleTrainingPage(QWidget):
         if self.retry_save.isVisible():
             for column, button in enumerate((self.hint, self.reveal, self.repeat)):
                 layout.addWidget(button, 0, column)
-            layout.addWidget(self.retry_save, 1, 0)
-            layout.addWidget(self.next, 1, 1, 1, 2)
+            layout.addWidget(self.retry_save, 1, 0, 1, 2)
+            layout.addWidget(self.next, 1, 2)
         else:
             layout.addWidget(self.hint, 0, 0)
             layout.addWidget(self.reveal, 0, 1, 1, 2)
@@ -712,5 +1330,8 @@ class PuzzleTrainingPage(QWidget):
             layout.addWidget(self.next, 1, 1, 1, 2)
 
     def hideEvent(self, event) -> None:  # noqa: N802 - Qt API
+        self._auto_next_timer.stop()
+        self._wrong_timer.stop()
+        self._reply_timer.stop()
         super().hideEvent(event)
         self.session_hidden.emit()

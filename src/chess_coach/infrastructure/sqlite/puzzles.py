@@ -9,6 +9,7 @@ import uuid
 import time
 
 from .constants import MAX_PAGE_SIZE
+from ...lichess.puzzle_training import practice_rating_delta
 
 
 def puzzle_attempt_uid(account_id: str, puzzle_id: str, attempt_date_ms: int,
@@ -20,6 +21,63 @@ def puzzle_attempt_uid(account_id: str, puzzle_id: str, attempt_date_ms: int,
 
 
 class PuzzleActivityStoreMixin:
+
+    def enqueue_puzzle_attempt(self, attempt: dict, *, error: str | None = None) -> None:
+        """Durably retain an unacknowledged local result, scoped to its account."""
+        payload = dict(attempt or {})
+        attempt_id = str(payload.get("attempt_id") or "").strip()
+        account_id = str(payload.get("account_id") or "local").strip() or "local"
+        puzzle_id = str(payload.get("puzzle_id") or "").strip()
+        if not attempt_id or not puzzle_id:
+            raise ValueError("Для очереди сохранения нужны attempt_id и puzzle_id.")
+        serialized = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+        now = int(time.time() * 1000)
+        with self._connection() as db:
+            existing = db.execute(
+                "SELECT account_id,puzzle_id FROM local_puzzle_attempt_outbox WHERE attempt_id=?",
+                (attempt_id,)).fetchone()
+            if existing and (str(existing["account_id"]) != account_id
+                             or str(existing["puzzle_id"]) != puzzle_id):
+                raise ValueError("Идентификатор сохранения уже принадлежит другому профилю.")
+            db.execute(
+                "INSERT INTO local_puzzle_attempt_outbox "
+                "(attempt_id,account_id,puzzle_id,payload_json,status,last_error,created_at_ms,updated_at_ms) "
+                "VALUES (?,?,?,?,?,?,?,?) ON CONFLICT(attempt_id) DO UPDATE SET "
+                "status=excluded.status,last_error=excluded.last_error,updated_at_ms=excluded.updated_at_ms",
+                (attempt_id, account_id, puzzle_id, serialized,
+                 "failed" if error else "pending", str(error) if error else None, now, now))
+
+    def pending_puzzle_attempts(self, account_id: str) -> list[dict]:
+        """Load only pending attempts belonging to the requested local profile."""
+        with self._connection() as db:
+            rows = db.execute(
+                "SELECT payload_json,status,last_error,created_at_ms FROM local_puzzle_attempt_outbox "
+                "WHERE account_id=? ORDER BY created_at_ms,attempt_id", (str(account_id or "local"),)
+            ).fetchall()
+        result = []
+        for row in rows:
+            try:
+                payload = json.loads(row["payload_json"])
+            except (ValueError, TypeError):
+                continue
+            if isinstance(payload, dict):
+                payload["save_status"] = str(row["status"])
+                payload["last_error"] = row["last_error"]
+                payload["outbox_created_at_ms"] = int(row["created_at_ms"])
+                result.append(payload)
+        return result
+
+    def mark_puzzle_attempt_failed(self, attempt_id: str, error: str) -> None:
+        with self._connection() as db:
+            db.execute(
+                "UPDATE local_puzzle_attempt_outbox SET status='failed',last_error=?,updated_at_ms=? "
+                "WHERE attempt_id=?", (str(error), int(time.time() * 1000), str(attempt_id)))
+
+    def acknowledge_puzzle_attempt(self, attempt_id: str) -> None:
+        """Idempotently remove a durable outbox row after the attempt commit."""
+        with self._connection() as db:
+            db.execute("DELETE FROM local_puzzle_attempt_outbox WHERE attempt_id=?",
+                       (str(attempt_id),))
 
     def cache_training_puzzle(self, account_id: str, puzzle_id: str,
                               puzzle_json: str) -> None:
@@ -103,7 +161,8 @@ class PuzzleActivityStoreMixin:
     def save_local_puzzle_attempt(self, account_id: str, puzzle_id: str, *,
                                   result: str, solved: bool, mistakes: int, hints: int,
                                   duration_ms: int, puzzle_json: str,
-                                  attempt_id: str | None = None) -> tuple[str, bool]:
+                                  attempt_id: str | None = None,
+                                  rating_eligible: bool = False) -> tuple[str, bool]:
         """Append a local training result without changing mirrored Lichess activity."""
         if result not in {"success", "mistake", "hinted", "revealed", "skipped"}:
             raise ValueError("Некорректный результат локальной задачи.")
@@ -112,12 +171,19 @@ class PuzzleActivityStoreMixin:
             raise ValueError("Для локальной попытки требуется стабильный идентификатор.")
         account_id = str(account_id or "local")
         puzzle_id = str(puzzle_id)
+        puzzle: dict = {}
+        themes: list = []
         try:
             puzzle_payload = json.loads(str(puzzle_json))
-            puzzle = puzzle_payload.get("puzzle", {})
-            themes = puzzle.get("themes", []) if isinstance(puzzle, dict) else []
+            if isinstance(puzzle_payload, dict):
+                parsed_puzzle = puzzle_payload.get("puzzle", {})
+                if isinstance(parsed_puzzle, dict):
+                    puzzle = parsed_puzzle
+                    parsed_themes = puzzle.get("themes", [])
+                    if isinstance(parsed_themes, (list, tuple)):
+                        themes = parsed_themes
         except (ValueError, TypeError, AttributeError):
-            themes = []
+            pass
         with self._connection() as db:
             existing = db.execute(
                 "SELECT account_id,puzzle_id FROM local_puzzle_attempts WHERE local_attempt_id=?",
@@ -135,7 +201,69 @@ class PuzzleActivityStoreMixin:
                 db.executemany(
                     "INSERT OR IGNORE INTO local_puzzle_attempt_themes VALUES (?,?)",
                     [(attempt_id, str(theme)) for theme in themes if theme])
+                rating_value = puzzle.get("rating") if isinstance(puzzle, dict) else None
+                if rating_eligible and rating_value is not None:
+                    try:
+                        puzzle_rating = max(0, int(rating_value))
+                    except (ValueError, TypeError):
+                        puzzle_rating = None
+                    if puzzle_rating is not None:
+                        scored = bool(solved and result == "success"
+                                      and int(mistakes) == 0 and int(hints) == 0)
+                        score = 1.0 if scored else 0.0
+                        already_rated = db.execute(
+                            "SELECT 1 FROM local_puzzle_rating_events "
+                            "WHERE account_id=? AND puzzle_id=?",
+                            (account_id, puzzle_id)).fetchone()
+                        if not already_rated:
+                            current_row = db.execute(
+                                "SELECT rating,rated_attempts FROM local_puzzle_practice_ratings "
+                                "WHERE account_id=?", (account_id,)).fetchone()
+                            previous = int(current_row["rating"]) if current_row else 1500
+                            delta = practice_rating_delta(previous, puzzle_rating, score)
+                            after = previous + delta
+                            created_at = datetime.now(timezone.utc).isoformat()
+                            db.execute(
+                                "INSERT INTO local_puzzle_rating_events "
+                                "(event_id,account_id,puzzle_id,attempt_id,puzzle_rating,score,"
+                                "rating_before,delta,rating_after,created_at) "
+                                "VALUES (?,?,?,?,?,?,?,?,?,?)",
+                                (uuid.uuid4().hex, account_id, puzzle_id, attempt_id,
+                                 puzzle_rating, score, previous, delta, after, created_at))
+                            db.execute(
+                                "INSERT INTO local_puzzle_practice_ratings "
+                                "(account_id,rating,last_delta,rated_attempts,updated_at) "
+                                "VALUES (?,?,?,?,?) ON CONFLICT(account_id) DO UPDATE SET "
+                                "rating=excluded.rating,last_delta=excluded.last_delta,"
+                                "rated_attempts=excluded.rated_attempts,updated_at=excluded.updated_at",
+                                (account_id, after, delta,
+                                 (int(current_row["rated_attempts"]) + 1) if current_row else 1,
+                                 created_at))
         return attempt_id, inserted
+
+    def local_puzzle_rating(self, account_id: str) -> dict:
+        """Return the independent Chess Coach practice rating (never Lichess rating)."""
+        with self._connection() as db:
+            row = db.execute(
+                "SELECT rating,last_delta,rated_attempts,updated_at "
+                "FROM local_puzzle_practice_ratings WHERE account_id=?",
+                (str(account_id or "local"),)).fetchone()
+        if row is None:
+            return {"rating": 1500, "delta": 0, "rated_attempts": 0, "date": None}
+        return {"rating": int(row["rating"]), "delta": int(row["last_delta"]),
+                "rated_attempts": int(row["rated_attempts"]), "date": row["updated_at"]}
+
+    def local_puzzle_rating_event(self, account_id: str, puzzle_id: str) -> dict | None:
+        with self._connection() as db:
+            row = db.execute(
+                "SELECT event_id,account_id,puzzle_id,attempt_id,puzzle_rating,score,"
+                "rating_before,delta,rating_after,created_at FROM local_puzzle_rating_events "
+                "WHERE account_id=? AND puzzle_id=?",
+                (str(account_id or "local"), str(puzzle_id))).fetchone()
+        return dict(row) if row else None
+
+    def has_local_puzzle_rating_event(self, account_id: str, puzzle_id: str) -> bool:
+        return self.local_puzzle_rating_event(account_id, puzzle_id) is not None
 
     def local_puzzle_attempts(self, account_id: str, *, limit: int = 8) -> list[dict]:
         limit = min(100, max(1, int(limit)))

@@ -11,7 +11,9 @@ on:
       - "src/chess_coach/window.py"
       - "scripts/capture_puzzle_training.py"
       - "tests/test_puzzle_training*.py"
+      - "tests/test_puz_ux_03_*.py"
       - "tests/test_puzzle_api_adapter.py"
+      - "tests/test_window.py"
       - "tests/test_board_view.py"
       - "tests/test_background_work.py"
       - ".github/workflows/puzzle-ux-02-verification.yml"
@@ -47,7 +49,8 @@ jobs:
             '^src/chess_coach/lichess/puzzle_training\.py$',
             '^src/chess_coach/infrastructure/sqlite/puzzles\.py$',
             '^src/chess_coach/window\.py$',
-            '^scripts/capture_puzzle_training\.py$'
+            '^scripts/capture_puzzle_training\.py$',
+            '^scripts/puz_ux_03_.*\.py$'
           )
           $changed = [bool]($files | Where-Object {
             $candidate = $_
@@ -73,11 +76,15 @@ jobs:
         run: >-
           python -m py_compile src/chess_coach/ui/pages/puzzle_training.py
           src/chess_coach/window.py
+          src/chess_coach/infrastructure/sqlite/constants.py
+          src/chess_coach/infrastructure/sqlite/migrations.py
           src/chess_coach/infrastructure/sqlite/puzzles.py
           src/chess_coach/lichess/puzzle_training.py
           tests/test_puzzle_training.py tests/test_puzzle_training_store.py
           tests/test_puzzle_training_ui.py tests/test_puzzle_training_navigation.py
           tests/test_puzzle_training_async.py tests/test_puzzle_api_adapter.py
+          tests/test_puz_ux_03_interaction.py tests/test_puz_ux_03_rating.py
+          tests/test_window.py
       - name: Run targeted puzzle contracts
         env:
           QT_QPA_PLATFORM: offscreen
@@ -86,12 +93,29 @@ jobs:
           tests/test_puzzle_training.py tests/test_puzzle_training_store.py
           tests/test_puzzle_training_ui.py tests/test_puzzle_training_navigation.py
           tests/test_puzzle_training_async.py tests/test_puzzle_api_adapter.py
+          tests/test_puz_ux_03_interaction.py tests/test_puz_ux_03_rating.py
+          tests/test_window.py::test_puzzle_account_switch_clears_old_board_and_keeps_scope
+          tests/test_window.py::test_account_switch_discards_delayed_profile_a_and_requests_profile_b
+          tests/test_window.py::test_advanced_difficulty_prefetch_accepts_selected_key
+          tests/test_window.py::test_training_replay_does_not_change_attempt_totals_statistics_or_rating
+          tests/test_window.py::test_cross_account_replay_wins_against_delayed_account_callback
+          tests/test_window.py::test_duplicate_prefetched_id_is_unrated_after_save_ack
+          tests/test_window.py::test_failed_attempt_outbox_recovers_only_when_its_account_is_selected
+          tests/test_window.py::test_close_requires_explicit_decision_when_attempt_could_not_reach_outbox
+          tests/test_window.py::test_account_switch_hides_all_previous_profile_metrics_before_worker_ack
+          tests/test_window.py::test_puzzle_token_rotation_after_worker_emit_rejects_queued_result
+          tests/test_window.py::test_close_prompt_catches_outbox_failure_finishing_during_shutdown
+          tests/test_window.py::test_stale_pending_snapshot_cannot_resurrect_attempt_after_save_ack
+          tests/test_window.py::test_prefetch_credential_failure_keeps_current_puzzle_playable
+          tests/test_window.py::test_duplicate_attempt_save_is_single_flight_and_ack_remains_success
+          tests/test_window.py::test_prefetch_validation_rechecks_scope_before_installing_prepared_puzzle
 
   l2-native-puzzle-captures:
-    name: L2 native puzzle training captures
+    name: L2 PUZ-UX-03 public and native UX
     needs: [detect-visual-scope, l1-targeted]
-    if: needs.detect-visual-scope.outputs.changed == 'true' && needs.l1-targeted.result == 'success'
+    if: needs.detect-visual-scope.outputs.changed == 'true' && needs.l1-targeted.result == 'success' && github.event.pull_request.head.ref == 'codex/puz-ux-03-online-puzzle-playability-2026-11-20' && github.event.pull_request.draft
     runs-on: windows-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v7.0.1
         with:
@@ -102,6 +126,11 @@ jobs:
           cache: pip
       - name: Install application
         run: python -m pip install -e .
+      - name: Compile the native live-smoke drivers
+        run: >-
+          python -m py_compile scripts/puz_ux_03_live_public_smoke.py
+          scripts/puz_ux_03_mainwindow_live_integration.py
+          scripts/puz_ux_03_perf_probe.py
       - name: Configure native Windows display
         shell: pwsh
         run: |
@@ -111,7 +140,28 @@ jobs:
           if ($bounds.Width -lt 1672 -or $bounds.Height -lt 941) {
             throw "Runner display cannot fit the 1672x941 puzzle capture."
           }
-      - name: Capture the puzzle workflow at 100, 125, and 150 percent
+      - name: Play public Lichess puzzles in real Qt at 100, 125, and 150 percent
+        shell: pwsh
+        env:
+          LOCALAPPDATA: ${{ runner.temp }}\puz-ux-03-live-localappdata
+        run: |
+          foreach ($scale in @("1", "1.25", "1.5")) {
+            $env:CC_PUZ_UX_03_LIVE_DPI = $scale
+            $env:CC_PUZ_UX_03_LIVE_OUTPUT = "visual-evidence/puz-ux-03-live-public/scale-$scale"
+            python -u -X faulthandler scripts/puz_ux_03_live_public_smoke.py
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          }
+      - name: Exercise MainWindow with public puzzle responses
+        env:
+          CC_PUZ_UX_03_MAINWINDOW_OUTPUT: visual-evidence/puz-ux-03-mainwindow
+          LOCALAPPDATA: ${{ runner.temp }}\puz-ux-03-mainwindow-localappdata
+        run: python -u -X faulthandler scripts/puz_ux_03_mainwindow_live_integration.py
+      - name: Measure ten cold and fifty warm Qt inputs
+        env:
+          CC_PUZ_UX_03_PERF_OUTPUT: visual-evidence/puz-ux-03-performance
+          LOCALAPPDATA: ${{ runner.temp }}\puz-ux-03-performance-localappdata
+        run: python -u -X faulthandler scripts/puz_ux_03_perf_probe.py
+      - name: Capture puzzle workflow at 100, 125, and 150 percent
         shell: pwsh
         env:
           CC_PUZZLE_VISUAL_SHA: ${{ github.event.pull_request.head.sha }}
@@ -130,6 +180,8 @@ jobs:
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: puzzle-ux-02-l2-${{ github.event.pull_request.head.sha }}
-          path: visual-evidence/puzzle-followup/
+          name: puz-ux-03-l2-${{ github.event.pull_request.head.sha }}
+          path: |
+            visual-evidence/puzzle-followup/
+            visual-evidence/puz-ux-03-*
           if-no-files-found: error
