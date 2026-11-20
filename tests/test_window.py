@@ -2904,8 +2904,9 @@ def test_account_switch_discards_delayed_profile_a_and_requests_profile_b(
 
 
 @pytest.mark.parametrize("difficulty", ["easiest", "hardest"])
+@pytest.mark.parametrize("rotate_token", [False, True])
 def test_advanced_difficulty_prefetch_accepts_selected_key(
-        qtbot, tmp_path, monkeypatch, difficulty):
+        qtbot, tmp_path, monkeypatch, difficulty, rotate_token):
     from chess_coach.lichess.puzzle_training import PuzzlePlayablePosition
     from chess_coach.ui.pages.puzzle_training import PuzzleTrainingPage
 
@@ -2925,14 +2926,19 @@ def test_advanced_difficulty_prefetch_accepts_selected_key(
     window.screen_stack.addWidget(page)
     window.screen_stack.setCurrentWidget(page)
 
+    credential = {"token": "fake-token-for-puzzle-account-b"}
+
     class FakeCredentialStore:
         def __init__(self, **_kwargs): pass
-        def get(self): return "fake-test-token-not-sent-to-network"
+        def get(self): return credential["token"]
 
     class PublicPuzzleAdapter:
         def __init__(self): self.difficulties = []
+        def get_account(self, _token): return {"username": "prefetch-user"}
         def get_puzzle_batch(self, _token, *, angle, difficulty, count):
             self.difficulties.append(difficulty)
+            if rotate_token:
+                credential["token"] = "rotated-token-for-account-a"
             return {"puzzles": [{
                 "game": {"id": "fixture-game", "pgn": "1. e4"},
                 "puzzle": {"id": f"prepared-{difficulty}", "initialPly": 0,
@@ -2941,8 +2947,10 @@ def test_advanced_difficulty_prefetch_accepts_selected_key(
             }]}
 
     class FakeService:
-        puzzle_username = "prefetch-user"
-        username = "prefetch-user"
+        # The ordinary game session can be account A while the separate
+        # puzzle:read credential is independently validated as account B.
+        puzzle_username = None
+        username = "gaming-account-a"
         def __init__(self): self.client = PublicPuzzleAdapter()
 
     service = FakeService()
@@ -2959,15 +2967,47 @@ def test_advanced_difficulty_prefetch_accepts_selected_key(
     # Thread termination can happen just before Qt delivers the queued
     # puzzle_training_finished signal. Wait for the observable UI contract,
     # not only for the Python worker to exit.
-    qtbot.waitUntil(lambda: page._prepared_online_puzzle is not None, timeout=5000)
-    assert page._prepared_online_puzzle is not None, (
-        f"worker_results={worker_results!r}; requested={service.client.difficulties!r}; "
-        f"account={page.account_id!r}/{account_id!r}; theme={page.selected_theme()!r}; "
-        f"difficulty={page.selected_difficulty()!r}; replay={page._is_replay}; "
-        f"network_status={page.network_status.text()!r}")
-
+    if rotate_token:
+        qtbot.waitUntil(lambda: not window._puzzle_prefetch_handle.is_alive(), timeout=5000)
+        qtbot.wait(0)
+        assert page._prepared_online_puzzle is None
+        assert window.game_repository.get_cached_training_puzzle(account_id,
+                                                                  f"prepared-{difficulty}") is None
+    else:
+        qtbot.waitUntil(lambda: page._prepared_online_puzzle is not None, timeout=5000)
+        assert page._prepared_online_puzzle is not None, (
+            f"worker_results={worker_results!r}; requested={service.client.difficulties!r}; "
+            f"account={page.account_id!r}/{account_id!r}; theme={page.selected_theme()!r}; "
+            f"difficulty={page.selected_difficulty()!r}; replay={page._is_replay}; "
+            f"network_status={page.network_status.text()!r}")
+        assert page._prepared_online_puzzle["difficulty"] == difficulty
     assert service.client.difficulties == [difficulty]
-    assert page._prepared_online_puzzle["difficulty"] == difficulty
+    window.close()
+
+
+def test_failed_attempt_outbox_recovers_only_when_its_account_is_selected(
+        qtbot, tmp_path):
+    from chess_coach.ui.pages.puzzle_training import PuzzleTrainingPage
+    window = MainWindow(QSettings(str(tmp_path / "puzzle-outbox-reopen.ini"),
+                                  QSettings.Format.IniFormat), offline_mode=True)
+    qtbot.addWidget(window)
+    account_a = window.game_repository.ensure_archive_account("outbox-account-a")
+    account_b = window.game_repository.ensure_archive_account("outbox-account-b")
+    attempt = {"attempt_id": "persisted-retry", "account_id": account_a,
+               "puzzle_id": "puzzle-retry", "result": "mistake", "solved": False,
+               "mistakes": 1, "hints": 0, "duration_ms": 70, "puzzle_json": "{}",
+               "session_id": "closed-session", "outbox_persisted": True}
+    window.game_repository.enqueue_puzzle_attempt(attempt, error="database busy")
+    window.show_puzzle_training(account_a)
+    page = window._puzzle_training_page
+    qtbot.waitUntil(lambda: "persisted-retry" in page._pending_attempt_saves, timeout=5000)
+    assert page.retry_save.isVisible()
+    window._puzzle_training_account_changed(page, account_b)
+    qtbot.waitUntil(lambda: page.account_id == account_b
+                    and "persisted-retry" not in page._pending_attempt_saves, timeout=5000)
+    window._puzzle_training_account_changed(page, account_a)
+    qtbot.waitUntil(lambda: "persisted-retry" in page._pending_attempt_saves, timeout=5000)
+    assert page._pending_attempt_saves["persisted-retry"]["account_id"] == account_a
     window.close()
 
 

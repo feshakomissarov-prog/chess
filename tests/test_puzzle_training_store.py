@@ -138,6 +138,31 @@ def test_valid_legacy_payload_still_contributes_rating(tmp_path):
         repository.shutdown()
 
 
+def test_failed_attempt_outbox_survives_reopen_and_is_account_scoped(tmp_path):
+    path = tmp_path / "attempt-outbox.sqlite3"
+    repository = GameRepository(path)
+    account_a = repository.ensure_archive_account("outbox-a")
+    account_b = repository.ensure_archive_account("outbox-b")
+    attempt = {"attempt_id": "durable-attempt", "account_id": account_a,
+               "puzzle_id": "p-outbox", "result": "mistake", "solved": False,
+               "mistakes": 1, "hints": 0, "duration_ms": 120,
+               "puzzle_json": "{broken"}
+    try:
+        repository.enqueue_puzzle_attempt(attempt, error="disk busy")
+        repository.shutdown()
+        repository = GameRepository(path)
+        recovered = repository.pending_puzzle_attempts(account_a)
+        assert len(recovered) == 1
+        assert recovered[0]["attempt_id"] == "durable-attempt"
+        assert recovered[0]["last_error"] == "disk busy"
+        assert repository.pending_puzzle_attempts(account_b) == []
+        repository.acknowledge_puzzle_attempt("durable-attempt")
+        repository.acknowledge_puzzle_attempt("durable-attempt")
+        assert repository.pending_puzzle_attempts(account_a) == []
+    finally:
+        repository.shutdown()
+
+
 def test_v27_upgrade_adds_rating_tables_without_losing_attempt_history(tmp_path):
     path = tmp_path / "puzzles-v27.sqlite3"
     repository = GameRepository(path)
@@ -165,6 +190,7 @@ def test_v27_upgrade_adds_rating_tables_without_losing_attempt_history(tmp_path)
             tables = {row[0] for row in db.execute(
                 "SELECT name FROM sqlite_master WHERE type='table'")}
             assert {"local_puzzle_practice_ratings", "local_puzzle_rating_events"} <= tables
-            assert db.execute("PRAGMA user_version").fetchone()[0] == 28
+            assert {"local_puzzle_attempt_outbox"} <= tables
+            assert db.execute("PRAGMA user_version").fetchone()[0] == 29
     finally:
         migrated.shutdown()

@@ -185,6 +185,39 @@ def test_delayed_save_ack_refreshes_reopened_page_after_navigation(qtbot, tmp_pa
     qtbot.wait(100)
 
 
+@pytest.mark.parametrize("puzzle_json", ["{broken", "[]", "null",
+                                        '{"puzzle":{"themes":["fork"],"rating":1500}}'])
+def test_committed_attempt_is_success_even_when_optional_read_model_fails(
+        qtbot, tmp_path, monkeypatch, puzzle_json):
+    window = MainWindow(QSettings(str(tmp_path / "post-commit-ack.ini"),
+                                  QSettings.Format.IniFormat), offline_mode=True)
+    qtbot.addWidget(window)
+    page = PuzzleTrainingPage(demo=True)
+    page.account_id = "local"
+    window._puzzle_training_page = page
+    attempt = {"attempt_id": f"ack-{len(puzzle_json)}", "account_id": "local",
+               "puzzle_id": "legacy-ack", "session_id": "session", "result": "success",
+               "solved": True, "mistakes": 0, "hints": 0, "duration_ms": 10,
+               "puzzle_json": puzzle_json, "rating_eligible": True}
+    original_read = window.game_repository.local_puzzle_attempts
+    monkeypatch.setattr(window.game_repository, "local_puzzle_attempts",
+                        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+                            RuntimeError("read-model unavailable")))
+    acknowledgements = []
+    window.puzzle_attempt_save_finished.connect(
+        lambda payload, error: acknowledgements.append((payload, error)))
+    window._save_training_attempt(page, attempt)
+    qtbot.waitUntil(lambda: bool(acknowledgements), timeout=5000)
+    stored = window.game_repository.local_puzzle_attempt_count("local")
+    assert stored == 1
+    assert acknowledgements[0][1] is None
+    assert acknowledgements[0][0]["attempt_id"] == attempt["attempt_id"]
+    assert window.game_repository.local_puzzle_rating("local")["rated_attempts"] == int(
+        puzzle_json.startswith('{"puzzle"'))
+    monkeypatch.setattr(window.game_repository, "local_puzzle_attempts", original_read)
+    window.close()
+
+
 @pytest.mark.parametrize("delay_ms", (100, 1200, 3000))
 def test_delayed_live_get_keeps_qt_event_loop_responsive(
         qtbot, tmp_path, monkeypatch, delay_ms):

@@ -172,6 +172,38 @@ def test_history_status_labels_and_theme_list_have_no_horizontal_scroll(qtbot):
     assert page.theme_list.horizontalScrollBarPolicy() == Qt.ScrollBarPolicy.ScrollBarAlwaysOff
 
 
+def test_official_rating_is_cleared_when_account_has_no_rating_history(qtbot):
+    page = PuzzleTrainingPage(demo=True)
+    qtbot.addWidget(page)
+    page.account_id = "lichess:account-a"
+    page.set_recent_history([], official_rating=1850, rating_date="2026-11-19",
+                            official_rating_loaded=True)
+    assert "1850" in page.metrics.text()
+    page.account_id = "lichess:account-b"
+    page.set_recent_history([], official_rating=None, rating_date=None,
+                            official_rating_loaded=True,
+                            practice_rating={"rating": 1520, "rated_attempts": 2})
+    assert "Рейтинг Lichess (синхронизация): нет данных" in page.metrics.text()
+    assert "1850" not in page.metrics.text()
+    assert "1520" in page.practice_rating.text()
+
+
+def test_next_is_single_flight_while_online_fetch_is_active(qtbot):
+    page = PuzzleTrainingPage()
+    qtbot.addWidget(page)
+    requests = []
+    page.new_puzzle_requested.connect(lambda *args: requests.append(args))
+    page.set_loading("Получаю задачу…")
+    page._next()
+    page._next()
+    assert requests == []
+    assert not page.next.isEnabled()
+    page.set_message("Временная ошибка сети. Повторите запрос.")
+    page._next()
+    page._next()
+    assert requests == [(page.selected_theme(), page.selected_difficulty())]
+
+
 def test_save_retry_fits_native_capture_width(qtbot):
     page = PuzzleTrainingPage(demo=True)
     qtbot.addWidget(page)

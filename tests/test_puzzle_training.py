@@ -87,6 +87,23 @@ def test_hints_are_staged_and_remain_counted_after_correct_move():
     assert state.hints_used == 2
 
 
+def test_loading_next_puzzle_clears_only_per_puzzle_reducer_history():
+    state = PuzzleTrainingState()
+    state.load(PuzzlePlayablePosition("first", chess.STARTING_FEN,
+                                      ("e2e4",), ("opening",)))
+    assert state.submit(chess.Move.from_uci("d2d4")) == "mistake"
+    state.hint()
+    assert state.submit(chess.Move.from_uci("e2e4")) == "success"
+    assert state.history
+    state.load(PuzzlePlayablePosition("second", chess.STARTING_FEN,
+                                      ("d2d4",), ("opening",)))
+    assert state.history == []
+    assert state.mistakes == 0
+    assert state.hint_level == 0
+    assert state.submit(chess.Move.from_uci("e2e4")) == "mistake"
+    assert len(state.history) == 1
+
+
 def test_activity_format_rejects_illegal_prep_move():
     with pytest.raises(ValueError, match="Подготовительный ход"):
         normalize_activity_puzzle("bad", chess.STARTING_FEN, ["e2e5", "e7e6"])
