@@ -31,17 +31,18 @@ The single themed regression command on Windows used the temporary application d
 .venv312\Scripts\python.exe -m pytest -q -o addopts= tests/test_puz_ux_04_flow.py tests/test_puz_ux_04_home.py tests/test_puzzle_training.py tests/test_puzzle_training_ui.py tests/test_puzzle_training_async.py tests/test_puzzle_training_navigation.py tests/test_board_view.py tests/test_dashboard.py tests/test_home_dashboard_last_good.py
 ```
 
-Result: **96 passed in 60.11s**. MainWindow test screenshots and a JSON interaction trace were written under the pytest temporary directory; retained outside the repository. Also completed a visible native Windows `Chess Coach` window path through the `Обучение` navigation, actual coordinate clicks, board moves, wheel scroll, repeat, timeout, and retry. It started with isolated temporary SQLite and an inert puzzle token; no user credential or user database was accessed. Five distinct new puzzle IDs were observed in succession (`NativeJourney-1`, `-3`, `-4`, `-5`, `-6`); `-1` was wrong then solved (remained red), replay was unrated, and the next four were solved cleanly (green series of four). The visible Home large-archive regression uses 3,300 isolated synthetic rows and asserts under 1,000 ms for the cached first summary.
+Result: **97 passed in 60.23s** after the Home resize follow-up. MainWindow test screenshots and a JSON interaction trace were written under the pytest temporary directory; retained outside the repository. Also completed a visible native Windows `Chess Coach` window path through the `Обучение` navigation, actual coordinate clicks, board moves, wheel scroll, repeat, timeout, and retry. It started with isolated temporary SQLite and an inert puzzle token; no user credential or user database was accessed. Five distinct new puzzle IDs were observed in succession (`NativeJourney-1`, `-3`, `-4`, `-5`, `-6`); `-1` was wrong then solved (remained red), replay was unrated, and the next four were solved cleanly (green series of four). The visible Home large-archive regression uses 3,300 isolated synthetic rows and asserts under 1,000 ms for the cached first summary.
 
 The native visual session was inspected at the current Windows display size. Automated offscreen frame captures are not published because the local Qt offscreen font bundle rendered Russian glyphs as boxes; the native window screenshots were readable and visually inspected in the interactive session. The three official scale/size captures remain part of the final Windows workflow run.
+
+After the first exact-head workflow stopped in its Home visual preflight, I reproduced the same `623 > 611` recent-card overflow on both this branch and detached `main` (`30cf8f0`). Fixed the card width to follow the scroll viewport and added a resize regression across 1360×860, 1280×720, and 1120×640. The targeted native Home capture at 1360×860 now passes; its PNGs were opened and visually reviewed. This small Home visual compatibility fix is included because the required PUZ04 Home archive acceptance and official L3 were blocked by it.
 
 No real Lichess requests or OAuth flows were run. The native timeout/recovery and five-ID sequence used a fake transport. This does not substitute for the owner's own authenticated Windows acceptance.
 
 ## L3
 
-- Exact final code/test SHA: pending commit.
-- Windows workflow run: pending.
-- Full pytest, `compileall`, isolated offline initialization, native visual matrix, and workflow artifacts: pending exact-head GitHub Actions.
+- Exact final code/test SHA: pending follow-up fix commit.
+- Windows workflow run `44836494683` on initial SHA `26af60a`: the targeted PUZ04 tests passed (62); L3 stopped at the Home native chart preflight on the baseline-reproducible card overflow, so dependent full pytest and visual-matrix jobs were skipped. A new exact-head Windows workflow must run after the follow-up commit; full pytest, isolated offline initialization, native visual matrix, and workflow artifacts remain pending.
 
 ## OWNER ACCEPTANCE REQUIRED
 

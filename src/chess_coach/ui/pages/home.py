@@ -7,7 +7,7 @@ import math
 
 import chess
 
-from PySide6.QtCore import QPoint, QPointF, QRect, QTimer, Qt, Signal
+from PySide6.QtCore import QEvent, QPoint, QPointF, QRect, QTimer, Qt, Signal
 from PySide6.QtGui import QColor, QFont, QFontMetrics, QPainter, QPainterPath, QPen, QPolygonF
 from PySide6.QtWidgets import (
     QComboBox, QFrame, QGridLayout, QHBoxLayout, QLabel, QPushButton, QScrollArea,
@@ -730,6 +730,7 @@ class HomePage(QWidget):
         self.recent_safety_notice.setMaximumHeight(20)
         recent_layout.addWidget(self.recent_safety_notice)
         recent_rows = QWidget()
+        self._recent_rows = recent_rows
         # Keep the resizable scroll content constrained by its viewport even
         # when recent-game cards have a wider desktop size hint.
         recent_rows.setSizePolicy(QSizePolicy.Policy.Ignored,
@@ -743,6 +744,7 @@ class HomePage(QWidget):
         self.recent_scroll.setWidgetResizable(True)
         self.recent_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self.recent_scroll.setWidget(recent_rows)
+        self.recent_scroll.viewport().installEventFilter(self)
         recent_layout.addWidget(self.recent_scroll, 1)
         # Keep progress and the next-lesson action in the center zone and the
         # three compact recent-game cards visible together in the right zone.
@@ -815,6 +817,24 @@ class HomePage(QWidget):
                        self.home_more_content, self.home_more):
             widget.setParent(self._legacy_action_host)
             widget.hide()
+
+    def _sync_recent_rows_width(self) -> None:
+        if not hasattr(self, "recent_scroll"):
+            return
+        width = self.recent_scroll.viewport().width()
+        if width > 0 and self._recent_rows.width() != width:
+            self._recent_rows.setFixedWidth(width)
+        if width > 0:
+            for card in self._recent_rows.findChildren(QFrame):
+                if card.objectName() == "metricCard":
+                    card.setMaximumWidth(width)
+
+    def eventFilter(self, watched, event):
+        if (hasattr(self, "recent_scroll")
+                and watched is self.recent_scroll.viewport()
+                and event.type() == QEvent.Type.Resize):
+            QTimer.singleShot(0, self._sync_recent_rows_width)
+        return super().eventFilter(watched, event)
 
     def set_selector_options(self, options: dict) -> None:
         selected = self.dashboard_account.currentData()
@@ -931,6 +951,7 @@ class HomePage(QWidget):
 
     def resizeEvent(self, event) -> None:  # noqa: N802 - Qt override
         super().resizeEvent(event)
+        QTimer.singleShot(0, self._sync_recent_rows_width)
         metric_width = (self.home_overview_scroll.viewport().width()
                         if hasattr(self, "home_overview_scroll")
                         else event.size().width())

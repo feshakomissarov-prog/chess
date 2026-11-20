@@ -4404,6 +4404,7 @@ class MainWindow(QMainWindow):
         # layout can retain a desktop minimum until a later resize event.
         if recent_width > 0:
             card.resize(recent_width, card.height())
+            card.setMaximumWidth(recent_width)
         # The scroll-area viewport owns the card width. Ignoring the card's
         # stale horizontal size hint lets its child layout switch to the
         # compact stacked form instead of overflowing at 1280x720.
