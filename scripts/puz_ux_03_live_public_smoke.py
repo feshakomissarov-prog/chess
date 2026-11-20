@@ -8,6 +8,7 @@ records only public puzzle metadata plus genuine widget screenshots.
 from __future__ import annotations
 
 from datetime import datetime, timezone
+import faulthandler
 import json
 import os
 from pathlib import Path
@@ -139,6 +140,8 @@ def solve_public_line(app: QApplication, page: PuzzleTrainingPage, output: Path,
 
 
 def play(output: Path, dpi_scale: str) -> None:
+    debug_trace = (output / "live-smoke-stacks.log").open("w", encoding="utf-8")
+    faulthandler.dump_traceback_later(45, repeat=True, file=debug_trace)
     os.environ["QT_SCALE_FACTOR"] = dpi_scale
     app = QApplication([])
     page = PuzzleTrainingPage()
@@ -255,6 +258,8 @@ def play(output: Path, dpi_scale: str) -> None:
     page.close()
     app.processEvents()
     shutdown_logging()
+    faulthandler.cancel_dump_traceback_later()
+    debug_trace.close()
 
 
 def main() -> None:
