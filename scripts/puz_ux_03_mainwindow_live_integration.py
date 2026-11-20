@@ -156,7 +156,7 @@ def run(output: Path) -> None:
     if before_auto_next != stored_rating:
         raise AssertionError("SQLite save ACK rating does not match the visible practice rating")
     wait_until(app, lambda: page.state.puzzle is not None and
-               page.state.puzzle.puzzle_id == "00008", timeout_ms=10000)
+               page.state.puzzle.puzzle_id == "0haqU", timeout_ms=10000)
     after_auto_next = int(page.practice_rating.text().split(":", 1)[1].split()[0])
     if after_auto_next != stored_rating:
         raise AssertionError(
