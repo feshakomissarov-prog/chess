@@ -6,6 +6,48 @@
 **Code SHA:** `ed96ecfe29dd2c6d42e8fdf2802c92f3fcc9f571`
 **Merge:** not performed
 
+## §13 follow-up review evidence — 2026-11-20
+
+This follow-up supersedes the earlier §13 verification snapshots below for the addressed behavior. Existing defect IDs were retained; no duplicate IDs were added.
+
+- **Code SHA:** `c6ccb8aca7667caa2abc97e59208441768f15768` (last executable change; replay terminal text). The latest targeted test-only commit is `ed95127`; executable source was not changed afterward.
+- **L1 GREEN:** [workflow run 44714071416](https://github.com/feshakomissarov-prog/chess/actions/runs/44714071416), Windows Python 3.12: **61 passed in 125.60 s**. A new replay-verdict test first failed against the preceding code SHA with **1 failed, 60 passed**, proving the inaccurate auto-next promise; the fix now reports “Повтор решён. Рейтинг не изменён.”
+- **L2 PASS:** [workflow run 44714071416](https://github.com/feshakomissarov-prog/chess/actions/runs/44714071416), artifact [puz-ux-03-l2-c6ccb8ac](https://github.com/feshakomissarov-prog/chess/actions/runs/44714071416/artifacts/14619391283). The job ran real Qt on Windows, fetched and played public unauthenticated Lichess puzzles `0haqU`, `00008`, `0000D` (HTTP 200), ran the production `MainWindow` adapter scenario against those real public responses with isolated temporary SQLite, and captured the 100/125/150% display matrix. The artifact includes timestamped sequences for legal-wrong rollback, hints, opponent replies, win/auto-next, wheel review, saved-history replay, skip, controlled network failure, account switch, and hardest prefetch.
+- **MainWindow evidence:** 10 public GETs, no Authorization header or credential sent. The successful initial save ACK and auto-next both showed CC rating `1501`; replay remained `1501` while the local attempt count advanced `1 → 2`. Skip reached `skipped`; controlled network failure stayed on an explicit Lichess error with no demo; account switch restarted a scoped request; prefetch retained `hardest`. Its fake profile/credential was only a harness adapter, not live OAuth.
+- **Replay verdict:** the final native frame `puz-ux-03-mainwindow/10-…-mainwindow-interactive-unrated-history-replay.png` now explicitly says “Повтор решён. Рейтинг не изменён.” and shows SQLite save confirmation. It no longer promises auto-next.
+- **Visual inspection:** opened real `live-ready` frames at 100%, 125%, and 150%, plus wrong-move, clean-win, wheel-review and replay-completion frames. The compact instruction is fully visible at each scale. Theme colors, board, actions, and side panel remain legible; the 125/150% layouts scroll the side pane vertically as intended. Full-resolution files are in the L2 artifact above; for example `puz-ux-03-live-public/scale-1.5/00-…-live-ready.png`, `puz-ux-03-live-public/scale-1.5/16-…-clean-win.png`, and `puz-ux-03-mainwindow/10-…-mainwindow-interactive-unrated-history-replay.png`.
+- **Authorized OAuth:** `BLOCKED (no authorized separate test profile available)`. MainWindow uses fake local profile resolution and a fake credential marker; the HTTP adapter explicitly sends no credential. This verifies production page/signals/workers/save ACK/prefetch plumbing with public real puzzle responses, not authenticated batch/OAuth behavior.
+
+### §13.2 first-input investigation
+
+The earlier `2357.82 ms` first-feedback / `2358.47 ms` destination-click outlier was **not reproduced** in the latest Windows runner measurement. The dedicated trace covers **10 separate cold Qt processes** and **50 warm board inputs**, records focus, click dispatch, first paint, board paint, event-loop gaps, CPU, Python thread count, startup, page construction, and public GET duration, and does not infer causality.
+
+| Measurement | Result | Interpretation |
+| --- | --- | --- |
+| Cold input → first painted feedback | n=10; p50 `30.75 ms`, p95/max `31.62 ms` | Board was focused; all ten below 100 ms. |
+| Warm input → first painted feedback | n=50; p50 `5.44 ms`, p95 `6.22 ms`, max `31.86 ms` | Repeated real Qt input on a position fetched from Lichess. |
+| Warm Qt event-loop gaps | p95 `17.00 ms`, max `39.44 ms` | No 2.3 s stall in this sample. |
+| First cold process to feedback | `629.96 ms` total; public GET `387.60 ms`; page construct/show `103.75 ms`; input-to-paint `31.13 ms` | Separates setup/network time from the first board input. |
+
+The old outlier remains **unattributed**: the new trace establishes that normal cold/warm board input is fast under these isolated runner conditions, but does not prove why the one earlier QtTest destination dispatch stalled. For this measured run, p95 is below the §13 gate of 100 ms; do not generalize it to owner hardware or live OAuth.
+
+### §13 UX checklist, refreshed against final L2
+
+| Question from §8.2 | Result | Evidence / limit |
+| --- | --- | --- |
+| Whose turn is it? | YES | Real public ready/reply frames show turn changes. |
+| Was my move accepted, and can I see opponent reply? | YES | Multi-ply lines show accepted move, reply wait, then animated reply. |
+| Was the move illegal or a legal puzzle mistake? | PARTIAL | Public legal-wrong move is red and rolls back; illegal-move distinction has addressable tests, not a separate public interaction. |
+| Did the task finish and what next? | YES | Public clean win/auto-next, hinted completion, MainWindow skip, and explicit network error/no fallback captured. |
+| Is result saving visible; can I continue? | YES in isolated integration | MainWindow save ACK and auto-next screenshots show SQLite success; fake delayed-DB tests cover nonblocking behavior. Owner DB was not used. |
+| Which rating changes? | YES for local/replay contract; OAuth PARTIAL | CC rating stayed at the save ACK value through auto-next and replay did not change it; Lichess official rating is read-only. No authenticated profile was tested. |
+| What happens after network failure; any demo fallback? | YES for controlled failure | MainWindow frame shows an explicit Lichess connection error, no demo; a real network outage/recovery was not induced. |
+| Can I inspect previous moves with the wheel? | YES | Real public Qt frame/trace records wheel back and forward with review state; reducer tests cover the played-position limit. |
+| What do red/green and streak mean? | YES for visible tape | Wrong/hinted/clean outcomes and streak counters are visible in native frames. |
+| Is there a delay and at which stage? | PARTIAL / measured | Cold/warm input values above; the previous isolated 2.36 s dispatch remains unattributed. |
+
+**Final Windows L3:** pending. It will be run once at the final PR head after this evidence-log commit. PR #52 remains Draft after CI; no merge is authorized or performed.
+
 ## Scope delivered in this pass
 
 - The puzzle reducer records only known/pre-puzzle and already displayed positions for review; the page routes wheel and arrow-key review through those snapshots and can return to the authoritative position.
