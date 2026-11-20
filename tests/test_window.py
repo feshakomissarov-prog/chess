@@ -2864,7 +2864,7 @@ def test_advanced_difficulty_prefetch_accepts_selected_key(
             self.difficulties.append(difficulty)
             return {"puzzles": [{
                 "game": {"id": "fixture-game", "pgn": "1. e4"},
-                "puzzle": {"id": f"prepared-{difficulty}", "initialPly": 1,
+                "puzzle": {"id": f"prepared-{difficulty}", "initialPly": 0,
                            "lastMove": "e2e4", "solution": ["e7e5"],
                            "themes": [angle], "rating": 1500},
             }]}
