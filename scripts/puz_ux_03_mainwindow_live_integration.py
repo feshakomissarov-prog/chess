@@ -171,6 +171,7 @@ def run(output: Path) -> None:
     duplicate_payload = page._prepared_online_puzzle["payload"]
     duplicate_rating_before = int(window.game_repository.local_puzzle_rating(account_id)["rating"])
     duplicate_attempt_count_before = window.game_repository.local_puzzle_attempt_count(account_id)
+    QTimer.singleShot(0, lambda: _accept_question(app))
     page.fetch.click()
     wait_until(app, lambda: page.state.puzzle is not None and
                page.state.puzzle.puzzle_id == "0haqU" and not page._is_replay,
@@ -262,22 +263,14 @@ def run(output: Path) -> None:
     window.lichess.username = "cc-puz-ux03-isolated"
     client.username = "cc-puz-ux03-isolated"
     page.account_selector.setCurrentIndex(page.account_selector.findData(account_id))
-    wait_until(app, lambda: page.account_id == account_id and page.state.puzzle is not None,
+    wait_until(app, lambda: page.account_id == account_id and page.state.puzzle is not None
+               and not page._is_replay and page.state.status.value == "ready",
                timeout_ms=15000)
-    page.fetch.click()
-    wait_until(app, lambda: page.state.puzzle is not None and
-               not page._is_replay and page._active_source == "lichess"
-               and page.state.status.value == "ready", timeout_ms=15000)
     legal_wrong = next(move for move in page.state.puzzle.board().legal_moves
                        if move.uci() not in page.state.puzzle.expected_user_moves)
     click_move(app, page, legal_wrong)
     wait_until(app, lambda: page.state.status.value == "mistake_retry", timeout_ms=5000)
     wait_until(app, lambda: not page._wrong_timer_pending, timeout_ms=5000)
-    page.fetch.click()
-    wait_until(app, lambda: page.state.puzzle is not None and
-               not page._is_replay and page._active_source == "lichess"
-               and page.state.status.value == "ready",
-               timeout_ms=15000)
     skipped_puzzle_id = page.state.puzzle.puzzle_id
     page._prepared_online_puzzle = None
     QTimer.singleShot(0, lambda: _accept_question(app))
