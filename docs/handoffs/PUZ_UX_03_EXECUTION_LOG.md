@@ -3,7 +3,7 @@
 **PR:** Draft #52 — `codex/puz-ux-03-online-puzzle-playability-2026-11-20`
 **Specification:** [`PUZ_UX_03_ONLINE_PUZZLE_PLAYABILITY_2026_11_20.md`](../specs/PUZ_UX_03_ONLINE_PUZZLE_PLAYABILITY_2026_11_20.md)
 **Base:** `b9e4b72d578e98db2ba345959c8474028d304cdc`
-**Code SHA:** `abed33e3f90c9537cb6f526cc9998fa960e73318`
+**Code SHA:** `cead2ace37d5913314ead22de784957a90a48018`
 **Merge:** not performed
 
 ## Scope delivered in this pass
@@ -43,9 +43,11 @@ The suite includes OAuth URL dispatch on the Qt GUI thread using a fake callback
 
 The three DPI screenshots were opened and visually inspected: 100% `1672x941-ready.png` (DPR 1.0), 125% `1280x720-ready.png` (physical `1600x900`, DPR 1.25), 150% `1120x640-ready.png` (physical `1680x960`, DPR 1.5). Branding/colors remain consistent; the shorter layouts use scrollable side panels and keep the board/actions visible. Live frames `01-...-wrong-visible.png` and `02-...-wrong-reverted.png` show the red transient followed by rollback; `16-...-clean-win.png` shows the success verdict and saving status.
 
+**Final code delta after this pass:** Home's saved-puzzle button now says “Открыть повтор” and describes the read-only/no-rating behavior; the shared visual capture now expects that replay rather than a playable offline trainer. Addressed by `cead2ace`; the PR was Draft during the next synchronize-triggered L2, so its public live smoke and DPI captures must be repeated for this final UI/capture delta before L3.
+
 ### L3 — full Windows CI
 
-**Status: PENDING.** After this evidence update is committed, mark this PR Ready for review to trigger the automatic exact-head Windows test/compile/offline-smoke/native visual jobs. No manual `workflow_dispatch` is needed. Return the open PR to Draft after the run; do not merge. If executable code changes after L3, run L2 and L3 again for the new code SHA.
+**Status: PENDING final code SHA.** After L2 for `cead2ace` is green, mark this PR Ready for review to trigger the automatic exact-head Windows test/compile/offline-smoke/native visual jobs. No manual `workflow_dispatch` is needed. Return the open PR to Draft after the run; do not merge. If executable code changes after L3, run L2 and L3 again for the new code SHA.
 
 ## Live access and UX acceptance
 
