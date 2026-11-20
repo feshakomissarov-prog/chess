@@ -104,6 +104,7 @@ def wait_until(app: QApplication, predicate, *, timeout_ms: int = 2500) -> None:
 
 
 def click_move(app: QApplication, page: PuzzleTrainingPage, move: chess.Move) -> None:
+    interaction_started = time.perf_counter()
     starting_index = page.state.solution_index
     starting_mistakes = page.state.mistakes
     start = page.board._square_center(move.from_square).toPoint()
@@ -114,6 +115,7 @@ def click_move(app: QApplication, page: PuzzleTrainingPage, move: chess.Move) ->
     if automation_clicks is not None:
         automation_clicks.append({"phase": "source",
                                   "elapsed_ms": round((time.perf_counter() - click_started) * 1000, 2)})
+    source_click_returned = time.perf_counter()
     if move.promotion:
         # BoardView deliberately opens the normal piece picker for user input.
         # Select the puzzle's expected piece through its actual Qt button while
@@ -140,10 +142,22 @@ def click_move(app: QApplication, page: PuzzleTrainingPage, move: chess.Move) ->
     if automation_clicks is not None:
         automation_clicks.append({"phase": "destination",
                                   "elapsed_ms": round((time.perf_counter() - click_started) * 1000, 2)})
+    destination_click_returned = time.perf_counter()
     if move.promotion and not promotion["selected"]:
         raise AssertionError("Promotion picker did not accept the expected piece")
     wait_until(app, lambda: page.state.solution_index > starting_index
                or page.state.mistakes > starting_mistakes)
+    interaction_samples = getattr(page, "_interaction_samples", None)
+    if interaction_samples is not None:
+        completed = time.perf_counter()
+        interaction_samples.append({
+            "uci": move.uci(),
+            "source_to_destination_ms": round(
+                (destination_click_returned - source_click_returned) * 1000, 2),
+            "destination_to_state_ms": round(
+                (completed - destination_click_returned) * 1000, 2),
+            "total_ms": round((completed - interaction_started) * 1000, 2),
+        })
 
 
 def capture(page: PuzzleTrainingPage, output: Path, index: int, label: str,
@@ -238,6 +252,18 @@ def play(output: Path, dpi_scale: str) -> None:
     app.processEvents()
     paint_observer = BoardPaintObserver(page)
     page._automation_click_ms = []
+    page._interaction_samples = []
+    event_loop_gaps: list[float] = []
+    heartbeat = QTimer(page)
+    heartbeat.setInterval(10)
+    last_heartbeat = [time.perf_counter()]
+
+    def record_heartbeat() -> None:
+        now = time.perf_counter()
+        event_loop_gaps.append((now - last_heartbeat[0]) * 1000)
+        last_heartbeat[0] = now
+
+    heartbeat.timeout.connect(record_heartbeat)
     puzzles = fetch_public_puzzles()
     frames: list[dict] = []
 
@@ -269,6 +295,9 @@ def play(output: Path, dpi_scale: str) -> None:
     wrong = next((move for move in board.legal_moves if move != expected), None)
     if wrong is None:
         raise AssertionError("Live puzzle has no alternate legal move for wrong-move UX check")
+    event_loop_gaps.clear()
+    last_heartbeat[0] = time.perf_counter()
+    heartbeat.start()
     click_move(app, page, wrong)
     if page.state.status.value != "mistake_retry":
         raise AssertionError("Real Qt input did not register the wrong legal move")
@@ -333,6 +362,13 @@ def play(output: Path, dpi_scale: str) -> None:
                                         page._input_feedback_ms)],
              "first_input_stage_timings": first_input_stages,
              "automation_click_samples": page._automation_click_ms,
+             "interaction_samples": page._interaction_samples,
+             "event_loop_gap_p95_ms": round(sorted(event_loop_gaps)[
+                 min(len(event_loop_gaps) - 1,
+                     math.ceil(0.95 * len(event_loop_gaps)) - 1)], 2)
+                 if event_loop_gaps else None,
+             "event_loop_gap_max_ms": round(max(event_loop_gaps), 2)
+                 if event_loop_gaps else None,
              "board_paint_event_ms": paint_observer.durations_ms,
              "elapsed_seconds": round(sum(float(meta["get_ms"]) for _raw, meta in puzzles) / 1000, 3),
              "rating_eligible": False}
@@ -353,6 +389,7 @@ def play(output: Path, dpi_scale: str) -> None:
                                     "frames": len(frames),
                                     "elapsed_seconds": trace["elapsed_seconds"]},
                                    ensure_ascii=False))
+    heartbeat.stop()
     page.close()
     app.processEvents()
     shutdown_logging()
