@@ -125,9 +125,9 @@
 
 **Native visual proof:** кадры каждого значимого пользовательского состояния: READY, REVIEW, restored interactive, arrow-before/selected-cleared, WRONG red tile, CLEAN green tile, series 2+, next LOADING и отличающийся следующий ID, TIMEOUT/retry, replay-unrated, Home large-archive cache-hit/no-evaluation. Кадры при 100/125/150% как выше; текст должен читаться, главный CTA виден, нет скрытых перекрытий/scroll trap. Перед финальным handoff Codex **открывает скриншоты и проверяет реальную геометрию**, не ограничивается кодом выхода runner и не заявляет, что сам вводил мышью при наличии только прямого вызова функций.
 
-## 7. План проверок и стоимость CI
+## План проверок и стоимость CI
 
-**L1 — после отдельных правок (локально / адресно):**
+### Уровень 1 — после отдельных правок (локально / адресно)
 - git diff --check
 - python -m py_compile src/chess_coach/ui/pages/puzzle_training.py src/chess_coach/lichess/puzzle_training.py src/chess_coach/board_view.py src/chess_coach/window.py
 - python -m pytest -q -o addopts= tests/test_puz_ux_04_flow.py::test_wheel_forward_returns_playable_board
@@ -137,20 +137,20 @@
 - python -m pytest -q -o addopts= tests/test_puz_ux_04_home.py::test_large_archive_home_shows_cached_or_informative_status
 - Имена **новых** tests указаны как обязательные node ID для разработки, они пока не существуют. До исправлений RED должен подтверждать симптомы, **без искусственного моделирования экзотики**. Минимум 1 native Qt clicked-flow smoke после действий с BoardView.
 
-**L2 — один тематический Windows Qt запуск после единого пакета:**
+### Уровень 2 — один тематический Windows Qt запуск после единого пакета
 - python -m pytest -q -o addopts= tests/test_puz_ux_04_flow.py tests/test_puz_ux_04_home.py tests/test_puzzle_training_ui.py tests/test_puzzle_training_async.py tests/test_puzzle_training_navigation.py tests/test_board_view.py (последние имена/существование сверить в текущем HEAD; при отсутствии файла корректировать команду открыто, не пропускать покрытие).
 - Windows MainWindow **реальный пользовательский flow 1–10** с QTest.mouseClick/drag/wheel или реальными Qt events, инертными credentials, временной SQLite и live **публичными GET Lichess**. Если ограничение Qt тестового окружения мешает wheel, добавить нативный event; **не засчитывать programmatic page method call как ручной mouse proof**.
 - Достаточно **одного** L2 с тремя DPI; без 30 избыточных полноэкранных матриц. Видеозапись короткого e2e приветствуется, но JSON trace + PNG + исходный скрипт обязательны. Тестовые trace содержат ID задач, запросы, статусы, переходы, timestamps и флаги input_enabled (без токенов).
 - Критерии регрессий: существующие профили, rating idempotency, recovery, Fair Play, no requests to owner's storage/credentials.
 
-**L3 — один финальный Windows exact-head:**
+### Уровень 3 — один финальный Windows exact-head
 - Один полный CI Windows на final code/test SHA: весь pytest, compileall, isolated offline smoke только как внутренний safety check, native visual matrix, spec-contract gate.
 - После L3 Markdown-only правки не требуют повторного полного прогона; при изменении исполняемого кода/тестов — repeat L3 по CC-VERIFY-01.
 - В журнале записать first bad/current SHA, RED/GREEN commands, run URLs, evidence filenames/links, измеренное время Home и next; НЕ выдавать mock GET за настоящую OAuth-проверку.
 
 **Бюджет:** L1 короткие адресные прогоны 1–3 минуты на пакет; L2 один тематический CI с публичными GET и скриншотами (ориентир 5–15 мин, не обещание); L3 один полный native Windows (ориентир 10–20 мин). Изменения docs-only — только spec-contract. Дополнительные прогоны обосновать реальной причиной, не бесконечной охотой на редкости.
 
-## 8. Критерии приёмки и доказательства
+## Критерии приёмки и доказательства
 
 | AC | Что должен увидеть владелец | Доказательство Codex | Статус на момент ТЗ |
 | --- | --- | --- | --- |
