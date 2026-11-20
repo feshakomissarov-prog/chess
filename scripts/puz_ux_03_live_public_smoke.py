@@ -175,6 +175,15 @@ def capture(page: PuzzleTrainingPage, output: Path, index: int, label: str,
     print(f"FRAME {timestamp} {filename}")
 
 
+def wheel_board(page: PuzzleTrainingPage, delta_y: int) -> None:
+    pos = page.board.rect().center()
+    event = QWheelEvent(
+        QPointF(pos), QPointF(page.board.mapToGlobal(pos)), QPoint(), QPoint(0, delta_y),
+        Qt.MouseButton.NoButton, Qt.KeyboardModifier.NoModifier,
+        Qt.ScrollPhase.ScrollUpdate, False)
+    QCoreApplication.sendEvent(page.board, event)
+
+
 def instrument_first_feedback(page: PuzzleTrainingPage) -> list[dict]:
     """Measure synchronous stages of the first live input without changing behavior."""
     samples: list[dict] = []
@@ -244,7 +253,8 @@ def play(output: Path, dpi_scale: str) -> None:
     app = QApplication([])
     app.setStyleSheet(desktop_stylesheet(VISUAL_TOKENS))
     page = PuzzleTrainingPage()
-    page.resize(1440, 900)
+    logical_sizes = {"1": (1672, 941), "1.25": (1280, 720), "1.5": (1120, 640)}
+    page.resize(*logical_sizes.get(dpi_scale, (1440, 900)))
     page.show()
     page.raise_()
     page.activateWindow()
@@ -354,6 +364,21 @@ def play(output: Path, dpi_scale: str) -> None:
     if page.state.status.value != "success":
         raise AssertionError("Did not finish second public puzzle in production page")
     capture(page, output, len(frames), "clean-win", frames)
+    if page.state.review_count < 3:
+        raise AssertionError("Public multi-move puzzle did not expose at least two played plies")
+    terminal_status = page.state.status
+    for _ in range(page.state.review_count + 1):
+        wheel_board(page, 120)
+    if not page.state.is_reviewing or page.state.review_cursor != 0:
+        raise AssertionError("Wheel-back did not reach the first known public position")
+    for _ in range(page.state.review_count + 1):
+        wheel_board(page, -120)
+    if page.state.review_cursor != page.state.review_count - 1:
+        raise AssertionError("Wheel-forward did not return to the latest played position")
+    capture(page, output, len(frames), "wheel-review-back-forward", frames)
+    page.return_to_solution.click()
+    if page.state.is_reviewing or page.state.status != terminal_status:
+        raise AssertionError("Leaving wheel review changed the completed puzzle status")
     wait_until(app, lambda: auto_next["advanced"], timeout_ms=2500)
     if page.state.puzzle.puzzle_id != "0000D":
         raise AssertionError("Production auto-next did not load the third public API position")

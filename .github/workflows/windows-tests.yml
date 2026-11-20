@@ -85,7 +85,9 @@ jobs:
           if-no-files-found: warn
   puz-ux-03-l2:
     name: L2 PUZ-UX-03 online and Qt review
-    if: github.event_name == 'pull_request' && github.event.action == 'ready_for_review' && github.event.pull_request.head.ref == 'codex/puz-ux-03-online-puzzle-playability-2026-11-20'
+    # PUZ-UX-03 L2 runs sequentially after L1 in puzzle-ux-02-verification;
+    # never race its native/live checks with the final ready_for_review L3.
+    if: github.event_name == 'pull_request' && github.event.action == 'ready_for_review' && github.event.pull_request.draft && github.event.pull_request.head.ref == 'codex/puz-ux-03-online-puzzle-playability-2026-11-20'
     runs-on: windows-latest
     timeout-minutes: 12
     steps:
