@@ -19,11 +19,11 @@ from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
 import chess
-from PySide6.QtCore import QPoint, QPointF, Qt
+from PySide6.QtCore import QPoint, QPointF, QTimer, Qt
 from PySide6.QtCore import QCoreApplication
 from PySide6.QtGui import QWheelEvent
 from PySide6.QtTest import QTest
-from PySide6.QtWidgets import QApplication
+from PySide6.QtWidgets import QApplication, QDialog, QPushButton
 
 from chess_coach.diagnostics import shutdown_logging
 from chess_coach.lichess.puzzle_training import normalize_api_puzzle
@@ -86,7 +86,30 @@ def click_move(app: QApplication, page: PuzzleTrainingPage, move: chess.Move) ->
     start = page.board._square_center(move.from_square).toPoint()
     end = page.board._square_center(move.to_square).toPoint()
     QTest.mouseClick(page.board, Qt.MouseButton.LeftButton, pos=start)
+    if move.promotion:
+        # BoardView deliberately opens the normal piece picker for user input.
+        # Select the puzzle's expected piece through its actual Qt button while
+        # QDialog.exec() runs its nested event loop.
+        promotion = {"selected": False, "attempts": 0}
+
+        def choose_promotion() -> None:
+            dialog = QApplication.activeModalWidget()
+            if isinstance(dialog, QDialog):
+                expected_name = chess.piece_name(move.promotion)
+                button = next((item for item in dialog.findChildren(QPushButton)
+                               if item.accessibleName() == expected_name), None)
+                if button is not None:
+                    QTest.mouseClick(button, Qt.MouseButton.LeftButton)
+                    promotion["selected"] = True
+                    return
+            promotion["attempts"] += 1
+            if promotion["attempts"] < 100:
+                QTimer.singleShot(10, choose_promotion)
+
+        QTimer.singleShot(0, choose_promotion)
     QTest.mouseClick(page.board, Qt.MouseButton.LeftButton, pos=end)
+    if move.promotion and not promotion["selected"]:
+        raise AssertionError("Promotion picker did not accept the expected piece")
     wait_until(app, lambda: page.state.solution_index > starting_index
                or page.state.mistakes > starting_mistakes)
 
