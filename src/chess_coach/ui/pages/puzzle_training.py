@@ -600,12 +600,13 @@ class PuzzleTrainingPage(QWidget):
         scope = (self.account_id, self.selected_theme(), self.selected_difficulty())
         if source == "lichess":
             self._seen_online_ids_by_scope.setdefault(scope, set()).add(puzzle.puzzle_id)
-            self._session_results.append({
-                "mark": "·", "label": "в процессе", "puzzle_id": puzzle.puzzle_id,
-                "session_id": self._session_id, "pending": True,
-                "source": "lichess", "account_id": self.account_id,
-            })
-            self._session_results = self._session_results[-20:]
+            if not self._is_replay:
+                self._session_results.append({
+                    "mark": "·", "label": "в процессе", "puzzle_id": puzzle.puzzle_id,
+                    "session_id": self._session_id, "pending": True,
+                    "source": "lichess", "account_id": self.account_id,
+                })
+                self._session_results = self._session_results[-20:]
         self._started_at = time.monotonic()
         self._terminal_verdict = ""
         self._rating_preview = None
@@ -724,7 +725,15 @@ class PuzzleTrainingPage(QWidget):
         position = self.state.navigate_review(int(direction))
         self.board.set_position(position)
         if not self.state.is_reviewing:
-            self._return_to_solution()
+            # Reaching the latest known position restores live input, while the
+            # explicit return control stays available as a clear way out of review.
+            self.board.set_interaction_enabled(self._allow_submit)
+            self.return_to_solution.show()
+            self.review_position.setText("Текущая позиция решения")
+            self.review_back.setEnabled(self.state.review_count > 1)
+            self.review_forward.setEnabled(False)
+            self._show_verdict(
+                "Текущая позиция · вернитесь к решению или выберите фигуру.", "neutral")
             return
         self.board.set_interaction_enabled(False)
         self.return_to_solution.show()

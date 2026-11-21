@@ -52,6 +52,9 @@ def test_wheel_forward_returns_playable_board(qtbot):
 
     assert not page.state.is_reviewing
     assert page.board._interaction_enabled
+    assert page.return_to_solution.isVisible()
+    qtbot.mouseClick(page.return_to_solution, Qt.MouseButton.LeftButton)
+    assert page.return_to_solution.isHidden()
     qtbot.mouseClick(page.board, Qt.MouseButton.LeftButton, pos=_center(page.board, chess.D7))
     assert page.board._selected_square == chess.D7
 
@@ -184,7 +187,6 @@ def test_mainwindow_real_qt_journey_uses_unique_online_tasks_and_recovers(
         page = window._puzzle_training_page
         qtbot.waitUntil(lambda: page is not None and page.state.puzzle is not None, timeout=10_000)
         page.auto_next.setChecked(False)
-        qtbot.waitUntil(lambda: page._prepared_online_puzzle is not None, timeout=10_000)
 
         def capture(name):
             path = tmp_path / f"{name}.png"
@@ -226,7 +228,6 @@ def test_mainwindow_real_qt_journey_uses_unique_online_tasks_and_recovers(
         qtbot.waitUntil(lambda: page.state.status.value == "success", timeout=3000)
         capture("wrong-then-solved")
         first_id = page._session_puzzle_id
-        qtbot.waitUntil(lambda: page._prepared_online_puzzle is not None, timeout=10_000)
 
         # Four successive new tasks are selected only via the visible CTA.
         seen = {first_id}
@@ -247,8 +248,6 @@ def test_mainwindow_real_qt_journey_uses_unique_online_tasks_and_recovers(
             qtbot.mouseClick(page.board, Qt.MouseButton.LeftButton,
                              pos=_center(page.board, chess.D5))
             qtbot.waitUntil(lambda: page.state.status.value == "success", timeout=3000)
-            if index < 3:
-                qtbot.waitUntil(lambda: page._prepared_online_puzzle is not None, timeout=10_000)
 
         assert len(seen) == 5
         assert page._session_streak == 4
