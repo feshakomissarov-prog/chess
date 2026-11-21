@@ -151,6 +151,7 @@ jobs:
             "RED_BASE_SHA=$env:BASE_SHA" | Out-File -FilePath "$env:GITHUB_STEP_SUMMARY" -Append
             "PUZ-UX-05 regression suite failed on unchanged base as expected." | Out-File -FilePath "$env:GITHUB_STEP_SUMMARY" -Append
           } finally { Pop-Location }
+          exit 0
 
   puz-ux-05-l2-windows-qt:
     name: L2 PUZ-UX-05 Windows user journey
