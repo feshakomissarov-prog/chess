@@ -6,15 +6,14 @@ import time
 import chess
 import chess_coach.lichess.puzzle_training as puzzle_training_module
 from PySide6.QtCore import QTimer, Qt
-from PySide6.QtWidgets import QApplication, QMessageBox
+from PySide6.QtWidgets import QApplication, QDialog, QMessageBox, QPushButton
 
 from chess_coach.board_view import BoardView
-from chess_coach.lichess.puzzle_training import (
-    normalize_api_puzzle, normalize_activity_puzzle, select_api_puzzle_queue,
-)
+from chess_coach.lichess.puzzle_training import normalize_api_puzzle, normalize_activity_puzzle
 from chess_coach.lichess.repository import GameRepository
 from chess_coach.ui.pages.puzzle_training import PuzzleTrainingPage
 
+select_api_puzzle_queue = getattr(puzzle_training_module, "select_api_puzzle_queue", None)
 normalize_saved_puzzle_payload = getattr(
     puzzle_training_module, "normalize_saved_puzzle_payload", None)
 select_next_api_puzzle = getattr(puzzle_training_module, "select_next_api_puzzle", None)
@@ -64,7 +63,6 @@ def test_home_saved_replay_legacy_payload_and_separate_new(qtbot):
 
 def test_official_activity_replay_preserves_player_fen_and_first_solution(qtbot):
     from chess_coach.lichess.puzzle_training import normalize_activity_puzzle
-    from scripts.puz_ux_05_mainwindow_live_journey import play_move
 
     playable = normalize_activity_puzzle(
         "0haqU", "6k1/1q3p2/5prp/2b5/3pN3/1PP2P1P/2Q1R1P1/6K1 b - - 0 1",
@@ -78,7 +76,33 @@ def test_official_activity_replay_preserves_player_fen_and_first_solution(qtbot)
     assert page.state.board.turn == chess.BLACK
     assert page.state.puzzle.expected_user_moves[0] == "d4d3"
     for raw in playable.expected_user_moves:
-        play_move(page, raw)
+        move = chess.Move.from_uci(raw)
+        promotion_clicked = []
+        if move.promotion:
+            promotion_deadline = time.monotonic() + 3
+
+            def choose_queen():
+                dialog = QApplication.activeModalWidget()
+                if isinstance(dialog, QDialog) and dialog.windowTitle() == "Превращение пешки":
+                    queen = next((button for button in dialog.findChildren(QPushButton)
+                                  if button.accessibleName() == chess.piece_name(chess.QUEEN)), None)
+                    if queen is not None:
+                        qtbot.mouseClick(queen, Qt.MouseButton.LeftButton)
+                        promotion_clicked.append(True)
+                        return
+                if time.monotonic() < promotion_deadline:
+                    QTimer.singleShot(10, choose_queen)
+                else:
+                    promotion_clicked.append(False)
+
+            QTimer.singleShot(0, choose_queen)
+        qtbot.mouseClick(page.board, Qt.MouseButton.LeftButton,
+                         pos=center(page.board, move.from_square))
+        qtbot.mouseClick(page.board, Qt.MouseButton.LeftButton,
+                         pos=center(page.board, move.to_square))
+        if move.promotion:
+            qtbot.waitUntil(lambda: promotion_clicked, timeout=3000)
+            assert promotion_clicked == [True]
         if page.state.status.value == "opponent_reply":
             qtbot.waitUntil(lambda: page.state.status.value != "opponent_reply", timeout=2000)
     assert page.state.status.value == "success"

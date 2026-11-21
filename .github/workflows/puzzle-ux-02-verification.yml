@@ -88,7 +88,8 @@ jobs:
           tests/test_puzzle_training_ui.py tests/test_puzzle_training_navigation.py
           tests/test_puzzle_training_async.py tests/test_puzzle_api_adapter.py
           tests/test_puz_ux_03_interaction.py tests/test_puz_ux_03_rating.py
-          tests/test_puz_ux_05_live_flow.py tests/test_window.py
+          tests/test_puz_ux_05_live_flow.py tests/test_puz_ux_06_modes.py
+          tests/test_puz_ux_06_rated.py tests/test_window.py
       - name: Run targeted puzzle contracts
         env:
           QT_QPA_PLATFORM: offscreen
@@ -98,7 +99,8 @@ jobs:
           tests/test_puzzle_training_ui.py tests/test_puzzle_training_navigation.py
           tests/test_puzzle_training_async.py tests/test_puzzle_api_adapter.py
           tests/test_puz_ux_03_interaction.py tests/test_puz_ux_03_rating.py
-          tests/test_puz_ux_05_live_flow.py
+          tests/test_puz_ux_05_live_flow.py tests/test_puz_ux_06_modes.py
+          tests/test_puz_ux_06_rated.py
           tests/test_window.py::test_puzzle_account_switch_clears_old_board_and_keeps_scope
           tests/test_window.py::test_account_switch_discards_delayed_profile_a_and_requests_profile_b
           tests/test_window.py::test_advanced_difficulty_prefetch_accepts_selected_key
@@ -161,7 +163,7 @@ jobs:
           exit 0
 
   puz-ux-05-l2-windows-qt:
-    name: L2 PUZ-UX-05 Windows user journey
+    name: L2 PUZ-UX-05/06 Windows user journey
     needs: [l1-targeted, puz-ux-05-red-baseline]
     if: github.event.pull_request.head.ref == 'codex/puz-ux-05-owner-live-next-replay' && github.event.pull_request.draft && needs.l1-targeted.result == 'success' && needs.puz-ux-05-red-baseline.result == 'success'
     runs-on: windows-latest
@@ -183,6 +185,7 @@ jobs:
           python -X faulthandler -m pytest -o addopts= -q
           tests/test_dashboard.py::test_dashboard_preview_large_scoped_fixture_is_bounded_and_does_not_load_pgn
           tests/test_dashboard_cache.py tests/test_puz_ux_05_live_flow.py
+          tests/test_puz_ux_06_modes.py tests/test_puz_ux_06_rated.py
           tests/test_puzzle_training.py tests/test_puzzle_training_ui.py
           tests/test_puzzle_training_navigation.py tests/test_puzzle_api_adapter.py
           tests/test_puz_ux_03_interaction.py tests/test_puz_ux_03_rating.py
@@ -193,7 +196,7 @@ jobs:
           Set-DisplayResolution -Width 1920 -Height 1080 -Force
           Add-Type -AssemblyName System.Windows.Forms
           $bounds = [System.Windows.Forms.Screen]::PrimaryScreen.Bounds
-          if ($bounds.Width -lt 1672 -or $bounds.Height -lt 941) { throw "Runner display is too small for PUZ-UX-05 capture." }
+          if ($bounds.Width -lt 1672 -or $bounds.Height -lt 941) { throw "Runner display is too small for PUZ-UX-06 capture." }
       - name: Run MainWindow mouse and wheel journey with a public unauthenticated GET
         shell: pwsh
         run: |
@@ -204,13 +207,13 @@ jobs:
           )
           foreach ($case in $cases) {
             $env:QT_SCALE_FACTOR = $case.Scale
-            $env:CC_PUZ_UX_05_SIZE = $case.Size
-            $env:CC_PUZ_UX_05_OUTPUT = "visual-evidence/puz-ux-05-l2/scale-$($case.Scale)"
-            $env:LOCALAPPDATA = Join-Path $env:RUNNER_TEMP "puz-ux-05-localappdata-$($case.Scale)"
+            $env:CC_PUZ_UX_06_SIZE = $case.Size
+            $env:CC_PUZ_UX_06_OUTPUT = "visual-evidence/puz-ux-06-l2/scale-$($case.Scale)"
+            $env:LOCALAPPDATA = Join-Path $env:RUNNER_TEMP "puz-ux-06-localappdata-$($case.Scale)"
             if ($case.Scale -eq "1") {
-              $env:CC_PUZ_UX_05_VISUAL_ONLY = "0"
+              $env:CC_PUZ_UX_06_VISUAL_ONLY = "0"
             } else {
-              $env:CC_PUZ_UX_05_VISUAL_ONLY = "1"
+              $env:CC_PUZ_UX_06_VISUAL_ONLY = "1"
             }
             python -u -X faulthandler scripts/puz_ux_05_mainwindow_live_journey.py
             if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
@@ -218,8 +221,8 @@ jobs:
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: puz-ux-05-l2-${{ github.event.pull_request.head.sha }}
-          path: visual-evidence/puz-ux-05-l2/
+          name: puz-ux-06-l2-${{ github.event.pull_request.head.sha }}
+          path: visual-evidence/puz-ux-06-l2/
           if-no-files-found: error
 
   l2-native-puzzle-captures:
