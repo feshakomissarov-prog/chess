@@ -107,7 +107,7 @@ def test_oauth_browser_open_is_dispatched_on_qt_main_thread(
         assert page.state.puzzle.puzzle_id == _official_example()["puzzle"]["id"]
         assert client.batch_arguments
         assert client.batch_arguments[-1] == {
-            "angle": page.selected_theme(), "difficulty": difficulty, "count": 1}
+            "angle": page.selected_theme(), "difficulty": difficulty, "count": 5}
     window.close()
 
 

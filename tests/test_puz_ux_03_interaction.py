@@ -113,7 +113,7 @@ def test_clean_skip_is_neutral_and_hint_then_skip_is_not_clean(qtbot):
     hinted._hint()
     hinted.state.skip()
     hinted._finish(PuzzleOutcome.SKIPPED)
-    assert hinted._session_results[-1]["mark"] == "–"
+    assert hinted._session_results[-1]["mark"] == "•"
     assert hinted._session_failed == hinted._session_clean == 0
 
 

@@ -5,6 +5,7 @@ on:
     branches: [main]
     paths:
       - "src/chess_coach/ui/pages/puzzle_training.py"
+      - "src/chess_coach/ui/pages/home.py"
       - "src/chess_coach/lichess/puzzle_training.py"
       - "src/chess_coach/infrastructure/sqlite/puzzles.py"
       - "src/chess_coach/infrastructure/sqlite/migrations.py"
@@ -12,6 +13,9 @@ on:
       - "scripts/capture_puzzle_training.py"
       - "tests/test_puzzle_training*.py"
       - "tests/test_puz_ux_03_*.py"
+      - "tests/test_puz_ux_05_*.py"
+      - "scripts/puz_ux_05_*.py"
+      - "tests/test_dashboard.py"
       - "tests/test_puzzle_api_adapter.py"
       - "tests/test_window.py"
       - "tests/test_board_view.py"
@@ -84,7 +88,7 @@ jobs:
           tests/test_puzzle_training_ui.py tests/test_puzzle_training_navigation.py
           tests/test_puzzle_training_async.py tests/test_puzzle_api_adapter.py
           tests/test_puz_ux_03_interaction.py tests/test_puz_ux_03_rating.py
-          tests/test_window.py
+          tests/test_puz_ux_05_live_flow.py tests/test_window.py
       - name: Run targeted puzzle contracts
         env:
           QT_QPA_PLATFORM: offscreen
@@ -94,6 +98,7 @@ jobs:
           tests/test_puzzle_training_ui.py tests/test_puzzle_training_navigation.py
           tests/test_puzzle_training_async.py tests/test_puzzle_api_adapter.py
           tests/test_puz_ux_03_interaction.py tests/test_puz_ux_03_rating.py
+          tests/test_puz_ux_05_live_flow.py
           tests/test_window.py::test_puzzle_account_switch_clears_old_board_and_keeps_scope
           tests/test_window.py::test_account_switch_discards_delayed_profile_a_and_requests_profile_b
           tests/test_window.py::test_advanced_difficulty_prefetch_accepts_selected_key
@@ -109,6 +114,113 @@ jobs:
           tests/test_window.py::test_prefetch_credential_failure_keeps_current_puzzle_playable
           tests/test_window.py::test_duplicate_attempt_save_is_single_flight_and_ack_remains_success
           tests/test_window.py::test_prefetch_validation_rechecks_scope_before_installing_prepared_puzzle
+
+  puz-ux-05-red-baseline:
+    name: L1 RED on exact base
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          fetch-depth: 0
+      - uses: actions/setup-python@v7.1.0
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Install supported Qt test runtime
+        run: python -m pip install -e ".[dev]"
+      - name: Prove PUZ-UX-05 contracts fail against the unchanged base
+        shell: pwsh
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          QT_QPA_PLATFORM: offscreen
+        run: |
+          $PSNativeCommandUseErrorActionPreference = $false
+          $red = Join-Path $env:RUNNER_TEMP "puz-ux-05-red"
+          git worktree add --detach $red $env:BASE_SHA
+          New-Item -ItemType Directory -Force (Join-Path $red "tests") | Out-Null
+          Copy-Item tests/test_puz_ux_05_live_flow.py (Join-Path $red "tests/test_puz_ux_05_live_flow.py")
+          $env:PYTHONPATH = Join-Path $red "src"
+          Push-Location $red
+          try {
+            # The Windows journey helper is new on this branch; its helper-only
+            # mouse test has no script counterpart in the unchanged base.
+            $pytestArgs = @(
+              "-X", "faulthandler", "-m", "pytest", "-o", "addopts=", "-q",
+              "-k", "not windows_journey_uses_mouse_for_promotion_choice",
+              "tests/test_puz_ux_05_live_flow.py"
+            )
+            $output = python @pytestArgs 2>&1
+            $exitCode = $LASTEXITCODE
+            $output | ForEach-Object { Write-Host $_ }
+            if ($exitCode -eq 0) { throw "PUZ-UX-05 RED contracts unexpectedly passed on base $env:BASE_SHA" }
+            if (($output -join "`n") -notmatch "failed") { throw "RED run failed before reaching PUZ-UX-05 assertions" }
+            "RED_BASE_SHA=$env:BASE_SHA" | Out-File -FilePath "$env:GITHUB_STEP_SUMMARY" -Append
+            "PUZ-UX-05 regression suite failed on unchanged base as expected." | Out-File -FilePath "$env:GITHUB_STEP_SUMMARY" -Append
+          } finally { Pop-Location }
+          exit 0
+
+  puz-ux-05-l2-windows-qt:
+    name: L2 PUZ-UX-05 Windows user journey
+    needs: [l1-targeted, puz-ux-05-red-baseline]
+    if: github.event.pull_request.head.ref == 'codex/puz-ux-05-owner-live-next-replay' && github.event.pull_request.draft && needs.l1-targeted.result == 'success' && needs.puz-ux-05-red-baseline.result == 'success'
+    runs-on: windows-latest
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+      - uses: actions/setup-python@v7.1.0
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Install application and test dependencies
+        run: python -m pip install -e ".[dev]"
+      - name: L2 isolated large Home archive regression
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: >-
+          python -X faulthandler -m pytest -o addopts= -q
+          tests/test_dashboard.py::test_dashboard_preview_large_scoped_fixture_is_bounded_and_does_not_load_pgn
+          tests/test_dashboard_cache.py tests/test_puz_ux_05_live_flow.py
+          tests/test_puzzle_training.py tests/test_puzzle_training_ui.py
+          tests/test_puzzle_training_navigation.py tests/test_puzzle_api_adapter.py
+          tests/test_puz_ux_03_interaction.py tests/test_puz_ux_03_rating.py
+          tests/test_board_view.py tests/test_window.py
+      - name: Configure isolated real Windows display
+        shell: pwsh
+        run: |
+          Set-DisplayResolution -Width 1920 -Height 1080 -Force
+          Add-Type -AssemblyName System.Windows.Forms
+          $bounds = [System.Windows.Forms.Screen]::PrimaryScreen.Bounds
+          if ($bounds.Width -lt 1672 -or $bounds.Height -lt 941) { throw "Runner display is too small for PUZ-UX-05 capture." }
+      - name: Run MainWindow mouse and wheel journey with a public unauthenticated GET
+        shell: pwsh
+        run: |
+          $cases = @(
+            @{ Scale = "1"; Size = "1672x941" },
+            @{ Scale = "1.25"; Size = "1280x720" },
+            @{ Scale = "1.5"; Size = "1120x640" }
+          )
+          foreach ($case in $cases) {
+            $env:QT_SCALE_FACTOR = $case.Scale
+            $env:CC_PUZ_UX_05_SIZE = $case.Size
+            $env:CC_PUZ_UX_05_OUTPUT = "visual-evidence/puz-ux-05-l2/scale-$($case.Scale)"
+            $env:LOCALAPPDATA = Join-Path $env:RUNNER_TEMP "puz-ux-05-localappdata-$($case.Scale)"
+            if ($case.Scale -eq "1") {
+              $env:CC_PUZ_UX_05_VISUAL_ONLY = "0"
+            } else {
+              $env:CC_PUZ_UX_05_VISUAL_ONLY = "1"
+            }
+            python -u -X faulthandler scripts/puz_ux_05_mainwindow_live_journey.py
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          }
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: puz-ux-05-l2-${{ github.event.pull_request.head.sha }}
+          path: visual-evidence/puz-ux-05-l2/
+          if-no-files-found: error
 
   l2-native-puzzle-captures:
     name: L2 PUZ-UX-03 public and native UX

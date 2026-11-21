@@ -40,16 +40,13 @@ def test_right_annotations_do_not_move_and_lmb_click_click_solves(qtbot):
     assert not board._annotation_arrows and not board._annotation_squares
 
 
-def test_reveal_requires_confirmation_and_exposes_line_only_after_yes(qtbot, monkeypatch):
+def test_reveal_is_immediate_and_exposes_the_line(qtbot, monkeypatch):
     page = PuzzleTrainingPage(demo=True)
     qtbot.addWidget(page)
     page.show()
     monkeypatch.setattr(QMessageBox, "question",
-                        lambda *args, **kwargs: QMessageBox.StandardButton.No)
-    page._reveal()
-    assert page.solution_line.isHidden()
-    monkeypatch.setattr(QMessageBox, "question",
-                        lambda *args, **kwargs: QMessageBox.StandardButton.Yes)
+                        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+                            AssertionError("Reveal must not ask for confirmation")))
     page._reveal()
     assert not page.solution_line.isHidden()
     assert "Правильная линия" in page.solution_line.text()
