@@ -292,7 +292,7 @@ QTest.mouseClick на Home двух CTA, реальная Qt keyboard navigation
 
 ### Уровень 3
 
-**Триггер:** один финальный Windows exact-code-SHA на итоговом коде/тестах **после** L2 и всех объединённых PUZ05/06 изменений.
+**Триггер:** один финальный Windows **exact-head** (проверка точного code/test SHA итогового PR) **после** L2 и всех объединённых PUZ05/06 изменений.
 
 - `python -X faulthandler -m pytest -q -o addopts= -W error::pytest.PytestUnhandledThreadExceptionWarning` (full)
 - `python -m compileall -q src tests`; isolated/offline MainWindow initialization как инженерный safety smoke (не отдельная offline-версия продукта); native 100/125/150 visual matrix; spec-contract.
