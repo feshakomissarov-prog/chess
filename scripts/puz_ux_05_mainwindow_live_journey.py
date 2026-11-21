@@ -264,6 +264,14 @@ def click_without_modal(app, button):
         raise AssertionError(f"{button.objectName()} unexpectedly opened a modal dialog")
 
 
+def click_checkbox(app, checkbox, checked):
+    """Toggle a visible checkbox with a Qt mouse event and verify its state."""
+    if checkbox.isChecked() != checked:
+        QTest.mouseClick(checkbox, Qt.MouseButton.LeftButton,
+                         pos=QPoint(checkbox.width() // 2, checkbox.height() // 2))
+    wait_until(app, lambda: checkbox.isChecked() == checked, 1000)
+
+
 def solve_visible_line(app, page, journal, tag):
     print(f"PUZ05_SOLVE_BEGIN {tag} {page._session_puzzle_id}", flush=True)
     for raw_move in page.state.puzzle.expected_user_moves:
@@ -509,22 +517,26 @@ def run():
     capture(page, "ten-unique-sequential-tasks", journal)
 
     # Exercise enabled auto-advance and turning it off before completion.
-    if not page.auto_next.isChecked():
-        QTest.mouseClick(page.auto_next, Qt.MouseButton.LeftButton)
-    wait_until(app, lambda: settings.value(
-        f"puzzles/auto_next/{page.account_id}", False, type=bool))
+    click_checkbox(app, page.auto_next, True)
+    settings.sync()
+    auto_setting_key = f"puzzles/auto_next/{page.account_id}"
+    if not settings.value(auto_setting_key, False, type=bool):
+        raise AssertionError("A real mouse click did not persist auto-next for this profile")
+    capture(page, "auto-next-checked", journal)
     auto_before = page._session_puzzle_id
     solve_visible_line(app, page, journal, "auto-next-clean")
     wait_until(app, lambda: page.state.puzzle.puzzle_id != auto_before, 7000)
     auto_id = page._session_puzzle_id
     solve_visible_line(app, page, journal, "auto-next-disable-after-success")
-    QTest.mouseClick(page.auto_next, Qt.MouseButton.LeftButton)
-    wait_until(app, lambda: not settings.value(
-        f"puzzles/auto_next/{page.account_id}", True, type=bool))
+    click_checkbox(app, page.auto_next, False)
+    settings.sync()
+    if settings.value(auto_setting_key, True, type=bool):
+        raise AssertionError("Turning auto-next off did not persist for this profile")
+    capture(page, "auto-next-unchecked-before-timeout", journal)
     QTest.qWait(1700)
     if page._session_puzzle_id != auto_id:
         raise AssertionError("Turning auto-next off after clean success did not stop its timer")
-    QTest.mouseClick(page.auto_next, Qt.MouseButton.LeftButton)
+    click_checkbox(app, page.auto_next, True)
     QTest.qWait(1700)
     if page._session_puzzle_id != auto_id:
         raise AssertionError("Turning auto-next on after completion started a new timer")
