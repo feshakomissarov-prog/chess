@@ -1444,7 +1444,10 @@ def main() -> None:
                 app.processEvents()
             if width == target_sizes[0][0] and height == target_sizes[0][1]:
                 puzzle_id = window._home_view._puzzle_preview["puzzle_id"]
-                QTest.mouseClick(window.home_activity_button, Qt.MouseButton.LeftButton)
+                wait_for(lambda: window.home_replay_button.isVisible()
+                         and window.home_replay_button.isEnabled(),
+                         "saved puzzle REPLAY action from Home")
+                QTest.mouseClick(window.home_replay_button, Qt.MouseButton.LeftButton)
                 wait_for(lambda: window._puzzle_training_page is not None
                          and window.screen_stack.currentWidget() is window._puzzle_training_page
                          and window._puzzle_training_page.state.puzzle is not None
