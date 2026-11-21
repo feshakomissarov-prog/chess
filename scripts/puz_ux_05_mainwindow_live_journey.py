@@ -29,6 +29,29 @@ from chess_coach.window import MainWindow
 
 OUTPUT = Path(os.environ.get("CC_PUZ_UX_05_OUTPUT", "visual-evidence/puz-ux-05-l2"))
 JOURNEY_TRACE: dict = {}
+_ACTIVE_APP = None
+_ACTIVE_WINDOW = None
+_CLEANUP_DONE = False
+
+
+def cleanup() -> None:
+    """Close the isolated Qt window and repository even after an assertion."""
+    global _CLEANUP_DONE
+    if _CLEANUP_DONE:
+        return
+    _CLEANUP_DONE = True
+    window = _ACTIVE_WINDOW
+    app = _ACTIVE_APP
+    if window is not None:
+        window.close()
+    if app is not None:
+        deadline = time.monotonic() + 3
+        while (window is not None and not window.runtime._closed
+               and time.monotonic() < deadline):
+            app.processEvents()
+            QTest.qWait(30)
+        app.processEvents()
+    shutdown_logging()
 
 
 def persist_journey_trace() -> None:
@@ -255,13 +278,16 @@ def solve_visible_line(app, page, journal, tag):
 
 
 def run():
+    global _ACTIVE_APP, _ACTIVE_WINDOW
     OUTPUT.mkdir(parents=True, exist_ok=True)
     visual_only = os.environ.get("CC_PUZ_UX_05_VISUAL_ONLY", "0") == "1"
     payload, public_get_evidence = public_get()
     app = QApplication.instance() or QApplication([])
+    _ACTIVE_APP = app
     app.setStyleSheet(desktop_stylesheet(VISUAL_TOKENS))
     settings = QSettings(str(OUTPUT / "isolated-settings.ini"), QSettings.Format.IniFormat)
     window = MainWindow(settings=settings, offline_mode=True)
+    _ACTIVE_WINDOW = window
     if not window.runtime.offline_data_dir or window.lichess is not None:
         raise AssertionError("The production MainWindow did not initialize isolated storage")
     window.offline_mode = False
@@ -313,10 +339,7 @@ def run():
                  "owner_database_or_oauth_touched": False}
         (OUTPUT / "action-journal.json").write_text(
             json.dumps(trace, ensure_ascii=False, indent=2), encoding="utf-8")
-        window.close()
-        app.processEvents()
-        window.game_repository.shutdown()
-        shutdown_logging()
+        cleanup()
         return
 
     # Exercise right-button annotation and wheel review/return with Qt events.
@@ -434,7 +457,10 @@ def run():
     wrong = next(move for move in page.state.board.legal_moves if move != expected)
     play_move(page, wrong.uci())
     wait_until(app, lambda: page.state.status.value == "mistake_retry", 3000)
-    wait_until(app, lambda: not page._wrong_timer_pending, 3000)
+    # _wrong_timer_pending clears as soon as the first red frame is painted;
+    # the 420 ms feedback timer still owns the board until _wrong_flash clears.
+    wait_until(app, lambda: not page._wrong_flash and not page._wrong_timer.isActive(),
+               3000)
     if page._result_tiles[-1].text() != "✕" or page._result_tiles[-1].isEnabled():
         raise AssertionError("First error was not immediately red and locked")
     wrong_id = page._session_puzzle_id
@@ -533,11 +559,11 @@ def run():
     (OUTPUT / "action-journal.json").write_text(
         json.dumps(trace, ensure_ascii=False, indent=2), encoding="utf-8")
     print("PUZ05_ACTION_JOURNAL " + json.dumps(trace, ensure_ascii=False, sort_keys=True))
-    window.close()
-    app.processEvents()
-    window.game_repository.shutdown()
-    shutdown_logging()
+    cleanup()
 
 
 if __name__ == "__main__":
-    run()
+    try:
+        run()
+    finally:
+        cleanup()
