@@ -454,7 +454,7 @@ def run():
     # First entry starts from the actual Home button.
     capture(window, "home-first-entry", journal)
     adapter.block_next = True
-    QTest.mouseClick(window.home_training_button, Qt.MouseButton.LeftButton)
+    QTest.mouseClick(window.home_activity_button, Qt.MouseButton.LeftButton)
     page = window._puzzle_training_page
     wait_until(app, adapter.block_started.is_set, 15000)
     if not page.board.isHidden() or not page.board_placeholder.isVisible():
@@ -573,7 +573,7 @@ def run():
 
     QTest.mouseClick(replay_page.home_button, Qt.MouseButton.LeftButton)
     wait_until(app, lambda: window.screen_stack.currentWidget() is window.home_page)
-    QTest.mouseClick(window.home_training_button, Qt.MouseButton.LeftButton)
+    QTest.mouseClick(window.home_activity_button, Qt.MouseButton.LeftButton)
     page = window._puzzle_training_page
     wait_until(app, lambda: page.state.puzzle is not None and not page._is_replay)
     adapter.current_id = page.state.puzzle.puzzle_id
