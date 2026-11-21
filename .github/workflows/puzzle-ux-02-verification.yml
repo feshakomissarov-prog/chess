@@ -135,6 +135,7 @@ jobs:
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
           QT_QPA_PLATFORM: offscreen
         run: |
+          $PSNativeCommandUseErrorActionPreference = $false
           $red = Join-Path $env:RUNNER_TEMP "puz-ux-05-red"
           git worktree add --detach $red $env:BASE_SHA
           New-Item -ItemType Directory -Force (Join-Path $red "tests") | Out-Null
