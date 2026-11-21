@@ -1103,6 +1103,8 @@ class PuzzleTrainingPage(QWidget):
         self._wrong_flash = False
         self._wrong_timer_pending = False
         self.state = PuzzleTrainingState()
+        self.board.set_position(self.state.board)
+        self.board.set_flipped(not self.state.board.turn)
         # Profile metrics and history are account-scoped. Do not leave the
         # previous account visible while the next scoped read is in flight.
         self._official_rating = None
