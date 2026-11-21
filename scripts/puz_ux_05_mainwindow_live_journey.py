@@ -285,8 +285,9 @@ def run():
         rating_eligible=False)
     window._home_view.set_puzzle_preview({"account_id": account, "puzzle_id": "0haqU",
                                          "fen": page.state.puzzle.player_to_move_fen,
-                                         "solver_is_white": True, "rating": 1167,
-                                         "themes": ["endgame"]})
+                                         "solver_is_white": page.state.puzzle.solver_is_white,
+                                         "rating": page.state.puzzle.rating,
+                                         "themes": list(page.state.puzzle.themes)})
     wait_until(app, lambda: window.home_replay_button.isVisible()
                and window.home_replay_button.isEnabled())
     capture(window, "home-saved-puzzle-replay-entry", journal)
