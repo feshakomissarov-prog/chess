@@ -572,7 +572,9 @@ def run():
              "owner_database_or_oauth_touched": False}
     (OUTPUT / "action-journal.json").write_text(
         json.dumps(trace, ensure_ascii=False, indent=2), encoding="utf-8")
-    print("PUZ05_ACTION_JOURNAL " + json.dumps(trace, ensure_ascii=False, sort_keys=True))
+    # GitHub Actions' Windows console may use cp1252 even when the journal is
+    # UTF-8; keep its one-line console copy ASCII while the artifact stays UTF-8.
+    print("PUZ05_ACTION_JOURNAL " + json.dumps(trace, ensure_ascii=True, sort_keys=True))
     cleanup()
 
 
