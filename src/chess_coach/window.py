@@ -3153,7 +3153,7 @@ class MainWindow(QMainWindow):
             "home_status", "dashboard_account", "dashboard_clock", "dashboard_metrics",
             "dashboard_metrics_grid", "_dashboard_metric_values", "_dashboard_metric_details",
             "home_recent_card", "_recent_games_layout", "home_primary_actions",
-            "home_activity_button", "activity_status",
+            "home_activity_button", "home_replay_button", "activity_status",
             "home_play_card", "home_puzzle_card", "puzzle_preview_board",
             "puzzle_side_to_move", "puzzle_meta", "home_progress_card", "home_all_progress_button",
             "progress_trend", "recent_safety_notice",
