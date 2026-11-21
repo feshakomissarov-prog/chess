@@ -274,7 +274,8 @@ def run():
 
     # Home exposes distinct NEW and saved REPLAY paths. Seed only the isolated
     # runner database and trigger each actual visible button.
-    QTest.mouseClick(window._nav_buttons["home"], Qt.MouseButton.LeftButton)
+    QTest.mouseClick(page.home_button, Qt.MouseButton.LeftButton)
+    wait_until(app, lambda: window.screen_stack.currentWidget() is window.home_page)
     account = window.game_repository.ensure_archive_account(adapter.username)
     serialized = json.dumps(payload, ensure_ascii=False)
     window.game_repository.cache_training_puzzle(account, "0haqU", serialized)
@@ -286,6 +287,9 @@ def run():
                                          "fen": page.state.puzzle.player_to_move_fen,
                                          "solver_is_white": True, "rating": 1167,
                                          "themes": ["endgame"]})
+    wait_until(app, lambda: window.home_replay_button.isVisible()
+               and window.home_replay_button.isEnabled())
+    capture(window, "home-saved-puzzle-replay-entry", journal)
     QTest.mouseClick(window.home_replay_button, Qt.MouseButton.LeftButton)
     wait_until(app, lambda: window._puzzle_training_page.state.puzzle is not None
                and window._puzzle_training_page._is_replay)
@@ -309,7 +313,8 @@ def run():
     actions.append({"action": "mouse-click", "target": "Home / Повторить эту",
                     "replay_unrated": True})
 
-    QTest.mouseClick(window._nav_buttons["home"], Qt.MouseButton.LeftButton)
+    QTest.mouseClick(replay_page.home_button, Qt.MouseButton.LeftButton)
+    wait_until(app, lambda: window.screen_stack.currentWidget() is window.home_page)
     QTest.mouseClick(window.home_activity_button, Qt.MouseButton.LeftButton)
     page = window._puzzle_training_page
     wait_until(app, lambda: page.state.puzzle is not None and not page._is_replay)
