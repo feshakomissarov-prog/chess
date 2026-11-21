@@ -72,7 +72,7 @@ def test_batch_duplicate_then_unique_and_exhausted_recovery():
 
 def test_compact_board_reserves_space_until_first_result_feedback(qtbot):
     payload = api_payload("compact-feedback")
-    page = PuzzleTrainingPage("puz05-compact-profile")
+    page = PuzzleTrainingPage()
     page.resize(820, 620)
     qtbot.addWidget(page)
     page.show()
