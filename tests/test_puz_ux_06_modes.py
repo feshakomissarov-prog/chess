@@ -311,4 +311,3 @@ def test_training_attempt_is_saved_without_local_cc_elo_even_if_legacy_flag_is_s
                 (account,)).fetchone()[0] == 0
     finally:
         repository.shutdown()
-

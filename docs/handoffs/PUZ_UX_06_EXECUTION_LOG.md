@@ -1,8 +1,11 @@
 # PUZ-UX-06 execution log
 
-**Branch:** `codex/puz-ux-05-owner-live-next-replay`  
-**PR:** [#57 — PUZ-UX-05/06](https://github.com/feshakomissarov-prog/chess/pull/57)  
-**Base/head before this package:** `4c2feba39339869667d2ae186a93f72ef96a17a4`  
+**Branch:** `codex/puz-ux-05-owner-live-next-replay`
+
+**PR:** [#57 — PUZ-UX-05/06](https://github.com/feshakomissarov-prog/chess/pull/57)
+
+**Base/head before this package:** `4c2feba39339869667d2ae186a93f72ef96a17a4`
+
 **Status:** implementation and Windows verification in progress; PR remains Draft; not merged.
 
 ## Scope
