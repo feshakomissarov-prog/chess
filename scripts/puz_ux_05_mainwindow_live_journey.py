@@ -388,13 +388,20 @@ def run():
     solve_visible_line(app, page, journal, "auto-next-clean")
     wait_until(app, lambda: page.state.puzzle.puzzle_id != auto_before, 7000)
     auto_id = page._session_puzzle_id
+    solve_visible_line(app, page, journal, "auto-next-disable-after-success")
     QTest.mouseClick(page.auto_next, Qt.MouseButton.LeftButton)
     wait_until(app, lambda: not settings.value(
         f"puzzles/auto_next/{page.account_id}", True, type=bool))
-    solve_visible_line(app, page, journal, "auto-next-off-clean")
     QTest.qWait(1700)
     if page._session_puzzle_id != auto_id:
-        raise AssertionError("Auto-next advanced after the checkbox was turned off")
+        raise AssertionError("Turning auto-next off after clean success did not stop its timer")
+    QTest.mouseClick(page.auto_next, Qt.MouseButton.LeftButton)
+    QTest.qWait(1700)
+    if page._session_puzzle_id != auto_id:
+        raise AssertionError("Turning auto-next on after completion started a new timer")
+    QTest.mouseClick(page.fetch, Qt.MouseButton.LeftButton)
+    wait_until(app, lambda: page._session_puzzle_id != auto_id, 20000)
+    solve_visible_line(app, page, journal, "auto-next-manual-recovery")
 
     # Network failure keeps the current result and makes the retry button usable.
     adapter.fail_next = True
