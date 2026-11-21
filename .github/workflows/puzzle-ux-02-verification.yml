@@ -143,7 +143,14 @@ jobs:
           $env:PYTHONPATH = Join-Path $red "src"
           Push-Location $red
           try {
-            $output = python -X faulthandler -m pytest -o addopts= -q tests/test_puz_ux_05_live_flow.py 2>&1
+            # The Windows journey helper is new on this branch; its helper-only
+            # mouse test has no script counterpart in the unchanged base.
+            $pytestArgs = @(
+              "-X", "faulthandler", "-m", "pytest", "-o", "addopts=", "-q",
+              "-k", "not windows_journey_uses_mouse_for_promotion_choice",
+              "tests/test_puz_ux_05_live_flow.py"
+            )
+            $output = python @pytestArgs 2>&1
             $exitCode = $LASTEXITCODE
             $output | ForEach-Object { Write-Host $_ }
             if ($exitCode -eq 0) { throw "PUZ-UX-05 RED contracts unexpectedly passed on base $env:BASE_SHA" }

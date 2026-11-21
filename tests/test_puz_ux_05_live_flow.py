@@ -11,7 +11,6 @@ from chess_coach.board_view import BoardView
 from chess_coach.lichess.puzzle_training import normalize_api_puzzle
 from chess_coach.lichess.repository import GameRepository
 from chess_coach.ui.pages.puzzle_training import PuzzleTrainingPage
-from scripts.puz_ux_05_mainwindow_live_journey import play_move
 
 normalize_saved_puzzle_payload = getattr(
     puzzle_training_module, "normalize_saved_puzzle_payload", None)
@@ -69,6 +68,10 @@ def test_batch_duplicate_then_unique_and_exhausted_recovery():
 
 
 def test_windows_journey_uses_mouse_for_promotion_choice(qtbot):
+    # This test validates a helper added with the Windows journey driver, not a
+    # product behavior present on the unchanged base used by the RED job.
+    from scripts.puz_ux_05_mainwindow_live_journey import play_move
+
     model = chess.Board("7k/P7/8/8/8/8/8/7K w - - 0 1")
     board = BoardView(model)
     board.resize(480, 480)
