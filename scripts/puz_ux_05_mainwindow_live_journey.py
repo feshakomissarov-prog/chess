@@ -226,6 +226,7 @@ def public_puzzle_sequence(puzzle_ids: list[str]) -> tuple[list[dict], list[dict
     seen_positions: set[str] = set()
     for puzzle_id in puzzle_ids:
         url = f"https://lichess.org/api/puzzle/{puzzle_id}"
+        print(f"PUZ06_PUBLIC_GET_BEGIN {puzzle_id}", flush=True)
         request = Request(url, headers={
             "Accept": "application/json",
             "User-Agent": "ChessCoach-PUZ-UX-06-public-L2",
@@ -242,6 +243,7 @@ def public_puzzle_sequence(puzzle_ids: list[str]) -> tuple[list[dict], list[dict
         if fingerprint in seen_positions:
             raise AssertionError(f"Public puzzle {puzzle_id} repeated a prior FEN/line")
         seen_positions.add(fingerprint)
+        print(f"PUZ06_PUBLIC_GET_OK {puzzle_id} HTTP {status}", flush=True)
         payloads.append(payload)
         evidence.append({"id": puzzle_id, "status": status,
                          "position_solution_sha256": fingerprint,
@@ -386,6 +388,7 @@ def choose_theme_with_mouse(app, page, data, search_text):
     theme_list = page.theme_list
     if theme_list.isVisible():
         search = page.theme_search
+        print(f"PUZ06_THEME_SEARCH_BEGIN {data}", flush=True)
         QTest.mouseClick(search, Qt.MouseButton.LeftButton)
         QTest.keyClick(search, Qt.Key.Key_A, Qt.KeyboardModifier.ControlModifier)
         QTest.keyClicks(search, search_text)
@@ -401,6 +404,7 @@ def choose_theme_with_mouse(app, page, data, search_text):
 
         wait_until(app, item_is_visible, 2000)
         rect = theme_list.visualItemRect(item)
+        print(f"PUZ06_THEME_ITEM_CLICK_BEGIN {data}", flush=True)
         QTest.mouseClick(theme_list.viewport(), Qt.MouseButton.LeftButton,
                          pos=rect.center())
         wait_until(app, lambda: page.selected_theme() == data, 2000)
