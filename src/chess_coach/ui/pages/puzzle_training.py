@@ -10,7 +10,7 @@ import chess
 from PySide6.QtCore import QLineF, QSize, Qt, Signal, QTimer
 from PySide6.QtGui import QColor, QPainter, QPen
 from PySide6.QtWidgets import (
-    QBoxLayout, QCheckBox, QComboBox, QFrame, QGridLayout, QHBoxLayout, QLabel, QLineEdit, QListWidget,
+    QBoxLayout, QButtonGroup, QCheckBox, QComboBox, QFrame, QGridLayout, QHBoxLayout, QLabel, QLineEdit, QListWidget,
     QListWidgetItem, QMessageBox, QPushButton, QScrollArea, QSizePolicy, QSplitter,
     QStyle, QStyleOptionButton, QVBoxLayout, QWidget,
 )
@@ -59,7 +59,8 @@ THEMES = (
      ("discoveredAttack", "Открытое нападение"),
      ("defensiveMove", "Защитный ход"), ("hangingPiece", "Незащищённая фигура")),
     ("Мат", ("mate", "Мат"), ("mateIn1", "Мат в 1"),
-     ("mateIn2", "Мат в 2"), ("mateIn3", "Мат в 3")),
+     ("mateIn2", "Мат в 2"), ("mateIn3", "Мат в 3"),
+     ("mateIn4", "Мат в 4"), ("mateIn5", "Мат в 5+")),
     ("Эндшпили", ("rookEndgame", "Ладейный"), ("bishopEndgame", "Слоновый"),
      ("pawnEndgame", "Пешечный"), ("knightEndgame", "Коневой"),
      ("queenEndgame", "Ферзевый")),
@@ -104,6 +105,10 @@ class PuzzleTrainingPage(QWidget):
     account_changed = Signal(str)
     session_hidden = Signal()
     prefetch_requested = Signal(str, str, str, str)
+    mode_changed = Signal(str)
+    rated_result_requested = Signal(object)
+    rated_reconcile_requested = Signal(str)
+    rated_retry_requested = Signal(object)
 
     def __init__(self, *, parent=None, demo: bool = False) -> None:
         super().__init__(parent)
@@ -112,6 +117,14 @@ class PuzzleTrainingPage(QWidget):
         self._started_at = 0.0
         self._puzzle_payload: dict = {}
         self._active_source = "local"
+        self.mode = "TRAINING"
+        self.attempt_mode = "TRAINING"
+        self._rated_result_sent = False
+        self._rated_attempt_win = False
+        self._rated_recovery_attempt_id = ""
+        self._rated_recovery_payload: dict = {}
+        self._attempt_theme = "mix"
+        self._attempt_difficulty = "normal"
         self._session_id = ""
         self._session_account_id = "local"
         self._session_puzzle_id = ""
@@ -134,7 +147,12 @@ class PuzzleTrainingPage(QWidget):
         self._auto_next_timer.setSingleShot(True)
         self._auto_next_timer.timeout.connect(self._auto_advance)
         self._prepared_online_puzzle: dict | None = None
+        self._prepared_online_queue: list[dict] = []
         self._session_results: list[dict] = []
+        self._session_results_by_scope: dict[tuple[str, str], list[dict]] = {
+            ("local", "TRAINING"): self._session_results,
+        }
+        self._session_metrics_by_scope: dict[tuple[str, str], tuple[int, int, int, int, int]] = {}
         self._session_result_index_by_id: dict[str, int] = {}
         self._session_streak = 0
         self._best_streak = 0
@@ -152,6 +170,10 @@ class PuzzleTrainingPage(QWidget):
         self._prepared_next_ms: float | None = None
         self._next_requested_at: float | None = None
         self._fetch_inflight = False
+        self._cooldown_seconds = 0
+        self._cooldown_timer = QTimer(self)
+        self._cooldown_timer.setInterval(1000)
+        self._cooldown_timer.timeout.connect(self._cooldown_tick)
         self._rating_eligible = False
         self._rated_puzzle_ids_by_account: dict[str, set[str]] = {}
         self._current_cc_rating = 1500
@@ -220,6 +242,32 @@ class PuzzleTrainingPage(QWidget):
         header_controls.addWidget(self.auto_next)
         header.addWidget(self._training_header_controls)
         root.addLayout(header)
+
+        self.mode_row = QHBoxLayout()
+        self.mode_group = QButtonGroup(self)
+        self.mode_group.setExclusive(True)
+        self.training_mode_button = QPushButton("Тренировка")
+        self.training_mode_button.setCheckable(True)
+        self.training_mode_button.setAccessibleName("Режим тренировки без рейтинга")
+        self.training_mode_button.setAccessibleDescription(
+            "Локальная практика; не изменяет рейтинги Lichess и Chess Coach.")
+        self.rated_mode_button = QPushButton("На рейтинг Lichess")
+        self.rated_mode_button.setCheckable(True)
+        self.rated_mode_button.setAccessibleName("Рейтинговый режим Lichess")
+        self.rated_mode_button.setAccessibleDescription(
+            "Отправляет результат задачи и может изменить официальный рейтинг Lichess.")
+        self.mode_group.addButton(self.training_mode_button, 0)
+        self.mode_group.addButton(self.rated_mode_button, 1)
+        self.training_mode_button.setChecked(True)
+        self.mode_row.addWidget(self.training_mode_button)
+        self.mode_row.addWidget(self.rated_mode_button)
+        self.mode_status = QLabel("Тренировка · не влияет на рейтинг Lichess")
+        self.mode_status.setObjectName("secondary")
+        self.mode_row.addWidget(self.mode_status, 1)
+        root.addLayout(self.mode_row)
+        self.mode_group.idClicked.connect(
+            lambda button_id: self._select_mode(
+                "TRAINING" if button_id == 0 else "LICHESS_RATED"))
 
         self.filter_row = QHBoxLayout()
         self.theme_search = QLineEdit()
@@ -413,6 +461,15 @@ class PuzzleTrainingPage(QWidget):
         self.network_status.setObjectName("puzzleNetworkStatus")
         self.network_status.setWordWrap(True)
         right_layout.addWidget(self.network_status)
+        self.rated_status = QLabel("Результат Lichess не отправляется")
+        self.rated_status.setObjectName("ratedPuzzleStatus")
+        self.rated_status.setWordWrap(True)
+        self.rated_status.setAccessibleName("Статус отправки результата рейтинговой задачи")
+        right_layout.addWidget(self.rated_status)
+        self.reconcile_rated_button = QPushButton("Проверить результат")
+        self.reconcile_rated_button.hide()
+        self.reconcile_rated_button.clicked.connect(self._rated_recovery_clicked)
+        right_layout.addWidget(self.reconcile_rated_button)
         history_heading = QLabel("Предыдущие задачи")
         history_heading.setStyleSheet("font-weight: 700; font-size: 16px")
         right_layout.addWidget(history_heading)
@@ -469,7 +526,66 @@ class PuzzleTrainingPage(QWidget):
                        self.difficulty.currentData() or "normal")
         return str(self.difficulty.currentData() or "normal")
 
+    def _select_mode(self, mode: str) -> None:
+        mode = "LICHESS_RATED" if str(mode).upper() == "LICHESS_RATED" else "TRAINING"
+        if mode == self.mode:
+            return
+        has_active_attempt = self._has_active_attempt()
+        if has_active_attempt and not self._prompt_active_attempt_exit(
+                "к рейтинговой задаче" if mode == "LICHESS_RATED" else "к тренировке"):
+            self.mode_group.button(0 if self.mode == "TRAINING" else 1).setChecked(True)
+            return
+        self._save_visible_session_scope()
+        self.mode = mode
+        self._activate_session_scope((str(self.account_id or "local"), self.mode))
+        self.training_mode_button.setChecked(mode == "TRAINING")
+        self.rated_mode_button.setChecked(mode == "LICHESS_RATED")
+        self._update_mode_status()
+        self.mode_changed.emit(mode)
+        # The owner confirmation (including the separate ranked consent) is
+        # synchronous. Let the controller veto the change before discarding
+        # the current board or recording a skip.
+        if self.mode != mode:
+            return
+        if has_active_attempt:
+            self._abandon_active_attempt("mode_switch")
+
+    def set_mode(self, mode: str) -> None:
+        """Set the selected mode before an explicit navigation intent starts."""
+        next_mode = "LICHESS_RATED" if str(mode).upper() == "LICHESS_RATED" else "TRAINING"
+        if next_mode != self.mode:
+            self.clear_prepared_puzzles()
+            self._save_visible_session_scope()
+        self.mode = next_mode
+        self._activate_session_scope((str(self.account_id or "local"), self.mode))
+        self.training_mode_button.setChecked(self.mode == "TRAINING")
+        self.rated_mode_button.setChecked(self.mode == "LICHESS_RATED")
+        self._update_mode_status()
+
+    def _update_mode_status(self) -> None:
+        self.mode_status.setText(
+            "Тренировка · не влияет на рейтинг Lichess" if self.mode == "TRAINING" else
+            "Официальный рейтинг Lichess · результат отправляется серверу")
+        self.practice_rating.setText(
+            "Историческая оценка Chess Coach · новые задачи её не меняют")
+        self.practice_rating.setVisible(self.mode == "TRAINING")
+
+    def _save_visible_session_scope(self) -> None:
+        scope = (str(self.account_id or "local"), str(self.mode))
+        self._session_results_by_scope[scope] = self._session_results
+        self._session_metrics_by_scope[scope] = (
+            self._session_streak, self._best_streak, self._session_clean,
+            self._session_failed, self._session_hinted)
+
+    def _activate_session_scope(self, scope: tuple[str, str]) -> None:
+        self._session_results = self._session_results_by_scope.setdefault(scope, [])
+        metrics = self._session_metrics_by_scope.get(scope, (0, 0, 0, 0, 0))
+        (self._session_streak, self._best_streak, self._session_clean,
+         self._session_failed, self._session_hinted) = metrics
+        self._update_session_display()
+
     def set_accounts(self, rows: list[dict], selected_account: str) -> None:
+        previous_account = str(self.account_id or "local")
         self.account_selector.blockSignals(True)
         self.account_selector.clear()
         self.account_selector.addItem("Локальный профиль", "local")
@@ -484,7 +600,18 @@ class PuzzleTrainingPage(QWidget):
             index = self.account_selector.count() - 1
         self.account_selector.setCurrentIndex(max(0, index))
         self.account_selector.blockSignals(False)
-        self.account_id = str(self.account_selector.currentData() or "local")
+        selected = str(self.account_selector.currentData() or "local")
+        self.set_active_account(selected, previous_account=previous_account)
+
+    def set_active_account(self, account_id: str, *, previous_account: str | None = None) -> None:
+        previous = str(previous_account or self.account_id or "local")
+        selected = str(account_id or "local")
+        if selected.casefold() != previous.casefold():
+            self._save_visible_session_scope()
+            self.account_id = selected
+            self._activate_session_scope((selected, self.mode))
+        else:
+            self.account_id = selected
 
     def _theme_selected(self, _index: int) -> None:
         self._save_theme_selection()
@@ -498,7 +625,11 @@ class PuzzleTrainingPage(QWidget):
                 self._save_theme_selection()
 
     def _save_theme_selection(self) -> None:
-        pass  # MainWindow persists the selected ID when a request starts.
+        self.clear_prepared_puzzles()
+
+    def clear_prepared_puzzles(self) -> None:
+        self._prepared_online_queue.clear()
+        self._prepared_online_puzzle = None
 
     def _filter_themes(self, text: str) -> None:
         query = str(text).strip().casefold()
@@ -510,6 +641,15 @@ class PuzzleTrainingPage(QWidget):
             visible = not query or query in label.casefold() or query in str(theme_id).casefold()
             model = self.theme.model()
             model.item(index).setHidden(not visible)
+        for index in range(self.theme_list.count()):
+            item = self.theme_list.item(index)
+            theme_id = item.data(Qt.ItemDataRole.UserRole)
+            if not theme_id:
+                item.setHidden(bool(query))
+                continue
+            label = item.text().strip()
+            item.setHidden(bool(query) and query not in label.casefold()
+                           and query not in str(theme_id).casefold())
 
     def _source_changed(self, _index: int) -> None:
         new_source = self.source.currentData() == "new"
@@ -521,15 +661,27 @@ class PuzzleTrainingPage(QWidget):
         if self._fetch_inflight:
             self.network_status.setText("Загрузка уже выполняется…")
             return
+        if self._cooldown_seconds > 0 and not self._prepared_online_queue:
+            self.network_status.setText(
+                f"Lichess разрешит новый запрос через {self._cooldown_seconds} с.")
+            return
         if (self.state.puzzle is not None and self._allow_submit
                 and self.state.status not in {PuzzleStatus.SUCCESS, PuzzleStatus.REVEALED,
                                               PuzzleStatus.SKIPPED, PuzzleStatus.UNAVAILABLE}):
+            rated_partial = (self.attempt_mode == "LICHESS_RATED"
+                             and self.state.solution_index > 0
+                             and not self._rated_result_sent)
             answer = QMessageBox.question(
-                self, "Пропустить задачу", "Текущая попытка будет сохранена как пропуск. Продолжить?",
+                self, "Пропустить задачу",
+                ("Отправить поражение на официальный рейтинг Lichess и перейти дальше?"
+                 if rated_partial else
+                 "Текущая попытка будет сохранена как пропуск. Продолжить?"),
                 QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
                 QMessageBox.StandardButton.No)
             if answer != QMessageBox.StandardButton.Yes:
                 return
+            if rated_partial:
+                self._request_rated_result(False, "skip")
             self.state.skip()
             self._finish(PuzzleOutcome.SKIPPED)
         self._auto_next_timer.stop()
@@ -561,9 +713,14 @@ class PuzzleTrainingPage(QWidget):
 
     def online_seen_ids(self, account_id: str, theme: str,
                         difficulty: str) -> set[str]:
-        """Return puzzle IDs already shown in this account/filter scope."""
-        scope = (str(account_id or "local"), str(theme), str(difficulty))
-        return set(self._seen_online_ids_by_scope.get(scope, set()))
+        """Return all puzzle IDs already shown for this account, across modes/filters."""
+        account = str(account_id or "local")
+        return {
+            puzzle_id
+            for scope, puzzle_ids in self._seen_online_ids_by_scope.items()
+            if scope and str(scope[0]).casefold() == account.casefold()
+            for puzzle_id in puzzle_ids
+        }
 
     def _retry_duplicate_online_puzzle(self, puzzle: PuzzlePlayablePosition) -> bool:
         if self._is_unique_online_puzzle(puzzle, self.selected_theme(),
@@ -584,25 +741,39 @@ class PuzzleTrainingPage(QWidget):
     def set_prepared_puzzle(self, account_id: str, theme: str, difficulty: str,
                             puzzle: PuzzlePlayablePosition, payload: dict,
                             details: dict | None = None) -> None:
-        self._prepared_online_puzzle = {
+        prepared = {
             "account_id": str(account_id), "theme": str(theme),
-            "difficulty": str(difficulty), "puzzle": puzzle,
+            "difficulty": str(difficulty), "mode": self.mode, "puzzle": puzzle,
             "payload": dict(payload), "details": dict(details or {}),
         }
         if str(puzzle.puzzle_id) in self._rated_puzzle_ids_by_account.get(str(account_id), set()):
-            self._prepared_online_puzzle["details"]["rating_eligible"] = False
+            prepared["details"]["rating_eligible"] = False
+        if not any(getattr(item.get("puzzle"), "puzzle_id", None) == puzzle.puzzle_id
+                   for item in self._prepared_online_queue):
+            self._prepared_online_queue.append(prepared)
+        self._prepared_online_puzzle = (self._prepared_online_queue[0]
+                                        if self._prepared_online_queue else None)
         self._live_get_ms = (details or {}).get("live_get_ms")
         if self.state.status in {PuzzleStatus.SUCCESS, PuzzleStatus.REVEALED,
                                  PuzzleStatus.SKIPPED, PuzzleStatus.UNAVAILABLE}:
             self.network_status.setText("Следующая задача готова")
 
+    def set_prepared_puzzles(self, account_id: str, theme: str, difficulty: str,
+                             puzzles: list[tuple[PuzzlePlayablePosition, dict]],
+                             details: dict | None = None) -> None:
+        self._prepared_online_queue.clear()
+        for puzzle, payload in puzzles:
+            self.set_prepared_puzzle(account_id, theme, difficulty, puzzle, payload, details)
+
     def take_prepared_puzzle(self, account_id: str, theme: str,
                              difficulty: str) -> dict | None:
-        prepared = self._prepared_online_puzzle
-        self._prepared_online_puzzle = None
+        prepared = self._prepared_online_queue.pop(0) if self._prepared_online_queue else None
+        self._prepared_online_puzzle = (self._prepared_online_queue[0]
+                                        if self._prepared_online_queue else None)
         if (prepared is None or prepared["account_id"] != str(account_id)
                 or prepared["theme"] != str(theme)
-                or prepared["difficulty"] != str(difficulty)):
+                or prepared["difficulty"] != str(difficulty)
+                or prepared.get("mode", "TRAINING") != self.mode):
             return None
         return prepared
 
@@ -651,6 +822,20 @@ class PuzzleTrainingPage(QWidget):
         self.state.load(puzzle)
         self._puzzle_payload = dict(payload or {})
         self._active_source = source
+        self.attempt_mode = (self.mode if source == "lichess" and not self._is_replay
+                             else "TRAINING")
+        self._rated_result_sent = False
+        self._attempt_theme = self.selected_theme()
+        self._attempt_difficulty = self.selected_difficulty()
+        if self.attempt_mode != "LEGACY":
+            self._rating_eligible = False
+        self.rated_status.setText(
+            "Тренировка: результат сохраняется локально · рейтинговой отправки нет"
+            if self.attempt_mode == "TRAINING" else
+            "Рейтинговая попытка · ждёт результата Lichess"
+            if self.attempt_mode == "LICHESS_RATED" else
+            "Повтор · без рейтинговой отправки")
+        self.reconcile_rated_button.hide()
         self._session_id = uuid.uuid4().hex
         self._session_account_id = str(self.account_id or "local")
         self._session_puzzle_id = puzzle.puzzle_id
@@ -715,6 +900,35 @@ class PuzzleTrainingPage(QWidget):
             self.board_placeholder.show()
             self._show_verdict(str(text), "neutral")
 
+    def set_rate_limit_cooldown(self, seconds: int) -> None:
+        self._cooldown_seconds = max(self._cooldown_seconds, max(1, int(seconds)))
+        if self._prepared_online_queue:
+            self.network_status.setText(
+                f"Ограничение Lichess · задача в очереди доступна · запрос через "
+                f"{self._cooldown_seconds} с.")
+            self.fetch.setText("Следующая задача →")
+            self.fetch.setEnabled(True)
+        else:
+            self.network_status.setText(
+                f"Ограничение Lichess · повтор через {self._cooldown_seconds} с.")
+            self.fetch.setText(f"Повтор через {self._cooldown_seconds} с")
+            self.fetch.setEnabled(False)
+        if self.reconcile_rated_button.isVisible():
+            self.reconcile_rated_button.setEnabled(False)
+        self._cooldown_timer.start()
+
+    def _cooldown_tick(self) -> None:
+        self._cooldown_seconds = max(0, self._cooldown_seconds - 1)
+        if self._cooldown_seconds:
+            self.set_rate_limit_cooldown(self._cooldown_seconds)
+            return
+        self._cooldown_timer.stop()
+        self.network_status.setText("Можно повторить запрос Lichess.")
+        self.fetch.setText("Повторить загрузку")
+        self.fetch.setEnabled(True)
+        if self.reconcile_rated_button.isVisible():
+            self.reconcile_rated_button.setEnabled(True)
+
     def set_message(self, text: str) -> None:
         self._fetch_inflight = False
         self.fetch.setText("Повторить загрузку")
@@ -743,6 +957,13 @@ class PuzzleTrainingPage(QWidget):
         self.fetch.setEnabled(True)
 
     def set_authorization_needed(self, needed: bool) -> None:
+        self.authorize.setText(
+            "Подключить рейтинг Lichess" if self.mode == "LICHESS_RATED"
+            else "Подключить задачи Lichess")
+        self.authorize.setToolTip(
+            "Отдельный доступ puzzle:read и puzzle:write; изменяет официальный рейтинг"
+            if self.mode == "LICHESS_RATED" else
+            "Отдельное разрешение Lichess только для чтения задач")
         self.authorize.setVisible(bool(needed))
 
     def _show_verdict(self, text: str, kind: str) -> None:
@@ -806,8 +1027,15 @@ class PuzzleTrainingPage(QWidget):
             self.review_position.setText("Текущая позиция решения")
             self.review_back.setEnabled(self.state.review_count > 1)
             self.review_forward.setEnabled(False)
-            self._show_verdict(
-                "Текущая позиция · вернитесь к решению или выберите фигуру.", "neutral")
+            if self.state.status in {PuzzleStatus.SUCCESS, PuzzleStatus.REVEALED,
+                                     PuzzleStatus.SKIPPED}:
+                self._show_verdict(self._terminal_verdict or "Задача завершена.",
+                                   "success" if self.state.status == PuzzleStatus.SUCCESS
+                                   else "neutral")
+                self._set_controls(True, finished=True)
+            else:
+                self._show_verdict(
+                    "Текущая позиция · вернитесь к решению или выберите фигуру.", "neutral")
             return
         self.board.set_interaction_enabled(False)
         self.return_to_solution.show()
@@ -861,6 +1089,7 @@ class PuzzleTrainingPage(QWidget):
         self._reply_timer.stop()
         self._auto_next_timer.stop()
         self._prepared_online_puzzle = None
+        self._prepared_online_queue.clear()
         # A retry control is account scoped. Failed rows remain in the durable
         # SQLite outbox and are reattached only after that account is selected.
         self._pending_attempt_saves.clear()
@@ -868,9 +1097,6 @@ class PuzzleTrainingPage(QWidget):
         self._retry_attempt_id = None
         self._retry_in_progress_id = None
         self._refresh_retry_save_control()
-        self._session_results.clear()
-        self._session_streak = self._best_streak = 0
-        self._session_clean = self._session_failed = self._session_hinted = 0
         self._session_outcome_ids.clear()
         self._update_session_display()
         self.persistence_status.clear()
@@ -890,7 +1116,9 @@ class PuzzleTrainingPage(QWidget):
         self.metrics.setText("Загрузка данных профиля…")
         self.practice_rating.setText("Рейтинг тренировки CC: загрузка…")
         self.board.set_interaction_enabled(False)
-        self.board.set_position(chess.Board())
+        self.board.hide()
+        self.board_placeholder.setText("Загружаем профиль и задачи…")
+        self.board_placeholder.show()
         self.board.set_feedback_squares(())
         self.board.clear_annotations(record_action=False)
         self._show_verdict("Профиль изменён · загружаем задачи выбранного профиля.", "neutral")
@@ -977,6 +1205,8 @@ class PuzzleTrainingPage(QWidget):
         if move is None:
             self._show_verdict("Максимум подсказок использован.", "neutral")
             return
+        if self.attempt_mode == "LICHESS_RATED":
+            self._request_rated_result(False, "hint")
         self._sync_hint_button()
         self._rating_eligible = self._rating_eligible and self._active_source == "lichess"
         if self.state.hint_level == 1:
@@ -991,6 +1221,8 @@ class PuzzleTrainingPage(QWidget):
     def _reveal(self) -> None:
         if not self.state.puzzle:
             return
+        if self.attempt_mode == "LICHESS_RATED":
+            self._request_rated_result(False, "reveal")
         self.state.reveal()
         self._show_solution_line()
         self.board.set_position(self.state.board)
@@ -1000,16 +1232,8 @@ class PuzzleTrainingPage(QWidget):
     def _repeat(self) -> None:
         if not self.state.puzzle:
             return
-        if self.state.status not in {PuzzleStatus.SUCCESS, PuzzleStatus.REVEALED,
-                                     PuzzleStatus.SKIPPED, PuzzleStatus.UNAVAILABLE}:
-            answer = QMessageBox.question(
-                self, "Повторить задачу", "Текущая попытка не завершена. Повторить с начала?",
-                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-                QMessageBox.StandardButton.No)
-            if answer != QMessageBox.StandardButton.Yes:
-                return
-            self.state.skip()
-            self._finish(PuzzleOutcome.SKIPPED)
+        if not self.confirm_leave_active_attempt("к повтору без рейтинга"):
+            return
         source = self._active_source
         self.load_puzzle(self.state.puzzle, self._puzzle_payload,
                          source="replay" if source != "demo" else "demo")
@@ -1029,6 +1253,8 @@ class PuzzleTrainingPage(QWidget):
     def _finish(self, outcome: PuzzleOutcome) -> None:
         if not self._session_id or self._session_id in self._finished_session_ids:
             return
+        if outcome == PuzzleOutcome.SUCCESS and self.attempt_mode == "LICHESS_RATED":
+            self._request_rated_result(True, "clean_completion")
         self._finished_session_ids.add(self._session_id)
         self._allow_submit = False
         self._wrong_timer.stop()
@@ -1088,9 +1314,13 @@ class PuzzleTrainingPage(QWidget):
             "solved": outcome == PuzzleOutcome.SUCCESS,
             "hints": self.state.hints_used, "duration_ms": int((time.monotonic() - self._started_at) * 1000),
             "puzzle_json": payload, "source": self._active_source,
-            "themes": list(self.state.puzzle.themes), "selected_theme": self.selected_theme(),
+            "themes": list(self.state.puzzle.themes), "selected_theme": self._attempt_theme,
+            "selected_difficulty": self._attempt_difficulty,
+            "difficulty": self._attempt_difficulty,
+            "mode": self.attempt_mode,
             "first_failure": bool(self.state.first_failure),
-            "rating_eligible": bool(self._rating_eligible and not self._is_replay),
+            "rating_eligible": bool(self._rating_eligible and not self._is_replay
+                                     and self.attempt_mode == "LEGACY"),
         }
         self._pending_attempt_saves[attempt["attempt_id"]] = attempt
         self._refresh_retry_save_control()
@@ -1100,7 +1330,8 @@ class PuzzleTrainingPage(QWidget):
         self._set_controls(True, finished=True)
         if (outcome == PuzzleOutcome.SUCCESS and self.state.mistakes == 0
                 and self.state.hints_used == 0 and self.auto_next.isChecked()
-                and self._active_source == "lichess" and not self._is_replay):
+                and self._active_source == "lichess" and not self._is_replay
+                and self.attempt_mode == "TRAINING"):
             self._auto_next_session_id = self._session_id
             self._auto_next_timer.start(1500)
         else:
@@ -1110,6 +1341,17 @@ class PuzzleTrainingPage(QWidget):
     def _record_session_result(self, outcome: PuzzleOutcome) -> None:
         if not self._session_id:
             return
+        attempt_scope = (str(self._session_account_id or "local"),
+                         str(self.attempt_mode))
+        visible_scope = (str(self.account_id or "local"), str(self.mode))
+        if attempt_scope != visible_scope:
+            self._save_visible_session_scope()
+            results = self._session_results_by_scope.setdefault(attempt_scope, [])
+            metrics = self._session_metrics_by_scope.get(attempt_scope, (0, 0, 0, 0, 0))
+            (self._session_streak, self._best_streak, self._session_clean,
+             self._session_failed, self._session_hinted) = metrics
+        else:
+            results = self._session_results
         clean = (outcome == PuzzleOutcome.SUCCESS and self.state.mistakes == 0
                  and self.state.hints_used == 0 and not self._is_replay)
         if self.state.mistakes:
@@ -1122,7 +1364,7 @@ class PuzzleTrainingPage(QWidget):
             mark, label = "✓", "чисто"
         else:
             mark, label = "–", "без рейтинга"
-        existing = next((row for row in self._session_results
+        existing = next((row for row in results
                          if row["session_id"] == self._session_id), None)
         if existing is not None:
             if existing.get("mark") == "✕" or self.state.first_failure:
@@ -1140,8 +1382,8 @@ class PuzzleTrainingPage(QWidget):
                    "session_id": self._session_id, "pending": True,
                    "completed": True, "source": self._active_source,
                    "account_id": self.account_id}
-            self._session_results.append(row)
-            self._session_results = self._session_results[-20:]
+            results.append(row)
+            results = results[-20:]
             existing = row
         if self._session_id not in self._session_outcome_ids:
             if clean:
@@ -1157,7 +1399,15 @@ class PuzzleTrainingPage(QWidget):
             else:
                 self._session_streak = 0
             self._session_outcome_ids.add(self._session_id)
-        self._update_session_display()
+        self._session_results_by_scope[attempt_scope] = results
+        self._session_metrics_by_scope[attempt_scope] = (
+            self._session_streak, self._best_streak, self._session_clean,
+            self._session_failed, self._session_hinted)
+        if attempt_scope == visible_scope:
+            self._session_results = results
+            self._update_session_display()
+        else:
+            self._activate_session_scope(visible_scope)
 
     def _record_first_failure(self) -> None:
         if self._is_replay:
@@ -1180,6 +1430,97 @@ class PuzzleTrainingPage(QWidget):
         row.update(mark="✕", label="первая ошибка", pending=True, completed=False)
         self._session_results = self._session_results[-20:]
         self._update_session_display()
+        if self.attempt_mode == "LICHESS_RATED":
+            self._request_rated_result(False, "first_mistake")
+
+    def _request_rated_result(self, win: bool, reason: str) -> None:
+        if (self.attempt_mode != "LICHESS_RATED" or self._is_replay
+                or self._rated_result_sent or not self._session_id):
+            return
+        self._rated_result_sent = True
+        self._rated_attempt_win = bool(win)
+        self.rated_status.setText("Отправляю результат Lichess…")
+        self.rated_result_requested.emit({
+            "attempt_id": self._session_id, "session_id": self._session_id,
+            "account_id": self._session_account_id,
+            "puzzle_id": self._session_puzzle_id, "win": bool(win),
+            "rated": True, "angle": self._attempt_theme,
+            "difficulty": self._attempt_difficulty, "reason": str(reason),
+        })
+
+    def apply_rated_result(self, status: str, *, win: bool,
+                            rating_diff: int | None = None,
+                            rating: int | None = None,
+                             message: str | None = None,
+                             attempt_id: str | None = None,
+                             attempt_payload: dict | None = None,
+                             schedule_auto_next: bool = True) -> None:
+        if status == "confirmed":
+            if rating is not None:
+                self._official_rating = int(rating)
+                date_text = time.strftime("%d.%m.%Y", time.localtime())
+                self.metrics.setText(
+                    f"Рейтинг Lichess подтверждён: {rating} · {date_text}\n" +
+                    self.metrics.text().split("\n", 1)[-1])
+            result_text = (f"✓ Lichess подтвердил результат · {rating_diff:+d}"
+                           if rating_diff is not None else
+                           "✓ Lichess подтвердил результат · изменение рейтинга неизвестно")
+            if rating is not None:
+                result_text += f" · рейтинг {rating}"
+            self.rated_status.setText(result_text)
+            self.reconcile_rated_button.hide()
+            if (schedule_auto_next and win and self._session_id
+                    and self._session_id == self._auto_next_session_id
+                    and self.auto_next.isChecked()):
+                self._auto_next_timer.start(1500)
+            elif (schedule_auto_next and win and self._session_id
+                  and self.attempt_mode == "LICHESS_RATED"
+                  and self.state.status == PuzzleStatus.SUCCESS
+                  and self.auto_next.isChecked()):
+                self._auto_next_session_id = self._session_id
+                self._auto_next_timer.start(1500)
+        elif status == "unknown":
+            self.rated_status.setText(
+                "Результат Lichess неизвестен. Повторная отправка не выполнялась. "
+                "Проверьте активность аккаунта.")
+            self._rated_recovery_attempt_id = str(attempt_id or self._session_id)
+            self._rated_recovery_payload = dict(attempt_payload or {})
+            self.reconcile_rated_button.setText("Проверить результат")
+            self.reconcile_rated_button.setEnabled(True)
+            self.reconcile_rated_button.show()
+        elif status in {"not_sent", "rejected"}:
+            self.rated_status.setText(message or
+                                      "Результат не подтверждён Lichess · переподключите разрешение.")
+            can_retry = (status == "not_sent"
+                         and "разрешение" not in str(message or "").casefold())
+            self._rated_recovery_attempt_id = str(attempt_id or self._session_id)
+            self._rated_recovery_payload = dict(attempt_payload or {})
+            self.reconcile_rated_button.setText("Повторить отправку")
+            self.reconcile_rated_button.setVisible(can_retry)
+            self.reconcile_rated_button.setEnabled(can_retry and self._cooldown_seconds <= 0)
+        else:
+            self.rated_status.setText(message or "Ожидаю подтверждение Lichess.")
+
+    def _rated_recovery_clicked(self) -> None:
+        attempt_id = str(getattr(self, "_rated_recovery_attempt_id", "") or "")
+        if not attempt_id:
+            return
+        if self.reconcile_rated_button.text() == "Повторить отправку":
+            if self._cooldown_seconds <= 0:
+                payload = dict(self._rated_recovery_payload)
+                if not payload:
+                    payload = {
+                    "attempt_id": attempt_id, "session_id": attempt_id,
+                    "account_id": self._session_account_id,
+                    "puzzle_id": self._session_puzzle_id,
+                    "mode": "LICHESS_RATED", "rated": True,
+                    "win": bool(getattr(self, "_rated_attempt_win", False)),
+                    "angle": self._attempt_theme,
+                    "difficulty": self._attempt_difficulty,
+                    }
+                self.rated_retry_requested.emit(payload)
+            return
+        self.rated_reconcile_requested.emit(attempt_id)
 
     def _record_first_hint(self) -> None:
         if self._is_replay or self._session_id in self._session_outcome_ids:
@@ -1259,20 +1600,70 @@ class PuzzleTrainingPage(QWidget):
     def _open_session_result(self, row: dict) -> None:
         if not row.get("completed") or not row.get("puzzle_id"):
             return
-        if (self.state.puzzle is not None and self._allow_submit
-                and self.state.status not in {PuzzleStatus.SUCCESS, PuzzleStatus.REVEALED,
-                                              PuzzleStatus.SKIPPED, PuzzleStatus.UNAVAILABLE}):
-            answer = QMessageBox.question(
-                self, "Прервать текущую задачу?",
-                "Текущая задача будет сохранена как пропуск. Открыть выбранный повтор?",
-                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-                QMessageBox.StandardButton.No)
-            if answer != QMessageBox.StandardButton.Yes:
-                return
-            self.state.skip()
-            self._finish(PuzzleOutcome.SKIPPED)
+        if not self.confirm_leave_active_attempt("к выбранному повтору"):
+            return
         self.replay_requested.emit(str(row.get("account_id") or self.account_id),
                                    str(row["puzzle_id"]), str(row.get("source") or ""))
+
+    def confirm_leave_active_attempt(self, destination: str = "дальше") -> bool:
+        """One explicit exit policy for navigation away from a live attempt."""
+        if not self._has_active_attempt():
+            return True
+        if not self._prompt_active_attempt_exit(destination):
+            return False
+        self._abandon_active_attempt("navigation_exit")
+        return True
+
+    def _has_active_attempt(self) -> bool:
+        return (self.state.puzzle is not None and self._allow_submit
+                and self.state.status not in {
+                    PuzzleStatus.SUCCESS, PuzzleStatus.REVEALED,
+                    PuzzleStatus.SKIPPED, PuzzleStatus.UNAVAILABLE})
+
+    def _is_unscored_rated_partial(self) -> bool:
+        return (self.attempt_mode == "LICHESS_RATED"
+                and self.state.solution_index > 0
+                and not self._rated_result_sent
+                and not self.state.mistakes and not self.state.hints_used)
+
+    def _prompt_active_attempt_exit(self, destination: str) -> bool:
+        if not self._has_active_attempt():
+            return True
+        # Once a rated loss is already frozen and sent, leaving cannot change
+        # its result; avoid asking the user to confirm the same outcome again.
+        if self.attempt_mode == "LICHESS_RATED" and self._rated_result_sent:
+            return True
+        if self._is_unscored_rated_partial():
+            dialog = QMessageBox(self)
+            dialog.setIcon(QMessageBox.Icon.Warning)
+            dialog.setWindowTitle("Прервать рейтинговую задачу?")
+            dialog.setText(
+                f"Рейтинговая попытка уже начата. Прерывание отправит поражение на Lichess "
+                f"и перейдёт {destination}.")
+            continue_button = dialog.addButton("Продолжить", QMessageBox.ButtonRole.RejectRole)
+            interrupt_button = dialog.addButton(
+                "Прервать и перейти", QMessageBox.ButtonRole.DestructiveRole)
+            dialog.setDefaultButton(continue_button)
+            dialog.exec()
+            return dialog.clickedButton() is interrupt_button
+        answer = QMessageBox.question(
+            self, "Переключить режим?" if destination in {"к тренировке", "к рейтинговой задаче"}
+            else "Оставить текущую задачу?",
+            (f"Рейтинговая задача ещё не начата. Перейти {destination} без отправки результата?"
+             if self.attempt_mode == "LICHESS_RATED" else
+             f"Текущая тренировка будет сохранена как пропуск без изменения рейтинга. "
+             f"Перейти {destination}?"),
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No)
+        return answer == QMessageBox.StandardButton.Yes
+
+    def _abandon_active_attempt(self, reason: str) -> None:
+        if not self._has_active_attempt():
+            return
+        if self._is_unscored_rated_partial():
+            self._request_rated_result(False, reason)
+        self.state.skip()
+        self._finish(PuzzleOutcome.SKIPPED)
 
     def _retry_attempt_save(self) -> None:
         if self._retry_in_progress_id:
@@ -1371,8 +1762,9 @@ class PuzzleTrainingPage(QWidget):
         self.hint.setEnabled(loaded and not finished)
         self.reveal.setEnabled(loaded and not finished)
         self.repeat.setEnabled(loaded)
-        self.next.setEnabled(not self._fetch_inflight)
-        self.fetch.setEnabled(not self._fetch_inflight)
+        can_request = self._cooldown_seconds <= 0 or bool(self._prepared_online_queue)
+        self.next.setEnabled(not self._fetch_inflight and can_request)
+        self.fetch.setEnabled(not self._fetch_inflight and can_request)
 
     def set_recent_history(self, rows: list[dict], *, local_count: int = 0,
                            official_rating: int | None = None,
@@ -1406,9 +1798,8 @@ class PuzzleTrainingPage(QWidget):
             rated_count = int(practice_rating.get("rated_attempts", 0))
             self._current_cc_rating = value
             self.practice_rating.setText(
-                f"Рейтинг тренировки CC: {value}"
-                + (" (стартовый)" if rated_count == 0 else "")
-                + (f" · {delta:+d} за задачу" if delta else ""))
+                f"Историческая оценка Chess Coach: {value} · новые задачи её не меняют"
+                + (" (начальная)" if rated_count == 0 else ""))
         self.history.clear()
         for row in rows[:8]:
             source = "Chess Coach" if row.get("source") == "local" else "Lichess · sync"
@@ -1457,8 +1848,10 @@ class PuzzleTrainingPage(QWidget):
         row = item.data(Qt.ItemDataRole.UserRole) or {}
         puzzle_id = str(row.get("puzzle_id", ""))
         if puzzle_id:
-            self.replay_requested.emit(self.account_id, puzzle_id,
-                                       str(row.get("source") or ""))
+            self._open_session_result({
+                **row, "completed": True, "account_id": self.account_id,
+                "puzzle_id": puzzle_id,
+            })
 
     def resizeEvent(self, event) -> None:  # noqa: N802 - Qt API
         super().resizeEvent(event)

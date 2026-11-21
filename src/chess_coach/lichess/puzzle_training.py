@@ -81,6 +81,8 @@ def normalize_api_puzzle(payload: dict) -> PuzzlePlayablePosition:
     try:
         game = payload["game"]
         puzzle = payload["puzzle"]
+        if not isinstance(game, dict) or not isinstance(puzzle, dict):
+            raise TypeError
         puzzle_id = str(puzzle["id"]).strip()
         initial_ply = int(puzzle["initialPly"])
         raw_solution = puzzle["solution"]
@@ -133,8 +135,52 @@ def normalize_api_puzzle(payload: dict) -> PuzzlePlayablePosition:
 
 def normalize_activity_puzzle(puzzle_id: str, fen: str, solution: object,
                               *, themes: object = (), rating: int | None = None,
-                              plays: int | None = None) -> PuzzlePlayablePosition:
-    """Normalize the historical CSV/activity format whose first move is prep."""
+                              plays: int | None = None,
+                              last_move: str | None = None) -> PuzzlePlayablePosition:
+    """Normalize an official PuzzleActivity record.
+
+    PuzzleActivity.fen is already the playable position. Its solution starts
+    with the user's move; unlike the old public CSV export it has no prep move
+    to apply. ``lastMove`` is metadata about the preceding game move.
+    """
+    try:
+        board = chess.Board(str(fen))
+    except (ValueError, TypeError) as exc:
+        raise ValueError("Сохранённая позиция повреждена.") from exc
+    if isinstance(solution, str):
+        import json
+        try:
+            solution = json.loads(solution)
+        except (ValueError, TypeError):
+            solution = solution.split()
+    if not isinstance(solution, (list, tuple)):
+        raise ValueError("В сохранённой задаче нет последовательности ходов.")
+    moves = _validated_moves(board.copy(), solution)
+    theme_values = _normalize_themes(themes)
+    return PuzzlePlayablePosition(
+        puzzle_id=str(puzzle_id), player_to_move_fen=board.fen(),
+        expected_user_moves=moves, themes=theme_values, rating=rating, plays=plays,
+        source=PuzzleSource.LICHESS_ACTIVITY, last_move=(str(last_move).strip() or None)
+        if last_move else None,
+    )
+
+
+def _normalize_themes(themes: object) -> tuple[str, ...]:
+    if isinstance(themes, str):
+        import json
+        try:
+            themes = json.loads(themes)
+        except (ValueError, TypeError):
+            themes = [themes]
+    if not isinstance(themes, (list, tuple)):
+        return ()
+    return tuple(str(item) for item in themes if item)
+
+
+def normalize_legacy_csv_puzzle(puzzle_id: str, fen: str, solution: object,
+                                *, themes: object = (), rating: int | None = None,
+                                plays: int | None = None) -> PuzzlePlayablePosition:
+    """Normalize the explicitly identified legacy CSV format with prep move."""
     try:
         board = chess.Board(str(fen))
     except (ValueError, TypeError) as exc:
@@ -154,28 +200,20 @@ def normalize_activity_puzzle(puzzle_id: str, fen: str, solution: object,
     prep_san = f"{board.fullmove_number}{'.' if board.turn else '...'} {board.san(prep)}"
     board.push(prep)
     moves = _validated_moves(board.copy(), solution[1:])
-    theme_values = themes
-    if isinstance(theme_values, str):
-        import json
-        try:
-            theme_values = json.loads(theme_values)
-        except (ValueError, TypeError):
-            theme_values = [theme_values]
-    if not isinstance(theme_values, (list, tuple)):
-        theme_values = ()
     return PuzzlePlayablePosition(
         puzzle_id=str(puzzle_id), player_to_move_fen=board.fen(),
         expected_user_moves=moves,
-        themes=tuple(str(item) for item in theme_values if item),
+        themes=_normalize_themes(themes),
         rating=rating, plays=plays, source=PuzzleSource.LICHESS_ACTIVITY,
         last_move=prep.uci(), review_fens=(initial_fen, board.fen()),
         review_san=(prep_san,),
     )
 
 
-def normalize_saved_puzzle_payload(puzzle_id: str, payload: object
+def normalize_saved_puzzle_payload(puzzle_id: str, payload: object, *,
+                                   source_format: str | None = None
                                    ) -> PuzzlePlayablePosition:
-    """Read an exact cached/local puzzle without assuming one historical JSON shape."""
+    """Read a cached puzzle only when its source semantics are known."""
     target_id = str(puzzle_id or "").strip()
     if not target_id or not isinstance(payload, dict):
         raise ValueError("Не удалось открыть сохранённую задачу.")
@@ -189,6 +227,10 @@ def normalize_saved_puzzle_payload(puzzle_id: str, payload: object
     except (KeyError, TypeError, ValueError) as exc:
         api_error = exc
 
+    if source_format not in {"lichess_activity_v1", "lichess_csv_v1"}:
+        raise ValueError(
+            "Не удалось безопасно восстановить сохранённую задачу: неизвестен формат источника."
+        ) from api_error
     candidates = [payload.get("puzzle"), payload]
     for candidate in candidates:
         if not isinstance(candidate, dict):
@@ -202,13 +244,17 @@ def normalize_saved_puzzle_payload(puzzle_id: str, payload: object
         if not fen or solution is None:
             continue
         try:
-            return normalize_activity_puzzle(
+            normalizer = (normalize_legacy_csv_puzzle if source_format == "lichess_csv_v1"
+                          else normalize_activity_puzzle)
+            return normalizer(
                 target_id, str(fen), solution,
                 themes=(candidate.get("themes") or payload.get("themes") or ()),
                 rating=(candidate.get("rating") or payload.get("rating")),
                 plays=(candidate.get("plays") or payload.get("plays")),
+                **({"last_move": candidate.get("lastMove") or payload.get("lastMove")}
+                   if source_format == "lichess_activity_v1" else {}),
             )
-        except (TypeError, ValueError):
+        except (TypeError, ValueError, AttributeError):
             continue
     raise ValueError("Не удалось безопасно восстановить сохранённую задачу.") from api_error
 
@@ -225,7 +271,7 @@ def select_next_api_puzzle(payloads: object, seen_ids: set[str], *,
             continue
         try:
             playable = normalize_api_puzzle(payload)
-        except (TypeError, ValueError):
+        except (TypeError, ValueError, KeyError, AttributeError):
             continue
         if playable.puzzle_id in seen:
             continue
@@ -233,6 +279,34 @@ def select_next_api_puzzle(payloads: object, seen_ids: set[str], *,
             continue
         return playable, payload
     return None
+
+
+def select_api_puzzle_queue(payloads: object, seen_ids: set[str], *,
+                            theme: str | None = None,
+                            max_count: int = 5) -> list[tuple[PuzzlePlayablePosition, dict]]:
+    """Validate and retain a bounded set of distinct, unseen batch members."""
+    if not isinstance(payloads, (list, tuple)):
+        return []
+    limit = max(0, min(5, int(max_count)))
+    seen = {str(item) for item in seen_ids}
+    queued: set[str] = set()
+    result: list[tuple[PuzzlePlayablePosition, dict]] = []
+    for payload in payloads[:50]:
+        if len(result) >= limit:
+            break
+        if not isinstance(payload, dict):
+            continue
+        try:
+            playable = normalize_api_puzzle(payload)
+        except (TypeError, ValueError, KeyError, AttributeError):
+            continue
+        if playable.puzzle_id in seen or playable.puzzle_id in queued:
+            continue
+        if theme and theme != "mix" and theme not in playable.themes:
+            continue
+        queued.add(playable.puzzle_id)
+        result.append((playable, payload))
+    return result
 
 
 class PuzzleStatus(str, Enum):

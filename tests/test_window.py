@@ -334,6 +334,12 @@ def test_progress_filter_options_load_in_background_not_dialog_constructor(
     assert dialog is not None and not dialog.account.isEnabled()
     qtbot.waitUntil(lambda: bool(calls) and dialog.account.isEnabled(), timeout=3000)
     assert calls and all(name != current_thread().name for name in calls)
+    # MainWindow also starts Home preview/aggregate reads. Wait for those
+    # unrelated startup workers before asserting the synchronous close path.
+    qtbot.waitUntil(
+        lambda: not any(thread is not None and thread.is_alive() for thread in (
+            window._dashboard_thread, window._dashboard_preview_thread)),
+        timeout=5000)
     assert window.close() is True
 
 
@@ -3535,6 +3541,10 @@ def test_close_prompt_catches_outbox_failure_finishing_during_shutdown(
     assert not window.runtime._closed
     qtbot.waitUntil(lambda: "shutdown-race-attempt" in window._puzzle_failed_attempts,
                     timeout=3000)
+    qtbot.waitUntil(
+        lambda: not any(thread is not None and thread.is_alive() for thread in (
+            window._dashboard_thread, window._dashboard_preview_thread)),
+        timeout=5000)
     final = QCloseEvent()
     window.closeEvent(final)
     assert final.isAccepted()
@@ -4849,8 +4859,10 @@ def test_m46_home_has_progress_activity_and_no_legacy_action_drawer(qtbot, tmp_p
     qtbot.addWidget(window)
     assert window.home_ai_button.isHidden()
     assert window.home_local_button.isHidden()
-    assert window.home_activity_button.text() == "Решать новые задачи"
+    assert window.home_activity_button.text() == "Тренировка"
+    assert window.home_rated_button.text() == "На рейтинг"
     assert not window.home_activity_button.isHidden()
+    assert not window.home_rated_button.isHidden()
     assert {"games", "accuracy", "analysis", "errors"} == set(window.dashboard_metrics)
     assert window.dashboard_account.count() >= 1
     assert window.dashboard_clock.isHidden()
@@ -4858,7 +4870,7 @@ def test_m46_home_has_progress_activity_and_no_legacy_action_drawer(qtbot, tmp_p
     assert not window.home_all_progress_button.isHidden()
     assert not window.home_games_button.isHidden()
     assert window.home_friend_button.parentWidget() is not None
-    assert window.home_activity_button.parentWidget() is window.home_play_card
+    assert window.home_activity_button.parentWidget() is window._home_view.home_puzzle_actions
     assert window.home_review_button.isHidden()
     assert window.home_batch_analysis_button.parentWidget() is not window.home_page
     assert window.home_batch_analysis_button.isEnabled()
@@ -4901,6 +4913,7 @@ def test_home_has_rating_kpi_and_three_recent_game_cards(qtbot, tmp_path):
     window.show()
     qtbot.wait(20)
     assert window.home_activity_button.isVisible()
+    assert window.home_rated_button.isVisible()
     assert window._nav_buttons["training"].isVisible()
     kpi_widths = [window._home_view.dashboard_metrics[key].width() for key in ("games", "accuracy")]
     kpi_widths.append(window.home_progress_card.width())
@@ -4908,7 +4921,7 @@ def test_home_has_rating_kpi_and_three_recent_game_cards(qtbot, tmp_path):
     # zone; recent games occupy the adjacent right zone.
     assert min(kpi_widths) >= 150
     assert max(kpi_widths) <= 560
-    assert window.home_activity_button.parentWidget() is window.home_play_card
+    assert window.home_activity_button.parentWidget() is window._home_view.home_puzzle_actions
     assert not isinstance(window.home_page, QScrollArea)
     assert not hasattr(window._home_view, "home_pilot_import_button")
     assert not hasattr(window._home_view, "home_puzzles_pilot_button")
@@ -4943,7 +4956,8 @@ def test_home_saved_puzzle_preview_opens_exact_offline_attempt(qtbot, tmp_path, 
     assert window._home_view.activity_status.text() == "Задача Lichess"
     assert "saved-puzzle-42" in window._home_view.activity_status.toolTip()
     assert "1770" in window._home_view.puzzle_meta.text()
-    assert window.home_activity_button.text() == "Решать новые задачи"
+    assert window.home_activity_button.text() == "Тренировка"
+    assert window.home_rated_button.text() == "На рейтинг"
     assert window.home_replay_button.text() == "Повторить эту"
     assert "без рейтинга" in window.home_replay_button.toolTip()
     assert "повтор без рейтинга" in window._home_view.puzzle_preview_board.accessibleDescription()

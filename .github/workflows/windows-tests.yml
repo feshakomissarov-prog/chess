@@ -145,6 +145,67 @@ jobs:
           name: puz-ux-03-l2-${{ github.event.pull_request.head.sha }}
           path: visual-evidence/puz-ux-03-*
           if-no-files-found: warn
+  puz-ux-06-l2:
+    name: L2 PUZ-UX-05/06 puzzle workflow and Windows Qt
+    if: github.event_name == 'pull_request' && github.event.action == 'synchronize' && github.event.pull_request.head.ref == 'codex/puz-ux-05-owner-live-next-replay'
+    runs-on: windows-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+      - uses: actions/setup-python@v7.1.0
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Install application and test dependencies
+        run: python -m pip install -e ".[dev]"
+      - name: L1 PUZ05/06 targeted regression and large Home archive
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: |
+          python -m py_compile src/chess_coach/infrastructure/sqlite/constants.py src/chess_coach/infrastructure/sqlite/migrations.py src/chess_coach/infrastructure/sqlite/puzzles.py src/chess_coach/lichess/api.py src/chess_coach/lichess/puzzle_training.py src/chess_coach/ui/pages/home.py src/chess_coach/ui/pages/puzzle_training.py src/chess_coach/window.py scripts/puz_ux_05_mainwindow_live_journey.py tests/test_puz_ux_06_modes.py tests/test_puz_ux_06_rated.py tests/test_puz_ux_05_live_flow.py tests/test_puzzle_training.py tests/test_puzzle_training_store.py tests/test_puzzle_training_ui.py tests/test_window.py
+          python -X faulthandler -m pytest -o addopts= -q -W error::pytest.PytestUnhandledThreadExceptionWarning tests/test_puz_ux_06_modes.py tests/test_puz_ux_06_rated.py tests/test_puz_ux_05_live_flow.py tests/test_puz_ux_04_flow.py tests/test_puzzle_training.py tests/test_puzzle_training_ui.py tests/test_puzzle_training_async.py tests/test_puzzle_training_navigation.py tests/test_puzzle_training_store.py tests/test_puzzle_api_adapter.py tests/test_board_view.py
+          python -X faulthandler -m pytest -o addopts= -q -W error::pytest.PytestUnhandledThreadExceptionWarning tests/test_window.py -k "progress_filter_options_load_in_background_not_dialog_constructor or close_prompt_catches_outbox_failure_finishing_during_shutdown or home_account_switch_preview_is_not_queued_behind_old_full_snapshot or home_shows_local_archive_preview_while_full_dashboard_aggregate_is_pending"
+      - name: Configure isolated native Windows Qt display
+        shell: pwsh
+        run: |
+          Set-DisplayResolution -Width 1920 -Height 1080 -Force
+          Add-Type -AssemblyName System.Windows.Forms
+          $bounds = [System.Windows.Forms.Screen]::PrimaryScreen.Bounds
+          Write-Host "PUZ-UX-06 L2 native display: $($bounds.Width)x$($bounds.Height)"
+          if ($bounds.Width -lt 1672 -or $bounds.Height -lt 941) {
+            throw "Runner display cannot fit the 1672x941 puzzle journey."
+          }
+      - name: Run interactive dual-mode journey on real public puzzles
+        env:
+          LOCALAPPDATA: ${{ runner.temp }}\puz-ux-06-live-localappdata
+          CC_PUZ_UX_06_OUTPUT: visual-evidence/puz-ux-06-live
+          CC_PUZ_UX_06_SIZE: "1672x941"
+        run: python -u -X faulthandler scripts/puz_ux_05_mainwindow_live_journey.py
+      - name: Capture compact puzzle screens at 125 and 150 percent DPI
+        shell: pwsh
+        env:
+          LOCALAPPDATA: ${{ runner.temp }}\puz-ux-06-visual-localappdata
+        run: |
+          $cases = @(
+            @{ Scale = "1.25"; Size = "1280x720" },
+            @{ Scale = "1.5"; Size = "1120x640" }
+          )
+          foreach ($case in $cases) {
+            $env:QT_SCALE_FACTOR = $case.Scale
+            $env:CC_PUZ_UX_06_SIZE = $case.Size
+            $env:CC_PUZ_UX_06_VISUAL_ONLY = "1"
+            $env:CC_PUZ_UX_06_OUTPUT = "visual-evidence/puz-ux-06-compact/scale-$($case.Scale)"
+            python -u -X faulthandler scripts/puz_ux_05_mainwindow_live_journey.py
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          }
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: puz-ux-06-l2-${{ github.event.pull_request.head.sha }}
+          path: visual-evidence/puz-ux-06-*
+          if-no-files-found: error
   test:
     if: github.event_name != 'pull_request' || github.event.action == 'ready_for_review' || (github.event.pull_request.head.ref != 'codex/review-ux-01-game-analysis-2026-11-14' && github.event.pull_request.head.ref != 'codex/puzzle-ux-02-lichess-training-2026-11-19' && github.event.pull_request.head.ref != 'codex/puz-ux-03-online-puzzle-playability-2026-11-20' && github.event.pull_request.head.ref != 'codex/puz-ux-05-owner-live-next-replay')
     needs: home-chart-review

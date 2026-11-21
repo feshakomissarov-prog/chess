@@ -1,14 +1,17 @@
 """PUZ-UX-05 regressions for source, NEXT and ordinary puzzle gestures."""
 
 from types import SimpleNamespace
+import time
 
 import chess
 import chess_coach.lichess.puzzle_training as puzzle_training_module
-from PySide6.QtCore import Qt
-from PySide6.QtWidgets import QMessageBox
+from PySide6.QtCore import QTimer, Qt
+from PySide6.QtWidgets import QApplication, QMessageBox
 
 from chess_coach.board_view import BoardView
-from chess_coach.lichess.puzzle_training import normalize_api_puzzle
+from chess_coach.lichess.puzzle_training import (
+    normalize_api_puzzle, normalize_activity_puzzle, select_api_puzzle_queue,
+)
 from chess_coach.lichess.repository import GameRepository
 from chess_coach.ui.pages.puzzle_training import PuzzleTrainingPage
 
@@ -42,7 +45,8 @@ def test_home_saved_replay_legacy_payload_and_separate_new(qtbot):
         "PUZ05-01 needs the source-aware saved-puzzle normalizer")
     old_shape = {"puzzle": {"id": "saved-legacy", "fen": LEGACY_FEN,
                              "solution": ["c7c5", "g1f3"], "themes": ["opening"]}}
-    playable = normalize_saved_puzzle_payload("saved-legacy", old_shape)
+    playable = normalize_saved_puzzle_payload(
+        "saved-legacy", old_shape, source_format="lichess_csv_v1")
     assert playable.puzzle_id == "saved-legacy"
     after_prep = chess.Board(LEGACY_FEN)
     after_prep.push_uci("c7c5")
@@ -56,6 +60,179 @@ def test_home_saved_replay_legacy_payload_and_separate_new(qtbot):
         assert "сохранённую задачу" in str(error).lower()
     else:
         raise AssertionError("Malformed exact replay must fail with a local replay message")
+
+
+def test_official_activity_replay_preserves_player_fen_and_first_solution(qtbot):
+    from chess_coach.lichess.puzzle_training import normalize_activity_puzzle
+    from scripts.puz_ux_05_mainwindow_live_journey import play_move
+
+    playable = normalize_activity_puzzle(
+        "0haqU", "6k1/1q3p2/5prp/2b5/3pN3/1PP2P1P/2Q1R1P1/6K1 b - - 0 1",
+        ["d4d3", "e4c5", "d3c2", "c5b7", "c2c1q"],
+        last_move="f2f3")
+    page = PuzzleTrainingPage()
+    qtbot.addWidget(page)
+    page.resize(1200, 800)
+    page.show()
+    page.load_puzzle(playable, {"puzzle": {"id": "0haqU"}}, source="replay")
+    assert page.state.board.turn == chess.BLACK
+    assert page.state.puzzle.expected_user_moves[0] == "d4d3"
+    for raw in playable.expected_user_moves:
+        play_move(page, raw)
+        if page.state.status.value == "opponent_reply":
+            qtbot.waitUntil(lambda: page.state.status.value != "opponent_reply", timeout=2000)
+    assert page.state.status.value == "success"
+    assert page.state.board.piece_at(chess.C1).symbol() == "q"
+    assert page.persistence_status.text() == "Повтор не записывается"
+
+
+def test_batch_queue_consumes_all_valid_candidates_and_skips_malformed_game():
+    def payload(pid, pgn, move):
+        return {"game": {"id": f"game-{pid}", "pgn": pgn},
+                "puzzle": {"id": pid, "initialPly": 2, "solution": [move],
+                           "themes": ["fork"]}}
+
+    rows = [payload("A", "1. e4 e5 2. Nf3", "d7d5"),
+            {"game": None, "puzzle": {"id": "malformed", "initialPly": 2,
+                                       "solution": ["d7d5"]}},
+            payload("B", "1. d4 d5 2. c4", "e7e6"),
+            payload("A", "1. e4 e5 2. Nf3", "d7d5"),
+            payload("C", "1. c4 e5 2. Nc3", "g8f6")]
+    queue = select_api_puzzle_queue(rows, set(), theme="mix", max_count=5)
+    assert [row[0].puzzle_id for row in queue] == ["A", "B", "C"]
+    assert len({row[0].player_to_move_fen for row in queue}) == 3
+
+
+def test_history_row_replay_uses_same_exit_policy_as_result_tiles(qtbot):
+    from chess_coach.ui.pages.puzzle_training import PuzzleTrainingPage
+
+    playable = normalize_activity_puzzle(
+        "active-rated", "6k1/1q3p2/5prp/2b5/3pN3/1PP2P1P/2Q1R1P1/6K1 b - - 0 1",
+        ["d4d3", "e4c5", "d3c2", "c5b7", "c2c1q"], last_move="f2f3")
+    page = PuzzleTrainingPage()
+    qtbot.addWidget(page)
+    page.resize(1200, 800)
+    page.show()
+    page.set_mode("LICHESS_RATED")
+    page.load_puzzle(playable, {}, source="lichess")
+    page.set_recent_history([{"puzzle_id": "history-replay", "result": "Решено",
+                             "source": "local", "themes": ["fork"]}], local_count=1)
+    rated, replayed, saved = [], [], []
+    page.rated_result_requested.connect(rated.append)
+    page.replay_requested.connect(lambda *args: replayed.append(args))
+    page.attempt_saved.connect(saved.append)
+
+    def queue_dialog_click(button_text):
+        deadline = time.monotonic() + 3
+
+        def click_when_ready():
+            dialog = QApplication.activeModalWidget()
+            if isinstance(dialog, QMessageBox):
+                button = next((item for item in dialog.buttons()
+                               if item.text() == button_text), None)
+                if button is not None:
+                    qtbot.mouseClick(button, Qt.MouseButton.LeftButton)
+                    return
+            if time.monotonic() < deadline:
+                QTimer.singleShot(10, click_when_ready)
+
+        QTimer.singleShot(0, click_when_ready)
+
+    first_move = chess.Move.from_uci("d4d3")
+    qtbot.mouseClick(page.board, Qt.MouseButton.LeftButton,
+                     pos=center(page.board, first_move.from_square))
+    qtbot.mouseClick(page.board, Qt.MouseButton.LeftButton,
+                     pos=center(page.board, first_move.to_square))
+    qtbot.waitUntil(lambda: page.state.status.value != "opponent_reply", timeout=2000)
+    queue_dialog_click("Продолжить")
+    item = page.history.item(0)
+    item_rect = page.history.visualItemRect(item)
+    qtbot.mouseClick(page.history.viewport(), Qt.MouseButton.LeftButton,
+                     pos=item_rect.center())
+    qtbot.waitUntil(lambda: QApplication.activeModalWidget() is None, timeout=2000)
+    assert page._session_puzzle_id == "active-rated"
+    assert not rated and not replayed and not saved
+
+    queue_dialog_click("Прервать и перейти")
+    qtbot.mouseClick(page.history.viewport(), Qt.MouseButton.LeftButton,
+                     pos=item_rect.center())
+    qtbot.waitUntil(lambda: page.state.status.value == "skipped", timeout=2000)
+    assert len(rated) == 1
+    assert rated[0]["win"] is False and rated[0]["rated"] is True
+    assert len(saved) == 1 and saved[0]["mode"] == "LICHESS_RATED"
+    assert replayed == [("local", "history-replay", "local")]
+
+
+def test_next_and_prefetch_respect_retry_after(qtbot):
+    payload = {"game": {"id": "game-current", "pgn": "1. e4 e5 2. Nf3"},
+               "puzzle": {"id": "cooldown-current", "initialPly": 2,
+                          "solution": ["d7d5"], "themes": ["fork"]}}
+    next_payload = {"game": {"id": "game-next", "pgn": "1. d4 d5 2. c4"},
+                    "puzzle": {"id": "cooldown-next", "initialPly": 2,
+                               "solution": ["e7e6"], "themes": ["fork"]}}
+    page = PuzzleTrainingPage()
+    qtbot.addWidget(page)
+    page.resize(1200, 800)
+    page.show()
+    page.load_puzzle(normalize_api_puzzle(payload), payload, source="lichess")
+    requested = []
+    page.new_puzzle_requested.connect(lambda *args: requested.append(args))
+    solve_d7d5(qtbot, page)
+    page.set_rate_limit_cooldown(60)
+    assert not page.fetch.isEnabled()
+    qtbot.mouseClick(page.fetch, Qt.MouseButton.LeftButton)
+    assert requested == [] and page._session_puzzle_id == "cooldown-current"
+
+    page.set_prepared_puzzle(
+        "local", "mix", "normal", normalize_api_puzzle(next_payload), next_payload)
+    page._set_controls(True, finished=True)
+    assert page.fetch.isEnabled()  # prepared queue remains usable during API cooldown
+    qtbot.mouseClick(page.fetch, Qt.MouseButton.LeftButton)
+    assert page._session_puzzle_id == "cooldown-next"
+    assert requested == []
+
+
+def test_theme_search_and_frozen_attempt_filter_and_profile_placeholder(qtbot):
+    payload = {"game": {"id": "game-frozen", "pgn": "1. e4 e5 2. Nf3"},
+               "puzzle": {"id": "frozen-theme", "initialPly": 2,
+                          "solution": ["d7d5"], "themes": ["mateIn2"]}}
+    page = PuzzleTrainingPage()
+    qtbot.addWidget(page)
+    page.resize(1200, 800)
+    page.show()
+    page.theme_search.setText("мат")
+    mate_index = next(i for i in range(page.theme_list.count())
+                      if page.theme_list.item(i).data(Qt.ItemDataRole.UserRole) == "mateIn2")
+    fork_index = next(i for i in range(page.theme_list.count())
+                      if page.theme_list.item(i).data(Qt.ItemDataRole.UserRole) == "fork")
+    assert not page.theme_list.item(mate_index).isHidden()
+    assert page.theme_list.item(fork_index).isHidden()
+    page.theme_search.clear()
+    assert not page.theme_list.item(fork_index).isHidden()
+
+    page.theme.setCurrentIndex(page.theme.findData("mateIn2"))
+    page.difficulty.setCurrentIndex(page.difficulty.findData("normal"))
+    page.set_mode("TRAINING")
+    page.load_puzzle(normalize_api_puzzle(payload), payload, source="lichess")
+    saved = []
+    page.attempt_saved.connect(saved.append)
+    page.theme.setCurrentIndex(page.theme.findData("mateIn3"))
+    page.difficulty.setCurrentIndex(page.difficulty.findData("harder"))
+    solve_d7d5(qtbot, page)
+    assert saved and saved[0]["selected_theme"] == "mateIn2"
+    assert saved[0]["difficulty"] == "normal"
+    assert saved[0]["mode"] == "TRAINING"
+
+    saved_results = list(page._session_results)
+    page.reset_for_account_switch()
+    assert page.board.isHidden()
+    assert page.board_placeholder.isVisible()
+    page.set_active_account("lichess:profile-b", previous_account="local")
+    page.reset_for_account_switch()
+    assert page._session_results == []
+    page.set_active_account("local", previous_account="lichess:profile-b")
+    page.reset_for_account_switch()
+    assert page._session_results == saved_results
 
 
 def test_batch_duplicate_then_unique_and_exhausted_recovery():

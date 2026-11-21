@@ -1,13 +1,14 @@
-"""Owner-like PUZ-UX-05 journey on an isolated Windows Qt runner.
+"""Owner-like PUZ-UX-05/06 journey on an isolated Windows Qt runner.
 
-One real, unauthenticated Lichess PuzzleAndGame GET anchors the API shape. The
-subsequent deterministic batch adapter derives GUI fixtures from that public
-response; it is explicitly not an authenticated Lichess acceptance test.
+Genuine unauthenticated Lichess PuzzleAndGame GETs supply distinct task FENs
+and lines. Rated submission uses only the isolated synthetic adapter; this is
+explicitly not an authenticated Lichess acceptance test.
 """
 
 from __future__ import annotations
 
 from datetime import datetime, timezone
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -19,7 +20,7 @@ import chess
 from PySide6.QtCore import QCoreApplication, QPoint, QPointF, QTimer, Qt
 from PySide6.QtGui import QWheelEvent
 from PySide6.QtTest import QTest
-from PySide6.QtWidgets import QApplication, QDialog, QPushButton
+from PySide6.QtWidgets import QApplication, QDialog, QMessageBox, QPushButton
 
 from chess_coach.diagnostics import shutdown_logging
 from chess_coach.lichess.puzzle_training import normalize_api_puzzle
@@ -27,11 +28,21 @@ from chess_coach.ui.theme import VISUAL_TOKENS, stylesheet as desktop_stylesheet
 from chess_coach.window import MainWindow
 
 
-OUTPUT = Path(os.environ.get("CC_PUZ_UX_05_OUTPUT", "visual-evidence/puz-ux-05-l2"))
+OUTPUT = Path(os.environ.get(
+    "CC_PUZ_UX_06_OUTPUT", os.environ.get(
+        "CC_PUZ_UX_05_OUTPUT", "visual-evidence/puz-ux-06-l2")))
 JOURNEY_TRACE: dict = {}
 _ACTIVE_APP = None
 _ACTIVE_WINDOW = None
 _CLEANUP_DONE = False
+MATE_IN_2_PUBLIC_IDS = [
+    "TCKXn", "n7Jiz", "kI1Ql", "IwzsF", "DKVLc",
+    "GNNig", "CJTjO", "2rGbA", "TPUJL", "e4jaa",
+]
+MATE_IN_1_PUBLIC_IDS = [
+    "BOTyj", "4g6Bs", "PuCzf", "ugoI2", "9FTAb",
+    "lq8m1", "h999q", "MdQwv", "tm6v1", "ehjSy",
+]
 
 
 def cleanup() -> None:
@@ -66,11 +77,14 @@ def persist_journey_trace() -> None:
 class InertCredentialStore:
     """A sentinel used only by local code; it is never sent over HTTP."""
 
-    def __init__(self, **_kwargs):
-        pass
+    def __init__(self, *, service=None, user=None):
+        if service != "ChessCoach.Lichess.Puzzles":
+            raise AssertionError("Puzzle journey tried to access a non-puzzle credential")
+        self.user = user
 
     def get(self):
-        return "PUZ05-NOT-A-REAL-OAUTH-CREDENTIAL"
+        return ("PUZ06-SYNTHETIC-RATED-CREDENTIAL" if self.user == "puzzle-rated-token"
+                else "PUZ06-SYNTHETIC-READ-CREDENTIAL")
 
     def set(self, _token):
         raise AssertionError("The L2 journey must not persist OAuth credentials")
@@ -85,6 +99,12 @@ class BatchAdapter:
         self.block_next = False
         self.block_started = threading.Event()
         self.release_blocked = threading.Event()
+        self.real_sequence: list[dict] = []
+        self.require_real_sequence = False
+        self.rated_posts: list[dict] = []
+        self.block_rated = False
+        self.rated_started = threading.Event()
+        self.release_rated = threading.Event()
         self.calls: list[dict] = []
         self.username = "puz05-isolated-runner"
 
@@ -101,8 +121,26 @@ class BatchAdapter:
             self.fail_next = False
             self.calls.append({"mode": "controlled-network-error", "count": count})
             raise OSError("PUZ-UX-05 controlled public GET outage")
-        if count != 5:
-            raise AssertionError(f"Expected batch size 5, got {count}")
+        if count < 1 or count > 5:
+            raise AssertionError(f"Unexpected bounded batch size: {count}")
+        if self.real_sequence:
+            batch = self.real_sequence[:count]
+            del self.real_sequence[:len(batch)]
+            fresh = [str(row["puzzle"]["id"]) for row in batch]
+            fingerprints = [hashlib.sha256(
+                (str(row["puzzle"].get("fen") or "") + "\0" +
+                 " ".join(row["puzzle"].get("solution") or [])).encode("utf-8")
+            ).hexdigest() for row in batch]
+            self.calls.append({"mode": "public-puzzle-fixture-batch", "angle": angle,
+                               "difficulty": difficulty, "count": count,
+                               "fresh_ids": fresh, "position_solution_sha256": fingerprints,
+                               "authenticated": False, "rating_post": False})
+            return {"puzzles": batch}
+        if self.require_real_sequence:
+            self.calls.append({"mode": "controlled-public-sequence-exhausted",
+                               "angle": angle, "difficulty": difficulty,
+                               "count": count, "authenticated": False})
+            raise LookupError("No unused public puzzle remains in this isolated L2 sequence")
         self.serial += 1
         current = self.current_id
         batch = []
@@ -123,6 +161,25 @@ class BatchAdapter:
                            "duplicate_first": current, "malformed_skipped": True,
                            "fresh_ids": fresh, "authenticated_lichess_verified": False})
         return {"puzzles": batch}
+
+    def set_real_sequence(self, payloads: list[dict]) -> None:
+        self.require_real_sequence = True
+        self.real_sequence = [json.loads(json.dumps(row)) for row in payloads]
+
+    def submit_puzzle_round(self, _token, angle, puzzle_id, win, *, rated, next_count):
+        if rated is not True or next_count != 1:
+            raise AssertionError("Rated L2 must model exactly one explicit rated round")
+        self.rated_posts.append({"angle": angle, "puzzle_id": puzzle_id,
+                                 "win": bool(win), "rated": rated,
+                                 "next_count": next_count,
+                                 "transport": "synthetic-fake-response; no HTTP POST"})
+        if self.block_rated:
+            self.rated_started.set()
+            if not self.release_rated.wait(15):
+                raise TimeoutError("Synthetic rated ACK was not released by the GUI journey")
+        return {"rounds": [{"id": puzzle_id, "win": bool(win), "ratingDiff": 7}],
+                "glicko": {"rating": 1807, "deviation": 55, "provisional": False},
+                "puzzles": []}
 
     def _copy(self, puzzle_id):
         payload = json.loads(json.dumps(self.template))
@@ -158,6 +215,39 @@ def public_get() -> tuple[dict, dict]:
                 "game_keys": sorted(payload["game"])}
     print("PUZ05_PUBLIC_GET " + json.dumps(evidence, sort_keys=True))
     return payload, evidence
+
+
+def public_puzzle_sequence(puzzle_ids: list[str]) -> tuple[list[dict], list[dict]]:
+    """Fetch genuine public PuzzleAndGame payloads; never send Authorization."""
+    payloads: list[dict] = []
+    evidence: list[dict] = []
+    seen_positions: set[str] = set()
+    for puzzle_id in puzzle_ids:
+        url = f"https://lichess.org/api/puzzle/{puzzle_id}"
+        request = Request(url, headers={
+            "Accept": "application/json",
+            "User-Agent": "ChessCoach-PUZ-UX-06-public-L2",
+        })
+        with urlopen(request, timeout=25) as response:
+            status, raw = int(response.status), response.read()
+        payload = json.loads(raw.decode("utf-8"))
+        puzzle = normalize_api_puzzle(payload)
+        if status != 200 or puzzle.puzzle_id != puzzle_id:
+            raise AssertionError(f"Public puzzle GET did not return {puzzle_id}")
+        fen = str(payload["puzzle"].get("fen") or puzzle.player_to_move_fen)
+        line = tuple(str(move) for move in payload["puzzle"].get("solution") or [])
+        fingerprint = hashlib.sha256((fen + "\0" + " ".join(line)).encode("utf-8")).hexdigest()
+        if fingerprint in seen_positions:
+            raise AssertionError(f"Public puzzle {puzzle_id} repeated a prior FEN/line")
+        seen_positions.add(fingerprint)
+        payloads.append(payload)
+        evidence.append({"id": puzzle_id, "status": status,
+                         "position_solution_sha256": fingerprint,
+                         "theme_ids": list(payload["puzzle"].get("themes") or []),
+                         "solution_plies": len(line), "authorization_header_sent": False})
+        # Stay below Lichess' shared API rate budget while checking unique IDs.
+        time.sleep(4.0)
+    return payloads, evidence
 
 
 def wait_until(app, predicate, timeout_ms=15000):
@@ -272,6 +362,45 @@ def click_checkbox(app, checkbox, checked):
     wait_until(app, lambda: checkbox.isChecked() == checked, 1000)
 
 
+def choose_combo_item_with_mouse(app, combo, data):
+    index = combo.findData(data)
+    if index < 0:
+        raise AssertionError(f"Visible theme option not found: {data}")
+    combo.showPopup()
+    app.processEvents()
+    view = combo.view()
+    rect = view.visualRect(combo.model().index(index, 0))
+    if not rect.isValid() or rect.isNull():
+        raise AssertionError(f"Theme option is not visible in the popup: {data}")
+    QTest.mouseClick(view.viewport(), Qt.MouseButton.LeftButton, pos=rect.center())
+    wait_until(app, lambda: combo.currentData() == data, 1500)
+
+
+def click_dialog_button_with_mouse(app, title, text, trigger):
+    deadline = time.monotonic() + 8
+    clicked: list[bool] = []
+
+    def locate_and_click():
+        dialog = app.activeModalWidget()
+        if isinstance(dialog, QDialog) and dialog.windowTitle() == title:
+            button = None
+            if isinstance(dialog, QMessageBox) and text in {"Да", "Yes"}:
+                button = dialog.button(QMessageBox.StandardButton.Yes)
+            if button is None:
+                button = next((item for item in dialog.findChildren(QPushButton)
+                               if item.text() == text), None)
+            if button is not None:
+                QTest.mouseClick(button, Qt.MouseButton.LeftButton)
+                clicked.append(True)
+                return
+        if time.monotonic() < deadline:
+            QTimer.singleShot(20, locate_and_click)
+
+    QTimer.singleShot(0, locate_and_click)
+    trigger()
+    wait_until(app, lambda: bool(clicked), 9000)
+
+
 def solve_visible_line(app, page, journal, tag):
     print(f"PUZ05_SOLVE_BEGIN {tag} {page._session_puzzle_id}", flush=True)
     for raw_move in page.state.puzzle.expected_user_moves:
@@ -288,7 +417,8 @@ def solve_visible_line(app, page, journal, tag):
 def run():
     global _ACTIVE_APP, _ACTIVE_WINDOW
     OUTPUT.mkdir(parents=True, exist_ok=True)
-    visual_only = os.environ.get("CC_PUZ_UX_05_VISUAL_ONLY", "0") == "1"
+    visual_only = os.environ.get(
+        "CC_PUZ_UX_06_VISUAL_ONLY", os.environ.get("CC_PUZ_UX_05_VISUAL_ONLY", "0")) == "1"
     payload, public_get_evidence = public_get()
     app = QApplication.instance() or QApplication([])
     _ACTIVE_APP = app
@@ -306,7 +436,8 @@ def run():
     import chess_coach.window as window_module
     window_module.WindowsCredentialStore = InertCredentialStore
     width, height = (int(part) for part in os.environ.get(
-        "CC_PUZ_UX_05_SIZE", "1672x941").lower().split("x", 1))
+        "CC_PUZ_UX_06_SIZE", os.environ.get("CC_PUZ_UX_05_SIZE", "1672x941")
+    ).lower().split("x", 1))
     window.resize(width, height)
     window.show()
     window.raise_()
@@ -323,7 +454,7 @@ def run():
     # First entry starts from the actual Home button.
     capture(window, "home-first-entry", journal)
     adapter.block_next = True
-    QTest.mouseClick(window.home_activity_button, Qt.MouseButton.LeftButton)
+    QTest.mouseClick(window.home_training_button, Qt.MouseButton.LeftButton)
     page = window._puzzle_training_page
     wait_until(app, adapter.block_started.is_set, 15000)
     if not page.board.isHidden() or not page.board_placeholder.isVisible():
@@ -334,7 +465,7 @@ def run():
     if page.state.puzzle.puzzle_id != "0haqU":
         raise AssertionError("Home NEW action did not load the public API puzzle")
     adapter.current_id = "0haqU"
-    actions.append({"action": "mouse-click", "target": "Home / Решать новые задачи",
+    actions.append({"action": "mouse-click", "target": "Home / Тренировка",
                     "loaded_id": page.state.puzzle.puzzle_id})
     wait_until(app, lambda: page._prepared_online_puzzle is not None, 30000)
     capture(page, "first-new-puzzle", journal)
@@ -343,7 +474,7 @@ def run():
                  "authenticated_lichess_verified": False,
                  "l2_transport": "deterministic GUI fixture derived from one live public response",
                  "actions": [{"action": "mouse-click",
-                             "target": "Home / Решать новые задачи",
+                  "target": "Home / Тренировка",
                              "loaded_id": page.state.puzzle.puzzle_id}],
                  "frames": journal, "visual_only_compact_scale": True,
                  "owner_database_or_oauth_touched": False}
@@ -442,18 +573,42 @@ def run():
 
     QTest.mouseClick(replay_page.home_button, Qt.MouseButton.LeftButton)
     wait_until(app, lambda: window.screen_stack.currentWidget() is window.home_page)
-    QTest.mouseClick(window.home_activity_button, Qt.MouseButton.LeftButton)
+    QTest.mouseClick(window.home_training_button, Qt.MouseButton.LeftButton)
     page = window._puzzle_training_page
     wait_until(app, lambda: page.state.puzzle is not None and not page._is_replay)
     adapter.current_id = page.state.puzzle.puzzle_id
-
+    solve_visible_line(app, page, journal, "training-batch-preface")
+    wait_until(app, lambda: "Сохранено в SQLite" in page.persistence_status.text(), 15000)
+    prefetch_handle = getattr(window, "_puzzle_prefetch_handle", None)
+    if prefetch_handle is not None:
+        wait_until(app, lambda: not prefetch_handle.is_alive(), 20000)
+    mate_in_2_payloads, mate_in_2_evidence = public_puzzle_sequence(MATE_IN_2_PUBLIC_IDS)
+    if len({row["puzzle"]["id"] for row in mate_in_2_payloads}) != 10:
+        raise AssertionError("Public L2 sequence does not contain ten distinct Lichess IDs")
+    if len({item["position_solution_sha256"] for item in mate_in_2_evidence}) != 10:
+        raise AssertionError("Ten public puzzle responses did not contain ten distinct positions")
+    choose_combo_item_with_mouse(app, page.theme, "mateIn2")
+    adapter.set_real_sequence(mate_in_2_payloads)
+    page.clear_prepared_puzzles()
+    previous = page._session_puzzle_id
+    QTest.mouseClick(page.fetch, Qt.MouseButton.LeftButton)
+    wait_until(app, lambda: page._session_puzzle_id != previous, 20000)
+    actual_start_id = page._session_puzzle_id
+    if actual_start_id != MATE_IN_2_PUBLIC_IDS[0]:
+        raise AssertionError("Theme selection did not start the first genuine mate-in-2 puzzle")
+    capture(page, "real-public-mate-in-2-sequence-start", journal)
+    actions.append({"action": "mouse-select-theme", "theme": "mateIn2",
+                    "first_public_id": actual_start_id,
+                    "genuine_distinct_public_puzzles": 10})
     clean_one = page._session_puzzle_id
     solve_visible_line(app, page, journal, "streak-clean-one")
+    seen = {clean_one}
     if page._session_streak != 1:
         raise AssertionError("First clean task did not advance the visible streak")
     QTest.mouseClick(page.fetch, Qt.MouseButton.LeftButton)
     wait_until(app, lambda: page._session_puzzle_id != clean_one, 20000)
     clean_two = page._session_puzzle_id
+    seen.add(clean_two)
     solve_visible_line(app, page, journal, "streak-clean-two")
     if page._session_streak != 2:
         raise AssertionError("Second clean task did not continue the visible streak")
@@ -474,21 +629,22 @@ def run():
     if page._result_tiles[-1].text() != "✕" or page._result_tiles[-1].isEnabled():
         raise AssertionError("First error was not immediately red and locked")
     wrong_id = page._session_puzzle_id
+    seen.add(wrong_id)
     solve_visible_line(app, page, journal, "wrong-then-correct")
     tile = next(row for row in page._session_results if row["puzzle_id"] == wrong_id)
     if tile.get("mark") != "✕" or not tile.get("completed"):
         raise AssertionError("Wrong-then-correct lost its red completed result")
     QTest.mouseClick(page.fetch, Qt.MouseButton.LeftButton)
     wait_until(app, lambda: page._session_puzzle_id != wrong_id, 20000)
+    seen.add(page._session_puzzle_id)
 
-    # Ten unique batch responses via visible NEXT. Each response contains a
-    # duplicate, malformed row and fresh PuzzleAndGame-shaped rows.
+    # Ten separate public Lichess IDs, each with its own fetched PuzzleAndGame
+    # FEN and solution, are used through visible NEXT actions.
     if page.auto_next.isChecked():
         QTest.mouseClick(page.auto_next, Qt.MouseButton.LeftButton)
-    seen = {wrong_id, page._session_puzzle_id}
     current_page = page
     while len(seen) < 10:
-        if len(seen) == 3:
+        if len(seen) == 5:
             revealed_id = current_page._session_puzzle_id
             click_without_modal(app, current_page.reveal)
             if current_page.state.status.value != "revealed":
@@ -516,7 +672,24 @@ def run():
                         "loaded_id": selected, "prior_result_tiles": len(before_ids)})
     if len(seen) != 10:
         raise AssertionError(f"Expected ten unique tasks, observed {len(seen)}")
+    if not seen.issubset(set(MATE_IN_2_PUBLIC_IDS)):
+        raise AssertionError(f"The ten-task sequence included a non-public or synthetic ID: {seen}")
     capture(page, "ten-unique-sequential-tasks", journal)
+    solve_visible_line(app, page, journal, "complete-tenth-public-task")
+    wait_until(app, lambda: "Сохранено в SQLite" in page.persistence_status.text(), 15000)
+    prefetch_handle = getattr(window, "_puzzle_prefetch_handle", None)
+    if prefetch_handle is not None:
+        wait_until(app, lambda: not prefetch_handle.is_alive(), 20000)
+    mate_in_1_payloads, mate_in_1_evidence = public_puzzle_sequence(MATE_IN_1_PUBLIC_IDS)
+    choose_combo_item_with_mouse(app, page.theme, "mateIn1")
+    adapter.set_real_sequence(mate_in_1_payloads)
+    page.clear_prepared_puzzles()
+    previous = page._session_puzzle_id
+    QTest.mouseClick(page.fetch, Qt.MouseButton.LeftButton)
+    wait_until(app, lambda: page._session_puzzle_id != previous, 20000)
+    if page._session_puzzle_id != MATE_IN_1_PUBLIC_IDS[0]:
+        raise AssertionError("Theme switch did not load a genuine public mate-in-1 task")
+    capture(page, "public-mate-in-1-autonext-ready", journal)
 
     # Exercise enabled auto-advance and turning it off before completion.
     click_checkbox(app, page.auto_next, True)
@@ -545,10 +718,15 @@ def run():
     QTest.mouseClick(page.fetch, Qt.MouseButton.LeftButton)
     wait_until(app, lambda: page._session_puzzle_id != auto_id, 20000)
     solve_visible_line(app, page, journal, "auto-next-manual-recovery")
+    # Stabilize the screen for the explicit network recovery actions below.
+    click_checkbox(app, page.auto_next, False)
 
     # Network failure keeps the current result and makes the retry button usable.
+    prefetch_handle = getattr(window, "_puzzle_prefetch_handle", None)
+    if prefetch_handle is not None:
+        wait_until(app, lambda: not prefetch_handle.is_alive(), 20000)
+    page.clear_prepared_puzzles()
     adapter.fail_next = True
-    page._prepared_online_puzzle = None
     error_id = page._session_puzzle_id
     QTest.mouseClick(page.fetch, Qt.MouseButton.LeftButton)
     wait_until(app, lambda: "PUZ-UX-05 controlled public GET outage" in
@@ -564,9 +742,134 @@ def run():
     solve_visible_line(app, page, journal, "recovered-task")
     wait_until(app, lambda: "Сохранено в SQLite" in page.persistence_status.text(), 15000)
 
+    # Keep auto-next off while switching profiles/screens, then enter the
+    # distinct rated mode through Home's visible CTA and the consent dialog.
+    click_checkbox(app, page.auto_next, False)
+    rated_payloads, rated_evidence = public_puzzle_sequence(
+        ["lq8m1", "h999q", "MdQwv"])
+    consent_cancel_payloads, consent_cancel_evidence = public_puzzle_sequence(["9FTAb"])
+    wait_until(app, lambda: not getattr(window, "_puzzle_prefetch_handle", None)
+               or not window._puzzle_prefetch_handle.is_alive(), 20000)
+    page.clear_prepared_puzzles()
+    QTest.mouseClick(page.home_button, Qt.MouseButton.LeftButton)
+    wait_until(app, lambda: window.screen_stack.currentWidget() is window.home_page)
+    capture(window, "home-dual-mode-actions", journal)
+    adapter.set_real_sequence(consent_cancel_payloads)
+    click_dialog_button_with_mouse(
+        app, "Рейтинг задач Lichess", "Отмена",
+        lambda: QTest.mouseClick(window.home_rated_button, Qt.MouseButton.LeftButton))
+    page = window._puzzle_training_page
+    wait_until(app, lambda: page.mode == "TRAINING" and page.attempt_mode == "TRAINING"
+               and page._session_puzzle_id == "9FTAb", 20000)
+    if adapter.rated_posts:
+        raise AssertionError("Canceling rated consent made a rated request")
+    capture(page, "rated-consent-cancel-keeps-training", journal)
+    actions.append({"action": "mouse-cancel-rated-consent",
+                    "fallback_mode": page.mode, "rated_posts": len(adapter.rated_posts),
+                    "public_id": page._session_puzzle_id})
+    solve_visible_line(app, page, journal, "consent-cancel-training-still-works")
+    wait_until(app, lambda: "Сохранено в SQLite" in page.persistence_status.text(), 15000)
+    QTest.mouseClick(page.home_button, Qt.MouseButton.LeftButton)
+    wait_until(app, lambda: window.screen_stack.currentWidget() is window.home_page)
+    adapter.set_real_sequence(rated_payloads[:1])
+    click_dialog_button_with_mouse(
+        app, "Рейтинг задач Lichess", "Разрешить на Lichess",
+        lambda: QTest.mouseClick(window.home_rated_button, Qt.MouseButton.LeftButton))
+    page = window._puzzle_training_page
+    wait_until(app, lambda: page.attempt_mode == "LICHESS_RATED"
+               and page.state.puzzle is not None, 20000)
+    if page._session_puzzle_id != "lq8m1":
+        raise AssertionError("Home rated CTA did not enter a genuine public rated task")
+    capture(page, "rated-mode-first-entry", journal)
+    actions.append({"action": "mouse-click-and-consent",
+                    "target": "Home / На рейтинг Lichess",
+                    "mode": page.attempt_mode, "public_id": page._session_puzzle_id,
+                    "rated_transport": "fake only; no HTTP POST"})
+
+    # Switching modes inside the workspace must be a real click and must not
+    # send a result for an untouched task. Each ensuing task is a distinct
+    # public PuzzleAndGame response.
+    wait_until(app, lambda: not getattr(window, "_puzzle_prefetch_handle", None)
+               or not window._puzzle_prefetch_handle.is_alive(), 20000)
+    adapter.set_real_sequence(rated_payloads[1:2])
+    before_posts = len(adapter.rated_posts)
+    click_dialog_button_with_mouse(
+        app, "Переключить режим?", "Да",
+        lambda: QTest.mouseClick(page.training_mode_button, Qt.MouseButton.LeftButton))
+    wait_until(app, lambda: page.attempt_mode == "TRAINING"
+               and page.state.puzzle is not None and page._session_puzzle_id != "lq8m1", 20000)
+    if adapter.rated_posts:
+        raise AssertionError("Switching away from an untouched rated task sent a result")
+    capture(page, "mode-switched-to-training", journal)
+    actions.append({"action": "mouse-click-mode-switch", "mode": "TRAINING",
+                    "result_posts": len(adapter.rated_posts)})
+
+    wait_until(app, lambda: not getattr(window, "_puzzle_prefetch_handle", None)
+               or not window._puzzle_prefetch_handle.is_alive(), 20000)
+    auto_next_payloads, auto_next_evidence = public_puzzle_sequence(["ehjSy"])
+    adapter.set_real_sequence([rated_payloads[2], auto_next_payloads[0]])
+    click_dialog_button_with_mouse(
+        app, "Переключить режим?", "Да",
+        lambda: QTest.mouseClick(page.rated_mode_button, Qt.MouseButton.LeftButton))
+    wait_until(app, lambda: page.attempt_mode == "LICHESS_RATED"
+               and page.state.puzzle is not None and page._session_puzzle_id == "MdQwv", 20000)
+    capture(page, "mode-switched-to-rated", journal)
+    if len(adapter.rated_posts) != before_posts:
+        raise AssertionError("An untouched task produced a rated submission during mode switch")
+    wait_until(app, lambda: page._prepared_online_puzzle is not None
+               and page._prepared_online_puzzle["puzzle"].puzzle_id == "ehjSy", 20000)
+    click_checkbox(app, page.auto_next, True)
+    adapter.block_rated = True
+    adapter.release_rated.clear()
+    prior_rated_id = page._session_puzzle_id
+    solve_visible_line(app, page, journal, "rated-mode-confirmed-win")
+    wait_until(app, adapter.rated_started.is_set, 10000)
+    QTest.qWait(1700)
+    if page._session_puzzle_id != prior_rated_id:
+        raise AssertionError("Rated auto-next advanced before Lichess ACK")
+    capture(page, "rated-result-waiting-for-ack", journal)
+    adapter.release_rated.set()
+    wait_until(app, lambda: page.rated_status.text().startswith("✓ Lichess подтвердил"), 10000)
+    if len(adapter.rated_posts) != 1:
+        raise AssertionError("One rated solve did not produce exactly one fake Lichess round")
+    if (adapter.rated_posts[0]["puzzle_id"] != "MdQwv"
+            or adapter.rated_posts[0]["transport"] != "synthetic-fake-response; no HTTP POST"):
+        raise AssertionError("Rated confirmation did not match the exact puzzle/fake transport")
+    capture(page, "rated-server-confirmation", journal)
+    wait_until(app, lambda: page._session_puzzle_id == "ehjSy", 10000)
+    if page.attempt_mode != "LICHESS_RATED":
+        raise AssertionError("Post-ACK auto-next did not retain the rated mode")
+    capture(page, "rated-auto-next-after-ack", journal)
+    actions.append({"action": "mouse-solve-rated-task",
+                    "official_ack_modeled": True, "real_rated_post": False,
+                    "fake_round_count": len(adapter.rated_posts)})
+
+    click_dialog_button_with_mouse(
+        app, "Оставить текущую задачу?", "Да",
+        lambda: QTest.mouseClick(page.home_button, Qt.MouseButton.LeftButton))
+    wait_until(app, lambda: window.screen_stack.currentWidget() is window.home_page)
+    wait_until(app, lambda: "1807" in window.home_page.official_puzzle_rating.text(), 5000)
+    capture(window, "home-official-rating-after-server-ack", journal)
+    actions.append({"action": "home-rating-refresh",
+                    "displayed_rating": window.home_page.official_puzzle_rating.text(),
+                    "source": "isolated fake server response; not authenticated acceptance"})
+
     trace = {"public_get": public_get_evidence,
+             "rated_public_tasks": rated_evidence,
+             "consent_cancel_public_task": consent_cancel_evidence,
+             "genuine_public_mate_in_2_evidence": mate_in_2_evidence,
+             "genuine_public_mate_in_1_evidence": mate_in_1_evidence,
+             "rated_auto_next_public_evidence": auto_next_evidence,
              "authenticated_lichess_verified": False,
-             "l2_transport": "deterministic GUI batch fixtures derived from one live public response",
+             "l2_transport": "public unauthenticated GET payloads; synthetic fake rated response only",
+             "rated_posts": adapter.rated_posts,
+             "genuine_public_puzzle_count": len(set(
+                 ["0haqU"] + MATE_IN_2_PUBLIC_IDS + MATE_IN_1_PUBLIC_IDS)),
+             "public_get_response_count": (1 + len(mate_in_2_evidence)
+                                           + len(mate_in_1_evidence)
+                                           + len(rated_evidence)
+                                           + len(consent_cancel_evidence)
+                                           + len(auto_next_evidence)),
              "batch_calls": adapter.calls, "unique_ids_in_ten_task_run": sorted(seen),
              "actions": actions, "frames": journal,
              "owner_database_or_oauth_touched": False}
@@ -574,7 +877,7 @@ def run():
         json.dumps(trace, ensure_ascii=False, indent=2), encoding="utf-8")
     # GitHub Actions' Windows console may use cp1252 even when the journal is
     # UTF-8; keep its one-line console copy ASCII while the artifact stays UTF-8.
-    print("PUZ05_ACTION_JOURNAL " + json.dumps(trace, ensure_ascii=True, sort_keys=True))
+    print("PUZ06_ACTION_JOURNAL " + json.dumps(trace, ensure_ascii=True, sort_keys=True))
     cleanup()
 
 

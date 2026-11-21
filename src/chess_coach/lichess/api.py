@@ -315,6 +315,7 @@ class LichessClient:
         form: Mapping[str, object] | None = None,
         query: Mapping[str, object] | None = None,
         accept: str = "application/json",
+        json_body: Mapping[str, object] | None = None,
     ) -> HttpResponse:
         started = time.monotonic()
         correlation_id = uuid.uuid4().hex[:12]
@@ -327,7 +328,12 @@ class LichessClient:
         if token:
             headers["Authorization"] = f"Bearer {token}"
         body = None
+        if json_body is not None:
+            body = json.dumps(json_body, separators=(",", ":")).encode("utf-8")
+            headers["Content-Type"] = "application/json"
         if form is not None:
+            if json_body is not None:
+                raise ValueError("Use either form or json_body, not both.")
             body = urlencode(form).encode("utf-8")
             headers["Content-Type"] = "application/x-www-form-urlencoded"
         try:
@@ -478,11 +484,7 @@ class LichessClient:
 
     def get_puzzle_batch(self, token: str, *, angle: str = "mix",
                          difficulty: str = "normal", count: int = 1) -> dict:
-        """Fetch a small, authenticated, read-only puzzle batch.
-
-        Never submits results: the matching POST endpoint requires puzzle:write,
-        which Chess Coach deliberately does not request.
-        """
+        """Fetch a small authenticated puzzle batch using puzzle:read."""
         from urllib.parse import quote
 
         allowed = {"easiest", "easier", "normal", "harder", "hardest"}
@@ -498,6 +500,36 @@ class LichessClient:
             query={"difficulty": difficulty, "nb": count})
         if not isinstance(payload.get("puzzles"), list):
             raise LichessError("Lichess вернул некорректный список задач.")
+        return payload
+
+    def submit_puzzle_round(self, token: str, angle: str, puzzle_id: str,
+                            win: bool, *, rated: bool = True,
+                            next_count: int = 1) -> dict:
+        """Submit exactly one explicitly rated outcome through the official API."""
+        allowed = {"easiest", "easier", "normal", "harder", "hardest"}
+        angle = str(angle or "").strip()
+        puzzle_id = str(puzzle_id or "").strip()
+        if not angle or len(angle) > 64 or any(
+                ch not in "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-"
+                for ch in angle):
+            raise ValueError("Неизвестная тема задач.")
+        if not puzzle_id or len(puzzle_id) > 128:
+            raise ValueError("Некорректный ID рейтинговой задачи.")
+        if not isinstance(win, bool) or rated is not True:
+            raise ValueError("Рейтинговая отправка требует win и rated=true.")
+        next_count = max(0, min(1, int(next_count)))
+        payload = self._json_call(
+            "POST", f"/api/puzzle/batch/{quote(angle, safe='')}", token=token,
+            query={"nb": next_count},
+            json_body={"solutions": [{"id": puzzle_id, "win": win, "rated": True}]},
+        )
+        rounds = payload.get("rounds")
+        if not isinstance(rounds, list):
+            raise LichessError("Ответ Lichess не содержит подтверждённые результаты.")
+        matching = [item for item in rounds if isinstance(item, dict)
+                    and str(item.get("id") or "") == puzzle_id]
+        if len(matching) != 1 or matching[0].get("win") is not win:
+            raise LichessError("Lichess не подтвердил результат этой задачи.")
         return payload
 
     def stream_user_games(self, token: str, username: str, stop_event: threading.Event,

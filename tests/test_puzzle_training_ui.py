@@ -67,7 +67,7 @@ def test_attempt_is_bound_to_account_at_load_not_current_selector(qtbot):
     assert attempts[-1]["account_id"] == "lichess:a"
 
 
-def test_history_replay_carries_original_source_and_account(qtbot):
+def test_history_replay_carries_original_source_and_account(qtbot, monkeypatch):
     page = PuzzleTrainingPage(demo=True)
     qtbot.addWidget(page)
     page.account_id = "lichess:history-user"
@@ -79,6 +79,9 @@ def test_history_replay_carries_original_source_and_account(qtbot):
     assert replay_signal is not None, "history replay must carry source/account context"
     captured = []
     replay_signal.connect(lambda *args: captured.append(args))
+    monkeypatch.setattr(
+        "chess_coach.ui.pages.puzzle_training.QMessageBox.question",
+        lambda *_args, **_kwargs: QMessageBox.StandardButton.Yes)
     page._open_history_item(page.history.item(0))
     assert captured == [("lichess:history-user", "old-puzzle", "lichess")]
 

@@ -22,6 +22,88 @@ def puzzle_attempt_uid(account_id: str, puzzle_id: str, attempt_date_ms: int,
 
 class PuzzleActivityStoreMixin:
 
+    def prepare_rated_puzzle_attempt(self, attempt: dict) -> tuple[dict, bool]:
+        """Persist a frozen rated outcome before any request can reach Lichess."""
+        payload = dict(attempt or {})
+        attempt_id = str(payload.get("attempt_id") or "").strip()
+        session_id = str(payload.get("session_id") or attempt_id).strip()
+        account_id = str(payload.get("account_id") or "").strip()
+        puzzle_id = str(payload.get("puzzle_id") or "").strip()
+        if not all((attempt_id, session_id, account_id, puzzle_id)):
+            raise ValueError("Для рейтингового результата нужны профиль, задача и попытка.")
+        if payload.get("mode") not in (None, "LICHESS_RATED") or payload.get("rated", True) is not True:
+            raise ValueError("Рейтинговая запись должна иметь frozen mode LICHESS_RATED.")
+        now = int(time.time() * 1000)
+        with self._connection() as db:
+            existing = db.execute(
+                "SELECT * FROM rated_puzzle_attempts WHERE attempt_id=?", (attempt_id,)
+            ).fetchone()
+            if existing is not None:
+                row = dict(existing)
+                identity = (row["account_id"], row["session_id"], row["puzzle_id"])
+                if identity != (account_id, session_id, puzzle_id):
+                    raise ValueError("ID рейтинговой попытки уже относится к другой задаче.")
+                return row, False
+            db.execute(
+                "INSERT INTO rated_puzzle_attempts "
+                "(attempt_id,account_id,session_id,puzzle_id,mode,theme,difficulty,win,rated,status,"
+                "created_at_ms,updated_at_ms) VALUES (?,?,?,?,?,?,?,?,?,'prepared',?,?)",
+                (attempt_id, account_id, session_id, puzzle_id, "LICHESS_RATED",
+                 str(payload.get("angle") or payload.get("theme") or "mix"),
+                 str(payload.get("difficulty") or "normal"), int(bool(payload.get("win"))),
+                 1, now, now))
+            row = db.execute(
+                "SELECT * FROM rated_puzzle_attempts WHERE attempt_id=?", (attempt_id,)
+            ).fetchone()
+        return dict(row), True
+
+    def update_rated_puzzle_attempt(self, attempt_id: str, status: str, *,
+                                    rating_diff: int | None = None,
+                                    rating: int | None = None,
+                                    error: str | None = None) -> dict:
+        allowed = {"prepared", "sending", "confirmed", "rejected", "unknown", "not_sent"}
+        if status not in allowed:
+            raise ValueError("Недопустимый статус рейтинговой попытки.")
+        now = int(time.time() * 1000)
+        with self._connection() as db:
+            db.execute(
+                "UPDATE rated_puzzle_attempts SET status=?,updated_at_ms=?,"
+                "server_confirmed_at_ms=CASE WHEN ?='confirmed' THEN ? ELSE server_confirmed_at_ms END,"
+                "server_rating_diff=COALESCE(?,server_rating_diff),"
+                "server_rating=COALESCE(?,server_rating),last_error=? WHERE attempt_id=?",
+                (status, now, status, now, rating_diff, rating,
+                 str(error)[:500] if error else None, str(attempt_id)))
+            row = db.execute("SELECT * FROM rated_puzzle_attempts WHERE attempt_id=?",
+                             (str(attempt_id),)).fetchone()
+        if row is None:
+            raise KeyError(attempt_id)
+        return dict(row)
+
+    def rated_puzzle_attempt(self, attempt_id: str) -> dict | None:
+        with self._connection() as db:
+            row = db.execute("SELECT * FROM rated_puzzle_attempts WHERE attempt_id=?",
+                             (str(attempt_id),)).fetchone()
+        return dict(row) if row else None
+
+    def unresolved_rated_puzzle_attempts(self, account_id: str) -> list[dict]:
+        with self._connection() as db:
+            rows = db.execute(
+                "SELECT * FROM rated_puzzle_attempts WHERE account_id=? "
+                "AND status IN ('prepared','sending','unknown','not_sent') "
+                "ORDER BY created_at_ms", (str(account_id),)).fetchall()
+        return [dict(row) for row in rows]
+
+    def mark_interrupted_rated_attempts_unknown(self, account_id: str) -> int:
+        """A process restart cannot distinguish a sent POST from a lost response."""
+        now = int(time.time() * 1000)
+        with self._connection() as db:
+            cursor = db.execute(
+                "UPDATE rated_puzzle_attempts SET status='unknown',updated_at_ms=?,"
+                "last_error='process ended while request was in flight' "
+                "WHERE account_id=? AND status='sending'",
+                (now, str(account_id)))
+        return int(cursor.rowcount)
+
     def enqueue_puzzle_attempt(self, attempt: dict, *, error: str | None = None) -> None:
         """Durably retain an unacknowledged local result, scoped to its account."""
         payload = dict(attempt or {})
@@ -162,7 +244,10 @@ class PuzzleActivityStoreMixin:
                                   result: str, solved: bool, mistakes: int, hints: int,
                                   duration_ms: int, puzzle_json: str,
                                   attempt_id: str | None = None,
-                                  rating_eligible: bool = False) -> tuple[str, bool]:
+                                  rating_eligible: bool = False,
+                                  mode: str = "LEGACY_LOCAL",
+                                  selected_theme: str = "mix",
+                                  selected_difficulty: str = "normal") -> tuple[str, bool]:
         """Append a local training result without changing mirrored Lichess activity."""
         if result not in {"success", "mistake", "hinted", "revealed", "skipped"}:
             raise ValueError("Некорректный результат локальной задачи.")
@@ -194,15 +279,19 @@ class PuzzleActivityStoreMixin:
             inserted = existing is None
             if inserted:
                 db.execute(
-                    "INSERT INTO local_puzzle_attempts VALUES (?,?,?,?,?,?,?,?,?,?)",
+                    "INSERT INTO local_puzzle_attempts "
+                    "(local_attempt_id,account_id,puzzle_id,result,solved,mistakes,hints,"
+                    "duration_ms,puzzle_json,created_at_ms,mode,selected_theme,selected_difficulty) "
+                    "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
                     (attempt_id, account_id, puzzle_id, result, int(bool(solved)),
                      max(0, int(mistakes)), max(0, int(hints)), max(0, int(duration_ms)),
-                     str(puzzle_json), int(time.time() * 1000)))
+                     str(puzzle_json), int(time.time() * 1000), str(mode),
+                     str(selected_theme or "mix"), str(selected_difficulty or "normal")))
                 db.executemany(
                     "INSERT OR IGNORE INTO local_puzzle_attempt_themes VALUES (?,?)",
                     [(attempt_id, str(theme)) for theme in themes if theme])
                 rating_value = puzzle.get("rating") if isinstance(puzzle, dict) else None
-                if rating_eligible and rating_value is not None:
+                if rating_eligible and str(mode) == "LEGACY_LOCAL" and rating_value is not None:
                     try:
                         puzzle_rating = max(0, int(rating_value))
                     except (ValueError, TypeError):
@@ -270,7 +359,8 @@ class PuzzleActivityStoreMixin:
         with self._connection() as db:
             rows = db.execute(
                 "SELECT local_attempt_id,account_id,puzzle_id,result,solved,mistakes,hints,"
-                "duration_ms,puzzle_json,created_at_ms FROM local_puzzle_attempts "
+                "duration_ms,puzzle_json,created_at_ms,mode,selected_theme,selected_difficulty "
+                "FROM local_puzzle_attempts "
                 "WHERE account_id=? ORDER BY created_at_ms DESC,local_attempt_id DESC LIMIT ?",
                 (str(account_id or "local"), limit)).fetchall()
         return [dict(row) for row in rows]

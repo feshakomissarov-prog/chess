@@ -281,7 +281,10 @@ class SQLiteMigrationMixin:
                     hints INTEGER NOT NULL DEFAULT 0 CHECK(hints >= 0),
                     duration_ms INTEGER NOT NULL DEFAULT 0 CHECK(duration_ms >= 0),
                     puzzle_json TEXT NOT NULL,
-                    created_at_ms INTEGER NOT NULL
+                    created_at_ms INTEGER NOT NULL,
+                    mode TEXT NOT NULL DEFAULT 'LEGACY_LOCAL',
+                    selected_theme TEXT NOT NULL DEFAULT 'mix',
+                    selected_difficulty TEXT NOT NULL DEFAULT 'normal'
                 );
                 CREATE TABLE IF NOT EXISTS local_puzzle_attempt_outbox (
                     attempt_id TEXT PRIMARY KEY,
@@ -293,6 +296,28 @@ class SQLiteMigrationMixin:
                     created_at_ms INTEGER NOT NULL,
                     updated_at_ms INTEGER NOT NULL
                 );
+                CREATE TABLE IF NOT EXISTS rated_puzzle_attempts (
+                    attempt_id TEXT PRIMARY KEY,
+                    account_id TEXT NOT NULL,
+                    session_id TEXT NOT NULL,
+                    puzzle_id TEXT NOT NULL,
+                    mode TEXT NOT NULL CHECK(mode='LICHESS_RATED'),
+                    theme TEXT NOT NULL,
+                    difficulty TEXT NOT NULL,
+                    win INTEGER NOT NULL CHECK(win IN (0,1)),
+                    rated INTEGER NOT NULL CHECK(rated=1),
+                    status TEXT NOT NULL CHECK(status IN
+                        ('prepared','sending','confirmed','rejected','unknown','not_sent')),
+                    created_at_ms INTEGER NOT NULL,
+                    updated_at_ms INTEGER NOT NULL,
+                    server_confirmed_at_ms INTEGER,
+                    server_rating_diff INTEGER,
+                    server_rating INTEGER,
+                    last_error TEXT,
+                    UNIQUE(account_id,session_id)
+                );
+                CREATE INDEX IF NOT EXISTS idx_rated_puzzle_attempts_pending
+                    ON rated_puzzle_attempts(account_id,status,created_at_ms);
                 CREATE INDEX IF NOT EXISTS idx_puzzle_attempt_outbox_account
                     ON local_puzzle_attempt_outbox(account_id,created_at_ms);
                 CREATE TABLE IF NOT EXISTS local_puzzle_attempt_themes (
@@ -344,6 +369,17 @@ class SQLiteMigrationMixin:
             for statement in schema_sql.split(";"):
                 if statement.strip():
                     db.execute(statement)
+            local_attempt_columns = {row[1] for row in
+                                     db.execute("PRAGMA table_info(local_puzzle_attempts)")}
+            if "mode" not in local_attempt_columns:
+                db.execute("ALTER TABLE local_puzzle_attempts ADD COLUMN mode "
+                           "TEXT NOT NULL DEFAULT 'LEGACY_LOCAL'")
+            if "selected_theme" not in local_attempt_columns:
+                db.execute("ALTER TABLE local_puzzle_attempts ADD COLUMN selected_theme "
+                           "TEXT NOT NULL DEFAULT 'mix'")
+            if "selected_difficulty" not in local_attempt_columns:
+                db.execute("ALTER TABLE local_puzzle_attempts ADD COLUMN selected_difficulty "
+                           "TEXT NOT NULL DEFAULT 'normal'")
             queue_schema = db.execute(
                 "SELECT sql FROM sqlite_master WHERE type='table' AND name='lichess_analysis_backfill'"
             ).fetchone()
