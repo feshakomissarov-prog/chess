@@ -51,6 +51,30 @@ def select_online(window, session):
     window.screen_stack.setCurrentWidget(window.game_page)
 
 
+def queue_modal_button_click(qtbot, standard_button):
+    """Answer a visible QMessageBox through Qt mouse input while exec() runs."""
+    clicked = []
+    deadline = time.monotonic() + 3
+
+    def click_when_ready():
+        dialog = QApplication.activeModalWidget()
+        if isinstance(dialog, QMessageBox):
+            button = dialog.button(standard_button)
+            if button is not None:
+                qtbot.mouseClick(button, Qt.MouseButton.LeftButton)
+                clicked.append(True)
+                return
+        if time.monotonic() < deadline:
+            QTimer.singleShot(10, click_when_ready)
+            return
+        if isinstance(dialog, QDialog):
+            dialog.reject()
+        clicked.append(False)
+
+    QTimer.singleShot(0, click_when_ready)
+    return clicked
+
+
 @pytest.mark.parametrize(("color", "expected_flipped"), [
     (chess.WHITE, False), (chess.BLACK, True),
 ])
@@ -2827,25 +2851,7 @@ def test_puzzle_account_switch_clears_old_board_and_keeps_scope(qtbot, tmp_path,
                         lambda target, account, **kwargs:
                         loaded.append((target, account, kwargs)))
 
-    confirmation = []
-    confirmation_deadline = time.monotonic() + 3
-
-    def click_switch_confirmation():
-        dialog = QApplication.activeModalWidget()
-        if isinstance(dialog, QMessageBox):
-            yes = dialog.button(QMessageBox.StandardButton.Yes)
-            if yes is not None:
-                qtbot.mouseClick(yes, Qt.MouseButton.LeftButton)
-                confirmation.append(True)
-                return
-        if time.monotonic() < confirmation_deadline:
-            QTimer.singleShot(10, click_switch_confirmation)
-            return
-        if isinstance(dialog, QDialog):
-            dialog.reject()
-        confirmation.append(False)
-
-    QTimer.singleShot(0, click_switch_confirmation)
+    confirmation = queue_modal_button_click(qtbot, QMessageBox.StandardButton.Yes)
     window._puzzle_training_account_changed(page, "lichess:account-b")
     assert confirmation == [True], "Account switch did not ask for user confirmation"
 
@@ -3894,7 +3900,9 @@ def test_prefetch_validation_rechecks_scope_before_installing_prepared_puzzle(
     else:
         qtbot.waitUntil(validation_result_ready.is_set, timeout=5000)
         monkeypatch.setattr(window, "_load_puzzle_training_accounts", lambda *_args, **_kwargs: None)
+        confirmation = queue_modal_button_click(qtbot, QMessageBox.StandardButton.Yes)
         window._puzzle_training_account_changed(page, other_account)
+        assert confirmation == [True], "Account scope change did not ask for user confirmation"
         assert window._puzzle_training_generation > captured["generation"]
 
     if scope_change == "account":
