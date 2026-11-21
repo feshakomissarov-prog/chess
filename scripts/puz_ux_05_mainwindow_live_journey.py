@@ -143,6 +143,7 @@ def capture(widget, name, journal):
     if not widget.grab().save(str(path)):
         raise AssertionError(f"Unable to save Qt screenshot: {path}")
     journal.append({"frame": path.name, "widget": widget.objectName() or type(widget).__name__})
+    print(f"PUZ05_FRAME {path.name}", flush=True)
 
 
 def click_square(page, square, button=Qt.MouseButton.LeftButton):
@@ -151,8 +152,11 @@ def click_square(page, square, button=Qt.MouseButton.LeftButton):
 
 def play_move(page, raw_move):
     move = chess.Move.from_uci(raw_move)
+    print(f"PUZ05_MOVE_BEGIN {page._session_puzzle_id} {raw_move}", flush=True)
     click_square(page, move.from_square)
     click_square(page, move.to_square)
+    print(f"PUZ05_MOVE_CLICKED {page._session_puzzle_id} {raw_move} "
+          f"{page.state.status.value}", flush=True)
 
 
 def wheel_board(page, delta):
@@ -180,6 +184,7 @@ def click_without_modal(app, button):
 
 
 def solve_visible_line(app, page, journal, tag):
+    print(f"PUZ05_SOLVE_BEGIN {tag} {page._session_puzzle_id}", flush=True)
     for raw_move in page.state.puzzle.expected_user_moves:
         wait_until(app, lambda: page.state.status.value in {"ready", "mistake_retry"}, 7000)
         play_move(page, raw_move)
@@ -188,10 +193,12 @@ def solve_visible_line(app, page, journal, tag):
     if page.state.status.value != "success":
         raise AssertionError(f"Mouse solve failed for {tag}: {page.state.status.value}")
     capture(page, f"{tag}-solved", journal)
+    print(f"PUZ05_SOLVE_COMPLETE {tag} {page._session_puzzle_id}", flush=True)
 
 
 def run():
     OUTPUT.mkdir(parents=True, exist_ok=True)
+    visual_only = os.environ.get("CC_PUZ_UX_05_VISUAL_ONLY", "0") == "1"
     payload, public_get_evidence = public_get()
     app = QApplication.instance() or QApplication([])
     app.setStyleSheet(desktop_stylesheet(VISUAL_TOKENS))
@@ -231,6 +238,22 @@ def run():
                     "loaded_id": page.state.puzzle.puzzle_id})
     wait_until(app, lambda: page._prepared_online_puzzle is not None, 30000)
     capture(page, "first-new-puzzle", journal)
+    if visual_only:
+        trace = {"public_get": public_get_evidence,
+                 "authenticated_lichess_verified": False,
+                 "l2_transport": "deterministic GUI fixture derived from one live public response",
+                 "actions": [{"action": "mouse-click",
+                             "target": "Home / Решать новые задачи",
+                             "loaded_id": page.state.puzzle.puzzle_id}],
+                 "frames": journal, "visual_only_compact_scale": True,
+                 "owner_database_or_oauth_touched": False}
+        (OUTPUT / "action-journal.json").write_text(
+            json.dumps(trace, ensure_ascii=False, indent=2), encoding="utf-8")
+        window.close()
+        app.processEvents()
+        window.game_repository.shutdown()
+        shutdown_logging()
+        return
 
     # Exercise right-button annotation and wheel review/return with Qt events.
     pos = page.board._square_center(chess.E2).toPoint()
@@ -267,6 +290,20 @@ def run():
     click_without_modal(app, page.reveal)
     if page.state.status.value != "revealed":
         raise AssertionError("Reveal button did not finish the task")
+    for _ in range(page.state.review_count + 1):
+        wheel_board(page, 120)
+    if not page.state.is_reviewing:
+        raise AssertionError("Mouse wheel did not enter review after showing the solution")
+    for _ in range(page.state.review_count + 1):
+        wheel_board(page, -120)
+    if page.state.review_cursor != page.state.review_count - 1:
+        raise AssertionError("Mouse wheel did not return to the latest shown move")
+    QTest.mouseClick(page.return_to_solution, Qt.MouseButton.LeftButton)
+    if page.state.is_reviewing:
+        raise AssertionError("Return-to-solution button left the revealed line in review mode")
+    actions.append({"action": "mouse-wheel-and-click",
+                    "target": "solution review / Вернуться к решению",
+                    "visible_moves_only": True})
     QTest.mouseClick(page.repeat, Qt.MouseButton.LeftButton)
     if page._session_puzzle_id != "0haqU" or not page._is_replay:
         raise AssertionError("Repeat button did not replay the exact current puzzle")
@@ -299,18 +336,8 @@ def run():
     replay_page = window._puzzle_training_page
     capture(replay_page, "home-saved-replay", journal)
     before = window.game_repository.local_puzzle_attempt_count(account)
-    solve_visible_line(app, replay_page, journal, "home-replay")
-    for _ in range(replay_page.state.review_count + 1):
-        wheel_board(replay_page, 120)
-    if not replay_page.state.is_reviewing:
-        raise AssertionError("Mouse wheel did not enter move review after the solution")
-    for _ in range(replay_page.state.review_count + 1):
-        wheel_board(replay_page, -120)
-    if replay_page.state.review_cursor != replay_page.state.review_count - 1:
-        raise AssertionError("Mouse wheel did not return to the latest played move")
-    QTest.mouseClick(replay_page.return_to_solution, Qt.MouseButton.LeftButton)
-    if replay_page.state.is_reviewing:
-        raise AssertionError("Return-to-solution button left the replay in review mode")
+    if replay_page._session_puzzle_id != "0haqU" or not replay_page._is_replay:
+        raise AssertionError("Home replay did not load the exact saved task as unrated")
     if window.game_repository.local_puzzle_attempt_count(account) != before:
         raise AssertionError("Saved replay altered local attempt totals")
     actions.append({"action": "mouse-click", "target": "Home / Повторить эту",

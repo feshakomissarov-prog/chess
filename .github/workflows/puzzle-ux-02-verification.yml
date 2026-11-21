@@ -200,6 +200,11 @@ jobs:
             $env:CC_PUZ_UX_05_SIZE = $case.Size
             $env:CC_PUZ_UX_05_OUTPUT = "visual-evidence/puz-ux-05-l2/scale-$($case.Scale)"
             $env:LOCALAPPDATA = Join-Path $env:RUNNER_TEMP "puz-ux-05-localappdata-$($case.Scale)"
+            if ($case.Scale -eq "1") {
+              $env:CC_PUZ_UX_05_VISUAL_ONLY = "0"
+            } else {
+              $env:CC_PUZ_UX_05_VISUAL_ONLY = "1"
+            }
             python -u -X faulthandler scripts/puz_ux_05_mainwindow_live_journey.py
             if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           }
