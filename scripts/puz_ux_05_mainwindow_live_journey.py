@@ -8,6 +8,7 @@ explicitly not an authenticated Lichess acceptance test.
 from __future__ import annotations
 
 from datetime import datetime, timezone
+import faulthandler
 import hashlib
 import json
 import os
@@ -51,6 +52,7 @@ def cleanup() -> None:
     if _CLEANUP_DONE:
         return
     _CLEANUP_DONE = True
+    faulthandler.cancel_dump_traceback_later()
     window = _ACTIVE_WINDOW
     app = _ACTIVE_APP
     if window is not None:
@@ -339,6 +341,7 @@ def wheel_board(page, delta):
 
 
 def click_without_modal(app, button):
+    print(f"PUZ06_CLICK_BEGIN {button.objectName()}", flush=True)
     observed = []
 
     def inspect_modal():
@@ -349,9 +352,11 @@ def click_without_modal(app, button):
 
     QTimer.singleShot(80, inspect_modal)
     QTest.mouseClick(button, Qt.MouseButton.LeftButton)
+    print(f"PUZ06_CLICK_SENT {button.objectName()}", flush=True)
     wait_until(app, lambda: bool(observed), 1000)
     if observed[0]:
         raise AssertionError(f"{button.objectName()} unexpectedly opened a modal dialog")
+    print(f"PUZ06_CLICK_COMPLETE {button.objectName()}", flush=True)
 
 
 def click_checkbox(app, checkbox, checked):
@@ -417,6 +422,10 @@ def solve_visible_line(app, page, journal, tag):
 def run():
     global _ACTIVE_APP, _ACTIVE_WINDOW
     OUTPUT.mkdir(parents=True, exist_ok=True)
+    # The live MainWindow walk has a bounded job timeout; emit a periodic stack
+    # only while this one diagnostic scenario is active so a Qt modal/block is
+    # located promptly instead of waiting for the runner cancellation dump.
+    faulthandler.dump_traceback_later(90, repeat=True)
     visual_only = os.environ.get(
         "CC_PUZ_UX_06_VISUAL_ONLY", os.environ.get("CC_PUZ_UX_05_VISUAL_ONLY", "0")) == "1"
     payload, public_get_evidence = public_get()
@@ -515,7 +524,9 @@ def run():
     if page.state.hint_level != 2 or not page.board._hint_arrows:
         raise AssertionError("Second hint did not immediately reveal an arrow")
     capture(page, "hint-immediate-result", journal)
+    print("PUZ06_REVEAL_BEGIN", flush=True)
     click_without_modal(app, page.reveal)
+    print("PUZ06_REVEAL_COMPLETE", flush=True)
     if page.state.status.value != "revealed":
         raise AssertionError("Reveal button did not finish the task")
     for _ in range(page.state.review_count + 1):
@@ -527,12 +538,14 @@ def run():
     if page.state.review_cursor != page.state.review_count - 1:
         raise AssertionError("Mouse wheel did not return to the latest shown move")
     QTest.mouseClick(page.return_to_solution, Qt.MouseButton.LeftButton)
+    print("PUZ06_REVIEW_RETURN_CLICKED", flush=True)
     if page.state.is_reviewing:
         raise AssertionError("Return-to-solution button left the revealed line in review mode")
     actions.append({"action": "mouse-wheel-and-click",
                     "target": "solution review / Вернуться к решению",
                     "visible_moves_only": True})
     QTest.mouseClick(page.repeat, Qt.MouseButton.LeftButton)
+    print("PUZ06_REPEAT_CLICKED", flush=True)
     if page._session_puzzle_id != "0haqU" or not page._is_replay:
         raise AssertionError("Repeat button did not replay the exact current puzzle")
     actions.append({"action": "hint-reveal-repeat-buttons", "result": "passed"})
