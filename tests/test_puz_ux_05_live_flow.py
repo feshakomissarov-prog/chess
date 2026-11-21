@@ -38,6 +38,8 @@ def solve_d7d5(qtbot, page):
 
 
 def test_home_saved_replay_legacy_payload_and_separate_new(qtbot):
+    assert callable(normalize_saved_puzzle_payload), (
+        "PUZ05-01 needs the source-aware saved-puzzle normalizer")
     old_shape = {"puzzle": {"id": "saved-legacy", "fen": LEGACY_FEN,
                              "solution": ["c7c5", "g1f3"], "themes": ["opening"]}}
     playable = normalize_saved_puzzle_payload("saved-legacy", old_shape)
@@ -57,6 +59,7 @@ def test_home_saved_replay_legacy_payload_and_separate_new(qtbot):
 
 
 def test_batch_duplicate_then_unique_and_exhausted_recovery():
+    assert callable(select_next_api_puzzle), "PUZ05-02 needs a safe batch selector"
     current = api_payload("already-seen")
     malformed = {"puzzle": {"id": "malformed", "solution": ["bad"]}}
     fresh = api_payload("new-from-batch")
@@ -91,6 +94,8 @@ def test_windows_journey_uses_mouse_for_promotion_choice(qtbot):
 
 
 def test_online_dedup_uses_local_and_imported_attempt_ids(tmp_path):
+    assert hasattr(GameRepository, "practiced_puzzle_ids"), (
+        "PUZ05-02 needs local and imported attempt IDs for deduplication")
     repository = GameRepository(tmp_path / "puz05-dedup.sqlite3")
     try:
         account = repository.ensure_archive_account("puz05-owner-fixture")
@@ -218,6 +223,7 @@ def test_error_keeps_finished_verdict_and_retry_cta(qtbot):
 
 def test_recovery_after_ten_unique_real_qt_clicks(qtbot):
     """Ten distinct API-shaped tasks are selected using visible UI input events."""
+    assert callable(select_next_api_puzzle), "PUZ05-02 needs a safe batch selector"
     page = PuzzleTrainingPage()
     qtbot.addWidget(page)
     page.resize(1050, 720)
