@@ -1,13 +1,17 @@
 """PUZ-UX-05 regressions for source, NEXT and ordinary puzzle gestures."""
 
+from types import SimpleNamespace
+
 import chess
 import chess_coach.lichess.puzzle_training as puzzle_training_module
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QMessageBox
 
+from chess_coach.board_view import BoardView
 from chess_coach.lichess.puzzle_training import normalize_api_puzzle
 from chess_coach.lichess.repository import GameRepository
 from chess_coach.ui.pages.puzzle_training import PuzzleTrainingPage
+from scripts.puz_ux_05_mainwindow_live_journey import play_move
 
 normalize_saved_puzzle_payload = getattr(
     puzzle_training_module, "normalize_saved_puzzle_payload", None)
@@ -62,6 +66,25 @@ def test_batch_duplicate_then_unique_and_exhausted_recovery():
     assert selected is not None, "Batch selector must skip duplicate and malformed IDs"
     assert selected[0].puzzle_id == "new-from-batch"
     assert select_next_api_puzzle([current, malformed], {"already-seen"}) is None
+
+
+def test_windows_journey_uses_mouse_for_promotion_choice(qtbot):
+    model = chess.Board("7k/P7/8/8/8/8/8/7K w - - 0 1")
+    board = BoardView(model)
+    board.resize(480, 480)
+    qtbot.addWidget(board)
+    board.show()
+    moves = []
+    board.move_intent.connect(moves.append)
+    page = SimpleNamespace(
+        board=board,
+        state=SimpleNamespace(status=SimpleNamespace(value="ready")),
+        _session_puzzle_id="promotion-fixture",
+    )
+
+    play_move(page, "a7a8q")
+
+    assert moves == [chess.Move.from_uci("a7a8q")]
 
 
 def test_online_dedup_uses_local_and_imported_attempt_ids(tmp_path):

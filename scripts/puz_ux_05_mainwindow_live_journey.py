@@ -19,7 +19,7 @@ import chess
 from PySide6.QtCore import QCoreApplication, QPoint, QPointF, QSettings, QTimer, Qt
 from PySide6.QtGui import QWheelEvent
 from PySide6.QtTest import QTest
-from PySide6.QtWidgets import QApplication
+from PySide6.QtWidgets import QApplication, QDialog, QPushButton
 
 from chess_coach.diagnostics import shutdown_logging
 from chess_coach.lichess.puzzle_training import normalize_api_puzzle
@@ -28,6 +28,16 @@ from chess_coach.window import MainWindow
 
 
 OUTPUT = Path(os.environ.get("CC_PUZ_UX_05_OUTPUT", "visual-evidence/puz-ux-05-l2"))
+JOURNEY_TRACE: dict = {}
+
+
+def persist_journey_trace() -> None:
+    """Keep an inspectable partial mouse-action trace if the runner is stopped."""
+    if not JOURNEY_TRACE:
+        return
+    OUTPUT.mkdir(parents=True, exist_ok=True)
+    (OUTPUT / "action-journal.json").write_text(
+        json.dumps(JOURNEY_TRACE, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
 class InertCredentialStore:
@@ -138,12 +148,21 @@ def wait_until(app, predicate, timeout_ms=15000):
 
 
 def capture(widget, name, journal):
+    QApplication.processEvents()
+    QTest.qWait(80)
+    QApplication.processEvents()
     OUTPUT.mkdir(parents=True, exist_ok=True)
     path = OUTPUT / f"{len(journal):02d}-{name}.png"
     if not widget.grab().save(str(path)):
         raise AssertionError(f"Unable to save Qt screenshot: {path}")
-    journal.append({"frame": path.name, "widget": widget.objectName() or type(widget).__name__})
+    frame = {"frame": path.name, "widget": widget.objectName() or type(widget).__name__,
+             "size": [widget.width(), widget.height()]}
+    board = getattr(widget, "board", None)
+    if board is not None:
+        frame["board_size"] = [board.width(), board.height()]
+    journal.append(frame)
     print(f"PUZ05_FRAME {path.name}", flush=True)
+    persist_journey_trace()
 
 
 def click_square(page, square, button=Qt.MouseButton.LeftButton):
@@ -153,10 +172,49 @@ def click_square(page, square, button=Qt.MouseButton.LeftButton):
 def play_move(page, raw_move):
     move = chess.Move.from_uci(raw_move)
     print(f"PUZ05_MOVE_BEGIN {page._session_puzzle_id} {raw_move}", flush=True)
+    move_action = {"action": "mouse-board-move", "puzzle_id": page._session_puzzle_id,
+                   "uci": raw_move, "promotion_choice": "queen" if move.promotion else None,
+                   "completed": False}
+    if JOURNEY_TRACE:
+        JOURNEY_TRACE.setdefault("actions", []).append(move_action)
+        persist_journey_trace()
+    promotion_choice = []
+    if move.promotion:
+        app = QApplication.instance()
+        deadline = time.monotonic() + 5
+
+        def choose_queen_with_mouse():
+            dialog = app.activeModalWidget() if app is not None else None
+            if not isinstance(dialog, QDialog) or dialog.windowTitle() != "Превращение пешки":
+                if time.monotonic() < deadline:
+                    QTimer.singleShot(10, choose_queen_with_mouse)
+                else:
+                    promotion_choice.append("promotion dialog did not appear")
+                return
+            queen = next((button for button in dialog.findChildren(QPushButton)
+                          if button.accessibleName() == chess.piece_name(chess.QUEEN)), None)
+            if queen is None:
+                promotion_choice.append("queen choice not found")
+                dialog.reject()
+                return
+            QTest.mouseClick(queen, Qt.MouseButton.LeftButton)
+            promotion_choice.append("queen clicked")
+            print("PUZ05_PROMOTION_CLICKED queen", flush=True)
+
+        # BoardView opens its real promotion picker inside a nested Qt event loop.
+        # This timer then performs the same visible queen-button click as a user.
+        QTimer.singleShot(0, choose_queen_with_mouse)
     click_square(page, move.from_square)
     click_square(page, move.to_square)
+    if move.promotion and promotion_choice != ["queen clicked"]:
+        raise AssertionError(
+            f"Promotion picker was not completed by a mouse click: {promotion_choice}")
     print(f"PUZ05_MOVE_CLICKED {page._session_puzzle_id} {raw_move} "
           f"{page.state.status.value}", flush=True)
+    if JOURNEY_TRACE:
+        move_action["status_after_click"] = page.state.status.value
+        move_action["completed"] = True
+        persist_journey_trace()
 
 
 def wheel_board(page, delta):
@@ -219,6 +277,12 @@ def run():
     window.activateWindow()
     journal: list[dict] = []
     actions: list[dict] = []
+    JOURNEY_TRACE.clear()
+    JOURNEY_TRACE.update({"public_get": public_get_evidence,
+                          "authenticated_lichess_verified": False,
+                          "l2_transport": "deterministic GUI batch fixtures derived from one live public response",
+                          "batch_calls": adapter.calls, "actions": actions,
+                          "frames": journal, "owner_database_or_oauth_touched": False})
 
     # First entry starts from the actual Home button.
     capture(window, "home-first-entry", journal)
