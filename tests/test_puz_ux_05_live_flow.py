@@ -133,7 +133,9 @@ def test_hint_and_reveal_no_modal_and_immediate_series_feedback(qtbot, monkeypat
     qtbot.mouseClick(page.reveal, Qt.MouseButton.LeftButton)
     assert page.state.status.value == "revealed"
     assert page._result_tiles[-1].text() == "•"
-    assert len(page._pending_attempt_saves) == 1
+    attempt = next(item for item in page._pending_attempt_saves.values()
+                   if item["puzzle_id"] == "hint-now")
+    assert attempt["result"] == "hinted" and attempt["hints"] == 1
 
 
 def test_result_tile_active_attempt_safe_replay_local_source(qtbot, monkeypatch):
