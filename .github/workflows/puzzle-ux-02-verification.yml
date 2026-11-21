@@ -66,7 +66,7 @@ jobs:
   l1-targeted:
     name: L1 targeted RED/GREEN
     runs-on: windows-latest
-    timeout-minutes: 35
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v7.0.1
         with:
@@ -117,7 +117,7 @@ jobs:
         env:
           QT_QPA_PLATFORM: offscreen
         run: >-
-          python -X faulthandler -m pytest -o addopts= -vv
+          python -X faulthandler -m pytest -o addopts= -vv -o faulthandler_timeout=60
           tests/test_window.py::test_puzzle_account_switch_clears_old_board_and_keeps_scope
           tests/test_window.py::test_account_switch_discards_delayed_profile_a_and_requests_profile_b
           tests/test_window.py::test_advanced_difficulty_prefetch_accepts_selected_key
