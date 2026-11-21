@@ -148,6 +148,7 @@ def test_history_row_replay_uses_same_exit_policy_as_result_tiles(qtbot):
 
     def queue_dialog_click(button_text):
         deadline = time.monotonic() + 3
+        observed = []
 
         def click_when_ready():
             dialog = QApplication.activeModalWidget()
@@ -156,11 +157,17 @@ def test_history_row_replay_uses_same_exit_policy_as_result_tiles(qtbot):
                                if item.text() == button_text), None)
                 if button is not None:
                     qtbot.mouseClick(button, Qt.MouseButton.LeftButton)
+                    observed.append(button_text)
                     return
             if time.monotonic() < deadline:
                 QTimer.singleShot(10, click_when_ready)
+                return
+            if isinstance(dialog, QDialog):
+                dialog.reject()
+            observed.append(None)
 
         QTimer.singleShot(0, click_when_ready)
+        return observed
 
     first_move = chess.Move.from_uci("d4d3")
     qtbot.mouseClick(page.board, Qt.MouseButton.LeftButton,
@@ -168,18 +175,23 @@ def test_history_row_replay_uses_same_exit_policy_as_result_tiles(qtbot):
     qtbot.mouseClick(page.board, Qt.MouseButton.LeftButton,
                      pos=center(page.board, first_move.to_square))
     qtbot.waitUntil(lambda: page.state.status.value != "opponent_reply", timeout=2000)
-    queue_dialog_click("Продолжить")
+    continue_dialog = queue_dialog_click("Продолжить")
     item = page.history.item(0)
     item_rect = page.history.visualItemRect(item)
     qtbot.mouseClick(page.history.viewport(), Qt.MouseButton.LeftButton,
                      pos=item_rect.center())
+    qtbot.waitUntil(lambda: bool(continue_dialog), timeout=3500)
+    assert continue_dialog == ["Продолжить"], "History replay did not offer Continue"
     qtbot.waitUntil(lambda: QApplication.activeModalWidget() is None, timeout=2000)
     assert page._session_puzzle_id == "active-rated"
     assert not rated and not replayed and not saved
 
-    queue_dialog_click("Прервать и перейти")
+    interrupt_dialog = queue_dialog_click("Прервать и перейти")
     qtbot.mouseClick(page.history.viewport(), Qt.MouseButton.LeftButton,
                      pos=item_rect.center())
+    qtbot.waitUntil(lambda: bool(interrupt_dialog), timeout=3500)
+    assert interrupt_dialog == ["Прервать и перейти"], (
+        "History replay did not offer the explicit rated interrupt choice")
     qtbot.waitUntil(lambda: page.state.status.value == "skipped", timeout=2000)
     assert len(rated) == 1
     assert rated[0]["win"] is False and rated[0]["rated"] is True
