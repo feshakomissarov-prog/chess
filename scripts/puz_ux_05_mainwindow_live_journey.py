@@ -552,7 +552,9 @@ def run():
 
     # Home exposes distinct NEW and saved REPLAY paths. Seed only the isolated
     # runner database and trigger each actual visible button.
-    QTest.mouseClick(page.home_button, Qt.MouseButton.LeftButton)
+    click_dialog_button_with_mouse(
+        app, "Оставить текущую задачу?", "Да",
+        lambda: QTest.mouseClick(page.home_button, Qt.MouseButton.LeftButton))
     wait_until(app, lambda: window.screen_stack.currentWidget() is window.home_page)
     account = window.game_repository.ensure_archive_account(adapter.username)
     serialized = json.dumps(payload, ensure_ascii=False)
@@ -584,7 +586,9 @@ def run():
     actions.append({"action": "mouse-click", "target": "Home / Повторить эту",
                     "replay_unrated": True})
 
-    QTest.mouseClick(replay_page.home_button, Qt.MouseButton.LeftButton)
+    click_dialog_button_with_mouse(
+        app, "Оставить текущую задачу?", "Да",
+        lambda: QTest.mouseClick(replay_page.home_button, Qt.MouseButton.LeftButton))
     wait_until(app, lambda: window.screen_stack.currentWidget() is window.home_page)
     QTest.mouseClick(window.home_activity_button, Qt.MouseButton.LeftButton)
     page = window._puzzle_training_page
