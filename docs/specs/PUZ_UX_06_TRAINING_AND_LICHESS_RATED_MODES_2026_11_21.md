@@ -2,9 +2,9 @@
 
 <!-- verification-contract: docs/process/VERIFICATION_PROTOCOL.md -->
 
-**Дата:** 21.11.2026 · **Статус:** DESIGN SPEC / FUTURE CONSOLIDATED CODEX BATCH; **НЕ ПЕРЕДАВАТЬ на реализацию до финальной приёмки PUZ-UX-05**.  
-**Основа концепции:** `main@53e6f5957e9e04530d165c9a143e0ee60a97292b` после PR #55. **Параллельная работа:** [кодовый Draft PR #57 по PUZ-UX-05](https://github.com/feshakomissarov-prog/chess/pull/57), [действующее ТЗ PUZ-UX-05 в docs Draft PR #56](https://github.com/feshakomissarov-prog/chess/blob/docs/puz-ux-05-owner-live-next-replay-fixes-2026-11-21/docs/specs/PUZ_UX_05_OWNER_REAL_LICHESS_NEXT_REPLAY_RECOVERY_2026_11_21.md). Код текущего PR #57 не менять.  
-**Важное решение владельца:** после завершения/независимой приёмки PUZ-UX-05 включить **его подтверждённые оставшиеся пользовательские дефекты в ЭТО ЖЕ ТЗ (см. §13)**; затем сделать **один общий Draft code PR** для новых двух режимов и фактических доработок. Не отправлять Codex сейчас, не создавать второй спорящий backlog, не merge без решения владельца.
+**Дата:** 21.11.2026 · **Статус:** CONSOLIDATED SPEC / INDEPENDENT REVIEW COMPLETE; **готово к передаче владельцем Codex, owner acceptance pending**.  
+**Основа концепции:** `main@53e6f5957e9e04530d165c9a143e0ee60a97292b` после PR #55. **Параллельная работа:** [кодовый Draft PR #57 по PUZ-UX-05](https://github.com/feshakomissarov-prog/chess/pull/57), [действующее ТЗ PUZ-UX-05 в docs Draft PR #56](https://github.com/feshakomissarov-prog/chess/blob/docs/puz-ux-05-owner-live-next-replay-fixes-2026-11-21/docs/specs/PUZ_UX_05_OWNER_REAL_LICHESS_NEXT_REPLAY_RECOVERY_2026_11_21.md). Независимое ревью на ec16b0f / 4c2feba закончено; объединённую реализацию продолжать в существующем Draft PR #57 после передачи владельцем.  
+**Важное решение владельца:** подтверждённые дефекты PUZ05 включены в §13 этого же ТЗ; продолжить один Draft code PR #57 для обоих режимов и фактических доработок. Без промежуточного merge.
 
 **Нормативные источники перед КАЖДЫМ новым этапом:** [AGENTS.md](../../AGENTS.md), [CC-VERIFY-01](../process/VERIFICATION_PROTOCOL.md), [OWNER-WORKFLOW-01 §4а — точная ветка Draft PR #53](https://github.com/feshakomissarov-prog/chess/blob/policy/owner-workflow-2026-11-20/docs/process/OWNER_WORKFLOW_CONTRACT.md), [шаблон](../specs/_TASK_TEMPLATE.md), [docs/PCD.md](../PCD.md), [docs/PRD.md](../PRD.md), [ROADMAP](../ROADMAP.md), актуальные HEAD/комментарии PR #57 и ТЗ PUZ-UX-05. Исторические инструкции ARCH-UX в AGENTS описывают старую стадию, **не запускать прежний проект повторно**. Сохраняются Fair Play, Windows Credential Manager, личная SQLite и запрет на произвольные реальные OAuth/POST.
 
@@ -184,7 +184,7 @@ Home и правая панель должны показывать **офици
 
 **Производительность:** при уже подготовленной задаче переход мгновенно на GUI, GET/POST в existing worker/coordinator, не читать keyring, не ждать SQLite и не делать requests в GUI thread. Home показывает сохранённый текущий рейтинг/metadata без повторного тяжелого расчёта 3327 партий. Никакой отдельной cloud DB.
 
-## 7. Архитектура и точная карта изменений (сверить с PUZ-UX-05 после merge)
+## 7. Архитектура и точная карта изменений (сверить с PUZ-UX-05 на HEAD PR #57)
 
 | Файл/модуль | Минимальное требуемое изменение |
 | --- | --- |
@@ -234,16 +234,9 @@ QTest.mouseClick на Home двух CTA, реальная Qt keyboard navigation
 
 **Нельзя зачесть** fake server `ratingDiff: +15` как **настоящий** официальный рейтинг владельца. Safe production write возможно проверить **только владельцу** с его разрешения после независимого теста fake transport. Принцип необратимости: тесты GitHub NEVER POST на реальный Lichess.
 
-## 9. Порядок выполнения с учётом параллельного PUZ-UX-05
+## 9. Порядок выполнения после независимого ревью PUZ-UX-05
 
-**Сейчас:**
-- Этот PR/ТЗ — **только концепция для следующего общего блока**, Codex продолжает только существующую PUZ-UX-05 работу в Draft PR #57, от его HEAD **не ответвляться**, ничего туда не коммитить.
-- Когда Codex сдаст PR #57, ChatGPT проведёт соразмерную **независимую проверку по реальному scope PUZ05-01…11**, проверит CI и артефакты, а владелец проведёт real Windows визуал/10 задач. Не превращать это в поиск теоретических микрогонок.
-- Если найдены **подтверждённые** дополнительные проблемы из PUZ-UX-05/ручного теста, **добавить их в §13 этого же файла** со старым PUZ05-ID, решением, L1/L2 proof, а не создавать третье ТЗ/PR. Если ничего нет — в §13 прямо написать «нет дополнительных практических замечаний». Этим получится **один пакет** нового режима + реальная постприёмочная доработка.
-- Только после того как владелец утвердит итоговый объединённый scope, один новый кодовый Draft PR от актуального `main`, Codex реализует **все действительные AC одним связным пакетом**, без merge. Обновить этот документ при base SHA, не полагаться на этот старый `53e6f59` как текущий код.
-- Не мешать CI старого PR и не сливать это docs PR автоматически. Ответственность за реальный rated OAuth/POST owner acceptance остаётся отдельно.
-
-**Новый дефект, найденный после отправки?** Если обычное реальное действие или серьёзная угроза потери данных — добавить в тот же consolidated §13. Теоретическая экзотика с несущественным эффектом — короткий tech debt без задержки. См. OWNER-WORKFLOW-01 §4а.
+Независимый проход выполнен, §13 содержит фактические замечания и доказательства. PR #57 не merged, owner acceptance pending. После передачи владельцем Codex продолжает существующий Draft PR #57 от проверенного HEAD 4c2feba или более нового проверенного descendant; не начинать от старого main, не терять PUZ05, не делать промежуточный merge. Один общий scope PUZ06-01…12 + §13, один execution log, один тематический L2 и финальный exact-head L3. Все PUZ05 AC сохраняются как регрессии. PR #58 docs-only. Никаких live rated POST в CI, owner-only приёмка отдельно. Итоговый merge только с явного разрешения владельца.
 
 ## Функциональные требования
 
@@ -285,7 +278,7 @@ QTest.mouseClick на Home двух CTA, реальная Qt keyboard navigation
 
 **Триггер:** одна тематическая Windows регрессия после всего комплекса mode+OAuth+server POST+UX, не на каждый push.
 
-- `python -m pytest -q -o addopts= tests/test_puz_ux_06_modes.py tests/test_puz_ux_06_rated.py tests/test_puz_ux_05_live_flow.py tests/test_puz_ux_04_flow.py tests/test_puzzle_training.py tests/test_puzzle_training_ui.py tests/test_puzzle_training_async.py tests/test_puzzle_training_navigation.py tests/test_puzzle_api_adapter.py tests/test_board_view.py`; путь PUZ05 **добавлять только если файл действительно вошёл в main после Codex/merge**, иначе явно подставить актуальное имя.
+- `python -m pytest -q -o addopts= tests/test_puz_ux_06_modes.py tests/test_puz_ux_06_rated.py tests/test_puz_ux_05_live_flow.py tests/test_puz_ux_04_flow.py tests/test_puzzle_training.py tests/test_puzzle_training_ui.py tests/test_puzzle_training_async.py tests/test_puzzle_training_navigation.py tests/test_puzzle_api_adapter.py tests/test_board_view.py`; файл PUZ05 уже входит в PR #57; сохранить его тесты.
 - Native Windows MainWindow journey §8 A–F **на реальных Qt QTest mouse/keyboard events**, изолированная SQLite, fake token store, fake transport + upstream-documented JSON samples. Проверить GET-only для training, POST rated, cancelled consent, timer after ACK, correct account and profile switch. Реальный HTTP **публичный GET** (если разрешён сетью и заданием) отдельно от fake POST; никакого live POST в CI.
 - PNG (или короткий ролик) и JSON trace с `mode, puzzle_id, button, rating_status, HTTP verb, status` без bearer/личной БД; 100/125/150% DPI на реально затронутых 3 размерах из §2.3, визуально открыть файлы до handoff. Согласовать с текущим native visual matrix, не создавать вторую параллельную систему снимков.
 - Один конкретный fake scenario `POST response lost after commit` — отсутствие второго POST проверено сетевым счетчиком, user-friendly unknown/reconcile UI проверено native screenshot; это **не избыточная экзотика**, это практический риск рейтинга.
@@ -324,23 +317,76 @@ QTest.mouseClick на Home двух CTA, реальная Qt keyboard navigation
 
 **Стоп-условие:** все обязательные AC + L1/L2/L3 без реальных серьёзных дефектов, отсутствие нарушения Fair Play/личной SQLite, явная передача owner-only OAuth test. **PR не merge без разрешения владельца.** Остаточную теорию вне риска не превращать в бесконечную доработку.
 
-## 13. Место для консолидированных замечаний после независимой приёмки PUZ-UX-05
+## 13. Консолидированное независимое ревью PUZ-UX-05 и следующий общий пакет (21.11.2026)
 
-**СТАТУС НА 21.11.2026: РЕЗЕРВ / NOT REVIEWED. НЕ СЧИТАТЬ СПИСОК НОВЫХ БАГОВ.**
+**Решение:** PR #57 не merged. По поручению владельца объединить перечисленные здесь фактические замечания с PUZ06-01…12 в одной реализации. Продолжить существующий Draft code PR #57 от проверенного HEAD, не создавать кодовую ветку от старого main с потерей PUZ05. PR #58 — docs-only. Ручная проверка владельца ещё НЕ проведена. Не делать промежуточный merge. Приоритет §13 и обновлённого §9 над прежним планом нового PR после merge.
 
-После завершения Code PR #57 ChatGPT проверяет исполняемый PUZ-UX-05 (GET queue, Home NEW/REPLAY, NEXT/auto-next, hints, плитки, сохранение, окно, L2/L3), **без охоты за экзотикой**, и владелец проводит реальную Windows приёмку. Если есть подтверждённые практические ошибки:
-- дополнить **ЭТОТ §13**, не другой файл, таблицей `existing PUZ05-ID → факт владельца/код/воспроизведение → конкретная доработка → L1/L2/OWNER evidence`;
-- сохранить старые defect IDs; **PUZ06-01…12 не переименовывать**;
-- сравнить со свежим main / PR #57, устранить повторы (например, если PUZ05 уже исправил Home/replay, не делать его заново); обновить карту изменений и объединённый список тестов;
-- отличить source-confirmed риск и настоящий owner repro; неблокирующую мелочь включить только если связана с этим же пользовательским путём;
-- передать Codex **один утверждённый итоговый кодовый пакет**: PUZ06 + подтверждённые PUZ05 follow-ups. Codex не начинает PUZ06 заранее.
+### 13.1. Независимые доказательства
 
-Если PUZ05 принят без новых замечаний: написать здесь «Реальных дополнительных дефектов PUZ05 не найдено», уточнить base SHA и передать **только PUZ06**. Правило масштабности OWNER-WORKFLOW-01 §4а остаётся в силе.
+- Base main 53e6f5957e9e04530d165c9a143e0ee60a97292b; final code ec16b0fd9e9d326e8d1edd8e7b8fc89317faaa93; current HEAD 4c2feba39339869667d2ae186a93f72ef96a17a4. Compare показывает 2 коммита, только docs/handoffs/PUZ_UX_05_EXECUTION_LOG.md. Прочитаны актуальные AGENTS, CC-VERIFY, OWNER-WORKFLOW §4а, шаблон, оба ТЗ и журнал. Проверены changed production files, CI и targeted tests.
+- [L2 44927477720](https://github.com/feshakomissarov-prog/chess/actions/runs/44927477720) PASS; [L3 44928237622](https://github.com/feshakomissarov-prog/chess/actions/runs/44928237622) PASS: по фактическому логу 1291 passed / 794.63 с, compileall, isolated MainWindow, native visual и Home jobs successful. Скачаны [L2 PNG/JSON](https://github.com/feshakomissarov-prog/chess/actions/runs/44927477720/artifacts/14716173550), [L3 visual master](https://github.com/feshakomissarov-prog/chess/actions/runs/44928237622/artifacts/14716592926), [Home artifacts](https://github.com/feshakomissarov-prog/chess/actions/runs/44928237622/artifacts/14716975139); просмотрены L2 кадры и выборка L3 Home/ready/solved/account-switch/replay/error при трёх DPI. Видны новые CTA, галочка, цветные плитки, подсказки, восстановление. Публичный GET /api/puzzle/0haqU: HTTP 200, 317.6 ms, без Authorization. В action-journal 87 действий, authenticated_lichess_verified=false. Полный проход при 100%, стартовые 3 кадра при 125/150% плюс visual master. 10 ID puz05-sequence-18…54 — производные ОДНОЙ публичной позиции, а не десять разных реальных задач. Корректно считать доказательством Qt fixture journey, не authenticated API.
+- **Поздний FAIL, который нельзя скрывать:** на docs-only HEAD состоялся [focused run 44930056617](https://github.com/feshakomissarov-prog/chess/actions/runs/44930056617), L1 success, L2 job 136925347218 FAIL: 379 passed, 2 failed. Оба assert при закрытии: test_progress_filter_options_load_in_background_not_dialog_constructor и test_close_prompt_catches_outbox_failure_finishing_during_shutdown. У второго первое предупреждение/отказ закрытия сработали; провалился final.isAccepted(). Не доказательство потери данных. Полный Windows job docs-only пропущен; код после успешного L3 не изменялся.
+
+### 13.2. Конкретные доработки — сохранить старые ID
+
+**PUZ05-01 / PUZ06-01,10 — P1: корректная сторона и первый ход импортированной задачи.**  
+Код src/chess_coach/lichess/puzzle_training.py: normalize_activity_puzzle считает solution[0] подготовительным ходом, играет его и убирает из решения. Это формат публичной CSV базы с FEN ДО prep move, но не API PuzzleActivity. [Официальный пример PuzzleActivity](https://github.com/lichess-org/api/blob/master/doc/specs/examples/puzzles-getYourPuzzleActivity.json.yaml) для 0haqU содержит lastMove=f2f3, fen="6k1/1q3p2/5prp/2b5/3pN3/1PP2P1P/2Q1R1P1/6K1 b - - 0 1", solution=["d4d3","e4c5","d3c2","c5b7","c2c1q"]. Белая пешка уже f3, очередь чёрных, первый пользовательский ход d4d3. Текущая функция делает его за игрока, предлагает e4c5 белыми. SQLite puzzles.py:374–382 сохраняет fen и solution непосредственно; window.py:6805–6818 применяет prep-семантику к imported rows. normalize_saved_puzzle_payload тоже не различает lastMove/source. Новый legacy test использует искусственный CSV-подобный пример. Это детерминированный source defect, а не проверка конкретных личных записей.
+
+Решение: раздельная нормализация API PuzzleAndGame, API PuzzleActivity (FEN уже playable, solution полностью сохраняется, lastMove — metadata) и legacy CSV (prep включён в ход). Проверить importer и происхождение исторических форматов; старые импортированные строки без lastMove открывать по известному source, не угадывать сторону. Если происхождение неизвестно, безопасный exact-ID GET/сверка либо ясная ошибка. Сохранить оригинальные данные. Home preview и replay должны использовать одинаковый FEN. RED: официальный activity fixture через importer → Home → replay → чёрные, d4d3 и полная линия; отдельный CSV fixture и full API. Реальный Qt ход с ответом соперника. Дополнительно проверить malformed game=null среди валидных: normalize_api_puzzle вызывает game.get без shape guard, AttributeError не ловится selector. Невалидный элемент не должен рушить весь batch.
+
+**PUZ05-02 / PUZ06-03,09 — P1 основной путь: полноценная очередь, а не только выбор первого кандидата.**  
+window.py:6460–6475/6644–6656 получает 5 puzzles, select_next_api_puzzle возвращает одного; page:584–607 хранит один prepared slot. Остальные valid пропадают. В L2 журнале каждая новая fixture выдаёт 3 свежих ID, но проход берёт 18,22,26…54. Это не утверждение, что Lichess всегда выдаёт одинаковый batch; это доказанная потеря уже полученных вариантов и лишние сетевые запросы.
+
+Решение: небольшая TRAINING очередь до 5, key account/credential generation/mode/theme/difficulty; validate each, устранить дубликаты внутри пакета, текущий, уже виденные/практикованные ID; pop NEXT без сети, пополнение при 1–2 оставшихся, один in-flight для scope. Смена фильтра/режима/профиля/disconnect сбрасывает несовместимую очередь. RATED использует тот же механизм выбора с отдельным scope, приоритет одной server-offered задачи после POST ACK (nb=1) либо GET. Не давать на рейтинг позицию, решение которой уже видел пользователь в TRAINING, и не смешивать local Elo eligibility с server rating. При отсутствии candidates честное состояние, retry/смена темы/replay без бесконечного цикла. RED: один ответ [A,B,C,D,E], повтор того же batch, все 5 реально использованы, потом [E,F,G,H,I]; десять разных FEN/линий, счётчик GET и отсутствие >1 concurrent request; 0 POST в TRAINING. Не считать десять клонов одной позиции доказательством разнообразия.
+
+**PUZ05-06 / PUZ06-06,07 — P1 для ranked: единая процедура ухода из активной попытки.**  
+_open_session_result (1258–1275) уже спрашивает о пропуске, но _open_history_item (1456–1461) напрямую emit replay_requested: клик правой истории обходит защиту. Home/Back/Вся история/смена аккаунта идут отдельными сигналами. Не переносить silent abandonment в новый ranked режим.
+Решение: единая exit/replay policy §3.1 для обеих историй, Next, Repeat, Home/Back, profile/mode switch/close. Отмена сохраняет доску и попытку. Перед уходом фиксировать local outcome и pending submission там, где необходимо; никаких скрытых POST при навигации/закрытии. До первого действия RATED можно отказаться без POST; частичная rated попытка требует явного решения владельца по §3.1; завершённая — без лишних вопросов. Hints/reveal остаются без popup. RED: клик строки истории после начала, Cancel/Yes, ровно один local skip при Yes; затем rated partial и уже зафиксированный loss, HTTP count. Проверить обычные маршруты Home/назад/смена профиля.
+
+**PUZ05-08 / PUZ06-08,09 — P2: видимый cooldown/recovery при 429.**  
+window.py:6535–6538 формирует Retry-After text, page.set_message:743 снова enable fetch; prefetch error:6673–6688 теряет status/retry_after. Даже если общий transport имеет rate limiter, UI не объясняет реальную готовность. Переиспользовать существующий механизм после его проверки: общий scoped cooldown для GET/prefetch, запрет повторного сетевого запроса до Retry-After, видимый текст/доступный retry после; готовую очередь можно продолжать без сети. Current playable board и зелёный verdict сохраняются. GET retry не смешивать с неопределённым rated POST. RED fake 429 + repeated click + prefetch, счётчик HTTP, восстановление.
+
+**PUZ05-08/09 / PUZ06-02,03,11 — P2: небольшие реальные UX/фильтры.**
+1. Native L3 account-switch-loading PNG при 100/125/150% показывает стандартную расстановку при пустой задаче; reset_for_account_switch:880–899 ставит chess.Board(), не скрывает. Синхронно показывать placeholder, отключить board, сохранить уже правильную очистку старых метрик.
+2. _navigate_review:801–811 пишет «выберите фигуру» в последней позиции завершённой задачи, хотя board readonly. Вернуть исходный verdict и «Следующая/Повторить»; READY wheel-forward не ломать.
+3. _filter_themes:503–512 фильтрует QComboBox model, а видимый QListWidget тем не фильтруется. Поиск «мат» действительно фильтрует обе панели/видимый список, очистка возвращает всё. _finish:1091 пишет selected_theme из текущего селектора; если пользователь поменял тему на следующую, попытка классифицируется неверно. Frozen theme/difficulty при load, рядом понятное «Тема следующей задачи» или переход по exit policy. Обязательно для rated POST angle. Добавить mat в 4/5+ из PUZ06. RED Qt search и смена фильтра во время решения, сохранение исходного angle/difficulty. 
+4. Compact board: ready при 150% улучшен, после появления feedback/ribbon доска уменьшается; не переделывать дизайн, проверить доступность actual mouse move/wrong/next/оба новых mode controls. Это regression UX, не новый тяжёлый дефект.
+
+**PUZ05-10 — P2: диагностировать фактически упавшие close tests.**  
+44930056617: два сбоя описаны выше. Определить причину штатного закрытия: worker/runtime shutdown либо нестабильный driver. Сохранить warning при unprotected outbox, ответ No и нормальное последующее закрытие после явного Yes; не ослаблять assert. Если fixture/environment-only — доказать, исправить targeted driver. Home wide и 3400 synthetic archive подтверждены CI, не переписывать. Docs-only focused workflow повторился из-за сравнения полного PR diff; не лечить глобальным CI refactor в этой задаче, зафиксировать процессный долг и не гонять L3 без нужды.
+
+### 13.3. Матрица всего PUZ05
+
+| ID | Статус независимого review | Объединённый объём |
+| --- | --- | --- |
+| PUZ05-01 | Home NEW/replay и legacy fixture PASS; activity семантика дефектна | §13.2 + новые CTA |
+| PUZ05-02 | Batch selector есть; queue отсутствует | §13.2 + PUZ06-09 |
+| PUZ05-03 | Manual/auto Qt fixture PASS, owner live pending | queue + server ACK |
+| PUZ05-04 | Видимая галочка и toggle test PASS | сохранить per-mode |
+| PUZ05-05 | Hint/reveal без modal PASS | сохранить, rated warning |
+| PUZ05-06 | Tile guard есть, history-row bypass | единая exit policy |
+| PUZ05-07 | Immediate yellow/red/streak реализовано | сохранить отдельно по режимам |
+| PUZ05-08 | Placeholder/ошибки улучшены, 429 и account switch gap | §13.2 |
+| PUZ05-09 | Wheel/ПКМ Qt evidence PASS, неверная надпись review | §13.2 |
+| PUZ05-10 | L3 PASS, более поздний focused close FAIL | адресная диагностика |
+| PUZ05-11 | Реальный авторизованный аккаунт NOT VERIFIED | OWNER gate |
+
+### 13.4. Дополнение к L1/L2/L3 — один общий пакет
+
+Новые планируемые node IDs (создать тесты, не утверждать, что они уже существуют):
+- python -m pytest -q -o addopts= tests/test_puz_ux_05_live_flow.py::test_official_activity_replay_preserves_player_fen_and_first_solution
+- python -m pytest -q -o addopts= tests/test_puz_ux_05_live_flow.py::test_batch_queue_consumes_all_valid_candidates_and_skips_malformed_game
+- python -m pytest -q -o addopts= tests/test_puz_ux_05_live_flow.py::test_history_row_replay_uses_same_exit_policy_as_result_tiles
+- python -m pytest -q -o addopts= tests/test_puz_ux_05_live_flow.py::test_next_and_prefetch_respect_retry_after
+- python -m pytest -q -o addopts= tests/test_puz_ux_05_live_flow.py::test_theme_search_and_frozen_attempt_filter_and_profile_placeholder
+- python -m pytest -q -o addopts= tests/test_window.py::test_progress_filter_options_load_in_background_not_dialog_constructor tests/test_window.py::test_close_prompt_catches_outbox_failure_finishing_during_shutdown
+
+L2 — существующий PUZ05 MainWindow journey + оба PUZ06 режима в одном thematic run, 10 разнотипных legal FEN/lines, official activity fixture, actual Qt interactions, frozen theme, GET/POST count trace, consent/decline, one scored result and unknown-response safe recovery, screenshots changed states/DPI. Не выдавать fake POST за настоящий. Проверить regression всех PUZ05 AC без переписывания исправленного. L3 — один final exact-head на объединённом коде; docs-only не повод повторять. Owner gate — поочерёдно реальные TRAINING 10 задач и осознанная RATED попытка с серверным подтверждением. Не трогать SQLite/OAuth владельца, не тестировать реальные rated POST из CI. PR #57 остаётся Draft, no merge. Никаких дополнительных циклов охоты за экзотикой.
 
 ## Отчёт Codex / завершение
 
 1. До реализации прочитать все нормативные файлы и точные branch refs из начала этого ТЗ; сверить main/PR56/PR57/последнее merged состояние и §13; не считать старую кодовую базу актуальной.
-2. Создать **один новый Draft code PR** от последнего main после согласования, с одним executable spec + consolidated execution log; не смешивать docs-only PR с active code PR.
+2. Продолжить **существующий Draft code PR #57** от проверенного HEAD с одним executable spec + consolidated execution log; не смешивать docs-only PR #58 с active code PR.
 3. L1 адресно → один тематический native Windows L2 → один final code-SHA L3; указать SHA и ссылки, приложить ответ fake GET/POST, реальные Qt interactions и screenshots; owner-only HTTP POST **NOT RUN**.
 4. Сохранить личные данные, токены, SQLite, Fair Play и правила игровых досок; любые настоящие rated POST только после осознанного owner consent, не из CI.
 5. В статусе каждой строки AC различать `DONE IN CODE`, `TESTED IN RUNNER`, `NOT VERIFIED`, `OWNER ACCEPTANCE PENDING`. Никакого самовольного merge.
