@@ -533,6 +533,10 @@ class MainWindow(QMainWindow):
         self._dashboard_first_count_paint = False
         self._dashboard_first_games_paint = False
         self._dashboard_initial_refresh_at: float | None = None
+        self._dashboard_wait_generation: int | None = None
+        self._dashboard_wait_timer = QTimer(self)
+        self._dashboard_wait_timer.setSingleShot(True)
+        self._dashboard_wait_timer.timeout.connect(self._dashboard_wait_timed_out)
         if offline_mode and manual_connect_mode:
             raise ValueError("--offline и --manual-connect нельзя включить одновременно")
         if settings is not None and runtime is not None and settings is not runtime.settings:
@@ -3141,6 +3145,7 @@ class MainWindow(QMainWindow):
                 "open_settings": self.open_settings,
             }, self._dashboard_filter_changed)
         self._home_view = view
+        view.refresh_dashboard_requested.connect(self._retry_home_dashboard)
         self._dashboard_metric_columns = view._dashboard_metric_columns
         for name in (
             "home_status", "dashboard_account", "dashboard_clock", "dashboard_metrics",
@@ -3664,6 +3669,11 @@ class MainWindow(QMainWindow):
                         account_id = self.dashboard_account.itemData(index)
                         break
         generation = self.dashboard_queries.begin_request()
+        self._dashboard_wait_generation = generation
+        self._dashboard_wait_timer.start(8000)
+        if hasattr(self, "_home_view"):
+            self._home_view.dashboard_refresh_button.hide()
+            self._home_view.home_status.hide()
         self._dashboard_revision_retry_counts[generation] = 0
         clock = None
         if not self._dashboard_options_loaded:
@@ -3678,6 +3688,28 @@ class MainWindow(QMainWindow):
         if self._dashboard_thread is not None and self._dashboard_thread.is_alive():
             self.dashboard_queries.defer((generation, account_id, clock))
         self._request_dashboard_preview(generation, account_id, clock)
+
+    def _dashboard_wait_timed_out(self) -> None:
+        generation = self._dashboard_wait_generation
+        if (generation is None or not self.dashboard_queries.is_current(generation)
+                or self._screen_mode != "home" or not hasattr(self, "_home_view")):
+            return
+        snapshot = self._latest_dashboard_snapshot or {}
+        scope = snapshot.get("filter") or {}
+        has_last_good = (scope.get("account_id") == self.dashboard_account.currentData()
+                         and not snapshot.get("is_preview"))
+        timestamp = snapshot.get("_dashboard_tier_b_saved_at")
+        suffix = f" (данные на {timestamp})" if timestamp else ""
+        self._home_view.home_status.setText(
+            "Сводка рассчитывается в фоне; последние доступные данные" + suffix
+            if has_last_good else "Сводка рассчитывается в фоне; пока данных нет.")
+        self._home_view.home_status.show()
+        self._home_view.dashboard_refresh_button.show()
+
+    def _retry_home_dashboard(self) -> None:
+        self._dashboard_wait_timer.stop()
+        self._dashboard_initial_refresh_at = None
+        self._refresh_home_dashboard()
 
     def _request_dashboard_preview(self, generation: int, account_id: str | None,
                                    clock: str | None) -> None:
@@ -3980,6 +4012,8 @@ class MainWindow(QMainWindow):
             self.dashboard_queries.clear_pending()
             return
         if self.dashboard_queries.is_current(generation):
+            self._dashboard_wait_timer.stop()
+            self._dashboard_wait_generation = None
             if error is not None:
                 last_good = self._latest_dashboard_snapshot or {}
                 last_good_scope = last_good.get("filter") or {}
@@ -3995,6 +4029,11 @@ class MainWindow(QMainWindow):
                                 f"{text}\nОбновление временно недоступно; "
                                 "показана сохранённая сводка.")
                 else:
+                    if hasattr(self, "_home_view"):
+                        self._home_view.home_status.setText(
+                            "Не удалось загрузить сводку. Повторите попытку.")
+                        self._home_view.home_status.show()
+                        self._home_view.dashboard_refresh_button.show()
                     for value in self._dashboard_metric_values.values():
                         value.setText("н/д")
                     for detail in self._dashboard_metric_details.values():
@@ -4017,6 +4056,9 @@ class MainWindow(QMainWindow):
                         != snapshot.get("filter", {}).get("account_id")):
                     self._refresh_home_dashboard()
                 else:
+                    if hasattr(self, "_home_view"):
+                        self._home_view.home_status.hide()
+                        self._home_view.dashboard_refresh_button.hide()
                     self._dashboard_full_rendered_generation = generation
                     self._dashboard_snapshot_cache_revision = (
                         int(source_revision) if source_revision is not None else None)
@@ -4353,7 +4395,7 @@ class MainWindow(QMainWindow):
         # historical scores. Active games remain hidden regardless of stale cache.
         can_show_scores = game_analysis_allowed and has_saved_position_metrics
         recent_width = self._home_view.recent_scroll.viewport().width()
-        compact = recent_width < 760
+        compact = recent_width < 740
         compact_height = self.height() < 780
         card = _DashboardGameCard()
         # QWidget starts at Qt's default 640 px even while its scroll-area
@@ -4362,6 +4404,7 @@ class MainWindow(QMainWindow):
         # layout can retain a desktop minimum until a later resize event.
         if recent_width > 0:
             card.resize(recent_width, card.height())
+            card.setMaximumWidth(recent_width)
         # The scroll-area viewport owns the card width. Ignoring the card's
         # stale horizontal size hint lets its child layout switch to the
         # compact stacked form instead of overflowing at 1280x720.
@@ -6063,7 +6106,7 @@ class MainWindow(QMainWindow):
                                           account_id: str) -> None:
         page.auto_next.blockSignals(True)
         page.auto_next.setChecked(
-            self.settings.value(f"puzzles/auto_next/{account_id}", True, type=bool))
+            self.settings.value(f"puzzles/auto_next/{account_id}", False, type=bool))
         page.auto_next.blockSignals(False)
 
     def _load_puzzle_training_accounts(self, page: PuzzleTrainingPage,
@@ -6458,6 +6501,9 @@ class MainWindow(QMainWindow):
                 self.puzzle_training_finished.emit(
                     request_id, None, {
                         "message": f"Не удалось получить задачу ({type(exc).__name__}): {exc}",
+                        "error_type": type(exc).__name__,
+                        "status": getattr(exc, "status", None),
+                        "retry_after": getattr(exc, "retry_after", None),
                         "authorization_needed": getattr(exc, "status", None) in {401, 403},
                     })
             finally:
@@ -6471,17 +6517,29 @@ class MainWindow(QMainWindow):
                     or self.screen_stack.currentWidget() is not page):
                 return
             if error:
-                message = error.get("message", "Ошибка загрузки задачи.") if isinstance(error, dict) else str(error)
-                if isinstance(error, dict) and error.get("authorization_needed"):
-                    message = "Подключите задачи Lichess с разрешением puzzle:read."
+                error_data = error if isinstance(error, dict) else {}
+                status = error_data.get("status")
+                error_type = str(error_data.get("error_type") or "")
+                if error_data.get("authorization_needed") or status in {401, 403}:
+                    message = "Для задач Lichess нужно подключить разрешение puzzle:read."
+                elif status == 429:
+                    wait = error_data.get("retry_after")
+                    message = (f"Lichess ограничил частоту запросов (429). Повторите через {wait} с."
+                               if wait else "Lichess ограничил частоту запросов (429). Повторите позже.")
+                elif error_type in {"TimeoutError", "ReadTimeout", "ConnectTimeout"}:
+                    message = "Тайм-аут Lichess. Проверьте соединение и повторите загрузку."
+                elif error_data:
+                    message = str(error_data.get("message") or
+                                  "Не удалось загрузить задачу Lichess. Повторите загрузку.")
                 else:
-                    message = "Не удалось загрузить задачу Lichess · повторите соединение."
+                    message = str(error)
                 page.set_message(message)
                 page.set_authorization_needed(
-                    bool(error.get("authorization_needed")) if isinstance(error, dict)
-                    else False)
+                    bool(error_data.get("authorization_needed") or status in {401, 403}))
                 return
             def apply_validated() -> None:
+                if page._retry_duplicate_online_puzzle(payload["puzzle"]):
+                    return
                 page.account_id = payload["account_id"]
                 rows = []
                 for index in range(page.account_selector.count()):

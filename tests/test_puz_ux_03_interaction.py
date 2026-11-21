@@ -68,6 +68,7 @@ def test_save_ack_does_not_replace_terminal_verdict(qtbot):
 
 def test_replay_success_does_not_promise_auto_next_or_change_any_session_stats(qtbot):
     page = online_page(qtbot)
+    results_before_replay = list(page._session_results)
     page.load_puzzle(page.state.puzzle, page._puzzle_payload, source="replay",
                      rating_eligible=False)
     attempts = []
@@ -77,7 +78,7 @@ def test_replay_success_does_not_promise_auto_next_or_change_any_session_stats(q
     assert "автоматически" not in page.status.text().casefold()
     assert not page._auto_next_timer.isActive()
     assert attempts == []
-    assert page._session_results == []
+    assert page._session_results == results_before_replay
     assert (page._session_streak, page._session_clean, page._session_failed,
             page._session_hinted) == (0, 0, 0, 0)
 
@@ -187,7 +188,7 @@ def test_first_failure_breaks_streak_once_and_hint_result_is_not_clean(qtbot):
     page._submit_move(chess.Move.from_uci("e2e4"))
     assert page._session_clean == 0
     assert page._session_failed == 1
-    assert page.results_tape.text().count("✕") == 1
+    assert sum(tile.text() == "✕" for tile in page._result_tiles) == 1
 
 
 def test_three_second_save_does_not_delay_clean_auto_next(qtbot):

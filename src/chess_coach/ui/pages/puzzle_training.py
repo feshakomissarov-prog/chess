@@ -90,6 +90,8 @@ class PuzzleTrainingPage(QWidget):
         self._retry_attempt_queue: list[str] = []
         self._retry_in_progress_id: str | None = None
         self._local_seen_by_scope: dict[tuple[str, str, str], set[str]] = {}
+        self._seen_online_ids_by_scope: dict[tuple[str, str, str], set[str]] = {}
+        self._next_unique_retries = 0
         self._is_replay = False
         self._wrong_flash = False
         self._wrong_timer_pending = False
@@ -181,7 +183,7 @@ class PuzzleTrainingPage(QWidget):
         self.auto_next = QCheckBox("Автопереход после чистого решения")
         self.auto_next.setObjectName("puzzleAutoNext")
         self.auto_next.setAccessibleName("Автопереход после чистого решения")
-        self.auto_next.setChecked(True)
+        self.auto_next.setChecked(False)
         header_controls.addWidget(self.auto_next)
         header.addWidget(self._training_header_controls)
         root.addLayout(header)
@@ -208,7 +210,6 @@ class PuzzleTrainingPage(QWidget):
         self.fetch = QPushButton("Новая задача")
         self.fetch.setObjectName("primaryAction")
         self.fetch.setMinimumHeight(38)
-        self.filter_row.addWidget(self.fetch)
         self.authorize = QPushButton("Подключить задачи Lichess")
         self.authorize.setVisible(False)
         self.authorize.setToolTip("Отдельное разрешение Lichess только для чтения задач")
@@ -261,13 +262,23 @@ class PuzzleTrainingPage(QWidget):
         self.board.setMinimumSize(160, 160)
         self.board.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         self.board.set_annotations_enabled(True)
+        self.board.set_puzzle_training_gestures(True)
         self.board.set_premove_allowed(False)
         self.board.set_show_legal_moves(True)
         self.board.setAccessibleName("Шахматная доска задачи")
         self.board.move_intent.connect(self._submit_move)
         self.board.wheel_navigate.connect(self._navigate_review)
+        self.board.puzzle_piece_pressed.connect(self._review_piece_pressed)
         self.board.paint_completed.connect(self._first_feedback_paint_completed)
         center_layout.addWidget(self.board, 1)
+        self.results_tape = QWidget(center)
+        self.results_tape.setObjectName("puzzleResultsTape")
+        self.results_tape.setAccessibleName("Последние результаты тренировки")
+        self.results_tape_layout = QHBoxLayout(self.results_tape)
+        self.results_tape_layout.setContentsMargins(0, 2, 0, 2)
+        self.results_tape_layout.setSpacing(4)
+        self._result_tiles: list[QPushButton] = []
+        center_layout.addWidget(self.results_tape)
         self.solution_line = QLabel("")
         self.solution_line.setObjectName("puzzleSolutionLine")
         self.solution_line.setWordWrap(True)
@@ -283,7 +294,8 @@ class PuzzleTrainingPage(QWidget):
         self.hint = QPushButton("Подсказка")
         self.reveal = QPushButton("Показать решение")
         self.repeat = QPushButton("Повторить")
-        self.next = QPushButton("Следующая задача")
+        self.next = self.fetch
+        self.next.setText("Следующая задача →")
         self.retry_save = QPushButton("Повторить запись")
         self.retry_save.setObjectName("retryPuzzleSave")
         self.retry_save.setAccessibleName("Повторить сохранение результата в SQLite")
@@ -316,7 +328,6 @@ class PuzzleTrainingPage(QWidget):
         self.hint.clicked.connect(self._hint)
         self.reveal.clicked.connect(self._reveal)
         self.repeat.clicked.connect(self._repeat)
-        self.next.clicked.connect(self._next)
         body.addWidget(center)
 
         right_scroll = QScrollArea()
@@ -346,11 +357,6 @@ class PuzzleTrainingPage(QWidget):
         self.session_summary.setObjectName("puzzleSessionSummary")
         self.session_summary.setWordWrap(True)
         right_layout.addWidget(self.session_summary)
-        self.results_tape = QLabel("Последние результаты: —")
-        self.results_tape.setObjectName("puzzleResultsTape")
-        self.results_tape.setWordWrap(True)
-        self.results_tape.setAccessibleName("Последние результаты тренировки")
-        right_layout.addWidget(self.results_tape)
         self.persistence_status = QLabel("")
         self.persistence_status.setObjectName("puzzlePersistenceStatus")
         self.persistence_status.setWordWrap(True)
@@ -462,6 +468,7 @@ class PuzzleTrainingPage(QWidget):
 
     def _next(self) -> None:
         if self._fetch_inflight:
+            self.network_status.setText("Загрузка уже выполняется…")
             return
         if (self.state.puzzle is not None and self._allow_submit
                 and self.state.status not in {PuzzleStatus.SUCCESS, PuzzleStatus.REVEALED,
@@ -477,7 +484,7 @@ class PuzzleTrainingPage(QWidget):
         self._auto_next_timer.stop()
         self._wrong_timer.stop()
         self._reply_timer.stop()
-        self.board.set_interaction_enabled(False)
+        self._next_unique_retries = 0
         self._next_requested_at = time.perf_counter()
         self._fetch_inflight = True
         self._set_controls(self.state.puzzle is not None)
@@ -486,10 +493,36 @@ class PuzzleTrainingPage(QWidget):
         if self.more_difficulty.isChecked():
             difficulty = str(self.advanced_difficulty.currentData() or difficulty)
         prepared = self.take_prepared_puzzle(self.account_id, self.selected_theme(), difficulty)
-        if prepared is not None:
+        if prepared is not None and self._is_unique_online_puzzle(
+                prepared["puzzle"], self.selected_theme(), difficulty,
+                prepared["account_id"]):
             self._apply_prepared_puzzle(prepared)
         else:
+            if prepared is not None:
+                self.network_status.setText("Подготовленная задача уже встречалась · получаю другую…")
             self.new_puzzle_requested.emit(self.selected_theme(), difficulty)
+
+    def _is_unique_online_puzzle(self, puzzle: PuzzlePlayablePosition, theme: str,
+                                 difficulty: str, account_id: str | None = None) -> bool:
+        scope = (str(account_id or self.account_id), str(theme), str(difficulty))
+        seen = self._seen_online_ids_by_scope.get(scope, set())
+        return puzzle.puzzle_id not in seen and puzzle.puzzle_id != self._session_puzzle_id
+
+    def _retry_duplicate_online_puzzle(self, puzzle: PuzzlePlayablePosition) -> bool:
+        if self._is_unique_online_puzzle(puzzle, self.selected_theme(),
+                                         self.selected_difficulty()):
+            return False
+        self._next_unique_retries += 1
+        if self._next_unique_retries < 3:
+            self.network_status.setText(
+                f"Lichess повторил задачу {puzzle.puzzle_id} · запрашиваю другую "
+                f"({self._next_unique_retries + 1}/3)…")
+            self.new_puzzle_requested.emit(self.selected_theme(), self.selected_difficulty())
+        else:
+            self.set_message(
+                "Не удалось получить другую задачу для выбранной темы. "
+                "Повторите загрузку или измените тему.")
+        return True
 
     def set_prepared_puzzle(self, account_id: str, theme: str, difficulty: str,
                             puzzle: PuzzlePlayablePosition, payload: dict,
@@ -564,6 +597,16 @@ class PuzzleTrainingPage(QWidget):
         self._session_id = uuid.uuid4().hex
         self._session_account_id = str(self.account_id or "local")
         self._session_puzzle_id = puzzle.puzzle_id
+        scope = (self.account_id, self.selected_theme(), self.selected_difficulty())
+        if source == "lichess":
+            self._seen_online_ids_by_scope.setdefault(scope, set()).add(puzzle.puzzle_id)
+            if not self._is_replay:
+                self._session_results.append({
+                    "mark": "·", "label": "в процессе", "puzzle_id": puzzle.puzzle_id,
+                    "session_id": self._session_id, "pending": True,
+                    "source": "lichess", "account_id": self.account_id,
+                })
+                self._session_results = self._session_results[-20:]
         self._started_at = time.monotonic()
         self._terminal_verdict = ""
         self._rating_preview = None
@@ -593,7 +636,8 @@ class PuzzleTrainingPage(QWidget):
         self.persistence_status.clear()
         self.network_status.clear()
         self._set_controls(True)
-        self.fetch.setText("Следующая задача")
+        self.fetch.setText("Следующая задача →")
+        self._update_session_display()
         self._sync_hint_button()
         if source == "lichess":
             difficulty = self.selected_difficulty()
@@ -602,26 +646,27 @@ class PuzzleTrainingPage(QWidget):
 
     def set_loading(self, text: str = "Загружаю задачу…") -> None:
         self._fetch_inflight = True
-        self._allow_submit = False
-        self.board.set_interaction_enabled(False)
-        if self._terminal_verdict:
-            self.network_status.setText("Загружаем следующую онлайн-задачу…")
-        else:
-            self._show_verdict(text, "neutral")
+        self.fetch.setText("Загружаем…")
         self.fetch.setEnabled(False)
-        self.next.setEnabled(False)
+        self.network_status.setText(str(text))
+        if self.state.puzzle is None:
+            self._show_verdict(str(text), "neutral")
 
     def set_message(self, text: str) -> None:
         self._fetch_inflight = False
-        self._allow_submit = False
-        self.board.set_interaction_enabled(False)
-        if self._terminal_verdict:
-            self.network_status.setText(str(text))
+        self.fetch.setText("Повторить загрузку")
+        self.network_status.setText(str(text))
+        if self.state.puzzle is not None:
+            can_continue = self.state.status in {PuzzleStatus.READY, PuzzleStatus.MISTAKE_RETRY}
+            self._allow_submit = can_continue
+            self.board.set_interaction_enabled(can_continue)
+            self._show_verdict(self._terminal_verdict or "Предыдущая задача сохранена на доске.",
+                               "error" if text else "neutral")
+            self._set_controls(True, finished=not can_continue)
         else:
-            self._show_verdict(text, "error")
+            self._show_verdict(str(text), "error")
+            self._set_controls(False)
         self.fetch.setEnabled(True)
-        self.next.setEnabled(True)
-        self._set_controls(False)
 
     def set_authorization_needed(self, needed: bool) -> None:
         self.authorize.setVisible(bool(needed))
@@ -679,6 +724,17 @@ class PuzzleTrainingPage(QWidget):
         self._auto_next_timer.stop()
         position = self.state.navigate_review(int(direction))
         self.board.set_position(position)
+        if not self.state.is_reviewing:
+            # Reaching the latest known position restores live input, while the
+            # explicit return control stays available as a clear way out of review.
+            self.board.set_interaction_enabled(self._allow_submit)
+            self.return_to_solution.show()
+            self.review_position.setText("Текущая позиция решения")
+            self.review_back.setEnabled(self.state.review_count > 1)
+            self.review_forward.setEnabled(False)
+            self._show_verdict(
+                "Текущая позиция · вернитесь к решению или выберите фигуру.", "neutral")
+            return
         self.board.set_interaction_enabled(False)
         self.return_to_solution.show()
         self.review_position.setText(
@@ -689,6 +745,10 @@ class PuzzleTrainingPage(QWidget):
         self._show_verdict(
             "Просмотр уже сыгранной части · будущие ходы скрыты · вернитесь к решению.",
             "neutral")
+
+    def _review_piece_pressed(self, _square: int) -> None:
+        if self.state.is_reviewing:
+            self._return_to_solution()
 
     def _return_to_solution(self) -> None:
         if not self.state.puzzle:
@@ -734,6 +794,11 @@ class PuzzleTrainingPage(QWidget):
         self._retry_attempt_id = None
         self._retry_in_progress_id = None
         self._refresh_retry_save_control()
+        self._session_results.clear()
+        self._session_streak = self._best_streak = 0
+        self._session_clean = self._session_failed = self._session_hinted = 0
+        self._session_outcome_ids.clear()
+        self._update_session_display()
         self.persistence_status.clear()
         self._allow_submit = False
         self._wrong_flash = False
@@ -906,8 +971,7 @@ class PuzzleTrainingPage(QWidget):
         if outcome == PuzzleOutcome.SUCCESS:
             clean = self.state.mistakes == 0 and self.state.hints_used == 0
             verdict = ("✓ Повтор решён. Рейтинг не изменён." if clean and self._is_replay else
-                       "✓ Задача решена! Следующая задача начнётся автоматически."
-                       if clean else
+                       "✓ Задача решена!" if clean else
                        "Задача решена с ошибкой." if self.state.mistakes else
                        "Задача решена с подсказкой.")
             self._terminal_verdict = verdict
@@ -968,7 +1032,7 @@ class PuzzleTrainingPage(QWidget):
                 and self.state.hints_used == 0 and self.auto_next.isChecked()
                 and self._active_source == "lichess" and not self._is_replay):
             self._auto_next_session_id = self._session_id
-            self._auto_next_timer.start(1250)
+            self._auto_next_timer.start(1500)
         else:
             self.next.setText("Следующая задача →")
         self._update_session_display()
@@ -998,22 +1062,25 @@ class PuzzleTrainingPage(QWidget):
             else:
                 existing.update(mark=mark, label=label, pending=True)
         else:
+            row = {"mark": mark, "label": label, "puzzle_id": self._session_puzzle_id,
+                   "session_id": self._session_id, "pending": True,
+                   "source": self._active_source, "account_id": self.account_id}
+            self._session_results.append(row)
+            self._session_results = self._session_results[-20:]
+            existing = row
+        if self._session_id not in self._session_outcome_ids:
             if clean:
                 self._session_streak += 1
                 self._best_streak = max(self._best_streak, self._session_streak)
                 self._session_clean += 1
             elif mark in {"✕", "•"}:
                 self._session_streak = 0
-                if mark == "✕" and not self.state.first_failure:
+                if mark == "✕":
                     self._session_failed += 1
-                elif mark == "•":
+                else:
                     self._session_hinted += 1
             else:
                 self._session_streak = 0
-            row = {"mark": mark, "label": label, "puzzle_id": self._session_puzzle_id,
-                   "session_id": self._session_id, "pending": True}
-            self._session_results.append(row)
-            self._session_results = self._session_results[-20:]
             self._session_outcome_ids.add(self._session_id)
         self._update_session_display()
 
@@ -1024,10 +1091,13 @@ class PuzzleTrainingPage(QWidget):
             return
         self._session_streak = 0
         self._session_failed += 1
-        self._session_results.append({
-            "mark": "✕", "label": "первая ошибка", "puzzle_id": self._session_puzzle_id,
-            "session_id": self._session_id, "pending": True,
-        })
+        row = next((item for item in self._session_results
+                    if item.get("session_id") == self._session_id), None)
+        if row is None:
+            row = {"puzzle_id": self._session_puzzle_id, "session_id": self._session_id,
+                   "source": self._active_source, "account_id": self.account_id}
+            self._session_results.append(row)
+        row.update(mark="✕", label="первая ошибка", pending=True)
         self._session_results = self._session_results[-20:]
         self._session_outcome_ids.add(self._session_id)
         self._update_session_display()
@@ -1037,11 +1107,47 @@ class PuzzleTrainingPage(QWidget):
             f"Серия: {self._session_streak} · Лучшая: {self._best_streak} · "
             f"Решено чисто: {self._session_clean} · Ошибок: {self._session_failed} · "
             f"С подсказкой: {self._session_hinted}")
-        self.results_tape.setText(
-            "Последние результаты: " + (" ".join(item["mark"] for item in self._session_results)
-                                          if self._session_results else "—"))
-        self.results_tape.setToolTip(" · ".join(
-            f"{item['puzzle_id']}: {item['label']}" for item in self._session_results))
+        while self.results_tape_layout.count():
+            item = self.results_tape_layout.takeAt(0)
+            widget = item.widget()
+            if widget is not None:
+                widget.deleteLater()
+        colors = {"✓": ("#286b47", "#8de0a8"), "✕": ("#7d3038", "#ff9da2"),
+                  "•": ("#7c621b", "#f2d36c"), "–": ("#454b56", "#c6cbd4"),
+                  "·": ("#373d49", "#cbd1dd")}
+        self._result_tiles = []
+        for result in self._session_results[-20:]:
+            mark = str(result.get("mark") or "·")
+            background, foreground = colors.get(mark, colors["·"])
+            tile = QPushButton(mark)
+            tile.setObjectName("puzzleResultTile")
+            tile.setFixedSize(28, 28)
+            description = f"Задача {result.get('puzzle_id')}: {result.get('label', 'в процессе')}"
+            tile.setAccessibleName(description)
+            tile.setToolTip(description + (" · ожидает сохранения" if result.get("pending") else ""))
+            tile.setCursor(Qt.CursorShape.PointingHandCursor)
+            tile.setStyleSheet(
+                f"QPushButton#puzzleResultTile {{ background:{background}; color:{foreground}; "
+                "border:1px solid #5b6472; border-radius:4px; font-weight:700; padding:0; }"
+                "QPushButton#puzzleResultTile:hover { border-color:#ffffff; }")
+            tile.clicked.connect(lambda _checked=False, row=dict(result):
+                                 self._open_session_result(row))
+            self._result_tiles.append(tile)
+            self.results_tape_layout.addWidget(tile)
+        if not self._result_tiles:
+            empty = QLabel("Результаты появятся после первой задачи")
+            empty.setObjectName("secondary")
+            self.results_tape_layout.addWidget(empty)
+        self.results_tape_layout.addStretch(1)
+        self.results_tape.setAccessibleName(
+            f"Результаты задач, всего {len(self._session_results)}; "
+            f"текущая серия {self._session_streak}")
+
+    def _open_session_result(self, row: dict) -> None:
+        if row.get("mark") == "·" or not row.get("puzzle_id"):
+            return
+        self.replay_requested.emit(str(row.get("account_id") or self.account_id),
+                                   str(row["puzzle_id"]), str(row.get("source") or ""))
 
     def _retry_attempt_save(self) -> None:
         if self._retry_in_progress_id:
@@ -1256,8 +1362,8 @@ class PuzzleTrainingPage(QWidget):
         )
         compact_controls = self._needs_compact_controls(center_width) or self.height() < 700
         if compact:
-            self._training_root_layout.setContentsMargins(8, 2, 8, 4)
-            self._training_root_layout.setSpacing(4)
+            self._training_root_layout.setContentsMargins(8, 0, 8, 0)
+            self._training_root_layout.setSpacing(2)
             self._training_title.setStyleSheet("font-size: 20px")
             self.fetch.setMinimumHeight(30)
             self.status.setMinimumHeight(24)

@@ -23,6 +23,7 @@ class BoardView(BoardWidget):
 
     move_intent = Signal(object)
     wheel_navigate = Signal(int)
+    puzzle_piece_pressed = Signal(int)
     paint_completed = Signal()
     premove_intent = Signal(object)
     annotations_changed = Signal()
@@ -45,6 +46,7 @@ class BoardView(BoardWidget):
         self._show_legal_moves = True
         self._show_last_move = True
         self._annotations_enabled = True
+        self._puzzle_training_gestures = False
         self._interaction_enabled = True
         self._premove_allowed = True
         self._annotation_arrows: set[tuple[int, int]] = set()
@@ -158,6 +160,10 @@ class BoardView(BoardWidget):
         if not enabled:
             self.clear_annotations()
         self.update()
+
+    def set_puzzle_training_gestures(self, enabled: bool) -> None:
+        """Enable puzzle-only annotation clearing and review recovery gestures."""
+        self._puzzle_training_gestures = bool(enabled)
 
     def set_premove_allowed(self, enabled: bool) -> None:
         if self._premove_allowed == enabled:
@@ -315,6 +321,14 @@ class BoardView(BoardWidget):
             return
         if event.button() != Qt.MouseButton.LeftButton:
             return
+        if self._puzzle_training_gestures:
+            square = self._pos_to_square(event.position())
+            piece = self._board.piece_at(square) if square is not None else None
+            if piece is not None and piece.color == self._board.turn:
+                # Restore REVIEW synchronously before the same physical click
+                # reaches chess-widgets' normal piece selection handling.
+                self.puzzle_piece_pressed.emit(square)
+                self.clear_annotations(record_action=False)
         if not self._interaction_enabled:
             return
         if self._is_premove_turn():
