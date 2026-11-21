@@ -70,6 +70,24 @@ def test_batch_duplicate_then_unique_and_exhausted_recovery():
     assert select_next_api_puzzle([current, malformed], {"already-seen"}) is None
 
 
+def test_compact_board_reserves_space_until_first_result_feedback(qtbot):
+    payload = api_payload("compact-feedback")
+    page = PuzzleTrainingPage("puz05-compact-profile")
+    page.resize(820, 620)
+    qtbot.addWidget(page)
+    page.show()
+    page.load_puzzle(normalize_api_puzzle(payload), payload, source="lichess")
+    qtbot.wait(20)
+
+    assert page.board.isVisible()
+    assert not page.results_tape_scroll.isVisible()
+
+    page._record_first_failure()
+
+    assert page.results_tape_scroll.isVisible()
+    assert page._result_tiles[-1].text() == "✕"
+
+
 def test_windows_journey_uses_mouse_for_promotion_choice(qtbot):
     # This test validates a helper added with the Windows journey driver, not a
     # product behavior present on the unchanged base used by the RED job.

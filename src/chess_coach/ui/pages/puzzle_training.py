@@ -1240,8 +1240,17 @@ class PuzzleTrainingPage(QWidget):
         self.results_tape.setAccessibleName(
             f"Результаты задач, всего {len(self._session_results)}; "
             f"текущая серия {self._session_streak}")
+        self._sync_results_tape_visibility()
         if self._result_tiles:
             QTimer.singleShot(0, self._scroll_results_to_end)
+
+    def _sync_results_tape_visibility(self) -> None:
+        """Give an unfinished compact board its space until feedback matters."""
+        if not hasattr(self, "results_tape_scroll"):
+            return
+        has_feedback = any(
+            row.get("mark") in {"✓", "✕", "•", "–"} for row in self._session_results)
+        self.results_tape_scroll.setVisible(self.height() >= 650 or has_feedback)
 
     def _scroll_results_to_end(self) -> None:
         if self._result_tiles:
@@ -1510,6 +1519,7 @@ class PuzzleTrainingPage(QWidget):
         if compact_controls != self._controls_compact:
             self._controls_compact = compact_controls
             self._sync_control_layout()
+        self._sync_results_tape_visibility()
 
     def _needs_compact_controls(self, center_width: int | None = None) -> bool:
         if center_width is None:
