@@ -639,8 +639,7 @@ class PuzzleTrainingPage(QWidget):
             if not theme_id:
                 continue
             visible = not query or query in label.casefold() or query in str(theme_id).casefold()
-            model = self.theme.model()
-            model.item(index).setHidden(not visible)
+            self.theme.view().setRowHidden(index, not visible)
         for index in range(self.theme_list.count()):
             item = self.theme_list.item(index)
             theme_id = item.data(Qt.ItemDataRole.UserRole)

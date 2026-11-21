@@ -101,7 +101,7 @@ def test_official_activity_replay_preserves_player_fen_and_first_solution(qtbot)
         qtbot.mouseClick(page.board, Qt.MouseButton.LeftButton,
                          pos=center(page.board, move.to_square))
         if move.promotion:
-            qtbot.waitUntil(lambda: promotion_clicked, timeout=3000)
+            qtbot.waitUntil(lambda: bool(promotion_clicked), timeout=3000)
             assert promotion_clicked == [True]
         if page.state.status.value == "opponent_reply":
             qtbot.waitUntil(lambda: page.state.status.value != "opponent_reply", timeout=2000)
@@ -243,8 +243,11 @@ def test_theme_search_and_frozen_attempt_filter_and_profile_placeholder(qtbot):
                       if page.theme_list.item(i).data(Qt.ItemDataRole.UserRole) == "fork")
     assert not page.theme_list.item(mate_index).isHidden()
     assert page.theme_list.item(fork_index).isHidden()
+    assert not page.theme.view().isRowHidden(page.theme.findData("mateIn2"))
+    assert page.theme.view().isRowHidden(page.theme.findData("fork"))
     page.theme_search.clear()
     assert not page.theme_list.item(fork_index).isHidden()
+    assert not page.theme.view().isRowHidden(page.theme.findData("fork"))
 
     page.theme.setCurrentIndex(page.theme.findData("mateIn2"))
     page.difficulty.setCurrentIndex(page.difficulty.findData("normal"))
