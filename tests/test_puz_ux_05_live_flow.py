@@ -207,7 +207,6 @@ def test_recovery_after_ten_unique_real_qt_clicks(qtbot):
         puzzle, payload = selected
         next_id += 1
         page.load_puzzle(puzzle, payload, source="lichess")
-        seen.add(puzzle.puzzle_id)
 
     page.new_puzzle_requested.connect(supply)
     for _ in range(9):
