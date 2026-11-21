@@ -16,7 +16,7 @@ import time
 from urllib.request import Request, urlopen
 
 import chess
-from PySide6.QtCore import QCoreApplication, QPoint, QPointF, QSettings, QTimer, Qt
+from PySide6.QtCore import QCoreApplication, QPoint, QPointF, QTimer, Qt
 from PySide6.QtGui import QWheelEvent
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication, QDialog, QPushButton
@@ -293,9 +293,11 @@ def run():
     app = QApplication.instance() or QApplication([])
     _ACTIVE_APP = app
     app.setStyleSheet(desktop_stylesheet(VISUAL_TOKENS))
-    settings = QSettings(str(OUTPUT / "isolated-settings.ini"), QSettings.Format.IniFormat)
-    window = MainWindow(settings=settings, offline_mode=True)
+    window = MainWindow(offline_mode=True)
     _ACTIVE_WINDOW = window
+    # Offline runtime owns its own temporary QSettings path. Observe the same
+    # isolated object the UI writes, rather than an unrelated artifact setting.
+    settings = window.settings
     if not window.runtime.offline_data_dir or window.lichess is not None:
         raise AssertionError("The production MainWindow did not initialize isolated storage")
     window.offline_mode = False
