@@ -381,6 +381,34 @@ def choose_combo_item_with_mouse(app, combo, data):
     wait_until(app, lambda: combo.currentData() == data, 1500)
 
 
+def choose_theme_with_mouse(app, page, data, search_text):
+    """Search and select a theme through the visible full-size theme list."""
+    theme_list = page.theme_list
+    if theme_list.isVisible():
+        search = page.theme_search
+        QTest.mouseClick(search, Qt.MouseButton.LeftButton)
+        QTest.keyClick(search, Qt.Key.Key_A, Qt.KeyboardModifier.ControlModifier)
+        QTest.keyClicks(search, search_text)
+        item = next((theme_list.item(index) for index in range(theme_list.count())
+                     if theme_list.item(index).data(Qt.ItemDataRole.UserRole) == data), None)
+        if item is None:
+            raise AssertionError(f"Visible theme item not found for {data}")
+
+        def item_is_visible():
+            rect = theme_list.visualItemRect(item)
+            return (not item.isHidden() and rect.isValid()
+                    and theme_list.viewport().rect().contains(rect.center()))
+
+        wait_until(app, item_is_visible, 2000)
+        rect = theme_list.visualItemRect(item)
+        QTest.mouseClick(theme_list.viewport(), Qt.MouseButton.LeftButton,
+                         pos=rect.center())
+        wait_until(app, lambda: page.selected_theme() == data, 2000)
+        print(f"PUZ06_THEME_CLICKED {data} via visible theme list", flush=True)
+        return
+    choose_combo_item_with_mouse(app, page.theme, data)
+
+
 def click_dialog_button_with_mouse(app, title, text, trigger):
     deadline = time.monotonic() + 8
     clicked: list[bool] = []
@@ -604,7 +632,7 @@ def run():
         raise AssertionError("Public L2 sequence does not contain ten distinct Lichess IDs")
     if len({item["position_solution_sha256"] for item in mate_in_2_evidence}) != 10:
         raise AssertionError("Ten public puzzle responses did not contain ten distinct positions")
-    choose_combo_item_with_mouse(app, page.theme, "mateIn2")
+    choose_theme_with_mouse(app, page, "mateIn2", "Мат в 2")
     adapter.set_real_sequence(mate_in_2_payloads)
     page.clear_prepared_puzzles()
     previous = page._session_puzzle_id
@@ -698,7 +726,7 @@ def run():
     if prefetch_handle is not None:
         wait_until(app, lambda: not prefetch_handle.is_alive(), 20000)
     mate_in_1_payloads, mate_in_1_evidence = public_puzzle_sequence(MATE_IN_1_PUBLIC_IDS)
-    choose_combo_item_with_mouse(app, page.theme, "mateIn1")
+    choose_theme_with_mouse(app, page, "mateIn1", "Мат в 1")
     adapter.set_real_sequence(mate_in_1_payloads)
     page.clear_prepared_puzzles()
     previous = page._session_puzzle_id
