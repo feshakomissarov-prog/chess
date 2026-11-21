@@ -2827,7 +2827,27 @@ def test_puzzle_account_switch_clears_old_board_and_keeps_scope(qtbot, tmp_path,
                         lambda target, account, **kwargs:
                         loaded.append((target, account, kwargs)))
 
+    confirmation = []
+    confirmation_deadline = time.monotonic() + 3
+
+    def click_switch_confirmation():
+        dialog = QApplication.activeModalWidget()
+        if isinstance(dialog, QMessageBox):
+            yes = dialog.button(QMessageBox.StandardButton.Yes)
+            if yes is not None:
+                qtbot.mouseClick(yes, Qt.MouseButton.LeftButton)
+                confirmation.append(True)
+                return
+        if time.monotonic() < confirmation_deadline:
+            QTimer.singleShot(10, click_switch_confirmation)
+            return
+        if isinstance(dialog, QDialog):
+            dialog.reject()
+        confirmation.append(False)
+
+    QTimer.singleShot(0, click_switch_confirmation)
     window._puzzle_training_account_changed(page, "lichess:account-b")
+    assert confirmation == [True], "Account switch did not ask for user confirmation"
 
     assert page.account_id == "lichess:account-b"
     assert page.state.puzzle is None
