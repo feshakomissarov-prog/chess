@@ -156,7 +156,7 @@ def test_dashboard_preview_large_scoped_fixture_is_bounded_and_does_not_load_pgn
         account_id = repo.ensure_archive_account("large-preview")
         rows = []
         links = []
-        for index in range(3000):
+        for index in range(3400):
             game_id = f"large-{index:04d}"
             timestamp = f"2026-10-{(index % 28) + 1:02d}T12:00:00Z"
             rows.append((game_id, "startpos", "", "white", "Fixture", 0, "5+0",
@@ -182,13 +182,13 @@ def test_dashboard_preview_large_scoped_fixture_is_bounded_and_does_not_load_pgn
         scoped = dashboard_preview_snapshot(repo, account_id=account_id)
         unscoped = dashboard_preview_snapshot(repo)
         metric = next(item for item in scoped["metrics"] if item["key"] == "games")
-        assert metric["value"] == "3000"
+        assert metric["value"] == "3400"
         assert len(scoped["recent_games"]) == 3
         assert len({game["game_id"] for game in scoped["recent_games"]}) == 3
-        assert scoped["recent_games"][0]["game_id"] == "large-2999"
+        assert scoped["recent_games"][0]["game_id"] == "large-3399"
         assert all("pgn" not in game and "moves" not in game
                    for game in scoped["recent_games"])
-        assert next(item for item in unscoped["metrics"] if item["key"] == "games")["value"] == "3000"
+        assert next(item for item in unscoped["metrics"] if item["key"] == "games")["value"] == "3400"
 
         with repo._connection() as db:
             count_plan = db.execute(

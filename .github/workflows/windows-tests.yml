@@ -27,7 +27,7 @@ concurrency:
 jobs:
   home-chart-review:
     name: L1/L2 Home chart review
-    if: github.event_name != 'pull_request' || github.event.action == 'ready_for_review' || (github.event.pull_request.head.ref != 'codex/review-ux-01-game-analysis-2026-11-14' && github.event.pull_request.head.ref != 'codex/puzzle-ux-02-lichess-training-2026-11-19' && github.event.pull_request.head.ref != 'codex/puz-ux-03-online-puzzle-playability-2026-11-20')
+    if: github.event_name != 'pull_request' || github.event.action == 'ready_for_review' || (github.event.pull_request.head.ref != 'codex/review-ux-01-game-analysis-2026-11-14' && github.event.pull_request.head.ref != 'codex/puzzle-ux-02-lichess-training-2026-11-19' && github.event.pull_request.head.ref != 'codex/puz-ux-03-online-puzzle-playability-2026-11-20' && github.event.pull_request.head.ref != 'codex/puz-ux-05-owner-live-next-replay')
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v7.0.1
@@ -146,7 +146,7 @@ jobs:
           path: visual-evidence/puz-ux-03-*
           if-no-files-found: warn
   test:
-    if: github.event_name != 'pull_request' || github.event.action == 'ready_for_review' || (github.event.pull_request.head.ref != 'codex/review-ux-01-game-analysis-2026-11-14' && github.event.pull_request.head.ref != 'codex/puzzle-ux-02-lichess-training-2026-11-19' && github.event.pull_request.head.ref != 'codex/puz-ux-03-online-puzzle-playability-2026-11-20')
+    if: github.event_name != 'pull_request' || github.event.action == 'ready_for_review' || (github.event.pull_request.head.ref != 'codex/review-ux-01-game-analysis-2026-11-14' && github.event.pull_request.head.ref != 'codex/puzzle-ux-02-lichess-training-2026-11-19' && github.event.pull_request.head.ref != 'codex/puz-ux-03-online-puzzle-playability-2026-11-20' && github.event.pull_request.head.ref != 'codex/puz-ux-05-owner-live-next-replay')
     needs: home-chart-review
     runs-on: windows-latest
     steps:
@@ -174,7 +174,7 @@ jobs:
         run: >-
           python -X faulthandler -c "from PySide6.QtWidgets import QApplication; from chess_coach.window import MainWindow; app = QApplication([]); window = MainWindow(offline_mode=True); assert window.lichess is None; window.close()"
   visual-evidence:
-    if: github.event_name != 'pull_request' || github.event.action == 'ready_for_review' || (github.event.pull_request.head.ref != 'codex/review-ux-01-game-analysis-2026-11-14' && github.event.pull_request.head.ref != 'codex/puzzle-ux-02-lichess-training-2026-11-19' && github.event.pull_request.head.ref != 'codex/puz-ux-03-online-puzzle-playability-2026-11-20')
+    if: github.event_name != 'pull_request' || github.event.action == 'ready_for_review' || (github.event.pull_request.head.ref != 'codex/review-ux-01-game-analysis-2026-11-14' && github.event.pull_request.head.ref != 'codex/puzzle-ux-02-lichess-training-2026-11-19' && github.event.pull_request.head.ref != 'codex/puz-ux-03-online-puzzle-playability-2026-11-20' && github.event.pull_request.head.ref != 'codex/puz-ux-05-owner-live-next-replay')
     needs: home-chart-review
     runs-on: windows-latest
     steps:

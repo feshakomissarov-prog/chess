@@ -4849,7 +4849,7 @@ def test_m46_home_has_progress_activity_and_no_legacy_action_drawer(qtbot, tmp_p
     qtbot.addWidget(window)
     assert window.home_ai_button.isHidden()
     assert window.home_local_button.isHidden()
-    assert window.home_activity_button.text() == "Открыть обучение"
+    assert window.home_activity_button.text() == "Решать новые задачи"
     assert not window.home_activity_button.isHidden()
     assert {"games", "accuracy", "analysis", "errors"} == set(window.dashboard_metrics)
     assert window.dashboard_account.count() >= 1
@@ -4943,10 +4943,11 @@ def test_home_saved_puzzle_preview_opens_exact_offline_attempt(qtbot, tmp_path, 
     assert window._home_view.activity_status.text() == "Задача Lichess"
     assert "saved-puzzle-42" in window._home_view.activity_status.toolTip()
     assert "1770" in window._home_view.puzzle_meta.text()
-    assert window.home_activity_button.text() == "Открыть повтор"
-    assert "не меняет рейтинг" in window.home_activity_button.toolTip()
+    assert window.home_activity_button.text() == "Решать новые задачи"
+    assert window.home_replay_button.text() == "Повторить эту"
+    assert "без рейтинга" in window.home_replay_button.toolTip()
     assert "повтор без рейтинга" in window._home_view.puzzle_preview_board.accessibleDescription()
-    window.home_activity_button.click()
+    window.home_replay_button.click()
     assert opened == [("lichess:owner", "saved-puzzle-42")]
     window._home_view.puzzle_preview_board.open_requested.emit()
     assert opened == [("lichess:owner", "saved-puzzle-42"),

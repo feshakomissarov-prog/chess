@@ -275,6 +275,25 @@ class PuzzleActivityStoreMixin:
                 (str(account_id or "local"), limit)).fetchall()
         return [dict(row) for row in rows]
 
+    def local_puzzle_attempt_ids(self, account_id: str) -> set[str]:
+        """Return account-scoped locally practiced IDs for online de-duplication."""
+        with self._connection() as db:
+            rows = db.execute(
+                "SELECT puzzle_id FROM local_puzzle_attempts WHERE account_id=? "
+                "GROUP BY puzzle_id ORDER BY MAX(created_at_ms) DESC",
+                (str(account_id or "local"),)).fetchall()
+        return {str(row["puzzle_id"]) for row in rows if row["puzzle_id"]}
+
+    def practiced_puzzle_ids(self, account_id: str) -> set[str]:
+        """IDs already seen in local attempts or imported Lichess puzzle history."""
+        account_id = str(account_id or "local")
+        with self._connection() as db:
+            rows = db.execute(
+                "SELECT puzzle_id FROM local_puzzle_attempts WHERE account_id=? "
+                "UNION SELECT puzzle_id FROM puzzle_attempts WHERE account_id=?",
+                (account_id, account_id)).fetchall()
+        return {str(row["puzzle_id"]) for row in rows if row["puzzle_id"]}
+
     def local_puzzle_attempt_count(self, account_id: str) -> int:
         with self._connection() as db:
             row = db.execute("SELECT COUNT(*) FROM local_puzzle_attempts WHERE account_id=?",

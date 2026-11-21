@@ -173,6 +173,68 @@ def normalize_activity_puzzle(puzzle_id: str, fen: str, solution: object,
     )
 
 
+def normalize_saved_puzzle_payload(puzzle_id: str, payload: object
+                                   ) -> PuzzlePlayablePosition:
+    """Read an exact cached/local puzzle without assuming one historical JSON shape."""
+    target_id = str(puzzle_id or "").strip()
+    if not target_id or not isinstance(payload, dict):
+        raise ValueError("Не удалось открыть сохранённую задачу.")
+
+    api_error: Exception | None = None
+    try:
+        playable = normalize_api_puzzle(payload)
+        if playable.puzzle_id != target_id:
+            raise ValueError("Сохранённый ответ относится к другой задаче.")
+        return playable
+    except (KeyError, TypeError, ValueError) as exc:
+        api_error = exc
+
+    candidates = [payload.get("puzzle"), payload]
+    for candidate in candidates:
+        if not isinstance(candidate, dict):
+            continue
+        candidate_id = str(candidate.get("id") or candidate.get("puzzle_id") or target_id)
+        if candidate_id != target_id:
+            continue
+        fen = candidate.get("fen") or payload.get("fen")
+        solution = (candidate.get("solution") or candidate.get("solution_json")
+                    or payload.get("solution") or payload.get("solution_json"))
+        if not fen or solution is None:
+            continue
+        try:
+            return normalize_activity_puzzle(
+                target_id, str(fen), solution,
+                themes=(candidate.get("themes") or payload.get("themes") or ()),
+                rating=(candidate.get("rating") or payload.get("rating")),
+                plays=(candidate.get("plays") or payload.get("plays")),
+            )
+        except (TypeError, ValueError):
+            continue
+    raise ValueError("Не удалось безопасно восстановить сохранённую задачу.") from api_error
+
+
+def select_next_api_puzzle(payloads: object, seen_ids: set[str], *,
+                           theme: str | None = None
+                           ) -> tuple[PuzzlePlayablePosition, dict] | None:
+    """Return the first valid, unseen member of a bounded Lichess GET batch."""
+    if not isinstance(payloads, (list, tuple)):
+        return None
+    seen = {str(item) for item in seen_ids}
+    for payload in payloads[:5]:
+        if not isinstance(payload, dict):
+            continue
+        try:
+            playable = normalize_api_puzzle(payload)
+        except (TypeError, ValueError):
+            continue
+        if playable.puzzle_id in seen:
+            continue
+        if theme and theme != "mix" and theme not in playable.themes:
+            continue
+        return playable, payload
+    return None
+
+
 class PuzzleStatus(str, Enum):
     LOADING = "loading"
     READY = "ready"

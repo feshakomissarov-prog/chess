@@ -107,7 +107,8 @@ from .ui.pages.library import LibraryPage
 from .ui.pages.puzzles import PuzzleHistoryPage
 from .ui.pages.puzzle_training import PuzzleTrainingPage
 from .lichess.puzzle_training import (normalize_api_puzzle, normalize_activity_puzzle,
-                                      select_next_local_candidate)
+                                      normalize_saved_puzzle_payload,
+                                      select_next_api_puzzle, select_next_local_candidate)
 from .ui.pages.analysis import AnalysisLandingPage
 from .ui.pages.background import BackgroundOperationsPage
 from .ui.dialogs import (OnlineGameDialog, BatchAnalysisDialog, ActiveGamesDialog,
@@ -3140,6 +3141,7 @@ class MainWindow(QMainWindow):
                 "show_statistics": self.show_statistics,
                 "show_batch_analysis": self.show_batch_analysis,
                 "open_puzzle_history_local": self.open_puzzle_history_local,
+                "open_new_puzzles": lambda: self.show_puzzle_training(),
                 "open_saved_puzzle": lambda account_id, puzzle_id: self.show_puzzle_training(
                     account_id, puzzle_id=puzzle_id),
                 "open_settings": self.open_settings,
@@ -6386,6 +6388,9 @@ class MainWindow(QMainWindow):
         request_id = uuid.uuid4().hex
         stop_event = threading.Event()
         requested_account = page.account_id
+        page_account_at_start = str(page.account_id or "local")
+        page_seen_ids = page.online_seen_ids(
+            page_account_at_start, theme, difficulty)
         service = self.lichess
         client = service.client
         capture_context = getattr(service, "capture_operation_context", None)
@@ -6400,7 +6405,7 @@ class MainWindow(QMainWindow):
             return bool(validator(operation_context)) if validator and operation_context is not None else True
 
         page.set_authorization_needed(False)
-        page.set_loading("Получаю одну новую задачу Lichess…")
+        page.set_loading("Получаю следующую задачу Lichess…")
 
         def worker() -> None:
             callback = None
@@ -6453,16 +6458,21 @@ class MainWindow(QMainWindow):
                 with authenticated_request_admission(operation_current, stop_event):
                     puzzle_get_started = time.perf_counter()
                     result = client.get_puzzle_batch(
-                        token, angle=theme, difficulty=difficulty, count=1)
+                        token, angle=theme, difficulty=difficulty, count=5)
                     puzzle_get_ms = (time.perf_counter() - puzzle_get_started) * 1000
                 if not operation_current():
                     return
-                puzzles = result.get("puzzles") or []
-                if not puzzles:
-                    raise LookupError("Для выбранной темы и сложности Lichess не вернул задачу.")
-                payload = puzzles[0]
-                playable = normalize_api_puzzle(payload)
                 scoped_account = self.game_repository.ensure_archive_account(username)
+                seen_ids = self.game_repository.practiced_puzzle_ids(scoped_account)
+                if page_account_at_start.casefold() == actual_account.casefold():
+                    seen_ids.update(page_seen_ids)
+                selected = select_next_api_puzzle(
+                    (result or {}).get("puzzles") if isinstance(result, dict) else None,
+                    seen_ids, theme=theme)
+                if selected is None:
+                    raise LookupError(
+                        "Для этой темы сейчас нет другой задачи. Измените тему или повторите загрузку.")
+                playable, payload = selected
                 serialized = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
                 self.game_repository.cache_training_puzzle(scoped_account, playable.puzzle_id,
                                                            serialized)
@@ -6593,6 +6603,7 @@ class MainWindow(QMainWindow):
         if not requested_account.startswith("lichess:"):
             return
         expected_username = requested_account.split(":", 1)[1]
+        page_seen_ids = page.online_seen_ids(requested_account, theme, difficulty)
         generation = self._puzzle_training_generation
         request_id = uuid.uuid4().hex
         stop_event = threading.Event()
@@ -6631,16 +6642,21 @@ class MainWindow(QMainWindow):
                 with authenticated_request_admission(operation_current, stop_event):
                     puzzle_get_started = time.perf_counter()
                     result = client.get_puzzle_batch(
-                        token, angle=theme, difficulty=difficulty, count=1)
+                        token, angle=theme, difficulty=difficulty, count=5)
                     puzzle_get_ms = (time.perf_counter() - puzzle_get_started) * 1000
                 if not operation_current() or store.get() != token:
                     return
-                puzzles = result.get("puzzles") or []
-                if not puzzles:
-                    raise LookupError("Lichess не подготовил следующую задачу.")
-                raw = puzzles[0]
-                playable = normalize_api_puzzle(raw)
                 scoped_account = self.game_repository.ensure_archive_account(username)
+                seen_ids = self.game_repository.practiced_puzzle_ids(scoped_account)
+                seen_ids.update(page_seen_ids)
+                selected = select_next_api_puzzle(
+                    (result or {}).get("puzzles") if isinstance(result, dict) else None,
+                    seen_ids, theme=theme)
+                if selected is None:
+                    raise LookupError(
+                        "Для этой темы сейчас нет другой задачи. Нажмите «Следующая задача» "
+                        "для новой попытки или измените тему.")
+                playable, raw = selected
                 self.game_repository.cache_training_puzzle(
                     scoped_account, playable.puzzle_id,
                     json.dumps(raw, ensure_ascii=False, separators=(",", ":")))
@@ -6667,7 +6683,9 @@ class MainWindow(QMainWindow):
                     or page._is_replay):
                 return
             if error or not isinstance(payload, dict):
-                page.network_status.setText("Следующая задача загрузится по запросу")
+                message = (error.get("message") if isinstance(error, dict) else None)
+                page.network_status.setText(
+                    str(message or "Следующая задача загрузится по запросу"))
                 return
 
             def apply_prepared_if_current() -> None:
@@ -6735,29 +6753,26 @@ class MainWindow(QMainWindow):
                 theme_filter = (theme if mode != "replay" and theme not in {"", "mix"}
                                 else None)
                 if mode == "replay" and target_id:
-                    cached = []
-                    imported = []
-                    local_exact = None
-                    imported_exact = None
                     cached_exact = self.game_repository.get_cached_training_puzzle(
                         account_id, target_id)
-                    if source_hint not in {"lichess", "lichess_activity"}:
-                        local_exact = self.game_repository.get_local_training_attempt_by_id(
-                            account_id, target_id)
-                    if source_hint not in {"local", "cached"}:
-                        imported_exact = self.game_repository.get_puzzle_attempt_by_id(
-                            account_id, target_id)
-                    if source_hint in {"lichess", "lichess_activity"}:
-                        local_exact = None
+                    local_exact = self.game_repository.get_local_training_attempt_by_id(
+                        account_id, target_id)
+                    imported_exact = self.game_repository.get_puzzle_attempt_by_id(
+                        account_id, target_id)
+                    cached = []
+                    imported = []
                     if source_hint in {"local", "cached"}:
-                        imported_exact = None
-                    if source_hint not in {"lichess", "lichess_activity"} and cached_exact:
-                        cached = [cached_exact]
-                    elif local_exact and source_hint not in {"lichess", "lichess_activity"}:
-                        cached = [{"puzzle_id": target_id,
-                                   "puzzle_json": local_exact.get("puzzle_json", "{}")}]
-                    local_attempts = ([local_exact] if local_exact else [])
-                    imported = ([imported_exact] if imported_exact else [])
+                        cached = [row for row in (cached_exact, local_exact) if row]
+                    elif source_hint == "lichess_activity":
+                        imported = [imported_exact] if imported_exact else []
+                        cached = [row for row in (local_exact, cached_exact) if row]
+                    else:
+                        # A locally completed Lichess task may never appear in
+                        # Lichess activity: the app deliberately does not POST
+                        # puzzle results. Prefer the exact local cache/attempt.
+                        cached = [row for row in (cached_exact, local_exact) if row]
+                        imported = [imported_exact] if imported_exact else []
+                    local_attempts = [local_exact] if local_exact else []
                 else:
                     cached = self.game_repository.cached_training_puzzles(
                         account_id, limit=100, theme=theme_filter)
@@ -6773,9 +6788,10 @@ class MainWindow(QMainWindow):
                 for row in cached:
                     try:
                         payload = json.loads(row["puzzle_json"])
-                    except (TypeError, ValueError):
+                        playable = normalize_saved_puzzle_payload(
+                            str(row.get("puzzle_id") or target_id or ""), payload)
+                    except (KeyError, TypeError, ValueError):
                         continue
-                    playable = normalize_api_puzzle(payload)
                     if mode == "errors" and playable.puzzle_id not in error_ids:
                         continue
                     if mode == "replay" and target_id and playable.puzzle_id != target_id:
@@ -6804,6 +6820,10 @@ class MainWindow(QMainWindow):
                     candidates = [candidate for candidate in candidates
                                   if candidate[0].puzzle_id in error_ids]
                 if not candidates:
+                    if mode == "replay":
+                        raise LookupError(
+                            "Не удалось открыть сохранённую задачу. "
+                            "Можно решить новую задачу или вернуться на главную.")
                     raise LookupError("В этой локальной выборке нет задач. Синхронизированные попытки Lichess доступны в разделе «Вся история».")
                 if mode == "replay":
                     selected = candidates[0] if candidates else None
@@ -6838,14 +6858,19 @@ class MainWindow(QMainWindow):
                     "scope": scope,
                 }, None)
             except Exception as exc:
-                self.puzzle_training_finished.emit(request_id, None, str(exc))
+                self.puzzle_training_finished.emit(request_id, None, {
+                    "message": str(exc), "local_replay": mode == "replay"})
 
         def apply_result(payload, error) -> None:
             if (generation != self._puzzle_training_generation or page is not self._puzzle_training_page
                     or self.screen_stack.currentWidget() is not page):
                 return
             if error:
-                page.set_message(str(error))
+                error_data = error if isinstance(error, dict) else {}
+                message = str(error_data.get("message") or error)
+                page.set_message(message)
+                if error_data.get("local_replay") and page.state.puzzle is None:
+                    page.fetch.setText("Решать новые задачи")
                 return
             page.account_id = payload["account_id"]
             page.load_puzzle(
