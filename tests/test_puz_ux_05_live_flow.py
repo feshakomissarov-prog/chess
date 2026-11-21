@@ -135,7 +135,9 @@ def test_hint_and_reveal_no_modal_and_immediate_series_feedback(qtbot, monkeypat
     assert page._result_tiles[-1].text() == "•"
     attempt = next(item for item in page._pending_attempt_saves.values()
                    if item["puzzle_id"] == "hint-now")
-    assert attempt["result"] == "hinted" and attempt["hints"] == 1
+    # The final action is reveal, so the persisted result is revealed while
+    # retaining the hint count accumulated earlier in the attempt.
+    assert attempt["result"] == "revealed" and attempt["hints"] == 1
 
 
 def test_result_tile_active_attempt_safe_replay_local_source(qtbot, monkeypatch):
