@@ -424,6 +424,10 @@ def run():
     solve_visible_line(app, page, journal, "streak-clean-two")
     if page._session_streak != 2:
         raise AssertionError("Second clean task did not continue the visible streak")
+    QTest.mouseClick(page.fetch, Qt.MouseButton.LeftButton)
+    wait_until(app, lambda: page._session_puzzle_id != clean_two, 20000)
+    actions.append({"action": "mouse-click", "target": "Следующая задача после второй серии",
+                    "loaded_id": page._session_puzzle_id})
 
     # A wrong answer remains red after retry, and the task still solves by mouse.
     expected = chess.Move.from_uci(page.state.puzzle.expected_user_moves[0])
