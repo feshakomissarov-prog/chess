@@ -254,14 +254,35 @@ def public_puzzle_sequence(puzzle_ids: list[str]) -> tuple[list[dict], list[dict
     return payloads, evidence
 
 
-def wait_until(app, predicate, timeout_ms=15000):
+def wait_until(app, predicate, timeout_ms=15000, label="GUI action"):
     deadline = time.monotonic() + timeout_ms / 1000
     while time.monotonic() < deadline:
         app.processEvents()
         if predicate():
             return
         QTest.qWait(15)
-    raise AssertionError("Windows Qt user flow did not settle before timeout")
+    visible = [widget for widget in QApplication.topLevelWidgets() if widget.isVisible()]
+    modal = [f"{type(widget).__name__}:{widget.windowTitle()!r}"
+             for widget in visible if widget.isModal() or isinstance(widget, QMessageBox)]
+    pages = []
+    for top in visible:
+        for page in top.findChildren(QWidget, "puzzleTrainingPage"):
+            state = getattr(page, "state", None)
+            puzzle = getattr(state, "puzzle", None)
+            pages.append({
+                "mode": getattr(page, "attempt_mode", None),
+                "session_id": getattr(page, "_session_id", None),
+                "puzzle_id": getattr(puzzle, "puzzle_id", None),
+                "status": getattr(getattr(state, "status", None), "value", None),
+                "rated_status": getattr(getattr(page, "rated_status", None), "text", lambda: "")(),
+            })
+    active = app.activeWindow()
+    active_name = (f"{type(active).__name__}:{active.windowTitle()!r}"
+                   if active is not None else "none")
+    diagnostic = (f"PUZ06_WAIT_TIMEOUT label={label!r} timeout_ms={timeout_ms} "
+                  f"active={active_name} modal={modal!r} pages={pages!r}")
+    print(diagnostic, flush=True)
+    raise AssertionError(diagnostic)
 
 
 def capture(widget, name, journal):
@@ -891,14 +912,16 @@ def run():
         raise AssertionError("Rated auto-next advanced before Lichess ACK")
     capture(page, "rated-result-waiting-for-ack", journal)
     adapter.release_rated.set()
-    wait_until(app, lambda: page.rated_status.text().startswith("✓ Lichess подтвердил"), 10000)
+    wait_until(app, lambda: page.rated_status.text().startswith("✓ Lichess подтвердил"),
+               10000, "rated server acknowledgement updates result banner")
     if len(adapter.rated_posts) != 1:
         raise AssertionError("One rated solve did not produce exactly one fake Lichess round")
     if (adapter.rated_posts[0]["puzzle_id"] != "MdQwv"
             or adapter.rated_posts[0]["transport"] != "synthetic-fake-response; no HTTP POST"):
         raise AssertionError("Rated confirmation did not match the exact puzzle/fake transport")
     capture(page, "rated-server-confirmation", journal)
-    wait_until(app, lambda: page._session_puzzle_id == "ehjSy", 10000)
+    wait_until(app, lambda: page._session_puzzle_id == "ehjSy", 10000,
+               "rated auto-next loads the already prepared next puzzle")
     if page.attempt_mode != "LICHESS_RATED":
         raise AssertionError("Post-ACK auto-next did not retain the rated mode")
     capture(page, "rated-auto-next-after-ack", journal)

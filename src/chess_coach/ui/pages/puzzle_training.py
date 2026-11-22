@@ -126,6 +126,7 @@ class PuzzleTrainingPage(QWidget):
         self._attempt_theme = "mix"
         self._attempt_difficulty = "normal"
         self._session_id = ""
+        self._auto_next_session_id = ""
         self._session_account_id = "local"
         self._session_puzzle_id = ""
         self._pending_attempt_saves: dict[str, dict] = {}

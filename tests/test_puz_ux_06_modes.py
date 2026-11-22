@@ -233,6 +233,23 @@ def test_rated_not_sent_offers_explicit_retry_after_cooldown(qtbot):
     assert retries == [retry_payload]
 
 
+def test_rated_auto_next_starts_only_after_confirmed_result(qtbot):
+    from chess_coach.ui.pages.puzzle_training import PuzzleTrainingPage
+    from chess_coach.lichess.puzzle_training import PuzzleStatus
+
+    page = PuzzleTrainingPage()
+    qtbot.addWidget(page)
+    page._session_id = "rated-auto-next"
+    page.attempt_mode = "LICHESS_RATED"
+    page.state.status = PuzzleStatus.SUCCESS
+    page.auto_next.setChecked(True)
+
+    page.apply_rated_result("confirmed", win=True)
+
+    assert page._auto_next_timer.isActive()
+    assert page._auto_next_session_id == "rated-auto-next"
+
+
 def test_post_round_uses_official_json_contract_and_matching_id_only():
     from chess_coach.lichess.api import HttpResponse, LichessClient
 
