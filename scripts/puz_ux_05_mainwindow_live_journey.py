@@ -657,18 +657,23 @@ def run():
     actions.append({"action": "mouse-select-theme", "theme": "mateIn2",
                     "first_public_id": actual_start_id,
                     "genuine_distinct_public_puzzles": 10})
+    streak_before_public_sequence = page._session_streak
     clean_one = page._session_puzzle_id
     solve_visible_line(app, page, journal, "streak-clean-one")
     seen = {clean_one}
-    if page._session_streak != 1:
-        raise AssertionError("First clean task did not advance the visible streak")
+    if page._session_streak != streak_before_public_sequence + 1:
+        raise AssertionError(
+            f"First clean task did not advance visible streak by one: "
+            f"{streak_before_public_sequence} -> {page._session_streak}")
     QTest.mouseClick(page.fetch, Qt.MouseButton.LeftButton)
     wait_until(app, lambda: page._session_puzzle_id != clean_one, 20000)
     clean_two = page._session_puzzle_id
     seen.add(clean_two)
     solve_visible_line(app, page, journal, "streak-clean-two")
-    if page._session_streak != 2:
-        raise AssertionError("Second clean task did not continue the visible streak")
+    if page._session_streak != streak_before_public_sequence + 2:
+        raise AssertionError(
+            f"Second clean task did not continue visible streak: "
+            f"{streak_before_public_sequence} -> {page._session_streak}")
     QTest.mouseClick(page.fetch, Qt.MouseButton.LeftButton)
     wait_until(app, lambda: page._session_puzzle_id != clean_two, 20000)
     actions.append({"action": "mouse-click", "target": "Следующая задача после второй серии",
