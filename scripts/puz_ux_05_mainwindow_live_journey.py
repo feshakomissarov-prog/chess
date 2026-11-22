@@ -756,7 +756,7 @@ def run():
     # Exercise enabled auto-advance and turning it off before completion.
     click_checkbox(app, page.auto_next, True)
     settings.sync()
-    auto_setting_key = f"puzzles/auto_next/{page.account_id}"
+    auto_setting_key = f"puzzles/auto_next/{page.account_id}/{page.mode}"
     if not settings.value(auto_setting_key, False, type=bool):
         raise AssertionError("A real mouse click did not persist auto-next for this profile")
     capture(page, "auto-next-checked", journal)
