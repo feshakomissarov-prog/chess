@@ -1011,8 +1011,7 @@ class PuzzleTrainingPage(QWidget):
         self.fetch.setText("Повторить загрузку")
         self.fetch.setEnabled(not self._fetch_inflight
                               and not self._rated_pending_for_current_mode())
-        if self.reconcile_rated_button.isVisible():
-            self.reconcile_rated_button.setEnabled(True)
+        self.reconcile_rated_button.setEnabled(True)
 
     def set_message(self, text: str) -> None:
         self._fetch_inflight = False
