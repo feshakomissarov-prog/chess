@@ -152,6 +152,8 @@ def test_unknown_reconcile_uses_official_nested_activity(qtbot, tmp_path, monkey
     window, _settings, _database = isolated_rated_window(tmp_path, "nested-activity")
     qtbot.addWidget(window)
     page = mount_rated_page(window)
+    # Keep failure cleanup from opening MainWindow's rated-partial close dialog.
+    page.state.status = PuzzleStatus.SUCCESS
     attempt = {"attempt_id": "nested-activity-attempt", "session_id": "nested-activity-attempt",
                "account_id": page.account_id, "puzzle_id": "puzzle-frozen",
                "mode": "LICHESS_RATED", "rated": True, "win": True,
@@ -193,7 +195,6 @@ def test_unknown_reconcile_uses_official_nested_activity(qtbot, tmp_path, monkey
     assert "изменение рейтинга недоступно" in page.rated_status.text().casefold()
     assert not page.reconcile_rated_button.isVisible()
     assert window.game_repository.unresolved_rated_puzzle_attempts(page.account_id) == []
-    page.state.status = PuzzleStatus.SUCCESS
     window.close()
 
 
@@ -203,6 +204,8 @@ def test_unknown_reconcile_rejects_stale_malformed_and_foreign_activity(
     window, _settings, _database = isolated_rated_window(tmp_path, "invalid-activity")
     qtbot.addWidget(window)
     page = mount_rated_page(window)
+    # Keep failure cleanup from opening MainWindow's rated-partial close dialog.
+    page.state.status = PuzzleStatus.SUCCESS
     attempt = {"attempt_id": "invalid-activity-attempt", "session_id": "invalid-activity-attempt",
                "account_id": page.account_id, "puzzle_id": "puzzle-frozen",
                "mode": "LICHESS_RATED", "rated": True, "win": True,
@@ -241,7 +244,6 @@ def test_unknown_reconcile_rejects_stale_malformed_and_foreign_activity(
         "Активность не позволила однозначно"), timeout=3000)
     assert window.game_repository.rated_puzzle_attempt(attempt["attempt_id"])["status"] == "unknown"
     assert "Повторный POST не выполнялся" in page.rated_status.text()
-    page.state.status = PuzzleStatus.SUCCESS
     window.close()
 
 
