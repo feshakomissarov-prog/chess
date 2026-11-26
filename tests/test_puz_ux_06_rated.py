@@ -264,8 +264,8 @@ def test_unknown_reconcile_rejects_stale_malformed_and_foreign_activity(
     client = window.lichess.client
     client.username = "fixture-user"
     QTest.mouseClick(page.reconcile_rated_button, Qt.MouseButton.LeftButton)
-    qtbot.waitUntil(lambda: page.rated_status.text().startswith(
-        "Активность не позволила однозначно"), timeout=3000)
+    qtbot.waitUntil(lambda: "активность не позволила однозначно" in
+                    page.rated_status.text().casefold(), timeout=3000)
     assert window.game_repository.rated_puzzle_attempt(attempt["attempt_id"])["status"] == "unknown"
     assert "Повторный POST не выполнялся" in page.rated_status.text()
     window.close()

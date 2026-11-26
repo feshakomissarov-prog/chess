@@ -622,20 +622,16 @@ class PuzzleTrainingPage(QWidget):
         status = str(row.get("status") or "unknown")
         puzzle_id = str(row.get("puzzle_id") or "задачи")
         message = str(row.get("last_error") or row.get("message") or "")
-        if status == "unknown" and message:
-            detail = message
-            if "post" not in detail.casefold():
-                detail += " Повторный POST не выполнялся."
-            self.rated_status.setText(detail)
-        else:
-            self.rated_status.setText(
-                f"Результат задачи {puzzle_id}: " + {
-                    "prepared": "сохранён и ещё не отправлен.",
-                    "sending": "отправляется в Lichess.",
-                    "unknown": "неизвестен; повторный POST не выполнялся.",
-                    "not_sent": "не отправлен.",
-                }.get(status, "ожидает подтверждения Lichess.") +
-                (f" {message}" if message and status == "not_sent" else ""))
+        status_text = {
+            "prepared": "сохранён и ещё не отправлен.",
+            "sending": "отправляется в Lichess.",
+            "unknown": "неизвестен; повторный POST не выполнялся.",
+            "not_sent": "не отправлен.",
+        }.get(status, "ожидает подтверждения Lichess.")
+        detail = f"Результат задачи {puzzle_id}: {status_text}"
+        if message and status in {"unknown", "not_sent"}:
+            detail += f" {message}"
+        self.rated_status.setText(detail)
         self._rated_recovery_attempt_id = str(row.get("attempt_id") or "")
         try:
             stored_payload = json.loads(str(row.get("payload_json") or "{}"))
