@@ -125,6 +125,7 @@ class PuzzleTrainingPage(QWidget):
         self._rated_recovery_attempt_id = ""
         self._rated_recovery_payload: dict = {}
         self._rated_pending_attempt: dict | None = None
+        self._rated_submission_in_flight_attempt_id = ""
         self._attempt_theme = "mix"
         self._attempt_difficulty = "normal"
         self._session_id = ""
@@ -620,6 +621,10 @@ class PuzzleTrainingPage(QWidget):
             self.reconcile_rated_button.hide()
             return
         status = str(row.get("status") or "unknown")
+        attempt_id = str(row.get("attempt_id") or "")
+        if (attempt_id and attempt_id == self._rated_submission_in_flight_attempt_id
+                and status in {"prepared", "sending"}):
+            status = "sending"
         puzzle_id = str(row.get("puzzle_id") or "задачи")
         message = str(row.get("last_error") or row.get("message") or "")
         status_text = {
@@ -1545,7 +1550,8 @@ class PuzzleTrainingPage(QWidget):
             "mode": "LICHESS_RATED",
             "puzzle_payload": dict(self._puzzle_payload or {}),
         }
-        self.set_rated_pending_attempt({**payload, "status": "prepared"})
+        self._rated_submission_in_flight_attempt_id = str(payload["attempt_id"])
+        self.set_rated_pending_attempt({**payload, "status": "sending"})
         self.rated_status.setText(f"Результат задачи {self._session_puzzle_id} отправляется в Lichess…")
         self.rated_result_requested.emit(payload)
 
@@ -1562,6 +1568,9 @@ class PuzzleTrainingPage(QWidget):
         payload = dict(attempt_payload or {})
         account_id = str(attempt_account_id or payload.get("account_id")
                          or self._session_account_id or self.account_id or "local")
+        if (resolved_attempt_id == self._rated_submission_in_flight_attempt_id
+                and status in {"confirmed", "unknown", "not_sent", "rejected"}):
+            self._rated_submission_in_flight_attempt_id = ""
         if status == "confirmed":
             self.clear_rated_pending_attempt(resolved_attempt_id, account_id)
             if rating is not None:
@@ -1637,6 +1646,8 @@ class PuzzleTrainingPage(QWidget):
                     "angle": self._attempt_theme,
                     "difficulty": self._attempt_difficulty,
                     }
+                self._rated_submission_in_flight_attempt_id = attempt_id
+                self._render_rated_pending_attempt()
                 self.rated_retry_requested.emit(payload)
             return
         self.rated_reconcile_requested.emit(attempt_id)

@@ -749,6 +749,8 @@ class MainWindow(QMainWindow):
         self._puzzle_training_page = None
         self._puzzle_training_generation = 0
         self._puzzle_training_callbacks: dict[str, object] = {}
+        self._rated_submission_lock = threading.RLock()
+        self._rated_submission_in_flight: set[str] = set()
         self._puzzle_training_oauth_callback = None
         self._puzzle_oauth_open_requests: dict[str, dict] = {}
         self._puzzle_failed_attempts: dict[str, dict] = {}
@@ -6235,6 +6237,15 @@ class MainWindow(QMainWindow):
                 attempt_id=attempt_id, attempt_payload=frozen,
                 attempt_account_id=account_id)
             return
+        with self._rated_submission_lock:
+            if attempt_id in self._rated_submission_in_flight:
+                return
+            self._rated_submission_in_flight.add(attempt_id)
+
+        def release_submission() -> None:
+            with self._rated_submission_lock:
+                self._rated_submission_in_flight.discard(attempt_id)
+
         request_id = uuid.uuid4().hex
         generation = self._puzzle_training_generation
         stop_event = threading.Event()
@@ -6300,8 +6311,15 @@ class MainWindow(QMainWindow):
                     raise PermissionError("Разрешение puzzle:write изменилось; отправка отменена.")
                 if not operation_current():
                     raise RequestNotSentError("Контекст аккаунта изменился до отправки.")
-                # This is the last durable transition before the mutating call.
-                self.game_repository.update_rated_puzzle_attempt(attempt_id, "sending")
+                # Atomically claim this frozen attempt; a competing worker must not POST.
+                stored, admitted = self.game_repository.claim_rated_puzzle_attempt_for_send(
+                    attempt_id)
+                if not admitted:
+                    result.update(status=str(stored.get("status") or "unknown"),
+                                  stored=stored, duplicate=True,
+                                  message="Эта попытка уже принята к отправке; повторный POST запрещён.")
+                    self.puzzle_training_finished.emit(request_id, result, None)
+                    return
                 post_started = True
                 try:
                     with authenticated_request_admission(operation_current, stop_event):
@@ -6403,39 +6421,60 @@ class MainWindow(QMainWindow):
             self.puzzle_training_finished.emit(request_id, result, None)
 
         def apply_result(result, error) -> None:
-            if (error or not isinstance(result, dict) or page is not self._puzzle_training_page
-                    or not shiboken6.isValid(page)
-                    or self.screen_stack.currentWidget() is not page
-                    or (not retry and str(payload.get("session_id")) != page._session_id)
-                    or account_id != page._session_account_id):
-                return
-            result_status = str(result.get("status") or "unknown")
-            stored = result.get("stored") or {}
             try:
-                applied_payload = json.loads(str(stored.get("payload_json") or "{}"))
-            except (ValueError, TypeError):
-                applied_payload = {}
-            if not isinstance(applied_payload, dict) or not applied_payload:
-                applied_payload = {**payload, "mode": "LICHESS_RATED", "rated": True}
-            page.apply_rated_result(
-                result_status, win=bool(payload.get("win")),
-                rating_diff=result.get("rating_diff", stored.get("server_rating_diff")),
-                rating=result.get("rating", stored.get("server_rating")),
+                if (error or not isinstance(result, dict)
+                        or page is not self._puzzle_training_page
+                        or not shiboken6.isValid(page)
+                        or self.screen_stack.currentWidget() is not page
+                        or (not retry and str(payload.get("session_id")) != page._session_id)
+                        or account_id != page._session_account_id):
+                    return
+                if result.get("duplicate"):
+                    return
+                result_status = str(result.get("status") or "unknown")
+                stored = result.get("stored") or {}
+                try:
+                    applied_payload = json.loads(str(stored.get("payload_json") or "{}"))
+                except (ValueError, TypeError):
+                    applied_payload = {}
+                if not isinstance(applied_payload, dict) or not applied_payload:
+                    applied_payload = {**payload, "mode": "LICHESS_RATED", "rated": True}
+                page.apply_rated_result(
+                    result_status, win=bool(payload.get("win")),
+                    rating_diff=result.get("rating_diff", stored.get("server_rating_diff")),
+                    rating=result.get("rating", stored.get("server_rating")),
                     message=result.get("message"), attempt_id=attempt_id,
                     attempt_payload=applied_payload,
                     authorization_needed=bool(result.get("authorization_needed")),
                     attempt_account_id=account_id)
-            if result.get("retry_after"):
-                page.set_rate_limit_cooldown(int(result["retry_after"]))
-            if result_status == "confirmed":
-                official = result.get("rating", stored.get("server_rating"))
-                if official is not None and self._home_view is not None:
-                    self._home_view.set_official_puzzle_rating(int(official))
+                if result.get("retry_after"):
+                    page.set_rate_limit_cooldown(int(result["retry_after"]))
+                if result_status == "confirmed":
+                    official = result.get("rating", stored.get("server_rating"))
+                    if official is not None and self._home_view is not None:
+                        self._home_view.set_official_puzzle_rating(int(official))
+            finally:
+                release_submission()
 
         self._register_training_callback(page, request_id, generation, apply_result)
-        self._start_registered_work(
-            worker, kind="rated_puzzle_submit", lane=OperationLane.INTERACTIVE,
-            thread_name="cc-rated-puzzle-submit", stop_event=stop_event)
+        try:
+            self._start_registered_work(
+                worker, kind="rated_puzzle_submit", lane=OperationLane.INTERACTIVE,
+                thread_name="cc-rated-puzzle-submit", stop_event=stop_event)
+        except RuntimeError as exc:
+            self._puzzle_history_callbacks.pop(request_id, None)
+            release_submission()
+            existing = self.game_repository.rated_puzzle_attempt(attempt_id)
+            if existing and existing.get("status") in {"prepared", "not_sent"}:
+                self.game_repository.update_rated_puzzle_attempt(
+                    attempt_id, "not_sent",
+                    error=f"worker did not start: {type(exc).__name__}")
+            page.apply_rated_result(
+                "not_sent", win=bool(payload.get("win")),
+                message="Результат сохранён, но отправка не запустилась.",
+                attempt_id=attempt_id,
+                attempt_payload={**payload, "mode": "LICHESS_RATED", "rated": True},
+                attempt_account_id=account_id)
 
     def _reconcile_rated_puzzle_result(self, page: PuzzleTrainingPage, attempt_id: str) -> None:
         attempt = self.game_repository.rated_puzzle_attempt(str(attempt_id))

@@ -135,14 +135,30 @@ class PuzzleActivityStoreMixin:
                 "UPDATE rated_puzzle_attempts SET status=?,updated_at_ms=?,"
                 "server_confirmed_at_ms=CASE WHEN ?='confirmed' THEN ? ELSE server_confirmed_at_ms END,"
                 "server_rating_diff=COALESCE(?,server_rating_diff),"
-                "server_rating=COALESCE(?,server_rating),last_error=? WHERE attempt_id=?",
+                "server_rating=COALESCE(?,server_rating),last_error=? WHERE attempt_id=? "
+                "AND (status!='confirmed' OR ?='confirmed')",
                 (status, now, status, now, rating_diff, rating,
-                 str(error)[:500] if error else None, str(attempt_id)))
+                 str(error)[:500] if error else None, str(attempt_id), status))
             row = db.execute("SELECT * FROM rated_puzzle_attempts WHERE attempt_id=?",
                              (str(attempt_id),)).fetchone()
         if row is None:
             raise KeyError(attempt_id)
         return dict(row)
+
+    def claim_rated_puzzle_attempt_for_send(self, attempt_id: str) -> tuple[dict, bool]:
+        """Atomically admit one POST for a recoverable frozen attempt."""
+        now = int(time.time() * 1000)
+        with self._connection() as db:
+            cursor = db.execute(
+                "UPDATE rated_puzzle_attempts SET status='sending',updated_at_ms=?,last_error=NULL "
+                "WHERE attempt_id=? AND status IN ('prepared','not_sent') "
+                "AND NOT (status='not_sent' AND last_error LIKE 'ABORTED_NO_SEND:%')",
+                (now, str(attempt_id)))
+            row = db.execute("SELECT * FROM rated_puzzle_attempts WHERE attempt_id=?",
+                             (str(attempt_id),)).fetchone()
+        if row is None:
+            raise KeyError(attempt_id)
+        return dict(row), cursor.rowcount == 1
 
     def rated_puzzle_attempt(self, attempt_id: str) -> dict | None:
         with self._connection() as db:

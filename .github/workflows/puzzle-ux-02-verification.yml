@@ -35,6 +35,7 @@ jobs:
     runs-on: windows-latest
     outputs:
       changed: ${{ steps.scope.outputs.changed }}
+      rated_singleflight_only: ${{ steps.scope.outputs.rated_singleflight_only }}
     steps:
       - uses: actions/checkout@v7.0.1
         with:
@@ -62,9 +63,25 @@ jobs:
           })
           "changed=$($changed.ToString().ToLowerInvariant())" >> $env:GITHUB_OUTPUT
           Write-Host "L2 UI/capture source changed: $changed"
+          $singleflightBase = '063cfe24422972013fe6bdd3f25888518261f5f9'
+          $singleflightFiles = @(git diff --name-only $singleflightBase $env:HEAD_SHA)
+          $singleflightAllowed = @(
+            'src/chess_coach/ui/pages/puzzle_training.py',
+            'src/chess_coach/infrastructure/sqlite/puzzles.py',
+            'src/chess_coach/window.py',
+            'tests/test_puz_ux_06_rated.py',
+            '.github/workflows/puzzle-ux-02-verification.yml',
+            'docs/handoffs/PUZ_UX_06_EXECUTION_LOG.md'
+          )
+          $singleflightOnly = ($singleflightFiles.Count -gt 0) -and
+            -not [bool]($singleflightFiles | Where-Object { $_ -notin $singleflightAllowed })
+          "rated_singleflight_only=$($singleflightOnly.ToString().ToLowerInvariant())" >> $env:GITHUB_OUTPUT
+          Write-Host "Only the PUZ06 rated single-flight continuation changed: $singleflightOnly"
 
   l1-targeted:
     name: L1 targeted RED/GREEN
+    needs: [detect-visual-scope]
+    if: needs.detect-visual-scope.outputs.rated_singleflight_only != 'true'
     runs-on: windows-latest
     timeout-minutes: 15
     steps:
@@ -159,6 +176,8 @@ jobs:
 
   puz-ux-05-red-baseline:
     name: L1 RED on exact base
+    needs: [detect-visual-scope]
+    if: needs.detect-visual-scope.outputs.rated_singleflight_only != 'true'
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v7.0.1
@@ -202,10 +221,73 @@ jobs:
           } finally { Pop-Location }
           exit 0
 
+  puz06-rated-singleflight-l1:
+    name: L1 PUZ06 rated single-flight
+    needs: [detect-visual-scope]
+    if: github.event.pull_request.head.ref == 'codex/puz-ux-05-owner-live-next-replay' && github.event.pull_request.draft && needs.detect-visual-scope.outputs.rated_singleflight_only == 'true'
+    runs-on: windows-latest
+    timeout-minutes: 7
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+      - uses: actions/setup-python@v7.1.0
+        timeout-minutes: 5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Install application and test dependencies
+        run: python -m pip install -e ".[dev]"
+      - name: Compile touched modules
+        run: >-
+          python -m py_compile src/chess_coach/ui/pages/puzzle_training.py
+          src/chess_coach/window.py src/chess_coach/infrastructure/sqlite/puzzles.py
+          tests/test_puz_ux_06_rated.py
+      - name: Run targeted Qt and SQLite RED/GREEN contracts
+        timeout-minutes: 3
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: >-
+          python -X faulthandler -m pytest -o addopts=
+          -o faulthandler_timeout=10 -vv
+          tests/test_puz_ux_06_rated.py::test_live_rated_submission_hides_retry_and_admits_one_post
+          tests/test_puz_ux_06_rated.py::test_rated_attempt_send_admission_is_atomic_and_confirmed_is_terminal
+          tests/test_puz_ux_06_rated.py::test_ambiguous_post_is_durable_unknown_and_never_retried
+          tests/test_puz_ux_06_rated.py::test_prepost_failure_and_prepared_restart_recovery
+
+  puz06-rated-singleflight-l2:
+    name: L2 Windows PUZ06 rated single-flight
+    needs: [detect-visual-scope, puz06-rated-singleflight-l1]
+    if: github.event.pull_request.head.ref == 'codex/puz-ux-05-owner-live-next-replay' && github.event.pull_request.draft && needs.detect-visual-scope.outputs.rated_singleflight_only == 'true' && needs.puz06-rated-singleflight-l1.result == 'success'
+    runs-on: windows-latest
+    timeout-minutes: 7
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+      - uses: actions/setup-python@v7.1.0
+        timeout-minutes: 5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Install application and test dependencies
+        run: python -m pip install -e ".[dev]"
+      - name: Exercise user retry, atomic send admission, and restart recovery
+        timeout-minutes: 3
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: >-
+          python -X faulthandler -m pytest -o addopts=
+          -o faulthandler_timeout=10 -vv
+          tests/test_puz_ux_06_rated.py::test_live_rated_submission_hides_retry_and_admits_one_post
+          tests/test_puz_ux_06_rated.py::test_rated_attempt_send_admission_is_atomic_and_confirmed_is_terminal
+          tests/test_puz_ux_06_rated.py::test_ambiguous_post_is_durable_unknown_and_never_retried
+          tests/test_puz_ux_06_rated.py::test_prepost_failure_and_prepared_restart_recovery
+
   puz-ux-05-l2-windows-qt:
     name: L2 PUZ-UX-05/06 Windows user journey
-    needs: [l1-targeted, puz-ux-05-red-baseline]
-    if: github.event.pull_request.head.ref == 'codex/puz-ux-05-owner-live-next-replay' && github.event.pull_request.draft && needs.l1-targeted.result == 'success' && needs.puz-ux-05-red-baseline.result == 'success'
+    needs: [detect-visual-scope, l1-targeted, puz-ux-05-red-baseline]
+    if: github.event.pull_request.head.ref == 'codex/puz-ux-05-owner-live-next-replay' && github.event.pull_request.draft && needs.detect-visual-scope.outputs.rated_singleflight_only != 'true' && needs.l1-targeted.result == 'success' && needs.puz-ux-05-red-baseline.result == 'success'
     runs-on: windows-latest
     timeout-minutes: 35
     steps:
