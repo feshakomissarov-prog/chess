@@ -192,7 +192,7 @@ def test_unknown_reconcile_uses_official_nested_activity(qtbot, tmp_path, monkey
     confirmed = window.game_repository.rated_puzzle_attempt(attempt["attempt_id"])
     assert client.activity_calls == 1
     assert confirmed["server_rating_diff"] is None and confirmed["server_rating"] is None
-    assert "изменение рейтинга недоступно" in page.rated_status.text().casefold()
+    assert "изменение рейтинга неизвестно" in page.rated_status.text().casefold()
     assert not page.reconcile_rated_button.isVisible()
     assert window.game_repository.unresolved_rated_puzzle_attempts(page.account_id) == []
     window.close()
