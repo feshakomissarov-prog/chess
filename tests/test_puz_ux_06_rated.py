@@ -312,6 +312,30 @@ def test_prepost_failure_and_prepared_restart_recovery(qtbot, tmp_path, monkeypa
     window, settings, database = isolated_rated_window(tmp_path, "prepost-recovery")
     qtbot.addWidget(window)
     page = mount_rated_page(window)
+    window.show()
+    qtbot.wait(25)
+    # The fixture focuses on durable recovery, not the close prompt. Keep teardown
+    # from opening a modal if an assertion fails before the explicit close below.
+    page.state.status = PuzzleStatus.SUCCESS
+
+    def wait_for_status(repository, attempt_id, expected, target_page, *,
+                        button_visible=None):
+        try:
+            qtbot.waitUntil(
+                lambda: (row := repository.rated_puzzle_attempt(attempt_id)) is not None
+                and row.get("status") == expected
+                and (button_visible is None or
+                     target_page.reconcile_rated_button.isVisible() == button_visible),
+                timeout=3000)
+        except Exception as exc:
+            pytest.fail(
+                f"Rated recovery did not reach {expected!r} within 3000 ms: {exc}; "
+                f"row={repository.rated_puzzle_attempt(attempt_id)!r}; "
+                f"ui={target_page.rated_status.text()!r}; "
+                f"button={target_page.reconcile_rated_button.text()!r}; "
+                f"button_visible={target_page.reconcile_rated_button.isVisible()}; "
+                f"button_enabled={target_page.reconcile_rated_button.isEnabled()}",
+                pytrace=False)
 
     class Client:
         def __init__(self):
@@ -342,15 +366,15 @@ def test_prepost_failure_and_prepared_restart_recovery(qtbot, tmp_path, monkeypa
               "puzzle_payload": RATED_PUZZLE}
 
     window._submit_rated_puzzle_result(page, frozen)
-    qtbot.waitUntil(lambda: window.game_repository.rated_puzzle_attempt(
-        frozen["attempt_id"])["status"] == "not_sent", timeout=3000)
+    wait_for_status(window.game_repository, frozen["attempt_id"], "not_sent", page,
+                    button_visible=True)
     failed = window.game_repository.rated_puzzle_attempt(frozen["attempt_id"])
     assert client.posts == []
     assert json.loads(failed["payload_json"])["puzzle_id"] == "puzzle-frozen"
     assert page.reconcile_rated_button.isVisible()
     QTest.mouseClick(page.reconcile_rated_button, Qt.MouseButton.LeftButton)
-    qtbot.waitUntil(lambda: window.game_repository.rated_puzzle_attempt(
-        frozen["attempt_id"])["status"] == "confirmed", timeout=3000)
+    wait_for_status(window.game_repository, frozen["attempt_id"], "confirmed", page,
+                    button_visible=False)
     assert client.posts == [("mix", "puzzle-frozen", True, True, 1)]
 
     # A persisted `prepared` result after restart is shown for an explicit send;
@@ -367,17 +391,22 @@ def test_prepost_failure_and_prepared_restart_recovery(qtbot, tmp_path, monkeypa
     runtime = create_runtime(settings=settings, manual_connect_mode=True)
     restarted = MainWindow(runtime=runtime)
     qtbot.addWidget(restarted)
+    restarted.show()
     restart_client = Client()
     restart_client.account_failures = 0
     restarted.lichess = SimpleNamespace(client=restart_client)
     restarted.show_puzzle_training(account_id="lichess:fixture-user", mode="LICHESS_RATED")
+    qtbot.wait(25)
     recovered_page = restarted._puzzle_training_page
+    recovered_page.state.status = PuzzleStatus.SUCCESS
     assert restart_client.posts == [] and restart_client.account_calls == 0
+    wait_for_status(restarted.game_repository, "prepared-after-restart", "prepared",
+                    recovered_page, button_visible=True)
     assert recovered_page.reconcile_rated_button.isVisible()
     assert recovered_page.reconcile_rated_button.text() == "Отправить сохранённый результат"
     QTest.mouseClick(recovered_page.reconcile_rated_button, Qt.MouseButton.LeftButton)
-    qtbot.waitUntil(lambda: restarted.game_repository.rated_puzzle_attempt(
-        "prepared-after-restart")["status"] == "confirmed", timeout=3000)
+    wait_for_status(restarted.game_repository, "prepared-after-restart", "confirmed",
+                    recovered_page, button_visible=False)
     assert restart_client.posts == [("mix", "puzzle-restart", True, True, 1)]
     recovered_page.state.status = PuzzleStatus.SUCCESS
     restarted.close()
