@@ -214,7 +214,7 @@ def test_live_rated_submission_hides_retry_and_admits_one_post(
     qtbot.wait(100)
 
     row = window.game_repository.rated_puzzle_attempt(frozen["attempt_id"])
-    assert "отправляется в Lichess" in waiting_text.casefold()
+    assert "отправляется в lichess" in waiting_text.casefold()
     assert not retry_was_available, (
         "Automatic rated submission exposed the saved-result retry button while "
         f"get_account was pending: button={page.reconcile_rated_button.text()!r}; "
