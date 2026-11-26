@@ -105,13 +105,27 @@ jobs:
           python -X faulthandler -m pytest -o addopts= -vv
           tests/test_puzzle_training_ui.py tests/test_puzzle_training_navigation.py
           tests/test_puzzle_training_async.py
-      - name: Run puzzle interaction and PUZ-05/06 contracts
+      - name: Run legacy puzzle interaction and PUZ-05 regressions
+        timeout-minutes: 3
         env:
           QT_QPA_PLATFORM: offscreen
         run: >-
-          python -X faulthandler -m pytest -o addopts= -vv
+          python -X faulthandler -m pytest -o addopts= -o faulthandler_timeout=20 -vv
           tests/test_puz_ux_03_interaction.py tests/test_puz_ux_03_rating.py
-          tests/test_puz_ux_05_live_flow.py tests/test_puz_ux_06_modes.py
+          tests/test_puz_ux_05_live_flow.py
+      - name: Run PUZ06 mode interaction contracts
+        timeout-minutes: 3
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: >-
+          python -X faulthandler -m pytest -o addopts= -o faulthandler_timeout=20 -vv
+          tests/test_puz_ux_06_modes.py
+      - name: Run PUZ06 rated recovery contracts
+        timeout-minutes: 3
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: >-
+          python -X faulthandler -m pytest -o addopts= -o faulthandler_timeout=20 -vv
           tests/test_puz_ux_06_rated.py
       - name: Run focused puzzle MainWindow regressions
         env:
