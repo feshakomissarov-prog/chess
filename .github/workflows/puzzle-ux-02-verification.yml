@@ -276,6 +276,7 @@ jobs:
         timeout-minutes: 3
         env:
           QT_QPA_PLATFORM: offscreen
+          CC_PUZ06_SINGLEFLIGHT_CAPTURE_DIR: visual-evidence/puz06-rated-singleflight
         run: >-
           python -X faulthandler -m pytest -o addopts=
           -o faulthandler_timeout=10 -vv
@@ -283,6 +284,13 @@ jobs:
           tests/test_puz_ux_06_rated.py::test_rated_attempt_send_admission_is_atomic_and_confirmed_is_terminal
           tests/test_puz_ux_06_rated.py::test_ambiguous_post_is_durable_unknown_and_never_retried
           tests/test_puz_ux_06_rated.py::test_prepost_failure_and_prepared_restart_recovery
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: puz06-rated-singleflight-${{ github.event.pull_request.head.sha }}
+          path: visual-evidence/puz06-rated-singleflight/
+          if-no-files-found: warn
+          retention-days: 14
 
   puz-ux-05-l2-windows-qt:
     name: L2 PUZ-UX-05/06 Windows user journey

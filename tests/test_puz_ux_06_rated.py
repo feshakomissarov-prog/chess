@@ -1,9 +1,11 @@
 """Fake-transport rated result safety; never contacts Lichess or a real keyring."""
 
 import json
+import os
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
 from types import SimpleNamespace
 
 import chess
@@ -200,6 +202,11 @@ def test_live_rated_submission_hides_retry_and_admits_one_post(
     waiting_text = page.rated_status.text()
     retry_was_available = (page.reconcile_rated_button.isVisible()
                            and page.reconcile_rated_button.isEnabled())
+    capture_dir = os.environ.get("CC_PUZ06_SINGLEFLIGHT_CAPTURE_DIR")
+    if capture_dir:
+        output = Path(capture_dir)
+        output.mkdir(parents=True, exist_ok=True)
+        assert page.grab().save(str(output / "01-sending-no-retry.png"))
     # A normal click must be harmless when the recovery control is unavailable.
     qtbot.mouseClick(page.reconcile_rated_button, Qt.MouseButton.LeftButton)
     # Also deliver a stale/repeated retry intent through the same connected controller.
@@ -227,6 +234,8 @@ def test_live_rated_submission_hides_retry_and_admits_one_post(
     assert row["server_rating_diff"] == 4
     assert not page.reconcile_rated_button.isVisible()
     assert "подтвердил результат" in page.rated_status.text().casefold()
+    if capture_dir:
+        assert page.grab().save(str(output / "02-confirmed.png"))
     window.close()
 
 
