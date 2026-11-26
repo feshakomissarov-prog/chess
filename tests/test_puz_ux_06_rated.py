@@ -152,6 +152,8 @@ def test_unknown_reconcile_uses_official_nested_activity(qtbot, tmp_path, monkey
     window, _settings, _database = isolated_rated_window(tmp_path, "nested-activity")
     qtbot.addWidget(window)
     page = mount_rated_page(window)
+    window.show()
+    qtbot.wait(25)
     # Keep failure cleanup from opening MainWindow's rated-partial close dialog.
     page.state.status = PuzzleStatus.SUCCESS
     attempt = {"attempt_id": "nested-activity-attempt", "session_id": "nested-activity-attempt",
@@ -182,6 +184,14 @@ def test_unknown_reconcile_uses_official_nested_activity(qtbot, tmp_path, monkey
         lambda attempt_id: window._reconcile_rated_puzzle_result(page, attempt_id))
     page.apply_rated_result("unknown", win=True, attempt_id=attempt["attempt_id"],
                             attempt_payload=attempt)
+    applied_statuses = []
+    original_apply_rated_result = page.apply_rated_result
+
+    def record_applied_status(status, **kwargs):
+        applied_statuses.append(status)
+        return original_apply_rated_result(status, **kwargs)
+
+    page.apply_rated_result = record_applied_status
     page.reconcile_rated_button.show()
     page.reconcile_rated_button.setEnabled(True)
 
@@ -192,6 +202,10 @@ def test_unknown_reconcile_uses_official_nested_activity(qtbot, tmp_path, monkey
     confirmed = window.game_repository.rated_puzzle_attempt(attempt["attempt_id"])
     assert client.activity_calls == 1
     assert confirmed["server_rating_diff"] is None and confirmed["server_rating"] is None
+    assert applied_statuses == ["confirmed"], (
+        f"Reconciliation completion was not applied: statuses={applied_statuses!r}; "
+        f"page_is_current={window.screen_stack.currentWidget() is page}; "
+        f"status_text={page.rated_status.text()!r}")
     assert "изменение рейтинга неизвестно" in page.rated_status.text().casefold()
     assert not page.reconcile_rated_button.isVisible()
     assert window.game_repository.unresolved_rated_puzzle_attempts(page.account_id) == []
