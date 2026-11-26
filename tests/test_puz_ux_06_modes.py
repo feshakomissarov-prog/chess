@@ -1,9 +1,12 @@
 """Targeted regressions for the consolidated two-mode puzzle workflow."""
 
 import json
+import time
 
 import chess
-from PySide6.QtWidgets import QMessageBox
+from PySide6.QtCore import QSettings, QTimer, Qt
+from PySide6.QtTest import QTest
+from PySide6.QtWidgets import QApplication, QMessageBox, QPushButton
 
 from chess_coach.lichess.puzzle_training import (
     normalize_activity_puzzle,
@@ -248,6 +251,88 @@ def test_rated_auto_next_starts_only_after_confirmed_result(qtbot):
 
     assert page._auto_next_timer.isActive()
     assert page._auto_next_session_id == "rated-auto-next"
+
+
+def test_close_partial_rated_attempt_preserves_unfinished_outcome(qtbot, tmp_path):
+    from chess_coach.bootstrap import create_runtime
+    from chess_coach.lichess.puzzle_training import PuzzleStatus, normalize_api_puzzle
+    from chess_coach.lichess.repository import GameRepository
+    from chess_coach.ui.pages.puzzle_training import PuzzleTrainingPage
+    from chess_coach.window import MainWindow
+
+    database = tmp_path / "partial-close.sqlite3"
+    repository = GameRepository(database)
+    repository.shutdown()
+    settings = QSettings(str(tmp_path / "partial-close.ini"), QSettings.Format.IniFormat)
+    settings.setValue("workspace/database_file", str(database))
+    settings.sync()
+    runtime = create_runtime(settings=settings, manual_connect_mode=True)
+    window = MainWindow(runtime=runtime)
+    qtbot.addWidget(window)
+    window.show()
+
+    payload = {"game": {"id": "close-game", "pgn": "1. e4 e5"},
+               "puzzle": {"id": "close-puzzle", "initialPly": 1, "lastMove": "e7e5",
+                          "solution": ["d1h5", "b8c6", "f1c4"],
+                          "themes": ["short"], "rating": 1500}}
+    page = PuzzleTrainingPage(parent=window)
+    page.account_id = "lichess:close-user"
+    page.set_mode("LICHESS_RATED")
+    page.load_puzzle(normalize_api_puzzle(payload), payload, source="lichess")
+    page.account_id = "lichess:close-user"
+    page._session_account_id = page.account_id
+    assert page.state.submit(chess.Move.from_uci("d1h5")) == "correct"
+    page.board.set_position(page.state.board)
+    window._puzzle_training_page = page
+    window._puzzle_page = page
+    window.screen_stack.addWidget(page)
+    window.screen_stack.setCurrentWidget(page)
+    posts = []
+    window.lichess = type("Service", (), {"client": type("Client", (), {
+        "submit_puzzle_round": lambda _self, *args, **kwargs: posts.append((args, kwargs))})()})()
+
+    clicked = []
+
+    def click_confirmed_close():
+        dialogs = [widget for widget in QApplication.topLevelWidgets()
+                   if isinstance(widget, QMessageBox) and widget.isVisible()]
+        if not dialogs:
+            QTimer.singleShot(10, click_confirmed_close)
+            return
+        dialog = dialogs[-1]
+        button = next((item for item in dialog.findChildren(QPushButton)
+                       if item.text() == "Закрыть без отправки"), None)
+        assert button is not None, f"Close dialog buttons: {[b.text() for b in dialog.findChildren(QPushButton)]}"
+        QTest.mouseClick(button, Qt.MouseButton.LeftButton)
+        clicked.append(button.text())
+
+    QTimer.singleShot(0, click_confirmed_close)
+    assert window.close()
+    assert clicked == ["Закрыть без отправки"]
+    assert posts == []
+
+    reopened = GameRepository(database)
+    try:
+        row = reopened.rated_puzzle_attempt(page._session_id)
+        assert row["status"] == "aborted"
+        progress = json.loads(row["progress_json"])
+        assert progress["moves"] == ["d1h5"]
+        assert progress["position_fen"] == page.state.board.fen()
+        assert row["win"] == 0
+        assert reopened.unresolved_rated_puzzle_attempts(page.account_id) == []
+    finally:
+        reopened.shutdown()
+
+    settings.setValue(f"puzzles/rated_consent/{page.account_id}", True)
+    settings.sync()
+    restarted = MainWindow(runtime=create_runtime(settings=settings, manual_connect_mode=True))
+    qtbot.addWidget(restarted)
+    restarted.show_puzzle_training(account_id=page.account_id, mode="LICHESS_RATED")
+    resumed_page = restarted._puzzle_training_page
+    assert "прервана" in resumed_page.rated_status.text().casefold()
+    assert "не отправлялся" in resumed_page.rated_status.text().casefold()
+    resumed_page.state.status = PuzzleStatus.SUCCESS
+    restarted.close()
 
 
 def test_post_round_uses_official_json_contract_and_matching_id_only():
