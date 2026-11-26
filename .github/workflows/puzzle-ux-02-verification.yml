@@ -125,7 +125,7 @@ jobs:
         env:
           QT_QPA_PLATFORM: offscreen
         run: >-
-          python -X faulthandler -m pytest -o addopts= -o faulthandler_timeout=20 -vv
+          python -X faulthandler -m pytest -o addopts= -o faulthandler_timeout=20 -vv -x
           tests/test_puz_ux_06_rated.py
       - name: Run focused puzzle MainWindow regressions
         env:
