@@ -1,7 +1,9 @@
 """Fake-transport rated result safety; never contacts Lichess or a real keyring."""
 
 import json
+import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from types import SimpleNamespace
 
 import chess
@@ -131,6 +133,127 @@ def test_ambiguous_post_is_durable_unknown_and_never_retried(qtbot, tmp_path, mo
     assert client.posts[0][4:] == (True, 1)
     window.game_repository.shutdown()
     window.close()
+
+
+def test_live_rated_submission_hides_retry_and_admits_one_post(
+        qtbot, tmp_path, monkeypatch):
+    """A user retry during automatic account lookup must not duplicate a POST."""
+    monkeypatch.setattr(window_module, "WindowsCredentialStore", FakeTokenStore)
+    window, _settings, _database = isolated_rated_window(tmp_path, "single-flight")
+    qtbot.addWidget(window)
+    page = mount_rated_page(window)
+    window.show()
+    qtbot.wait(25)
+
+    release_account = threading.Event()
+    account_started = threading.Event()
+
+    class Client:
+        def __init__(self):
+            self.account_calls = 0
+            self.posts = []
+
+        def get_account(self, _token):
+            self.account_calls += 1
+            account_started.set()
+            if not release_account.wait(3.0):
+                raise TimeoutError("test did not release delayed account lookup")
+            return {"username": "fixture-user"}
+
+        def submit_puzzle_round(self, _token, angle, puzzle_id, win, *, rated, next_count):
+            self.posts.append((angle, puzzle_id, win, rated, next_count))
+            return {"rounds": [{"id": puzzle_id, "win": win, "ratingDiff": 4}],
+                    "glicko": {"rating": 1704}}
+
+    client = Client()
+    window.lichess = SimpleNamespace(client=client)
+    page.rated_result_requested.connect(
+        lambda frozen: window._submit_rated_puzzle_result(page, frozen))
+    page.rated_retry_requested.connect(
+        lambda frozen: window._submit_rated_puzzle_result(page, frozen, retry=True))
+    page.board.set_position(page.state.board)
+
+    # Ordinary user action: play the puzzle's correct move with two real Qt clicks.
+    qtbot.mouseClick(page.board, Qt.MouseButton.LeftButton,
+                     pos=page.board._square_center(chess.D1).toPoint())
+    qtbot.mouseClick(page.board, Qt.MouseButton.LeftButton,
+                     pos=page.board._square_center(chess.H5).toPoint())
+    qtbot.waitUntil(account_started.is_set, timeout=3000)
+
+    frozen = dict(page._rated_pending_attempt)
+    waiting_text = page.rated_status.text()
+    retry_was_available = (page.reconcile_rated_button.isVisible()
+                           and page.reconcile_rated_button.isEnabled())
+    # A normal click must be harmless when the recovery control is unavailable.
+    qtbot.mouseClick(page.reconcile_rated_button, Qt.MouseButton.LeftButton)
+    # Also deliver a stale/repeated retry intent through the same connected controller.
+    page.rated_retry_requested.emit(frozen)
+    qtbot.wait(100)
+
+    release_account.set()
+    qtbot.waitUntil(
+        lambda: (row := window.game_repository.rated_puzzle_attempt(
+            frozen["attempt_id"])) is not None and row["status"] == "confirmed",
+        timeout=5000)
+    qtbot.wait(100)
+
+    row = window.game_repository.rated_puzzle_attempt(frozen["attempt_id"])
+    assert "отправляется в Lichess" in waiting_text.casefold()
+    assert not retry_was_available, (
+        "Automatic rated submission exposed the saved-result retry button while "
+        f"get_account was pending: button={page.reconcile_rated_button.text()!r}; "
+        f"status={waiting_text!r}")
+    assert client.account_calls == 1, (
+        f"Repeated retry started another account lookup: {client.account_calls}")
+    assert client.posts == [("mix", frozen["puzzle_id"], True, True, 1)], (
+        f"One attempt must have exactly one official POST: {client.posts!r}")
+    assert row["status"] == "confirmed"
+    assert row["server_rating_diff"] == 4
+    assert not page.reconcile_rated_button.isVisible()
+    assert "подтвердил результат" in page.rated_status.text().casefold()
+    window.game_repository.shutdown()
+    window.close()
+
+
+def test_rated_attempt_send_admission_is_atomic_and_confirmed_is_terminal(
+        tmp_path):
+    repository = GameRepository(tmp_path / "rated-send-admission.sqlite3")
+    attempt = {
+        "attempt_id": "single-flight-store-attempt",
+        "session_id": "single-flight-store-attempt",
+        "account_id": "lichess:fixture-user",
+        "puzzle_id": "puzzle-frozen",
+        "mode": "LICHESS_RATED",
+        "rated": True,
+        "win": True,
+        "angle": "mix",
+        "difficulty": "normal",
+    }
+    try:
+        repository.prepare_rated_puzzle_attempt(attempt)
+        barrier = threading.Barrier(3)
+
+        def claim_send():
+            barrier.wait(timeout=2.0)
+            return repository.claim_rated_puzzle_attempt_for_send(attempt["attempt_id"])
+
+        with ThreadPoolExecutor(2) as pool:
+            futures = [pool.submit(claim_send) for _ in range(2)]
+            barrier.wait(timeout=2.0)
+            claims = [future.result(timeout=3.0) for future in futures]
+        assert sum(claimed for _row, claimed in claims) == 1
+        assert repository.rated_puzzle_attempt(attempt["attempt_id"])["status"] == "sending"
+
+        repository.update_rated_puzzle_attempt(
+            attempt["attempt_id"], "confirmed", rating_diff=4, rating=1704)
+        late_claim = repository.claim_rated_puzzle_attempt_for_send(attempt["attempt_id"])
+        assert late_claim[1] is False
+        assert late_claim[0]["status"] == "confirmed"
+        repository.update_rated_puzzle_attempt(
+            attempt["attempt_id"], "unknown", error="late duplicate callback")
+        assert repository.rated_puzzle_attempt(attempt["attempt_id"])["status"] == "confirmed"
+    finally:
+        repository.shutdown()
 
 
 def test_post_response_with_wrong_round_id_is_not_an_ack():
