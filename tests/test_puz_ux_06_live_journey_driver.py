@@ -4,11 +4,21 @@ from types import SimpleNamespace
 import time
 
 import pytest
-from PySide6.QtCore import QTimer, Qt
+from PySide6.QtCore import QTimer
 from PySide6.QtWidgets import QApplication, QMessageBox, QWidget
-from PySide6.QtTest import QTest
 
 from scripts import puz_ux_05_mainwindow_live_journey as journey
+
+
+def test_wait_timeout_reports_state_instead_of_masking_failure(qtbot):
+    app = QApplication.instance()
+    window = QWidget()
+    qtbot.addWidget(window)
+    window.show()
+
+    with pytest.raises(AssertionError, match="PUZ06_WAIT_TIMEOUT.*controlled timeout"):
+        journey.wait_until(app, lambda: False, timeout_ms=25,
+                           label="controlled timeout")
 
 
 def test_unexpected_dialog_is_reported_and_exec_is_closed(qtbot):

@@ -238,8 +238,10 @@ jobs:
           $bounds = [System.Windows.Forms.Screen]::PrimaryScreen.Bounds
           if ($bounds.Width -lt 1672 -or $bounds.Height -lt 941) { throw "Runner display is too small for PUZ-UX-06 capture." }
       - name: Run MainWindow mouse and wheel journey with a public unauthenticated GET
+        timeout-minutes: 14
         shell: pwsh
         run: |
+          $journeyDeadline = [DateTime]::UtcNow.AddMinutes(12)
           $cases = @(
             @{ Scale = "1"; Size = "1672x941" },
             @{ Scale = "1.25"; Size = "1280x720" },
@@ -255,8 +257,46 @@ jobs:
             } else {
               $env:CC_PUZ_UX_06_VISUAL_ONLY = "1"
             }
-            python -u -X faulthandler scripts/puz_ux_05_mainwindow_live_journey.py
-            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+            $logRoot = Join-Path $env:RUNNER_TEMP "puz-ux-06-driver-logs"
+            New-Item -ItemType Directory -Force -Path $logRoot | Out-Null
+            $stdoutPath = Join-Path $logRoot "scale-$($case.Scale).stdout.log"
+            $stderrPath = Join-Path $logRoot "scale-$($case.Scale).stderr.log"
+            $process = Start-Process -FilePath "python" `
+              -ArgumentList @("-u", "-X", "faulthandler", "scripts/puz_ux_05_mainwindow_live_journey.py") `
+              -WorkingDirectory $PWD.Path -NoNewWindow -PassThru `
+              -RedirectStandardOutput $stdoutPath -RedirectStandardError $stderrPath
+            $caseSeconds = if ($case.Scale -eq "1") { 600 } else { 90 }
+            $caseDeadline = [DateTime]::UtcNow.AddSeconds($caseSeconds)
+            if ($caseDeadline -gt $journeyDeadline) { $caseDeadline = $journeyDeadline }
+            $timedOut = $false
+            while ($true) {
+              $process.Refresh()
+              if ($process.HasExited) { break }
+              if ([DateTime]::UtcNow -ge $caseDeadline) {
+                $timedOut = $true
+                Write-Host "PUZ06_EXTERNAL_WATCHDOG_TIMEOUT scale=$($case.Scale) size=$($case.Size) child_pid=$($process.Id) limit_seconds=$caseSeconds"
+                & taskkill.exe /PID $process.Id /T /F | Out-Null
+                $process.WaitForExit(5000)
+                break
+              }
+              Start-Sleep -Milliseconds 500
+            }
+            $evidenceDir = Join-Path $PWD.Path $env:CC_PUZ_UX_06_OUTPUT
+            New-Item -ItemType Directory -Force -Path $evidenceDir | Out-Null
+            if (Test-Path -LiteralPath $stdoutPath) {
+              Copy-Item -LiteralPath $stdoutPath -Destination (Join-Path $evidenceDir "driver-stdout.log") -Force
+              Get-Content -LiteralPath $stdoutPath -Tail 250
+            }
+            if (Test-Path -LiteralPath $stderrPath) {
+              Copy-Item -LiteralPath $stderrPath -Destination (Join-Path $evidenceDir "driver-stderr.log") -Force
+              Get-Content -LiteralPath $stderrPath -Tail 150
+            }
+            if ($timedOut) { exit 124 }
+            if ($process.ExitCode -ne 0) { exit $process.ExitCode }
+            if ([DateTime]::UtcNow -ge $journeyDeadline -and $case.Scale -ne "1.5") {
+              Write-Host "PUZ06_EXTERNAL_WATCHDOG_TIMEOUT overall journey limit reached before final scale"
+              exit 124
+            }
           }
       - uses: actions/upload-artifact@v4
         if: always()

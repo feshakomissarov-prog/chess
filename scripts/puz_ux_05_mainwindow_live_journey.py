@@ -21,7 +21,7 @@ import chess
 from PySide6.QtCore import QCoreApplication, QPoint, QPointF, QTimer, Qt
 from PySide6.QtGui import QWheelEvent
 from PySide6.QtTest import QTest
-from PySide6.QtWidgets import QApplication, QDialog, QMessageBox, QPushButton
+from PySide6.QtWidgets import QApplication, QDialog, QMessageBox, QPushButton, QWidget
 
 from chess_coach.diagnostics import shutdown_logging
 from chess_coach.lichess.puzzle_training import normalize_api_puzzle
@@ -46,8 +46,37 @@ MATE_IN_1_PUBLIC_IDS = [
 ]
 
 
-def cleanup() -> None:
-    """Close the isolated Qt window and repository even after an assertion."""
+def _ui_diagnostic(app) -> dict:
+    visible = [widget for widget in QApplication.topLevelWidgets() if widget.isVisible()]
+    dialogs = []
+    for widget in visible:
+        if isinstance(widget, QDialog) or isinstance(widget, QMessageBox):
+            dialogs.append({
+                "type": type(widget).__name__, "title": widget.windowTitle(),
+                "modal": widget.isModal(),
+                "buttons": [button.text() for button in widget.findChildren(QPushButton)],
+            })
+    pages = []
+    for top in visible:
+        for page in top.findChildren(QWidget, "puzzleTrainingPage"):
+            state = getattr(page, "state", None)
+            puzzle = getattr(state, "puzzle", None)
+            pages.append({
+                "mode": getattr(page, "attempt_mode", None),
+                "session_id": getattr(page, "_session_id", None),
+                "puzzle_id": getattr(puzzle, "puzzle_id", None),
+                "status": getattr(getattr(state, "status", None), "value", None),
+            })
+    active = app.activeWindow() if app is not None else None
+    return {
+        "active": (f"{type(active).__name__}:{active.windowTitle()!r}"
+                   if active is not None else "none"),
+        "dialogs": dialogs, "pages": pages,
+    }
+
+
+def cleanup() -> str | None:
+    """Bounded teardown; resolve CI-only close prompts without bypassing closeEvent."""
     global _CLEANUP_DONE
     if _CLEANUP_DONE:
         return
@@ -55,16 +84,50 @@ def cleanup() -> None:
     faulthandler.cancel_dump_traceback_later()
     window = _ACTIVE_WINDOW
     app = _ACTIVE_APP
-    if window is not None:
-        window.close()
-    if app is not None:
-        deadline = time.monotonic() + 3
-        while (window is not None and not window.runtime._closed
-               and time.monotonic() < deadline):
+    persist_journey_trace()
+    error = None
+    modal_timer = None
+    if window is not None and app is not None:
+        deadline = time.monotonic() + 2.5
+        attempts = 0
+
+        def resolve_teardown_modal():
+            for dialog in QApplication.topLevelWidgets():
+                if not isinstance(dialog, QDialog) or not dialog.isVisible():
+                    continue
+                if dialog.windowTitle() == "Незавершённая рейтинговая задача":
+                    button = next((item for item in dialog.findChildren(QPushButton)
+                                   if item.text() == "Закрыть без отправки"), None)
+                    if button is not None:
+                        print("PUZ06_CLEANUP_SAFE_CLOSE_CLICK "
+                              + json.dumps(_ui_diagnostic(app), ensure_ascii=True), flush=True)
+                        QTest.mouseClick(button, Qt.MouseButton.LeftButton)
+                        continue
+                detail = {"title": dialog.windowTitle(),
+                          "buttons": [item.text() for item in dialog.findChildren(QPushButton)]}
+                print("PUZ06_CLEANUP_DISMISS_UNEXPECTED "
+                      + json.dumps(detail, ensure_ascii=True), flush=True)
+                dialog.reject()
+
+        modal_timer = QTimer(app)
+        modal_timer.setInterval(25)
+        modal_timer.timeout.connect(resolve_teardown_modal)
+        modal_timer.start()
+        while time.monotonic() < deadline:
+            attempts += 1
+            window.close()
+            if getattr(getattr(window, "runtime", None), "_closed", False):
+                break
             app.processEvents()
-            QTest.qWait(30)
+            QTest.qWait(25)
+        modal_timer.stop()
+        if not getattr(getattr(window, "runtime", None), "_closed", False):
+            error = ("PUZ06_CLEANUP_TIMEOUT attempts=" + str(attempts) + " state="
+                     + json.dumps(_ui_diagnostic(app), ensure_ascii=True))
+            print(error, flush=True)
         app.processEvents()
     shutdown_logging()
+    return error
 
 
 def persist_journey_trace() -> None:
@@ -256,33 +319,42 @@ def public_puzzle_sequence(puzzle_ids: list[str]) -> tuple[list[dict], list[dict
 
 def wait_until(app, predicate, timeout_ms=15000, label="GUI action"):
     deadline = time.monotonic() + timeout_ms / 1000
-    while time.monotonic() < deadline:
-        app.processEvents()
-        if predicate():
-            return
-        QTest.qWait(15)
-    visible = [widget for widget in QApplication.topLevelWidgets() if widget.isVisible()]
-    modal = [f"{type(widget).__name__}:{widget.windowTitle()!r}"
-             for widget in visible if widget.isModal() or isinstance(widget, QMessageBox)]
-    pages = []
-    for top in visible:
-        for page in top.findChildren(QWidget, "puzzleTrainingPage"):
-            state = getattr(page, "state", None)
-            puzzle = getattr(state, "puzzle", None)
-            pages.append({
-                "mode": getattr(page, "attempt_mode", None),
-                "session_id": getattr(page, "_session_id", None),
-                "puzzle_id": getattr(puzzle, "puzzle_id", None),
-                "status": getattr(getattr(state, "status", None), "value", None),
-                "rated_status": getattr(getattr(page, "rated_status", None), "text", lambda: "")(),
-            })
-    active = app.activeWindow()
-    active_name = (f"{type(active).__name__}:{active.windowTitle()!r}"
-                   if active is not None else "none")
-    diagnostic = (f"PUZ06_WAIT_TIMEOUT label={label!r} timeout_ms={timeout_ms} "
-                  f"active={active_name} modal={modal!r} pages={pages!r}")
-    print(diagnostic, flush=True)
-    raise AssertionError(diagnostic)
+    unexpected = []
+    modal_guard = QTimer(app)
+
+    def close_unexpected_modal():
+        for dialog in QApplication.topLevelWidgets():
+            if (isinstance(dialog, QDialog) and dialog.isVisible()
+                    and (dialog.isModal() or isinstance(dialog, QMessageBox))):
+                detail = {"title": dialog.windowTitle(),
+                          "buttons": [button.text() for button in
+                                      dialog.findChildren(QPushButton)]}
+                unexpected.append(detail)
+                print("PUZ06_UNEXPECTED_MODAL " + json.dumps(
+                    {"label": label, "expected": "no modal while waiting", **detail},
+                    ensure_ascii=True), flush=True)
+                dialog.reject()
+                modal_guard.stop()
+                return
+
+    modal_guard.setInterval(25)
+    modal_guard.timeout.connect(close_unexpected_modal)
+    modal_guard.start()
+    try:
+        while time.monotonic() < deadline:
+            app.processEvents()
+            if unexpected:
+                raise AssertionError(f"PUZ06_UNEXPECTED_MODAL label={label!r} "
+                                     f"actual={unexpected[0]!r}")
+            if predicate():
+                return
+            QTest.qWait(15)
+        diagnostic = (f"PUZ06_WAIT_TIMEOUT label={label!r} timeout_ms={timeout_ms} "
+                      f"state={_ui_diagnostic(app)!r}")
+        print(diagnostic, flush=True)
+        raise AssertionError(diagnostic)
+    finally:
+        modal_guard.stop()
 
 
 def capture(widget, name, journal):
@@ -442,29 +514,65 @@ def choose_theme_with_mouse(app, page, data):
     choose_combo_item_with_mouse(app, page.theme, data)
 
 
-def click_dialog_button_with_mouse(app, title, text, trigger):
-    deadline = time.monotonic() + 8
+def click_dialog_button_with_mouse(app, title, text, trigger, *, label=None):
+    deadline = time.monotonic() + 3.0
     clicked: list[bool] = []
+    failure: list[str] = []
+    label = label or f"{title} / {text}"
+    print("PUZ06_MODAL_BEGIN " + json.dumps({
+        "label": label, "expected_title": title, "expected_button": text,
+        "context": _ui_diagnostic(app),
+    }, ensure_ascii=True), flush=True)
 
     def locate_and_click():
+        if clicked or failure:
+            return
         dialog = app.activeModalWidget()
-        if isinstance(dialog, QDialog) and dialog.windowTitle() == title:
-            button = None
-            if isinstance(dialog, QMessageBox) and text in {"Да", "Yes"}:
-                button = dialog.button(QMessageBox.StandardButton.Yes)
-            if button is None:
-                button = next((item for item in dialog.findChildren(QPushButton)
-                               if item.text() == text), None)
-            if button is not None:
-                QTest.mouseClick(button, Qt.MouseButton.LeftButton)
-                clicked.append(True)
-                return
-        if time.monotonic() < deadline:
-            QTimer.singleShot(20, locate_and_click)
+        if isinstance(dialog, QDialog):
+            buttons = [item.text() for item in dialog.findChildren(QPushButton)]
+            if dialog.windowTitle() != title:
+                failure.append(f"unexpected dialog title={dialog.windowTitle()!r}, "
+                               f"buttons={buttons!r}; expected title={title!r}, "
+                               f"button={text!r}")
+            else:
+                button = None
+                if isinstance(dialog, QMessageBox) and text in {"Да", "Yes"}:
+                    button = dialog.button(QMessageBox.StandardButton.Yes)
+                if button is None:
+                    button = next((item for item in dialog.findChildren(QPushButton)
+                                   if item.text() == text), None)
+                if button is None:
+                    failure.append(f"dialog title={title!r} has buttons={buttons!r}; "
+                                   f"expected button={text!r}")
+                else:
+                    print("PUZ06_MODAL_CLICK " + json.dumps({
+                        "label": label, "title": title, "button": text,
+                    }, ensure_ascii=True), flush=True)
+                    QTest.mouseClick(button, Qt.MouseButton.LeftButton)
+                    clicked.append(True)
+                    return
+            print("PUZ06_MODAL_MISMATCH " + json.dumps({
+                "label": label, "failure": failure[-1],
+                "context": _ui_diagnostic(app),
+            }, ensure_ascii=True), flush=True)
+            dialog.reject()
+            return
+        if time.monotonic() >= deadline:
+            failure.append(f"expected dialog {title!r} with button {text!r} was not shown")
+            print("PUZ06_MODAL_MISSING " + json.dumps({
+                "label": label, "context": _ui_diagnostic(app),
+            }, ensure_ascii=True), flush=True)
+            return
+        QTimer.singleShot(20, locate_and_click)
 
     QTimer.singleShot(0, locate_and_click)
     trigger()
-    wait_until(app, lambda: bool(clicked), 9000)
+    wait_until(app, lambda: bool(clicked or failure), 3500,
+               label=f"modal action {label}")
+    if failure:
+        raise AssertionError(f"PUZ06_MODAL_FAILURE label={label!r}: {failure[0]}")
+    if not clicked:
+        raise AssertionError(f"PUZ06_MODAL_FAILURE label={label!r}: expected click missing")
 
 
 def solve_visible_line(app, page, journal, tag):
@@ -615,7 +723,8 @@ def run():
     # runner database and trigger each actual visible button.
     click_dialog_button_with_mouse(
         app, "Оставить текущую задачу?", "Да",
-        lambda: QTest.mouseClick(page.home_button, Qt.MouseButton.LeftButton))
+        lambda: QTest.mouseClick(page.home_button, Qt.MouseButton.LeftButton),
+        label="leave training task for Home")
     wait_until(app, lambda: window.screen_stack.currentWidget() is window.home_page)
     account = window.game_repository.ensure_archive_account(adapter.username)
     serialized = json.dumps(payload, ensure_ascii=False)
@@ -649,7 +758,8 @@ def run():
 
     click_dialog_button_with_mouse(
         app, "Оставить текущую задачу?", "Да",
-        lambda: QTest.mouseClick(replay_page.home_button, Qt.MouseButton.LeftButton))
+        lambda: QTest.mouseClick(replay_page.home_button, Qt.MouseButton.LeftButton),
+        label="leave replay for Home")
     wait_until(app, lambda: window.screen_stack.currentWidget() is window.home_page)
     QTest.mouseClick(window.home_activity_button, Qt.MouseButton.LeftButton)
     page = window._puzzle_training_page
@@ -840,7 +950,8 @@ def run():
     adapter.set_real_sequence(consent_cancel_payloads)
     click_dialog_button_with_mouse(
         app, "Рейтинг задач Lichess", "Отмена",
-        lambda: QTest.mouseClick(window.home_rated_button, Qt.MouseButton.LeftButton))
+        lambda: QTest.mouseClick(window.home_rated_button, Qt.MouseButton.LeftButton),
+        label="Home rated consent cancellation")
     page = window._puzzle_training_page
     wait_until(app, lambda: page.mode == "TRAINING" and page.attempt_mode == "TRAINING"
                and page._session_puzzle_id == "9FTAb", 20000)
@@ -857,7 +968,8 @@ def run():
     adapter.set_real_sequence(rated_payloads[:1])
     click_dialog_button_with_mouse(
         app, "Рейтинг задач Lichess", "Разрешить на Lichess",
-        lambda: QTest.mouseClick(window.home_rated_button, Qt.MouseButton.LeftButton))
+        lambda: QTest.mouseClick(window.home_rated_button, Qt.MouseButton.LeftButton),
+        label="Home rated consent acceptance")
     page = window._puzzle_training_page
     wait_until(app, lambda: page.attempt_mode == "LICHESS_RATED"
                and page.state.puzzle is not None, 20000)
@@ -878,7 +990,8 @@ def run():
     before_posts = len(adapter.rated_posts)
     click_dialog_button_with_mouse(
         app, "Переключить режим?", "Да",
-        lambda: QTest.mouseClick(page.training_mode_button, Qt.MouseButton.LeftButton))
+        lambda: QTest.mouseClick(page.training_mode_button, Qt.MouseButton.LeftButton),
+        label="rated to training mode switch")
     wait_until(app, lambda: page.attempt_mode == "TRAINING"
                and page.state.puzzle is not None and page._session_puzzle_id != "lq8m1", 20000)
     if adapter.rated_posts:
@@ -893,14 +1006,16 @@ def run():
     adapter.set_real_sequence([rated_payloads[2], auto_next_payloads[0]])
     click_dialog_button_with_mouse(
         app, "Переключить режим?", "Да",
-        lambda: QTest.mouseClick(page.rated_mode_button, Qt.MouseButton.LeftButton))
+        lambda: QTest.mouseClick(page.rated_mode_button, Qt.MouseButton.LeftButton),
+        label="training to rated mode switch")
     wait_until(app, lambda: page.attempt_mode == "LICHESS_RATED"
                and page.state.puzzle is not None and page._session_puzzle_id == "MdQwv", 20000)
     capture(page, "mode-switched-to-rated", journal)
     if len(adapter.rated_posts) != before_posts:
         raise AssertionError("An untouched task produced a rated submission during mode switch")
     wait_until(app, lambda: page._prepared_online_puzzle is not None
-               and page._prepared_online_puzzle["puzzle"].puzzle_id == "ehjSy", 20000)
+               and page._prepared_online_puzzle["puzzle"].puzzle_id == "ehjSy", 20000,
+               "rated prefetch prepared task ehjSy after mode switch")
     click_checkbox(app, page.auto_next, True)
     adapter.block_rated = True
     adapter.release_rated.clear()
@@ -931,7 +1046,8 @@ def run():
 
     click_dialog_button_with_mouse(
         app, "Оставить текущую задачу?", "Да",
-        lambda: QTest.mouseClick(page.home_button, Qt.MouseButton.LeftButton))
+        lambda: QTest.mouseClick(page.home_button, Qt.MouseButton.LeftButton),
+        label="leave rated task for Home after acknowledgement")
     wait_until(app, lambda: window.screen_stack.currentWidget() is window.home_page)
     wait_until(app, lambda: "1807" in window.home_page.official_puzzle_rating.text(), 5000)
     capture(window, "home-official-rating-after-server-ack", journal)
@@ -963,7 +1079,9 @@ def run():
     # GitHub Actions' Windows console may use cp1252 even when the journal is
     # UTF-8; keep its one-line console copy ASCII while the artifact stays UTF-8.
     print("PUZ06_ACTION_JOURNAL " + json.dumps(trace, ensure_ascii=True, sort_keys=True))
-    cleanup()
+    cleanup_error = cleanup()
+    if cleanup_error:
+        raise AssertionError(cleanup_error)
 
 
 if __name__ == "__main__":
