@@ -6,7 +6,7 @@
 
 **Base/head before this package:** `4c2feba39339869667d2ae186a93f72ef96a17a4`
 
-**Status:** implementation and Windows verification in progress; PR remains Draft; not merged.
+**Status:** implementation complete for current scope; Windows L1 and themed L2 passed at code SHA `21095b10622fd785998935750f79f0fa91f03f51`; exact-head L3 awaits owner workflow dispatch. PR remains Draft; not merged.
 
 ## Scope
 
@@ -24,7 +24,7 @@ No owner SQLite, OAuth token, or keyring entry has been accessed. Windows runner
 
 - Local `python -m compileall` for changed Python modules and tests: **PASS** (syntax only; local pytest/Qt was not run).
 - Local `git diff --check`: **PASS**.
-- L1/L2/L3 Windows runner results: **PENDING**.
+- L1/L2 Windows runner results: **PASS** at code SHA `21095b10622fd785998935750f79f0fa91f03f51`; full exact-head L3: **PENDING owner dispatch**.
 - Public GET, authenticated account behavior, and real rated result POST: authenticated account and rated POST intentionally **NOT RUN**; public read-only checks are recorded in the L2 action journal.
 - Owner manual Windows acceptance and independent review: **PENDING**.
 
@@ -32,14 +32,14 @@ No owner SQLite, OAuth token, or keyring entry has been accessed. Windows runner
 
 | Requirement | Code status | Runner status | Owner status |
 | --- | --- | --- | --- |
-| PUZ06-01…12: two modes, official server rating, explicit permission, durable attempt outcome | Implemented; verify on L1/L2/L3 | Pending | Pending |
-| PUZ05/§13: activity FEN, genuine queue, unified exits, 429 recovery, filter freeze, profile placeholder, review text | Implemented; targeted cases added | Pending | Pending |
-| Ten genuine public puzzles, real Qt interactions, captures | Journey driver prepared; no cloned IDs | Pending | Pending |
-| Rated ACK and ambiguity behavior | Fake transport only; no real rated POST | Pending | Authenticated owner acceptance required |
+| PUZ06-01…12: two modes, official server rating, explicit permission, durable attempt outcome | Implemented | L1/L2 passed; L3 pending | Pending |
+| PUZ05/§13: activity FEN, genuine queue, unified exits, 429 recovery, filter freeze, profile placeholder, review text | Implemented | L1/L2 passed; L3 pending | Pending |
+| Ten genuine public puzzles, real Qt interactions, captures | Journey driver uses native mouse/wheel events and public puzzle payloads | L2 passed; L3 pending | Pending |
+| Rated ACK and ambiguity behavior | Fake transport only; no real rated POST | L1/L2 passed; L3 pending | Authenticated owner acceptance required |
 
 ## Results and artifacts
 
-Populate after the runner executions with exact code SHA, test counts, Windows workflow/run links, artifact IDs and digests. Open and inspect the L2 action journal and representative native frames at each configured scale before marking visual acceptance complete.
+See the §14 continuation below for the exact code SHA, run links, artifact ID/digest, reviewed action journal and native frames. The final exact-head L3 still awaits owner dispatch.
 
 ## PUZ-UX-06 §14 continuation (2026-11-26)
 
@@ -53,3 +53,16 @@ This continuation is limited to the four owner-confirmed §14 findings. It start
 - **Implementation in progress:** (1) strict account + official nested `PuzzleActivity` identity, strict `bool`/integer fields, a narrow timestamp window, and unique-match-only confirmation; no invented rating delta; (2) synchronous gate for every unresolved rated status, training-mode preservation, and no rated prefetch; (3) frozen payload persistence, preflight failures remain `not_sent`, and `sending` is persisted immediately before POST; startup alone converts interrupted `sending` to `unknown`; prepared/not-sent retry uses the saved payload; explicit reauthorization does not send; (4) a rated-only close choice persists board progress as a local `not_sent` abort marker and sends nothing, then shows the abort state on re-entry.
 - **Local checks after the implementation edits:** `git diff --check` and Python 3.12 `py_compile` for changed production/test modules passed. Local pytest/Qt and owner-profile GUI/database access were not run.
 - **Next verification:** targeted L1 is pending on the implementation SHA; then one §14-themed Windows L2; then one final exact-head Windows L3. Exact run links, test totals, inspected artifact names and hashes will be recorded here after each runner completes. No real rated POST is used in CI. PR #57 remains Draft; merge is not authorized.
+
+## PUZ-UX-06 §14.4 continuation — bounded Windows MainWindow journey driver (2026-11-26)
+
+This continuation addresses only the test-driver diagnosis and bounded cleanup requested in §14.4. The reviewed code head before this continuation was `c5db017a9ae530988d5df7099d23ff75a09cac43`; the final code change is a journey-fixture correction at `21095b10622fd785998935750f79f0fa91f03f51`. No production module was changed.
+
+- **Cancelled run diagnosis:** run [45819087962](https://github.com/feshakomissarov-prog/chess/actions/runs/45819087962) was cancelled before the original journey failure could be established. Its log proves that the diagnostic path itself raised `NameError: QWidget is not defined`, masking the pending test failure. The log does **not** prove the original event-loop/modal root cause. On a separate earlier run at `e11a675c425e36732ff671b8d4700291bffc5fbb`, the improved diagnostic observed an active MainWindow, no modal dialog, and Rated mode `Ready` while the scenario waited for an `ehjSy` prefetch before ACK. That was an invalid test expectation: rated mode intentionally requests NEXT only after ACK. No application defect was confirmed.
+- **RED→GREEN driver evidence:** focused driver tests were added at commit `d863b4967d3100e18a3d6e3f0ab93598ebb4fa7f`; the bounded RED run failed the unexpected-dialog and cleanup-dialog cases in 15.04 seconds. Commit `e11a675c425e36732ff671b8d4700291bffc5fbb` added QWidget diagnostics, fail-fast unexpected-modal detection, bounded mouse-driven cleanup, and an external journey watchdog. Its targeted Windows L1 passed. The first L2 at that SHA completed the large archive suite (406 passed in 174.24 seconds) but correctly failed the journey on the pre-ACK prefetch expectation described above.
+- **Addressed journey expectation:** commit `21095b10622fd785998935750f79f0fa91f03f51` removed only the impossible wait for rated prefetch before ACK. The journey continues to assert that ACK for `MdQwv` triggers a real mouse-driven auto-next request that loads distinct public task `ehjSy`.
+- **Final L1:** Windows verification [run 45833667411](https://github.com/feshakomissarov-prog/chess/actions/runs/45833667411), exact checked-out SHA `21095b10622fd785998935750f79f0fa91f03f51`: unchanged-base RED job passed; compile, bounded driver recovery tests, store/API, UI/worker, PUZ05 interactions, PUZ06 mode/rated contracts and focused MainWindow regression groups all passed.
+- **Final themed L2:** the same run's `L2 PUZ-UX-05/06 Windows user journey` passed. Large Home archive regression: **406 passed in 168.42 seconds**. Native MainWindow journey passed at 100%, 125% and 150%; it used real Qt mouse/wheel events for Home entry, right-click arrows, move history/review/return, hint/reveal/repeat, wrong then correct move, result ribbon, ten sequential distinct public mate-in-2 IDs, auto-next toggle/manual recovery, network error/retry, mode/consent switches, rated ACK and post-ACK auto-next. The journal records 21 distinct public puzzle IDs with distinct position/solution hashes. The official public GET returned HTTP 200 without Authorization. Rated behavior used one clearly labeled synthetic fake response; **no rated HTTP POST** was sent and authenticated Lichess acceptance was not tested.
+- **Diagnostic note:** the successful L2 journey log includes a `faulthandler` stack snapshot at the 90-second diagnostic interval, pointing to `time.sleep(4.0)` inside the intentional pacing loop for public Lichess puzzle reads. The scenario then completed, uploaded all three scale captures, and exited successfully. This is evidence of the diagnostic timer firing during deliberate API pacing, not evidence of a hung Qt action.
+- **Visual/artifact review:** I downloaded and inspected the action journal and representative images including Home dual-mode buttons, first puzzle at 100/125/150%, right-click/wheel review, wrong/correct ribbon, reveal, network recovery, and rated auto-next. Artifact [15125380870](https://github.com/feshakomissarov-prog/chess/actions/runs/45833667411/artifacts/15125380870), `puz-ux-06-l2-21095b10622fd785998935750f79f0fa91f03f51`, SHA-256 `f52ea7b79f5740cb75cb9a71a1370174570c078e56befb1dec185f8ef7cbc730`. The action journal confirms the GUI clicks and board moves completed; Owner SQLite/OAuth touched: **false**.
+- **Exact-head L3:** pending. Since PR #57 remains Draft, the full `Windows tests` workflow does not automatically run on Draft pushes. Owner action: open [Actions → Windows tests](https://github.com/feshakomissarov-prog/chess/actions/workflows/windows-tests.yml), choose branch `codex/puz-ux-05-owner-live-next-replay`, verify the selected head is the final branch SHA after this log update, then click **Run workflow**. Review that run and its visual artifact before acceptance. No merge is authorized.
