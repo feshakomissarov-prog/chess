@@ -300,6 +300,7 @@ def test_manual_next_cannot_bypass_pending_rated_ack(qtbot):
     page.apply_rated_result("confirmed", win=True, attempt_id=original_session,
                             attempt_payload={"account_id": page.account_id,
                                              "attempt_id": original_session})
+    page.state.status = PuzzleStatus.SUCCESS
     assert page.fetch.isEnabled()
     QTest.mouseClick(page.fetch, Qt.MouseButton.LeftButton)
     assert page._session_puzzle_id == "puzzle-next"
