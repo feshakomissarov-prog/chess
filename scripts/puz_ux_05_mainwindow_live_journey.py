@@ -1013,9 +1013,9 @@ def run():
     capture(page, "mode-switched-to-rated", journal)
     if len(adapter.rated_posts) != before_posts:
         raise AssertionError("An untouched task produced a rated submission during mode switch")
-    wait_until(app, lambda: page._prepared_online_puzzle is not None
-               and page._prepared_online_puzzle["puzzle"].puzzle_id == "ehjSy", 20000,
-               "rated prefetch prepared task ehjSy after mode switch")
+    # Rated mode deliberately does not prefetch before Lichess confirms a
+    # result. Keep ehjSy as the next public fixture and let the genuine
+    # mouse-driven auto-next request consume it only after the ACK below.
     click_checkbox(app, page.auto_next, True)
     adapter.block_rated = True
     adapter.release_rated.clear()
