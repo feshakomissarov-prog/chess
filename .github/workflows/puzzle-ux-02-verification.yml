@@ -91,7 +91,15 @@ jobs:
           tests/test_puzzle_training_async.py tests/test_puzzle_api_adapter.py
           tests/test_puz_ux_03_interaction.py tests/test_puz_ux_03_rating.py
           tests/test_puz_ux_05_live_flow.py tests/test_puz_ux_06_modes.py
-          tests/test_puz_ux_06_rated.py tests/test_window.py
+          tests/test_puz_ux_06_rated.py tests/test_puz_ux_06_live_journey_driver.py
+          tests/test_window.py
+      - name: Prove bounded MainWindow journey driver recovery
+        timeout-minutes: 2
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: >-
+          python -X faulthandler -m pytest -o addopts= -vv
+          tests/test_puz_ux_06_live_journey_driver.py
       - name: Run puzzle store and API contracts
         env:
           QT_QPA_PLATFORM: offscreen
