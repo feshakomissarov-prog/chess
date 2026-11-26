@@ -113,7 +113,7 @@ def test_ambiguous_post_is_durable_unknown_and_never_retried(qtbot, tmp_path, mo
     while (not page.rated_status.text().startswith("Результат Lichess неизвестен")
            and time.monotonic() < deadline):
         QTest.qWait(25)
-    assert page.rated_status.text().startswith("Результат Lichess неизвестен"), (
+    assert page.rated_status.text().startswith("Результат задачи puzzle-unknown: неизвестен"), (
         f"Rated result UI did not update: text={page.rated_status.text()!r}; "
         f"stored={window.game_repository.rated_puzzle_attempt(page._session_id)!r}; "
         f"current_page={window.screen_stack.currentWidget() is page}; "
