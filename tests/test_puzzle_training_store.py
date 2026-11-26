@@ -205,7 +205,7 @@ def test_v27_upgrade_adds_rating_tables_without_losing_attempt_history(tmp_path)
                 "SELECT name FROM sqlite_master WHERE type='table'")}
             assert {"local_puzzle_practice_ratings", "local_puzzle_rating_events"} <= tables
             assert {"local_puzzle_attempt_outbox"} <= tables
-            assert db.execute("PRAGMA user_version").fetchone()[0] == 30
+            assert db.execute("PRAGMA user_version").fetchone()[0] == 31
             assert "rated_puzzle_attempts" in tables
     finally:
         migrated.shutdown()
