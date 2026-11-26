@@ -90,6 +90,7 @@ def test_ambiguous_post_is_durable_unknown_and_never_retried(qtbot, tmp_path, mo
         client=client, is_auth_generation_current=lambda _generation: True)
     page = PuzzleTrainingPage()
     qtbot.addWidget(page)
+    page.set_mode("LICHESS_RATED")
     page.account_id = "lichess:fixture-user"
     page._session_account_id = page.account_id
     page._session_id = "session-unknown"
