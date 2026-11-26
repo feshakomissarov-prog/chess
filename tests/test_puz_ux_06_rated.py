@@ -217,6 +217,8 @@ def test_unknown_reconcile_rejects_stale_malformed_and_foreign_activity(
     window, _settings, _database = isolated_rated_window(tmp_path, "invalid-activity")
     qtbot.addWidget(window)
     page = mount_rated_page(window)
+    window.show()
+    qtbot.wait(25)
     # Keep failure cleanup from opening MainWindow's rated-partial close dialog.
     page.state.status = PuzzleStatus.SUCCESS
     attempt = {"attempt_id": "invalid-activity-attempt", "session_id": "invalid-activity-attempt",
