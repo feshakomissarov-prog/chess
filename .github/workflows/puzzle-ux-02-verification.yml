@@ -72,6 +72,7 @@ jobs:
         with:
           ref: ${{ github.event.pull_request.head.sha }}
       - uses: actions/setup-python@v7.1.0
+        timeout-minutes: 5
         with:
           python-version: "3.12"
           cache: pip
