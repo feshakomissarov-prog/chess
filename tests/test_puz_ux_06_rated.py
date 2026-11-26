@@ -136,7 +136,7 @@ def test_ambiguous_post_is_durable_unknown_and_never_retried(qtbot, tmp_path, mo
 
 
 def test_live_rated_submission_hides_retry_and_admits_one_post(
-        qtbot, tmp_path, monkeypatch):
+        qtbot, tmp_path, monkeypatch, request):
     """A user retry during automatic account lookup must not duplicate a POST."""
     monkeypatch.setattr(window_module, "WindowsCredentialStore", FakeTokenStore)
     window, _settings, _database = isolated_rated_window(tmp_path, "single-flight")
@@ -167,6 +167,14 @@ def test_live_rated_submission_hides_retry_and_admits_one_post(
 
     client = Client()
     window.lichess = SimpleNamespace(client=client)
+
+    def cleanup_window():
+        release_account.set()
+        # Keep a failing assertion from opening MainWindow's partial-rated close prompt.
+        page.state.status = PuzzleStatus.SUCCESS
+        window.close()
+
+    request.addfinalizer(cleanup_window)
     page.rated_result_requested.connect(
         lambda frozen: window._submit_rated_puzzle_result(page, frozen))
     page.rated_retry_requested.connect(
@@ -178,6 +186,14 @@ def test_live_rated_submission_hides_retry_and_admits_one_post(
                      pos=page.board._square_center(chess.D1).toPoint())
     qtbot.mouseClick(page.board, Qt.MouseButton.LeftButton,
                      pos=page.board._square_center(chess.H5).toPoint())
+    qtbot.waitUntil(
+        lambda: page.state.status == PuzzleStatus.READY
+        and page.state.solution_index >= 2,
+        timeout=2000)
+    qtbot.mouseClick(page.board, Qt.MouseButton.LeftButton,
+                     pos=page.board._square_center(chess.F1).toPoint())
+    qtbot.mouseClick(page.board, Qt.MouseButton.LeftButton,
+                     pos=page.board._square_center(chess.C4).toPoint())
     qtbot.waitUntil(account_started.is_set, timeout=3000)
 
     frozen = dict(page._rated_pending_attempt)
@@ -211,7 +227,6 @@ def test_live_rated_submission_hides_retry_and_admits_one_post(
     assert row["server_rating_diff"] == 4
     assert not page.reconcile_rated_button.isVisible()
     assert "подтвердил результат" in page.rated_status.text().casefold()
-    window.game_repository.shutdown()
     window.close()
 
 
