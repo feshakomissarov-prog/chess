@@ -196,8 +196,7 @@ def test_unknown_reconcile_uses_official_nested_activity(qtbot, tmp_path, monkey
     page.reconcile_rated_button.setEnabled(True)
 
     QTest.mouseClick(page.reconcile_rated_button, Qt.MouseButton.LeftButton)
-    qtbot.waitUntil(lambda: window.game_repository.rated_puzzle_attempt(
-        attempt["attempt_id"])["status"] == "confirmed", timeout=3000)
+    qtbot.waitUntil(lambda: applied_statuses == ["confirmed"], timeout=3000)
 
     confirmed = window.game_repository.rated_puzzle_attempt(attempt["attempt_id"])
     assert client.activity_calls == 1
