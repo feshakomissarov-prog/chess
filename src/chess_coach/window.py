@@ -107,7 +107,7 @@ from .ui.pages.home import HomeEvaluationGraph, HomePage
 from .ui.pages.library import LibraryPage
 from .ui.pages.puzzles import PuzzleHistoryPage
 from .ui.pages.puzzle_training import PuzzleTrainingPage
-from .lichess.puzzle_training import (normalize_api_puzzle, normalize_activity_puzzle,
+from .lichess.puzzle_training import (PuzzleStatus, normalize_api_puzzle, normalize_activity_puzzle,
                                       normalize_saved_puzzle_payload,
                                       select_api_puzzle_queue, select_next_api_puzzle,
                                       select_next_local_candidate)
@@ -578,6 +578,9 @@ class MainWindow(QMainWindow):
         color = self.settings.value("player_color", chess.WHITE, type=int)
         self.controller = GameController(chess.Color(color))
         self.game_repository = self.runtime.repository
+        # Any remaining `sending` record predates this process. Do not perform
+        # this transition from later puzzle fetches while a live POST may run.
+        self.game_repository.mark_all_interrupted_rated_attempts_unknown()
         self._ephemeral_study = False
         self.archive_sync = ArchiveSyncCoordinator(self.game_repository)
         self.dashboard_queries = DashboardQueryCoordinator(self.game_repository)
@@ -6032,6 +6035,7 @@ class MainWindow(QMainWindow):
         if not selected.startswith("lichess:"):
             selected = "local"
         page.account_id = selected
+        page._session_account_id = selected
         page.set_accounts([], selected)
         explicit_mode = mode is not None
         if mode is None:
@@ -6074,6 +6078,8 @@ class MainWindow(QMainWindow):
             lambda session_id: self._reconcile_rated_puzzle_result(page, session_id))
         page.rated_retry_requested.connect(
             lambda attempt: self._submit_rated_puzzle_result(page, attempt, retry=True))
+        page.rated_reauthorize_requested.connect(
+            lambda attempt_id: self._reauthorize_rated_puzzle_attempt(page, attempt_id))
         page.local_puzzle_requested.connect(
             lambda mode, theme: self._request_local_training_puzzle(page, mode, theme))
         page.replay_requested.connect(
@@ -6102,6 +6108,17 @@ class MainWindow(QMainWindow):
         page.attach_pending_attempts([
             attempt for attempt in self._puzzle_failed_attempts.values()
             if attempt.get("account_id") == selected])
+        unresolved = self.game_repository.unresolved_rated_puzzle_attempts(selected)
+        if unresolved and mode == "LICHESS_RATED":
+            page.set_rated_pending_attempt(unresolved[0])
+            page.set_message(
+                "Сначала проверьте или восстановите сохранённый рейтинговый результат.")
+            return
+        aborted = self.game_repository.latest_aborted_rated_puzzle_attempt(selected)
+        if aborted and mode == "LICHESS_RATED":
+            page.set_aborted_rated_notice(aborted)
+            page.network_status.setText("Нажмите «Следующая задача», чтобы начать новую рейтинговую задачу.")
+            return
         if puzzle_id:
             self._request_local_training_puzzle(page, "replay", "", puzzle_id=puzzle_id,
                                                 source_hint=puzzle_source)
@@ -6164,6 +6181,19 @@ class MainWindow(QMainWindow):
         self._request_puzzle_training(page, theme, difficulty, authorize=True,
                                       force_authorize=True)
 
+    def _reauthorize_rated_puzzle_attempt(self, page: PuzzleTrainingPage,
+                                          attempt_id: str) -> None:
+        row = self.game_repository.rated_puzzle_attempt(str(attempt_id))
+        if (not row or row.get("status") != "not_sent"
+                or str(row.get("account_id") or "").casefold()
+                != str(page.account_id or "").casefold()):
+            page.rated_status.setText("Не найдена попытка для переподключения этого профиля.")
+            return
+        page.set_rated_pending_attempt(row)
+        self._request_puzzle_training(
+            page, page.selected_theme(), page.selected_difficulty(), authorize=True,
+            force_authorize=True, reauthorize_attempt=row)
+
     def _puzzle_training_mode_changed(self, page: PuzzleTrainingPage, mode: str) -> None:
         if page is not self._puzzle_training_page:
             return
@@ -6195,8 +6225,15 @@ class MainWindow(QMainWindow):
             return
         service = self.lichess
         if service is None or self.offline_mode:
-            page.apply_rated_result("not_sent", win=bool(payload.get("win")),
-                                     message="Результат не отправлен · подключите Lichess и проверьте попытку.")
+            frozen = {**payload, "mode": "LICHESS_RATED", "rated": True}
+            stored, _inserted = self.game_repository.prepare_rated_puzzle_attempt(frozen)
+            stored = self.game_repository.update_rated_puzzle_attempt(
+                attempt_id, "not_sent", error="offline before POST")
+            page.apply_rated_result(
+                "not_sent", win=bool(frozen.get("win")),
+                message="Результат сохранён, но не отправлен · подключите Lichess.",
+                attempt_id=attempt_id, attempt_payload=frozen,
+                attempt_account_id=account_id)
             return
         request_id = uuid.uuid4().hex
         generation = self._puzzle_training_generation
@@ -6213,55 +6250,64 @@ class MainWindow(QMainWindow):
         def worker() -> None:
             status = "not_sent"
             result: dict = {"attempt_id": attempt_id}
+            post_started = False
+            frozen = {**payload, "mode": "LICHESS_RATED", "rated": True}
             try:
                 pending = self.game_repository.unresolved_rated_puzzle_attempts(account_id)
                 if any(str(row.get("attempt_id")) != attempt_id for row in pending):
                     raise PermissionError(
                         "Есть рейтинговый результат, который ещё не удалось проверить. "
                         "Сначала подтвердите его в активности Lichess.")
-                frozen = {**payload, "mode": "LICHESS_RATED", "rated": True}
                 stored, inserted = self.game_repository.prepare_rated_puzzle_attempt(frozen)
+                status = str(stored.get("status") or "prepared")
                 if not inserted:
-                    status = str(stored.get("status") or "unknown")
-                    if retry and status == "not_sent":
-                        self.game_repository.update_rated_puzzle_attempt(attempt_id, "sending")
-                    else:
+                    try:
+                        persisted = json.loads(str(stored.get("payload_json") or "{}"))
+                    except (ValueError, TypeError):
+                        persisted = {}
+                    if not isinstance(persisted, dict) or not persisted:
+                        raise RuntimeError("Сохранённый рейтинговый payload недоступен.")
+                    frozen = persisted
+                    if status in {"sending", "unknown", "confirmed", "rejected"}:
                         result.update(status=status, stored=stored, duplicate=True,
-                                      message=("Попытка уже отправлена ранее."
-                                               if status in {"sending", "unknown", "confirmed"}
-                                               else "Результат сохранён; автоматический повтор запрещён."))
+                                      message=("Попытка уже отправлялась; повторный POST запрещён."
+                                               if status != "confirmed" else
+                                               "Попытка уже подтверждена Lichess."))
                         self.puzzle_training_finished.emit(request_id, result, None)
                         return
-                self.game_repository.update_rated_puzzle_attempt(attempt_id, "sending")
+                    if status not in {"prepared", "not_sent"} or not retry:
+                        result.update(status=status, stored=stored, duplicate=True,
+                                      message="Результат сохранён; используйте явную кнопку восстановления.")
+                        self.puzzle_training_finished.emit(request_id, result, None)
+                        return
+                elif retry and status != "prepared":
+                    raise RuntimeError("Повтор разрешён только для сохранённой попытки.")
                 store = WindowsCredentialStore(
                     service="ChessCoach.Lichess.Puzzles", user="puzzle-rated-token")
                 token = store.get()
                 if not token:
-                    self.game_repository.update_rated_puzzle_attempt(
-                        attempt_id, "not_sent", error="rated permission missing")
                     raise PermissionError(
                         "Не предоставлено отдельное разрешение puzzle:write. "
                         "Результат сохранён и не отправлялся.")
                 if not operation_current():
-                    self.game_repository.update_rated_puzzle_attempt(
-                        attempt_id, "not_sent", error="account context changed before send")
                     raise RequestNotSentError()
                 with authenticated_request_admission(operation_current, stop_event):
                     identity = service.client.get_account(token)
                 username = str((identity or {}).get("username") or "").strip()
                 if not username or f"lichess:{username.casefold()}" != account_id.casefold():
-                    self.game_repository.update_rated_puzzle_attempt(
-                        attempt_id, "not_sent", error="rated credential account mismatch")
                     raise PermissionError("Разрешение puzzle:write относится к другому аккаунту.")
                 if store.get() != token:
-                    self.game_repository.update_rated_puzzle_attempt(
-                        attempt_id, "not_sent", error="rated credential changed before send")
                     raise PermissionError("Разрешение puzzle:write изменилось; отправка отменена.")
+                if not operation_current():
+                    raise RequestNotSentError("Контекст аккаунта изменился до отправки.")
+                # This is the last durable transition before the mutating call.
+                self.game_repository.update_rated_puzzle_attempt(attempt_id, "sending")
+                post_started = True
                 try:
                     with authenticated_request_admission(operation_current, stop_event):
                         response = service.client.submit_puzzle_round(
-                            token, str(payload.get("angle") or "mix"),
-                            str(payload["puzzle_id"]), bool(payload.get("win")),
+                            token, str(frozen.get("angle") or frozen.get("theme") or "mix"),
+                            str(frozen["puzzle_id"]), bool(frozen.get("win")),
                             rated=True, next_count=1)
                 except RateLimitError as exc:
                     status = "not_sent"
@@ -6326,11 +6372,34 @@ class MainWindow(QMainWindow):
                               rating_diff=diff, rating=rating,
                               win=bool(payload.get("win")))
             except PermissionError as exc:
+                stored = self.game_repository.update_rated_puzzle_attempt(
+                    attempt_id, "not_sent", error=str(exc))
+                result.update(stored=stored,
+                              authorization_needed=("разреш" in str(exc).casefold()
+                                                    or "permission" in str(exc).casefold()
+                                                    or "401" in str(exc) or "403" in str(exc)))
                 result.update(status="not_sent", message=str(exc))
+            except LichessError as exc:
+                status = ("unknown" if post_started and exc.status not in {400, 401, 403, 404, 429}
+                          else "not_sent" if exc.status in {401, 403, 429}
+                          else "rejected")
+                stored = self.game_repository.update_rated_puzzle_attempt(
+                    attempt_id, status, error=str(exc))
+                result.update(status=status, stored=stored, http_status=exc.status,
+                              authorization_needed=exc.status in {401, 403},
+                              message=str(exc))
+            except RequestNotSentError as exc:
+                stored = self.game_repository.update_rated_puzzle_attempt(
+                    attempt_id, "not_sent", error=str(exc))
+                result.update(status="not_sent", stored=stored, message=str(exc))
             except Exception as exc:
-                result.update(status=status, message=(
-                    "Не удалось сохранить состояние рейтинговой попытки. "
-                    "Новая отправка автоматически не повторяется."))
+                status = "unknown" if post_started else "not_sent"
+                stored = self.game_repository.update_rated_puzzle_attempt(
+                    attempt_id, status, error=type(exc).__name__)
+                result.update(status=status, stored=stored, message=(
+                    "Ответ Lichess не получен после возможной отправки; повторный POST запрещён."
+                    if post_started else
+                    f"Сбой до отправки ({type(exc).__name__}). Результат сохранён и не отправлялся."))
             self.puzzle_training_finished.emit(request_id, result, None)
 
         def apply_result(result, error) -> None:
@@ -6342,12 +6411,20 @@ class MainWindow(QMainWindow):
                 return
             result_status = str(result.get("status") or "unknown")
             stored = result.get("stored") or {}
+            try:
+                applied_payload = json.loads(str(stored.get("payload_json") or "{}"))
+            except (ValueError, TypeError):
+                applied_payload = {}
+            if not isinstance(applied_payload, dict) or not applied_payload:
+                applied_payload = {**payload, "mode": "LICHESS_RATED", "rated": True}
             page.apply_rated_result(
                 result_status, win=bool(payload.get("win")),
                 rating_diff=result.get("rating_diff", stored.get("server_rating_diff")),
                 rating=result.get("rating", stored.get("server_rating")),
                     message=result.get("message"), attempt_id=attempt_id,
-                    attempt_payload={**payload, "mode": "LICHESS_RATED", "rated": True})
+                    attempt_payload=applied_payload,
+                    authorization_needed=bool(result.get("authorization_needed")),
+                    attempt_account_id=account_id)
             if result.get("retry_after"):
                 page.set_rate_limit_cooldown(int(result["retry_after"]))
             if result_status == "confirmed":
@@ -6386,14 +6463,25 @@ class MainWindow(QMainWindow):
                 username = str((identity or {}).get("username") or "").strip()
                 if f"lichess:{username.casefold()}" != account_id.casefold():
                     raise PermissionError("Разрешение задач относится к другому аккаунту.")
-                start = max(0, int(attempt["created_at_ms"]) - 60_000)
+                created_ms = int(attempt["created_at_ms"])
+                start = max(0, created_ms - 30_000)
                 events = list(client.stream_puzzle_activity(
                     token, threading.Event(), since=start, max_items=100))
-                matches = [item for item in events if isinstance(item, dict)
-                           and str(item.get("id") or "") == str(attempt["puzzle_id"])
-                           and bool(item.get("win")) == bool(attempt["win"])
-                           and abs(int(item.get("date") or 0) - int(attempt["created_at_ms"]))
-                               <= 10 * 60_000]
+                now_ms = int(time.time() * 1000)
+                matches = []
+                for item in events:
+                    if not isinstance(item, dict):
+                        continue
+                    event_date = item.get("date")
+                    event_win = item.get("win")
+                    puzzle = item.get("puzzle")
+                    if (type(event_date) is not int or type(event_win) is not bool
+                            or not isinstance(puzzle, dict)
+                            or str(puzzle.get("id") or "") != str(attempt["puzzle_id"])
+                            or event_win is not bool(attempt["win"])
+                            or not created_ms - 30_000 <= event_date <= now_ms + 30_000):
+                        continue
+                    matches.append(item)
                 if len(matches) == 1:
                     self.game_repository.update_rated_puzzle_attempt(
                         str(attempt["attempt_id"]), "confirmed",
@@ -6418,6 +6506,9 @@ class MainWindow(QMainWindow):
                                     win=bool(attempt.get("win")),
                                     message=result.get("message"),
                                     attempt_id=str(attempt.get("attempt_id") or attempt_id),
+                                    attempt_payload=json.loads(
+                                        str(attempt.get("payload_json") or "{}")),
+                                    attempt_account_id=account_id,
                                     schedule_auto_next=False)
 
         self._register_training_callback(page, request_id, generation, apply_result)
@@ -6743,8 +6834,16 @@ class MainWindow(QMainWindow):
 
     def _request_puzzle_training(self, page: PuzzleTrainingPage, theme: str,
                                  difficulty: str, *, authorize: bool,
-                                 force_authorize: bool = False) -> None:
+                                 force_authorize: bool = False,
+                                 reauthorize_attempt: dict | None = None) -> None:
         """Fetch exactly one new puzzle (and authorize only after the explicit CTA)."""
+        if page.mode == "LICHESS_RATED" and reauthorize_attempt is None:
+            unresolved = self.game_repository.unresolved_rated_puzzle_attempts(page.account_id)
+            if unresolved:
+                page.set_rated_pending_attempt(unresolved[0])
+                page.network_status.setText(
+                    "Новая рейтинговая задача заблокирована: сначала подтвердите прошлый результат.")
+                return
         if self.offline_mode:
             page.set_message("Для онлайн-задач Lichess включите подключение к сети.")
             return
@@ -6836,8 +6935,22 @@ class MainWindow(QMainWindow):
                     raise PermissionError(
                         "Сохранённое разрешение задач относится к другому профилю. "
                         "Выберите соответствующий профиль или подключите его отдельно.")
+                if reauthorize_attempt is not None:
+                    frozen_row = self.game_repository.rated_puzzle_attempt(
+                        str(reauthorize_attempt.get("attempt_id") or ""))
+                    if (not frozen_row or frozen_row.get("status") != "not_sent"
+                            or str(frozen_row.get("account_id") or "").casefold()
+                            != actual_account.casefold()):
+                        raise PermissionError(
+                            "Сохранённая попытка не принадлежит подключённому профилю.")
+                    refreshed = self.game_repository.update_rated_puzzle_attempt(
+                        str(frozen_row["attempt_id"]), "not_sent")
+                    self.puzzle_training_finished.emit(request_id, {
+                        "reauthorized": True, "attempt": refreshed,
+                        "account_id": actual_account,
+                    }, None)
+                    return
                 if rated_mode:
-                    self.game_repository.mark_interrupted_rated_attempts_unknown(actual_account)
                     unresolved = self.game_repository.unresolved_rated_puzzle_attempts(actual_account)
                     if unresolved:
                         exc = RuntimeError(
@@ -6847,8 +6960,9 @@ class MainWindow(QMainWindow):
                         raise exc
                 with authenticated_request_admission(operation_current, stop_event):
                     puzzle_get_started = time.perf_counter()
+                    batch_count = 1 if rated_mode else 5
                     result = client.get_puzzle_batch(
-                        token, angle=theme, difficulty=difficulty, count=5)
+                        token, angle=theme, difficulty=difficulty, count=batch_count)
                     puzzle_get_ms = (time.perf_counter() - puzzle_get_started) * 1000
                 if not operation_current():
                     return
@@ -6858,7 +6972,7 @@ class MainWindow(QMainWindow):
                     seen_ids.update(page_seen_ids)
                 selected_queue = select_api_puzzle_queue(
                     (result or {}).get("puzzles") if isinstance(result, dict) else None,
-                    seen_ids, theme=theme, max_count=5)
+                    seen_ids, theme=theme, max_count=1 if rated_mode else 5)
                 if not selected_queue:
                     raise LookupError(
                         "Для этой темы сейчас нет другой задачи. Измените тему или повторите загрузку.")
@@ -6919,6 +7033,21 @@ class MainWindow(QMainWindow):
         def apply_result(payload, error) -> None:
             if (generation != self._puzzle_training_generation or page is not self._puzzle_training_page
                     or self.screen_stack.currentWidget() is not page):
+                return
+            if not error and isinstance(payload, dict) and payload.get("reauthorized"):
+                attempt_row = dict(payload.get("attempt") or {})
+                try:
+                    frozen = json.loads(str(attempt_row.get("payload_json") or "{}"))
+                except (ValueError, TypeError):
+                    frozen = {}
+                page.set_rated_pending_attempt(attempt_row)
+                page.apply_rated_result(
+                    "not_sent", win=bool(attempt_row.get("win")),
+                    message="Разрешение обновлено. Проверьте и отправьте сохранённый результат.",
+                    attempt_id=str(attempt_row.get("attempt_id") or ""),
+                    attempt_payload=frozen if isinstance(frozen, dict) else {},
+                    authorization_needed=False, schedule_auto_next=False,
+                    attempt_account_id=str(attempt_row.get("account_id") or ""))
                 return
             if error:
                 error_data = error if isinstance(error, dict) else {}
@@ -12220,6 +12349,52 @@ class MainWindow(QMainWindow):
         self.show_home()
 
     def closeEvent(self, event) -> None:
+        puzzle_page = getattr(self, "_puzzle_training_page", None)
+        if (puzzle_page is not None and shiboken6.isValid(puzzle_page)
+                and puzzle_page.attempt_mode == "LICHESS_RATED"
+                and puzzle_page.state.puzzle is not None
+                and puzzle_page.state.status not in {
+                    PuzzleStatus.SUCCESS, PuzzleStatus.REVEALED,
+                    PuzzleStatus.SKIPPED, PuzzleStatus.UNAVAILABLE}
+                and not puzzle_page._rated_result_sent):
+            dialog = QMessageBox(self)
+            dialog.setIcon(QMessageBox.Icon.Question)
+            dialog.setWindowTitle("Незавершённая рейтинговая задача")
+            dialog.setText("Решение не завершено. Продолжить сейчас или закрыть без отправки?")
+            continue_button = dialog.addButton(
+                "Продолжить решение", QMessageBox.ButtonRole.RejectRole)
+            close_button = dialog.addButton(
+                "Закрыть без отправки", QMessageBox.ButtonRole.AcceptRole)
+            dialog.setDefaultButton(continue_button)
+            dialog.exec()
+            if dialog.clickedButton() is not close_button:
+                event.ignore()
+                return
+            try:
+                attempt = {
+                    "attempt_id": puzzle_page._session_id,
+                    "session_id": puzzle_page._session_id,
+                    "account_id": puzzle_page._session_account_id,
+                    "puzzle_id": puzzle_page._session_puzzle_id,
+                    "mode": "LICHESS_RATED", "rated": True, "win": False,
+                    "angle": puzzle_page._attempt_theme,
+                    "difficulty": puzzle_page._attempt_difficulty,
+                    "puzzle_payload": dict(puzzle_page._puzzle_payload or {}),
+                }
+                progress = {
+                    "position_fen": puzzle_page.state.board.fen(),
+                    "moves": [move.uci() for move in puzzle_page.state.board.move_stack],
+                    "solution_index": int(puzzle_page.state.solution_index),
+                    "mistakes": int(puzzle_page.state.mistakes),
+                    "hints_used": int(puzzle_page.state.hints_used),
+                }
+                self.game_repository.record_aborted_rated_puzzle_attempt(attempt, progress)
+            except Exception as exc:
+                QMessageBox.critical(
+                    self, "Не удалось сохранить решение",
+                    f"Задача осталась открытой, потому что прогресс не сохранён: {exc}")
+                event.ignore()
+                return
         with self._puzzle_attempt_state_lock:
             active_saves = list(self._puzzle_attempt_save_states.values())
         unsafe_attempts = [attempt for attempt in active_saves

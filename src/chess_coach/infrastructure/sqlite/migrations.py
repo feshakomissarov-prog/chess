@@ -314,6 +314,8 @@ class SQLiteMigrationMixin:
                     server_rating_diff INTEGER,
                     server_rating INTEGER,
                     last_error TEXT,
+                    payload_json TEXT NOT NULL DEFAULT '{}',
+                    progress_json TEXT,
                     UNIQUE(account_id,session_id)
                 );
                 CREATE INDEX IF NOT EXISTS idx_rated_puzzle_attempts_pending
@@ -369,6 +371,13 @@ class SQLiteMigrationMixin:
             for statement in schema_sql.split(";"):
                 if statement.strip():
                     db.execute(statement)
+            rated_attempt_columns = {row[1] for row in
+                                     db.execute("PRAGMA table_info(rated_puzzle_attempts)")}
+            if "payload_json" not in rated_attempt_columns:
+                db.execute("ALTER TABLE rated_puzzle_attempts ADD COLUMN payload_json "
+                           "TEXT NOT NULL DEFAULT '{}'")
+            if "progress_json" not in rated_attempt_columns:
+                db.execute("ALTER TABLE rated_puzzle_attempts ADD COLUMN progress_json TEXT")
             local_attempt_columns = {row[1] for row in
                                      db.execute("PRAGMA table_info(local_puzzle_attempts)")}
             if "mode" not in local_attempt_columns:

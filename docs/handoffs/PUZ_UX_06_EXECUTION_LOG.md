@@ -40,3 +40,12 @@ No owner SQLite, OAuth token, or keyring entry has been accessed. Windows runner
 ## Results and artifacts
 
 Populate after the runner executions with exact code SHA, test counts, Windows workflow/run links, artifact IDs and digests. Open and inspect the L2 action journal and representative native frames at each configured scale before marking visual acceptance complete.
+
+## PUZ-UX-06 §14 continuation (2026-11-26)
+
+This continuation is limited to the four owner-confirmed §14 findings. It starts from the already reviewed PR #57 code head `0bf366b52aa0deb04676868542f2defcc441a786`; the focused RED-only test commit was `e06232f5a5b26b45bc268cdffbac5b28180033a8`.
+
+- **RED evidence:** Windows L1 run [45802087262](https://github.com/feshakomissarov-prog/chess/actions/runs/45802087262) executed the focused PUZ06 tests. The exact-base check passed; five newly added §14 assertions failed as expected and 53 related tests passed. Failures isolated nested activity reconciliation, synchronous rated NEXT blocking, durable frozen payload/pre-POST recovery, and close-without-send persistence. The Qt waits are bounded at 3 seconds and include the expected state/status in their predicate.
+- **Implementation in progress:** (1) strict account + official nested `PuzzleActivity` identity, strict `bool`/integer fields, a narrow timestamp window, and unique-match-only confirmation; no invented rating delta; (2) synchronous gate for every unresolved rated status, training-mode preservation, and no rated prefetch; (3) frozen payload persistence, preflight failures remain `not_sent`, and `sending` is persisted immediately before POST; startup alone converts interrupted `sending` to `unknown`; prepared/not-sent retry uses the saved payload; explicit reauthorization does not send; (4) a rated-only close choice persists board progress as a local `not_sent` abort marker and sends nothing, then shows the abort state on re-entry.
+- **Local checks after the implementation edits:** `git diff --check` and Python 3.12 `py_compile` for changed production/test modules passed. Local pytest/Qt and owner-profile GUI/database access were not run.
+- **Next verification:** targeted L1 is pending on the implementation SHA; then one §14-themed Windows L2; then one final exact-head Windows L3. Exact run links, test totals, inspected artifact names and hashes will be recorded here after each runner completes. No real rated POST is used in CI. PR #57 remains Draft; merge is not authorized.

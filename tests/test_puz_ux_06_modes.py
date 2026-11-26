@@ -314,7 +314,8 @@ def test_close_partial_rated_attempt_preserves_unfinished_outcome(qtbot, tmp_pat
     reopened = GameRepository(database)
     try:
         row = reopened.rated_puzzle_attempt(page._session_id)
-        assert row["status"] == "aborted"
+        assert row["status"] == "not_sent"
+        assert row["last_error"].startswith("ABORTED_NO_SEND:")
         progress = json.loads(row["progress_json"])
         assert progress["moves"] == ["d1h5"]
         assert progress["position_fen"] == page.state.board.fen()

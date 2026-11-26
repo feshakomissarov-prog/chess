@@ -185,6 +185,7 @@ def test_unknown_reconcile_uses_official_nested_activity(qtbot, tmp_path, monkey
     assert "изменение рейтинга недоступно" in page.rated_status.text().casefold()
     assert not page.reconcile_rated_button.isVisible()
     assert window.game_repository.unresolved_rated_puzzle_attempts(page.account_id) == []
+    page.state.status = PuzzleStatus.SUCCESS
     window.close()
 
 
@@ -202,8 +203,10 @@ def test_unknown_reconcile_rejects_stale_malformed_and_foreign_activity(
     window.game_repository.update_rated_puzzle_attempt(attempt["attempt_id"], "unknown")
 
     class Client:
+        username = "another-user"
+
         def get_account(self, _token):
-            return {"username": "fixture-user"}
+            return {"username": self.username}
 
         def stream_puzzle_activity(self, *_args, **_kwargs):
             yield {"date": row["created_at_ms"] - 120_000, "win": True,
@@ -219,10 +222,18 @@ def test_unknown_reconcile_rejects_stale_malformed_and_foreign_activity(
     page.apply_rated_result("unknown", win=True, attempt_id=attempt["attempt_id"],
                             attempt_payload=attempt)
     QTest.mouseClick(page.reconcile_rated_button, Qt.MouseButton.LeftButton)
+    qtbot.waitUntil(lambda: "другому аккаунту" in page.rated_status.text().casefold(),
+                    timeout=3000)
+    assert window.game_repository.rated_puzzle_attempt(
+        attempt["attempt_id"])["status"] == "unknown"
+    client = window.lichess.client
+    client.username = "fixture-user"
+    QTest.mouseClick(page.reconcile_rated_button, Qt.MouseButton.LeftButton)
     qtbot.waitUntil(lambda: page.rated_status.text().startswith(
         "Активность не позволила однозначно"), timeout=3000)
     assert window.game_repository.rated_puzzle_attempt(attempt["attempt_id"])["status"] == "unknown"
     assert "Повторный POST не выполнялся" in page.rated_status.text()
+    page.state.status = PuzzleStatus.SUCCESS
     window.close()
 
 
