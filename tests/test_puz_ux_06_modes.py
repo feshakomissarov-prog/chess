@@ -243,6 +243,7 @@ def test_rated_auto_next_starts_only_after_confirmed_result(qtbot):
     page = PuzzleTrainingPage()
     qtbot.addWidget(page)
     page._session_id = "rated-auto-next"
+    page.set_mode("LICHESS_RATED")
     page.attempt_mode = "LICHESS_RATED"
     page.state.status = PuzzleStatus.SUCCESS
     page.auto_next.setChecked(True)

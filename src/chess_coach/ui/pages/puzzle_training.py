@@ -998,8 +998,7 @@ class PuzzleTrainingPage(QWidget):
                 f"Ограничение Lichess · повтор через {self._cooldown_seconds} с.")
             self.fetch.setText(f"Повтор через {self._cooldown_seconds} с")
             self.fetch.setEnabled(False)
-        if self.reconcile_rated_button.isVisible():
-            self.reconcile_rated_button.setEnabled(False)
+        self.reconcile_rated_button.setEnabled(False)
         self._cooldown_timer.start()
 
     def _cooldown_tick(self) -> None:
@@ -1524,7 +1523,7 @@ class PuzzleTrainingPage(QWidget):
                        "account_id": self._session_account_id,
                        "puzzle_id": self._session_puzzle_id,
                        "mode": "LICHESS_RATED", "rated": True,
-                       "win": bool(win), "angle": self._attempt_theme,
+                       "win": False, "angle": self._attempt_theme,
                        "difficulty": self._attempt_difficulty,
                        "status": "prepared"}
             self.set_rated_pending_attempt(pending)
