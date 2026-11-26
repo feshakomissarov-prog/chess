@@ -622,14 +622,20 @@ class PuzzleTrainingPage(QWidget):
         status = str(row.get("status") or "unknown")
         puzzle_id = str(row.get("puzzle_id") or "задачи")
         message = str(row.get("last_error") or row.get("message") or "")
-        self.rated_status.setText(
-            f"Результат задачи {puzzle_id}: " + {
-                "prepared": "сохранён и ещё не отправлен.",
-                "sending": "отправляется в Lichess.",
-                "unknown": "неизвестен; повторный POST не выполнялся.",
-                "not_sent": "не отправлен.",
-            }.get(status, "ожидает подтверждения Lichess.") +
-            (f" {message}" if message and status == "not_sent" else ""))
+        if status == "unknown" and message:
+            detail = message
+            if "post" not in detail.casefold():
+                detail += " Повторный POST не выполнялся."
+            self.rated_status.setText(detail)
+        else:
+            self.rated_status.setText(
+                f"Результат задачи {puzzle_id}: " + {
+                    "prepared": "сохранён и ещё не отправлен.",
+                    "sending": "отправляется в Lichess.",
+                    "unknown": "неизвестен; повторный POST не выполнялся.",
+                    "not_sent": "не отправлен.",
+                }.get(status, "ожидает подтверждения Lichess.") +
+                (f" {message}" if message and status == "not_sent" else ""))
         self._rated_recovery_attempt_id = str(row.get("attempt_id") or "")
         try:
             stored_payload = json.loads(str(row.get("payload_json") or "{}"))
@@ -1588,7 +1594,7 @@ class PuzzleTrainingPage(QWidget):
                 self._auto_next_session_id = self._session_id
                 self._auto_next_timer.start(1500)
         elif status == "unknown":
-            self.rated_status.setText(
+            self.rated_status.setText(message or
                 "Результат Lichess неизвестен. Повторная отправка не выполнялась. "
                 "Проверьте активность аккаунта.")
             self._rated_recovery_attempt_id = resolved_attempt_id

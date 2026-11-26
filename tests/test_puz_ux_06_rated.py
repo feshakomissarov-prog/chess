@@ -248,8 +248,17 @@ def test_unknown_reconcile_rejects_stale_malformed_and_foreign_activity(
     page.apply_rated_result("unknown", win=True, attempt_id=attempt["attempt_id"],
                             attempt_payload=attempt)
     QTest.mouseClick(page.reconcile_rated_button, Qt.MouseButton.LeftButton)
-    qtbot.waitUntil(lambda: "другому аккаунту" in page.rated_status.text().casefold(),
-                    timeout=3000)
+    deadline = time.monotonic() + 3.0
+    while ("другому аккаунту" not in page.rated_status.text().casefold()
+           and time.monotonic() < deadline):
+        QTest.qWait(25)
+    assert "другому аккаунту" in page.rated_status.text().casefold(), (
+        f"Account-scoped recovery did not reach its visible terminal state: "
+        f"status={page.rated_status.text()!r}; "
+        f"current_page={window.screen_stack.currentWidget() is page}; "
+        f"registered_callbacks={list(window._puzzle_history_callbacks)}; "
+        f"button_visible={page.reconcile_rated_button.isVisible()}; "
+        f"button_enabled={page.reconcile_rated_button.isEnabled()}")
     assert window.game_repository.rated_puzzle_attempt(
         attempt["attempt_id"])["status"] == "unknown"
     client = window.lichess.client
