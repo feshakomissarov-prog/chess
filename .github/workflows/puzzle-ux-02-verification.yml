@@ -5,6 +5,7 @@ on:
     branches: [main]
     paths:
       - "src/chess_coach/ui/pages/puzzle_training.py"
+      - "src/chess_coach/ui/pages/home.py"
       - "src/chess_coach/lichess/puzzle_training.py"
       - "src/chess_coach/infrastructure/sqlite/puzzles.py"
       - "src/chess_coach/infrastructure/sqlite/migrations.py"
@@ -12,6 +13,9 @@ on:
       - "scripts/capture_puzzle_training.py"
       - "tests/test_puzzle_training*.py"
       - "tests/test_puz_ux_03_*.py"
+      - "tests/test_puz_ux_05_*.py"
+      - "scripts/puz_ux_05_*.py"
+      - "tests/test_dashboard.py"
       - "tests/test_puzzle_api_adapter.py"
       - "tests/test_window.py"
       - "tests/test_board_view.py"
@@ -31,6 +35,7 @@ jobs:
     runs-on: windows-latest
     outputs:
       changed: ${{ steps.scope.outputs.changed }}
+      rated_singleflight_only: ${{ steps.scope.outputs.rated_singleflight_only }}
     steps:
       - uses: actions/checkout@v7.0.1
         with:
@@ -58,15 +63,33 @@ jobs:
           })
           "changed=$($changed.ToString().ToLowerInvariant())" >> $env:GITHUB_OUTPUT
           Write-Host "L2 UI/capture source changed: $changed"
+          $singleflightBase = '063cfe24422972013fe6bdd3f25888518261f5f9'
+          $singleflightFiles = @(git diff --name-only $singleflightBase $env:HEAD_SHA)
+          $singleflightAllowed = @(
+            'src/chess_coach/ui/pages/puzzle_training.py',
+            'src/chess_coach/infrastructure/sqlite/puzzles.py',
+            'src/chess_coach/window.py',
+            'tests/test_puz_ux_06_rated.py',
+            '.github/workflows/puzzle-ux-02-verification.yml',
+            'docs/handoffs/PUZ_UX_06_EXECUTION_LOG.md'
+          )
+          $singleflightOnly = ($singleflightFiles.Count -gt 0) -and
+            -not [bool]($singleflightFiles | Where-Object { $_ -notin $singleflightAllowed })
+          "rated_singleflight_only=$($singleflightOnly.ToString().ToLowerInvariant())" >> $env:GITHUB_OUTPUT
+          Write-Host "Only the PUZ06 rated single-flight continuation changed: $singleflightOnly"
 
   l1-targeted:
     name: L1 targeted RED/GREEN
+    needs: [detect-visual-scope]
+    if: needs.detect-visual-scope.outputs.rated_singleflight_only != 'true'
     runs-on: windows-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v7.0.1
         with:
           ref: ${{ github.event.pull_request.head.sha }}
       - uses: actions/setup-python@v7.1.0
+        timeout-minutes: 5
         with:
           python-version: "3.12"
           cache: pip
@@ -84,16 +107,57 @@ jobs:
           tests/test_puzzle_training_ui.py tests/test_puzzle_training_navigation.py
           tests/test_puzzle_training_async.py tests/test_puzzle_api_adapter.py
           tests/test_puz_ux_03_interaction.py tests/test_puz_ux_03_rating.py
+          tests/test_puz_ux_05_live_flow.py tests/test_puz_ux_06_modes.py
+          tests/test_puz_ux_06_rated.py tests/test_puz_ux_06_live_journey_driver.py
           tests/test_window.py
-      - name: Run targeted puzzle contracts
+      - name: Prove bounded MainWindow journey driver recovery
+        timeout-minutes: 2
         env:
           QT_QPA_PLATFORM: offscreen
         run: >-
-          python -X faulthandler -m pytest -o addopts= -q
+          python -X faulthandler -m pytest -o addopts= -vv
+          tests/test_puz_ux_06_live_journey_driver.py
+      - name: Run puzzle store and API contracts
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: >-
+          python -X faulthandler -m pytest -o addopts= -vv
           tests/test_puzzle_training.py tests/test_puzzle_training_store.py
+          tests/test_puzzle_api_adapter.py
+      - name: Run puzzle UI and worker contracts
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: >-
+          python -X faulthandler -m pytest -o addopts= -vv
           tests/test_puzzle_training_ui.py tests/test_puzzle_training_navigation.py
-          tests/test_puzzle_training_async.py tests/test_puzzle_api_adapter.py
+          tests/test_puzzle_training_async.py
+      - name: Run legacy puzzle interaction and PUZ-05 regressions
+        timeout-minutes: 3
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: >-
+          python -X faulthandler -m pytest -o addopts= -o faulthandler_timeout=20 -vv
           tests/test_puz_ux_03_interaction.py tests/test_puz_ux_03_rating.py
+          tests/test_puz_ux_05_live_flow.py
+      - name: Run PUZ06 mode interaction contracts
+        timeout-minutes: 3
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: >-
+          python -X faulthandler -m pytest -o addopts= -o faulthandler_timeout=20 -vv
+          tests/test_puz_ux_06_modes.py
+      - name: Run PUZ06 rated recovery contracts
+        timeout-minutes: 3
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: >-
+          python -X faulthandler -m pytest -o addopts= -o faulthandler_timeout=20 -vv -x
+          tests/test_puz_ux_06_rated.py
+      - name: Run focused puzzle MainWindow regressions
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: >-
+          python -X faulthandler -m pytest -o addopts= -vv -o faulthandler_timeout=60
           tests/test_window.py::test_puzzle_account_switch_clears_old_board_and_keeps_scope
           tests/test_window.py::test_account_switch_discards_delayed_profile_a_and_requests_profile_b
           tests/test_window.py::test_advanced_difficulty_prefetch_accepts_selected_key
@@ -109,6 +173,227 @@ jobs:
           tests/test_window.py::test_prefetch_credential_failure_keeps_current_puzzle_playable
           tests/test_window.py::test_duplicate_attempt_save_is_single_flight_and_ack_remains_success
           tests/test_window.py::test_prefetch_validation_rechecks_scope_before_installing_prepared_puzzle
+
+  puz-ux-05-red-baseline:
+    name: L1 RED on exact base
+    needs: [detect-visual-scope]
+    if: needs.detect-visual-scope.outputs.rated_singleflight_only != 'true'
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          fetch-depth: 0
+      - uses: actions/setup-python@v7.1.0
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Install supported Qt test runtime
+        run: python -m pip install -e ".[dev]"
+      - name: Prove PUZ-UX-05 contracts fail against the unchanged base
+        shell: pwsh
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          QT_QPA_PLATFORM: offscreen
+        run: |
+          $PSNativeCommandUseErrorActionPreference = $false
+          $red = Join-Path $env:RUNNER_TEMP "puz-ux-05-red"
+          git worktree add --detach $red $env:BASE_SHA
+          New-Item -ItemType Directory -Force (Join-Path $red "tests") | Out-Null
+          Copy-Item tests/test_puz_ux_05_live_flow.py (Join-Path $red "tests/test_puz_ux_05_live_flow.py")
+          $env:PYTHONPATH = Join-Path $red "src"
+          Push-Location $red
+          try {
+            # The Windows journey helper is new on this branch; its helper-only
+            # mouse test has no script counterpart in the unchanged base.
+            $pytestArgs = @(
+              "-X", "faulthandler", "-m", "pytest", "-o", "addopts=", "-q",
+              "-k", "not windows_journey_uses_mouse_for_promotion_choice",
+              "tests/test_puz_ux_05_live_flow.py"
+            )
+            $output = python @pytestArgs 2>&1
+            $exitCode = $LASTEXITCODE
+            $output | ForEach-Object { Write-Host $_ }
+            if ($exitCode -eq 0) { throw "PUZ-UX-05 RED contracts unexpectedly passed on base $env:BASE_SHA" }
+            if (($output -join "`n") -notmatch "failed") { throw "RED run failed before reaching PUZ-UX-05 assertions" }
+            "RED_BASE_SHA=$env:BASE_SHA" | Out-File -FilePath "$env:GITHUB_STEP_SUMMARY" -Append
+            "PUZ-UX-05 regression suite failed on unchanged base as expected." | Out-File -FilePath "$env:GITHUB_STEP_SUMMARY" -Append
+          } finally { Pop-Location }
+          exit 0
+
+  puz06-rated-singleflight-l1:
+    name: L1 PUZ06 rated single-flight
+    needs: [detect-visual-scope]
+    if: github.event.pull_request.head.ref == 'codex/puz-ux-05-owner-live-next-replay' && github.event.pull_request.draft && needs.detect-visual-scope.outputs.rated_singleflight_only == 'true'
+    runs-on: windows-latest
+    timeout-minutes: 7
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+      - uses: actions/setup-python@v7.1.0
+        timeout-minutes: 5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Install application and test dependencies
+        run: python -m pip install -e ".[dev]"
+      - name: Compile touched modules
+        run: >-
+          python -m py_compile src/chess_coach/ui/pages/puzzle_training.py
+          src/chess_coach/window.py src/chess_coach/infrastructure/sqlite/puzzles.py
+          tests/test_puz_ux_06_rated.py
+      - name: Run targeted Qt and SQLite RED/GREEN contracts
+        timeout-minutes: 3
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: >-
+          python -X faulthandler -m pytest -o addopts=
+          -o faulthandler_timeout=10 -vv
+          tests/test_puz_ux_06_rated.py::test_live_rated_submission_hides_retry_and_admits_one_post
+          tests/test_puz_ux_06_rated.py::test_rated_attempt_send_admission_is_atomic_and_confirmed_is_terminal
+          tests/test_puz_ux_06_rated.py::test_ambiguous_post_is_durable_unknown_and_never_retried
+          tests/test_puz_ux_06_rated.py::test_prepost_failure_and_prepared_restart_recovery
+
+  puz06-rated-singleflight-l2:
+    name: L2 Windows PUZ06 rated single-flight
+    needs: [detect-visual-scope, puz06-rated-singleflight-l1]
+    if: github.event.pull_request.head.ref == 'codex/puz-ux-05-owner-live-next-replay' && github.event.pull_request.draft && needs.detect-visual-scope.outputs.rated_singleflight_only == 'true' && needs.puz06-rated-singleflight-l1.result == 'success'
+    runs-on: windows-latest
+    timeout-minutes: 7
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+      - uses: actions/setup-python@v7.1.0
+        timeout-minutes: 5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Install application and test dependencies
+        run: python -m pip install -e ".[dev]"
+      - name: Exercise user retry, atomic send admission, and restart recovery
+        timeout-minutes: 3
+        env:
+          QT_QPA_PLATFORM: offscreen
+          CC_PUZ06_SINGLEFLIGHT_CAPTURE_DIR: visual-evidence/puz06-rated-singleflight
+        run: >-
+          python -X faulthandler -m pytest -o addopts=
+          -o faulthandler_timeout=10 -vv
+          tests/test_puz_ux_06_rated.py::test_live_rated_submission_hides_retry_and_admits_one_post
+          tests/test_puz_ux_06_rated.py::test_rated_attempt_send_admission_is_atomic_and_confirmed_is_terminal
+          tests/test_puz_ux_06_rated.py::test_ambiguous_post_is_durable_unknown_and_never_retried
+          tests/test_puz_ux_06_rated.py::test_prepost_failure_and_prepared_restart_recovery
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: puz06-rated-singleflight-${{ github.event.pull_request.head.sha }}
+          path: visual-evidence/puz06-rated-singleflight/
+          if-no-files-found: warn
+          retention-days: 14
+
+  puz-ux-05-l2-windows-qt:
+    name: L2 PUZ-UX-05/06 Windows user journey
+    needs: [detect-visual-scope, l1-targeted, puz-ux-05-red-baseline]
+    if: github.event.pull_request.head.ref == 'codex/puz-ux-05-owner-live-next-replay' && github.event.pull_request.draft && needs.detect-visual-scope.outputs.rated_singleflight_only != 'true' && needs.l1-targeted.result == 'success' && needs.puz-ux-05-red-baseline.result == 'success'
+    runs-on: windows-latest
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+      - uses: actions/setup-python@v7.1.0
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Install application and test dependencies
+        run: python -m pip install -e ".[dev]"
+      - name: L2 isolated large Home archive regression
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: >-
+          python -X faulthandler -m pytest -o addopts= -q
+          tests/test_dashboard.py::test_dashboard_preview_large_scoped_fixture_is_bounded_and_does_not_load_pgn
+          tests/test_dashboard_cache.py tests/test_puz_ux_05_live_flow.py
+          tests/test_puz_ux_06_modes.py tests/test_puz_ux_06_rated.py
+          tests/test_puzzle_training.py tests/test_puzzle_training_ui.py
+          tests/test_puzzle_training_navigation.py tests/test_puzzle_api_adapter.py
+          tests/test_puz_ux_03_interaction.py tests/test_puz_ux_03_rating.py
+          tests/test_board_view.py tests/test_window.py
+      - name: Configure isolated real Windows display
+        shell: pwsh
+        run: |
+          Set-DisplayResolution -Width 1920 -Height 1080 -Force
+          Add-Type -AssemblyName System.Windows.Forms
+          $bounds = [System.Windows.Forms.Screen]::PrimaryScreen.Bounds
+          if ($bounds.Width -lt 1672 -or $bounds.Height -lt 941) { throw "Runner display is too small for PUZ-UX-06 capture." }
+      - name: Run MainWindow mouse and wheel journey with a public unauthenticated GET
+        timeout-minutes: 14
+        shell: pwsh
+        run: |
+          $journeyDeadline = [DateTime]::UtcNow.AddMinutes(12)
+          $cases = @(
+            @{ Scale = "1"; Size = "1672x941" },
+            @{ Scale = "1.25"; Size = "1280x720" },
+            @{ Scale = "1.5"; Size = "1120x640" }
+          )
+          foreach ($case in $cases) {
+            $env:QT_SCALE_FACTOR = $case.Scale
+            $env:CC_PUZ_UX_06_SIZE = $case.Size
+            $env:CC_PUZ_UX_06_OUTPUT = "visual-evidence/puz-ux-06-l2/scale-$($case.Scale)"
+            $env:LOCALAPPDATA = Join-Path $env:RUNNER_TEMP "puz-ux-06-localappdata-$($case.Scale)"
+            if ($case.Scale -eq "1") {
+              $env:CC_PUZ_UX_06_VISUAL_ONLY = "0"
+            } else {
+              $env:CC_PUZ_UX_06_VISUAL_ONLY = "1"
+            }
+            $logRoot = Join-Path $env:RUNNER_TEMP "puz-ux-06-driver-logs"
+            New-Item -ItemType Directory -Force -Path $logRoot | Out-Null
+            $stdoutPath = Join-Path $logRoot "scale-$($case.Scale).stdout.log"
+            $stderrPath = Join-Path $logRoot "scale-$($case.Scale).stderr.log"
+            $process = Start-Process -FilePath "python" `
+              -ArgumentList @("-u", "-X", "faulthandler", "scripts/puz_ux_05_mainwindow_live_journey.py") `
+              -WorkingDirectory $PWD.Path -NoNewWindow -PassThru `
+              -RedirectStandardOutput $stdoutPath -RedirectStandardError $stderrPath
+            $caseSeconds = if ($case.Scale -eq "1") { 600 } else { 90 }
+            $caseDeadline = [DateTime]::UtcNow.AddSeconds($caseSeconds)
+            if ($caseDeadline -gt $journeyDeadline) { $caseDeadline = $journeyDeadline }
+            $timedOut = $false
+            while ($true) {
+              $process.Refresh()
+              if ($process.HasExited) { break }
+              if ([DateTime]::UtcNow -ge $caseDeadline) {
+                $timedOut = $true
+                Write-Host "PUZ06_EXTERNAL_WATCHDOG_TIMEOUT scale=$($case.Scale) size=$($case.Size) child_pid=$($process.Id) limit_seconds=$caseSeconds"
+                & taskkill.exe /PID $process.Id /T /F | Out-Null
+                $process.WaitForExit(5000)
+                break
+              }
+              Start-Sleep -Milliseconds 500
+            }
+            $evidenceDir = Join-Path $PWD.Path $env:CC_PUZ_UX_06_OUTPUT
+            New-Item -ItemType Directory -Force -Path $evidenceDir | Out-Null
+            if (Test-Path -LiteralPath $stdoutPath) {
+              Copy-Item -LiteralPath $stdoutPath -Destination (Join-Path $evidenceDir "driver-stdout.log") -Force
+              Get-Content -LiteralPath $stdoutPath -Tail 250
+            }
+            if (Test-Path -LiteralPath $stderrPath) {
+              Copy-Item -LiteralPath $stderrPath -Destination (Join-Path $evidenceDir "driver-stderr.log") -Force
+              Get-Content -LiteralPath $stderrPath -Tail 150
+            }
+            if ($timedOut) { exit 124 }
+            if ($process.ExitCode -ne 0) { exit $process.ExitCode }
+            if ([DateTime]::UtcNow -ge $journeyDeadline -and $case.Scale -ne "1.5") {
+              Write-Host "PUZ06_EXTERNAL_WATCHDOG_TIMEOUT overall journey limit reached before final scale"
+              exit 124
+            }
+          }
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: puz-ux-06-l2-${{ github.event.pull_request.head.sha }}
+          path: visual-evidence/puz-ux-06-l2/
+          if-no-files-found: error
 
   l2-native-puzzle-captures:
     name: L2 PUZ-UX-03 public and native UX

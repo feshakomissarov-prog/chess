@@ -22,6 +22,188 @@ def puzzle_attempt_uid(account_id: str, puzzle_id: str, attempt_date_ms: int,
 
 class PuzzleActivityStoreMixin:
 
+    def prepare_rated_puzzle_attempt(self, attempt: dict) -> tuple[dict, bool]:
+        """Persist a frozen rated outcome before any request can reach Lichess."""
+        payload = dict(attempt or {})
+        attempt_id = str(payload.get("attempt_id") or "").strip()
+        session_id = str(payload.get("session_id") or attempt_id).strip()
+        account_id = str(payload.get("account_id") or "").strip()
+        puzzle_id = str(payload.get("puzzle_id") or "").strip()
+        if not all((attempt_id, session_id, account_id, puzzle_id)):
+            raise ValueError("Для рейтингового результата нужны профиль, задача и попытка.")
+        if payload.get("mode") not in (None, "LICHESS_RATED") or payload.get("rated", True) is not True:
+            raise ValueError("Рейтинговая запись должна иметь frozen mode LICHESS_RATED.")
+        now = int(time.time() * 1000)
+        frozen_json = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+        with self._connection() as db:
+            existing = db.execute(
+                "SELECT * FROM rated_puzzle_attempts WHERE attempt_id=?", (attempt_id,)
+            ).fetchone()
+            if existing is not None:
+                row = dict(existing)
+                identity = (row["account_id"], row["session_id"], row["puzzle_id"])
+                if identity != (account_id, session_id, puzzle_id):
+                    raise ValueError("ID рейтинговой попытки уже относится к другой задаче.")
+                if (row["status"] == "not_sent"
+                        and str(row.get("last_error") or "").startswith("ABORTED_NO_SEND:")):
+                    raise ValueError("Прерванная рейтинговая попытка не является результатом для отправки.")
+                if row["status"] == "prepared" and str(row.get("payload_json") or "{}") == "{}":
+                    db.execute(
+                        "UPDATE rated_puzzle_attempts SET payload_json=?,updated_at_ms=? "
+                        "WHERE attempt_id=?", (frozen_json, now, attempt_id))
+                    row = db.execute(
+                        "SELECT * FROM rated_puzzle_attempts WHERE attempt_id=?", (attempt_id,)
+                    ).fetchone()
+                    return dict(row), False
+                if row["status"] == "paused":
+                    db.execute(
+                        "UPDATE rated_puzzle_attempts SET status='prepared',win=?,theme=?,difficulty=?,"
+                        "payload_json=?,updated_at_ms=?,last_error=NULL WHERE attempt_id=?",
+                        (int(bool(payload.get("win"))),
+                         str(payload.get("angle") or payload.get("theme") or "mix"),
+                         str(payload.get("difficulty") or "normal"), frozen_json, now, attempt_id))
+                    row = db.execute(
+                        "SELECT * FROM rated_puzzle_attempts WHERE attempt_id=?", (attempt_id,)
+                    ).fetchone()
+                    return dict(row), True
+                return row, False
+            db.execute(
+                "INSERT INTO rated_puzzle_attempts "
+                "(attempt_id,account_id,session_id,puzzle_id,mode,theme,difficulty,win,rated,status,"
+                "created_at_ms,updated_at_ms,payload_json) VALUES (?,?,?,?,?,?,?,?,?,'prepared',?,?,?)",
+                (attempt_id, account_id, session_id, puzzle_id, "LICHESS_RATED",
+                 str(payload.get("angle") or payload.get("theme") or "mix"),
+                 str(payload.get("difficulty") or "normal"), int(bool(payload.get("win"))),
+                 1, now, now, frozen_json))
+            row = db.execute(
+                "SELECT * FROM rated_puzzle_attempts WHERE attempt_id=?", (attempt_id,)
+            ).fetchone()
+        return dict(row), True
+
+    def record_aborted_rated_puzzle_attempt(self, attempt: dict, progress: dict) -> dict:
+        """Persist an explicit close-without-submit record for an unfinished rated puzzle."""
+        payload = dict(attempt or {})
+        attempt_id = str(payload.get("attempt_id") or payload.get("session_id") or "").strip()
+        account_id = str(payload.get("account_id") or "").strip()
+        session_id = str(payload.get("session_id") or attempt_id).strip()
+        puzzle_id = str(payload.get("puzzle_id") or "").strip()
+        if not all((attempt_id, account_id, session_id, puzzle_id)):
+            raise ValueError("Для записи прерванной задачи нужны профиль, ID задачи и попытки.")
+        if payload.get("mode") != "LICHESS_RATED" or payload.get("rated") is not True:
+            raise ValueError("Можно сохранить только незавершённую рейтинговую задачу.")
+        frozen_json = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+        progress_json = json.dumps(dict(progress or {}), ensure_ascii=False,
+                                   separators=(",", ":"))
+        now = int(time.time() * 1000)
+        with self._connection() as db:
+            existing = db.execute(
+                "SELECT account_id,session_id,puzzle_id,status FROM rated_puzzle_attempts "
+                "WHERE attempt_id=?", (attempt_id,)).fetchone()
+            if existing is not None:
+                if (str(existing["account_id"]) != account_id
+                        or str(existing["session_id"]) != session_id
+                        or str(existing["puzzle_id"]) != puzzle_id):
+                    raise ValueError("ID прерванной попытки уже принадлежит другой записи.")
+                if str(existing["status"]) not in {"prepared", "not_sent"}:
+                    raise ValueError("Эта рейтинговая попытка уже имеет сохранённое решение.")
+            db.execute(
+                "INSERT INTO rated_puzzle_attempts "
+                "(attempt_id,account_id,session_id,puzzle_id,mode,theme,difficulty,win,rated,status,"
+                "created_at_ms,updated_at_ms,last_error,payload_json,progress_json) "
+                "VALUES (?,?,?,?,?,?,?,?,?,'not_sent',?,?,?, ?,?) "
+                "ON CONFLICT(attempt_id) DO UPDATE SET status='not_sent',updated_at_ms=excluded.updated_at_ms,"
+                "last_error=excluded.last_error,payload_json=excluded.payload_json,"
+                "progress_json=excluded.progress_json",
+                (attempt_id, account_id, session_id, puzzle_id, "LICHESS_RATED",
+                 str(payload.get("angle") or "mix"), str(payload.get("difficulty") or "normal"),
+                 0, 1, now, now, "ABORTED_NO_SEND: closed by owner without rated result",
+                 frozen_json, progress_json))
+            row = db.execute("SELECT * FROM rated_puzzle_attempts WHERE attempt_id=?",
+                             (attempt_id,)).fetchone()
+        return dict(row)
+
+    def update_rated_puzzle_attempt(self, attempt_id: str, status: str, *,
+                                    rating_diff: int | None = None,
+                                    rating: int | None = None,
+                                    error: str | None = None) -> dict:
+        allowed = {"prepared", "sending", "confirmed", "rejected", "unknown", "not_sent"}
+        if status not in allowed:
+            raise ValueError("Недопустимый статус рейтинговой попытки.")
+        now = int(time.time() * 1000)
+        with self._connection() as db:
+            db.execute(
+                "UPDATE rated_puzzle_attempts SET status=?,updated_at_ms=?,"
+                "server_confirmed_at_ms=CASE WHEN ?='confirmed' THEN ? ELSE server_confirmed_at_ms END,"
+                "server_rating_diff=COALESCE(?,server_rating_diff),"
+                "server_rating=COALESCE(?,server_rating),last_error=? WHERE attempt_id=? "
+                "AND (status!='confirmed' OR ?='confirmed')",
+                (status, now, status, now, rating_diff, rating,
+                 str(error)[:500] if error else None, str(attempt_id), status))
+            row = db.execute("SELECT * FROM rated_puzzle_attempts WHERE attempt_id=?",
+                             (str(attempt_id),)).fetchone()
+        if row is None:
+            raise KeyError(attempt_id)
+        return dict(row)
+
+    def claim_rated_puzzle_attempt_for_send(self, attempt_id: str) -> tuple[dict, bool]:
+        """Atomically admit one POST for a recoverable frozen attempt."""
+        now = int(time.time() * 1000)
+        with self._connection() as db:
+            cursor = db.execute(
+                "UPDATE rated_puzzle_attempts SET status='sending',updated_at_ms=?,last_error=NULL "
+                "WHERE attempt_id=? AND status IN ('prepared','not_sent') "
+                "AND NOT (status='not_sent' AND last_error LIKE 'ABORTED_NO_SEND:%')",
+                (now, str(attempt_id)))
+            row = db.execute("SELECT * FROM rated_puzzle_attempts WHERE attempt_id=?",
+                             (str(attempt_id),)).fetchone()
+        if row is None:
+            raise KeyError(attempt_id)
+        return dict(row), cursor.rowcount == 1
+
+    def rated_puzzle_attempt(self, attempt_id: str) -> dict | None:
+        with self._connection() as db:
+            row = db.execute("SELECT * FROM rated_puzzle_attempts WHERE attempt_id=?",
+                             (str(attempt_id),)).fetchone()
+        return dict(row) if row else None
+
+    def unresolved_rated_puzzle_attempts(self, account_id: str) -> list[dict]:
+        with self._connection() as db:
+            rows = db.execute(
+                "SELECT * FROM rated_puzzle_attempts WHERE account_id=? "
+                "AND status IN ('prepared','sending','unknown','not_sent') "
+                "AND NOT (status='not_sent' AND last_error LIKE 'ABORTED_NO_SEND:%') "
+                "ORDER BY created_at_ms", (str(account_id),)).fetchall()
+        return [dict(row) for row in rows]
+
+    def latest_aborted_rated_puzzle_attempt(self, account_id: str) -> dict | None:
+        with self._connection() as db:
+            row = db.execute(
+                "SELECT * FROM rated_puzzle_attempts WHERE account_id=? AND status='not_sent' "
+                "AND last_error LIKE 'ABORTED_NO_SEND:%' "
+                "ORDER BY updated_at_ms DESC LIMIT 1", (str(account_id),)).fetchone()
+        return dict(row) if row else None
+
+    def mark_interrupted_rated_attempts_unknown(self, account_id: str) -> int:
+        """A process restart cannot distinguish a sent POST from a lost response."""
+        now = int(time.time() * 1000)
+        with self._connection() as db:
+            cursor = db.execute(
+                "UPDATE rated_puzzle_attempts SET status='unknown',updated_at_ms=?,"
+                "last_error='process ended while request was in flight' "
+                "WHERE account_id=? AND status='sending'",
+                (now, str(account_id)))
+        return int(cursor.rowcount)
+
+    def mark_all_interrupted_rated_attempts_unknown(self) -> int:
+        """Convert prior-process sends to unknown once during application startup."""
+        now = int(time.time() * 1000)
+        with self._connection() as db:
+            cursor = db.execute(
+                "UPDATE rated_puzzle_attempts SET status='unknown',updated_at_ms=?,"
+                "last_error='process ended while request was in flight' WHERE status='sending'",
+                (now,))
+        return int(cursor.rowcount)
+
     def enqueue_puzzle_attempt(self, attempt: dict, *, error: str | None = None) -> None:
         """Durably retain an unacknowledged local result, scoped to its account."""
         payload = dict(attempt or {})
@@ -162,7 +344,10 @@ class PuzzleActivityStoreMixin:
                                   result: str, solved: bool, mistakes: int, hints: int,
                                   duration_ms: int, puzzle_json: str,
                                   attempt_id: str | None = None,
-                                  rating_eligible: bool = False) -> tuple[str, bool]:
+                                  rating_eligible: bool = False,
+                                  mode: str = "LEGACY_LOCAL",
+                                  selected_theme: str = "mix",
+                                  selected_difficulty: str = "normal") -> tuple[str, bool]:
         """Append a local training result without changing mirrored Lichess activity."""
         if result not in {"success", "mistake", "hinted", "revealed", "skipped"}:
             raise ValueError("Некорректный результат локальной задачи.")
@@ -194,15 +379,19 @@ class PuzzleActivityStoreMixin:
             inserted = existing is None
             if inserted:
                 db.execute(
-                    "INSERT INTO local_puzzle_attempts VALUES (?,?,?,?,?,?,?,?,?,?)",
+                    "INSERT INTO local_puzzle_attempts "
+                    "(local_attempt_id,account_id,puzzle_id,result,solved,mistakes,hints,"
+                    "duration_ms,puzzle_json,created_at_ms,mode,selected_theme,selected_difficulty) "
+                    "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
                     (attempt_id, account_id, puzzle_id, result, int(bool(solved)),
                      max(0, int(mistakes)), max(0, int(hints)), max(0, int(duration_ms)),
-                     str(puzzle_json), int(time.time() * 1000)))
+                     str(puzzle_json), int(time.time() * 1000), str(mode),
+                     str(selected_theme or "mix"), str(selected_difficulty or "normal")))
                 db.executemany(
                     "INSERT OR IGNORE INTO local_puzzle_attempt_themes VALUES (?,?)",
                     [(attempt_id, str(theme)) for theme in themes if theme])
                 rating_value = puzzle.get("rating") if isinstance(puzzle, dict) else None
-                if rating_eligible and rating_value is not None:
+                if rating_eligible and str(mode) == "LEGACY_LOCAL" and rating_value is not None:
                     try:
                         puzzle_rating = max(0, int(rating_value))
                     except (ValueError, TypeError):
@@ -270,10 +459,30 @@ class PuzzleActivityStoreMixin:
         with self._connection() as db:
             rows = db.execute(
                 "SELECT local_attempt_id,account_id,puzzle_id,result,solved,mistakes,hints,"
-                "duration_ms,puzzle_json,created_at_ms FROM local_puzzle_attempts "
+                "duration_ms,puzzle_json,created_at_ms,mode,selected_theme,selected_difficulty "
+                "FROM local_puzzle_attempts "
                 "WHERE account_id=? ORDER BY created_at_ms DESC,local_attempt_id DESC LIMIT ?",
                 (str(account_id or "local"), limit)).fetchall()
         return [dict(row) for row in rows]
+
+    def local_puzzle_attempt_ids(self, account_id: str) -> set[str]:
+        """Return account-scoped locally practiced IDs for online de-duplication."""
+        with self._connection() as db:
+            rows = db.execute(
+                "SELECT puzzle_id FROM local_puzzle_attempts WHERE account_id=? "
+                "GROUP BY puzzle_id ORDER BY MAX(created_at_ms) DESC",
+                (str(account_id or "local"),)).fetchall()
+        return {str(row["puzzle_id"]) for row in rows if row["puzzle_id"]}
+
+    def practiced_puzzle_ids(self, account_id: str) -> set[str]:
+        """IDs already seen in local attempts or imported Lichess puzzle history."""
+        account_id = str(account_id or "local")
+        with self._connection() as db:
+            rows = db.execute(
+                "SELECT puzzle_id FROM local_puzzle_attempts WHERE account_id=? "
+                "UNION SELECT puzzle_id FROM puzzle_attempts WHERE account_id=?",
+                (account_id, account_id)).fetchall()
+        return {str(row["puzzle_id"]) for row in rows if row["puzzle_id"]}
 
     def local_puzzle_attempt_count(self, account_id: str) -> int:
         with self._connection() as db:

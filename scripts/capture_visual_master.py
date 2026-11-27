@@ -1444,7 +1444,10 @@ def main() -> None:
                 app.processEvents()
             if width == target_sizes[0][0] and height == target_sizes[0][1]:
                 puzzle_id = window._home_view._puzzle_preview["puzzle_id"]
-                QTest.mouseClick(window.home_activity_button, Qt.MouseButton.LeftButton)
+                wait_for(lambda: window.home_replay_button.isVisible()
+                         and window.home_replay_button.isEnabled(),
+                         "saved puzzle REPLAY action from Home")
+                QTest.mouseClick(window.home_replay_button, Qt.MouseButton.LeftButton)
                 wait_for(lambda: window._puzzle_training_page is not None
                          and window.screen_stack.currentWidget() is window._puzzle_training_page
                          and window._puzzle_training_page.state.puzzle is not None
@@ -1552,8 +1555,11 @@ def main() -> None:
                  and window._puzzle_training_page is window._puzzle_page,
                  "local puzzle trainer page creation", timeout=30)
         training = window._puzzle_training_page
-        wait_for(lambda: training.board.isVisible() and training.fetch.isVisible(),
-                 "puzzle trainer board and actions", timeout=30)
+        wait_for(lambda: training.fetch.isVisible()
+                 and (training.board.isVisible()
+                      or training.board_placeholder.isVisible()),
+                 "puzzle trainer position or empty-state placeholder and actions",
+                 timeout=30)
         captured["training"] = capture(window, output, "training", width, height)
         QTest.mouseClick(training.history_button, Qt.MouseButton.LeftButton)
         wait_for(lambda: window._puzzle_page is not None

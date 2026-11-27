@@ -6,7 +6,7 @@ import pytest
 
 from chess_coach.lichess.puzzle_training import (
     PuzzlePlayablePosition, PuzzleStatus, PuzzleTrainingState,
-    normalize_activity_puzzle, normalize_api_puzzle,
+    normalize_activity_puzzle, normalize_api_puzzle, normalize_legacy_csv_puzzle,
 )
 
 
@@ -38,8 +38,8 @@ def test_real_lichess_batch_example_initial_ply_and_promotion_fixture():
     assert chess.Move.from_uci(normalized.expected_user_moves[-1]).promotion == chess.QUEEN
 
 
-def test_history_source_replays_one_prep_move():
-    normalized = normalize_activity_puzzle(
+def test_legacy_csv_source_replays_one_explicit_prep_move():
+    normalized = normalize_legacy_csv_puzzle(
         "history-fixture", chess.STARTING_FEN, ["e2e4", "e7e5"], themes=["opening"])
     board = normalized.board()
     assert board.turn == chess.BLACK
@@ -104,8 +104,8 @@ def test_loading_next_puzzle_clears_only_per_puzzle_reducer_history():
     assert len(state.history) == 1
 
 
-def test_activity_format_rejects_illegal_prep_move():
-    with pytest.raises(ValueError, match="Подготовительный ход"):
+def test_activity_format_rejects_illegal_first_user_move():
+    with pytest.raises(ValueError, match="нелегальный"):
         normalize_activity_puzzle("bad", chess.STARTING_FEN, ["e2e5", "e7e6"])
 
 

@@ -196,12 +196,16 @@ def test_v27_upgrade_adds_rating_tables_without_losing_attempt_history(tmp_path)
         attempts = migrated.local_puzzle_attempts(account, limit=8)
         assert len(attempts) == 1
         assert attempts[0]["local_attempt_id"] == "preserved-attempt"
+        assert attempts[0]["mode"] == "LEGACY_LOCAL"
+        assert attempts[0]["selected_theme"] == "mix"
+        assert attempts[0]["selected_difficulty"] == "normal"
         assert migrated.local_puzzle_rating(account)["rating"] == 1500
         with migrated._connection() as db:
             tables = {row[0] for row in db.execute(
                 "SELECT name FROM sqlite_master WHERE type='table'")}
             assert {"local_puzzle_practice_ratings", "local_puzzle_rating_events"} <= tables
             assert {"local_puzzle_attempt_outbox"} <= tables
-            assert db.execute("PRAGMA user_version").fetchone()[0] == 29
+            assert db.execute("PRAGMA user_version").fetchone()[0] == 31
+            assert "rated_puzzle_attempts" in tables
     finally:
         migrated.shutdown()

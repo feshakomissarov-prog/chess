@@ -1,0 +1,559 @@
+"""Fake-transport rated result safety; never contacts Lichess or a real keyring."""
+
+import json
+import os
+import threading
+import time
+from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
+from types import SimpleNamespace
+
+import chess
+import pytest
+from PySide6.QtCore import QSettings, QTimer, Qt
+from PySide6.QtTest import QTest
+from PySide6.QtWidgets import QApplication, QMessageBox, QPushButton
+
+import chess_coach.window as window_module
+from chess_coach.lichess.api import HttpResponse, LichessClient
+from chess_coach.lichess.puzzle_training import PuzzleStatus, normalize_api_puzzle
+from chess_coach.lichess.repository import GameRepository
+from chess_coach.ui.pages.puzzle_training import PuzzleTrainingPage
+from chess_coach.window import MainWindow
+from chess_coach.bootstrap import create_runtime
+
+
+class FakeTokenStore:
+    def __init__(self, *, service, user):
+        assert service == "ChessCoach.Lichess.Puzzles"
+        assert user == "puzzle-rated-token"
+
+    def get(self):
+        return "synthetic-rated-token"
+
+
+RATED_PUZZLE = {
+    "game": {"id": "rated-fixture-game", "pgn": "1. e4 e5"},
+    "puzzle": {"id": "puzzle-frozen", "initialPly": 1,
+               "lastMove": "e7e5", "solution": ["d1h5", "b8c6", "f1c4"],
+               "themes": ["short"], "rating": 1500, "plays": 100},
+}
+
+
+def isolated_rated_window(tmp_path, name="rated-window"):
+    """Use a repository under tmp_path, never the owner profile or database."""
+    database = tmp_path / f"{name}.sqlite3"
+    initial = GameRepository(database)
+    initial.shutdown()
+    settings = QSettings(str(tmp_path / f"{name}.ini"), QSettings.Format.IniFormat)
+    settings.setValue("workspace/database_file", str(database))
+    settings.sync()
+    runtime = create_runtime(settings=settings, manual_connect_mode=True)
+    return MainWindow(runtime=runtime), settings, database
+
+
+def mount_rated_page(window, *, puzzle_payload=RATED_PUZZLE):
+    page = PuzzleTrainingPage(parent=window)
+    page.account_id = "lichess:fixture-user"
+    page.set_mode("LICHESS_RATED")
+    puzzle = normalize_api_puzzle(puzzle_payload)
+    page.load_puzzle(puzzle, puzzle_payload, source="lichess")
+    page.account_id = "lichess:fixture-user"
+    page._session_account_id = page.account_id
+    window._puzzle_training_page = page
+    window._puzzle_page = page
+    window.screen_stack.addWidget(page)
+    window.screen_stack.setCurrentWidget(page)
+    return page
+
+
+def test_ambiguous_post_is_durable_unknown_and_never_retried(qtbot, tmp_path, monkeypatch):
+    monkeypatch.setattr(window_module, "WindowsCredentialStore", FakeTokenStore)
+    monkeypatch.setattr(MainWindow, "_refresh_home_dashboard", lambda _self: None)
+    window = MainWindow(
+        QSettings(str(tmp_path / "rated.ini"), QSettings.Format.IniFormat),
+        offline_mode=True,
+    )
+    qtbot.addWidget(window)
+    window.offline_mode = False
+
+    class Client:
+        def __init__(self):
+            self.posts = []
+
+        def get_account(self, _token):
+            return {"username": "fixture-user"}
+
+        def submit_puzzle_round(self, token, angle, puzzle_id, win, *, rated, next_count):
+            self.posts.append((token, angle, puzzle_id, win, rated, next_count))
+            # Model a server that applied the result but whose response was lost.
+            raise TimeoutError("response lost after possible commit")
+
+    client = Client()
+    window.lichess = SimpleNamespace(
+        client=client, is_auth_generation_current=lambda _generation: True)
+    page = PuzzleTrainingPage()
+    qtbot.addWidget(page)
+    page.set_mode("LICHESS_RATED")
+    page.account_id = "lichess:fixture-user"
+    page._session_account_id = page.account_id
+    page._session_id = "session-unknown"
+    page._session_puzzle_id = "puzzle-unknown"
+    window._puzzle_training_page = page
+    window._puzzle_page = page
+    window.screen_stack.addWidget(page)
+    window.screen_stack.setCurrentWidget(page)
+    payload = {
+        "attempt_id": page._session_id,
+        "session_id": page._session_id,
+        "account_id": page._session_account_id,
+        "puzzle_id": page._session_puzzle_id,
+        "mode": "LICHESS_RATED", "rated": True, "win": True,
+        "angle": "mix", "difficulty": "normal",
+    }
+
+    window._submit_rated_puzzle_result(page, payload)
+    deadline = time.monotonic() + 2.5
+    while (not page.rated_status.text().startswith("Результат Lichess неизвестен")
+           and time.monotonic() < deadline):
+        QTest.qWait(25)
+    assert page.rated_status.text().startswith("Результат задачи puzzle-unknown: неизвестен"), (
+        f"Rated result UI did not update: text={page.rated_status.text()!r}; "
+        f"stored={window.game_repository.rated_puzzle_attempt(page._session_id)!r}; "
+        f"current_page={window.screen_stack.currentWidget() is page}; "
+        f"session={page._session_id!r}; account={page.account_id!r}")
+    row = window.game_repository.rated_puzzle_attempt(page._session_id)
+    assert row["status"] == "unknown"
+    assert row["server_rating_diff"] is None
+    assert not page.reconcile_rated_button.isHidden()
+
+    # A repeated UI/controller event for the same attempt reads the durable row;
+    # it does not repeat the non-idempotent POST.
+    window._submit_rated_puzzle_result(page, payload)
+    qtbot.wait(100)
+    assert len(client.posts) == 1
+    assert client.posts[0][4:] == (True, 1)
+    window.game_repository.shutdown()
+    window.close()
+
+
+def test_live_rated_submission_hides_retry_and_admits_one_post(
+        qtbot, tmp_path, monkeypatch, request):
+    """A user retry during automatic account lookup must not duplicate a POST."""
+    monkeypatch.setattr(window_module, "WindowsCredentialStore", FakeTokenStore)
+    window, _settings, _database = isolated_rated_window(tmp_path, "single-flight")
+    qtbot.addWidget(window)
+    page = mount_rated_page(window)
+    window.show()
+    qtbot.wait(25)
+
+    release_account = threading.Event()
+    account_started = threading.Event()
+
+    class Client:
+        def __init__(self):
+            self.account_calls = 0
+            self.posts = []
+
+        def get_account(self, _token):
+            self.account_calls += 1
+            account_started.set()
+            if not release_account.wait(3.0):
+                raise TimeoutError("test did not release delayed account lookup")
+            return {"username": "fixture-user"}
+
+        def submit_puzzle_round(self, _token, angle, puzzle_id, win, *, rated, next_count):
+            self.posts.append((angle, puzzle_id, win, rated, next_count))
+            return {"rounds": [{"id": puzzle_id, "win": win, "ratingDiff": 4}],
+                    "glicko": {"rating": 1704}}
+
+    client = Client()
+    window.lichess = SimpleNamespace(client=client)
+
+    def cleanup_window():
+        release_account.set()
+        # Keep a failing assertion from opening MainWindow's partial-rated close prompt.
+        page.state.status = PuzzleStatus.SUCCESS
+        window.close()
+
+    request.addfinalizer(cleanup_window)
+    page.rated_result_requested.connect(
+        lambda frozen: window._submit_rated_puzzle_result(page, frozen))
+    page.rated_retry_requested.connect(
+        lambda frozen: window._submit_rated_puzzle_result(page, frozen, retry=True))
+    page.board.set_position(page.state.board)
+
+    # Ordinary user action: play the puzzle's correct move with two real Qt clicks.
+    qtbot.mouseClick(page.board, Qt.MouseButton.LeftButton,
+                     pos=page.board._square_center(chess.D1).toPoint())
+    qtbot.mouseClick(page.board, Qt.MouseButton.LeftButton,
+                     pos=page.board._square_center(chess.H5).toPoint())
+    qtbot.waitUntil(
+        lambda: page.state.status == PuzzleStatus.READY
+        and page.state.solution_index >= 2,
+        timeout=2000)
+    qtbot.mouseClick(page.board, Qt.MouseButton.LeftButton,
+                     pos=page.board._square_center(chess.F1).toPoint())
+    qtbot.mouseClick(page.board, Qt.MouseButton.LeftButton,
+                     pos=page.board._square_center(chess.C4).toPoint())
+    qtbot.waitUntil(account_started.is_set, timeout=3000)
+
+    frozen = dict(page._rated_pending_attempt)
+    waiting_text = page.rated_status.text()
+    retry_was_available = (page.reconcile_rated_button.isVisible()
+                           and page.reconcile_rated_button.isEnabled())
+    capture_dir = os.environ.get("CC_PUZ06_SINGLEFLIGHT_CAPTURE_DIR")
+    if capture_dir:
+        output = Path(capture_dir)
+        output.mkdir(parents=True, exist_ok=True)
+        assert page.grab().save(str(output / "01-sending-no-retry.png"))
+    # A normal click must be harmless when the recovery control is unavailable.
+    qtbot.mouseClick(page.reconcile_rated_button, Qt.MouseButton.LeftButton)
+    # Also deliver a stale/repeated retry intent through the same connected controller.
+    page.rated_retry_requested.emit(frozen)
+    qtbot.wait(100)
+
+    release_account.set()
+    qtbot.waitUntil(
+        lambda: (row := window.game_repository.rated_puzzle_attempt(
+            frozen["attempt_id"])) is not None and row["status"] == "confirmed",
+        timeout=5000)
+    qtbot.wait(100)
+
+    row = window.game_repository.rated_puzzle_attempt(frozen["attempt_id"])
+    assert "отправляется в lichess" in waiting_text.casefold()
+    assert not retry_was_available, (
+        "Automatic rated submission exposed the saved-result retry button while "
+        f"get_account was pending: button={page.reconcile_rated_button.text()!r}; "
+        f"status={waiting_text!r}")
+    assert client.account_calls == 1, (
+        f"Repeated retry started another account lookup: {client.account_calls}")
+    assert client.posts == [("mix", frozen["puzzle_id"], True, True, 1)], (
+        f"One attempt must have exactly one official POST: {client.posts!r}")
+    assert row["status"] == "confirmed"
+    assert row["server_rating_diff"] == 4
+    assert not page.reconcile_rated_button.isVisible()
+    assert "подтвердил результат" in page.rated_status.text().casefold()
+    if capture_dir:
+        assert page.grab().save(str(output / "02-confirmed.png"))
+    window.close()
+
+
+def test_rated_attempt_send_admission_is_atomic_and_confirmed_is_terminal(
+        tmp_path):
+    repository = GameRepository(tmp_path / "rated-send-admission.sqlite3")
+    attempt = {
+        "attempt_id": "single-flight-store-attempt",
+        "session_id": "single-flight-store-attempt",
+        "account_id": "lichess:fixture-user",
+        "puzzle_id": "puzzle-frozen",
+        "mode": "LICHESS_RATED",
+        "rated": True,
+        "win": True,
+        "angle": "mix",
+        "difficulty": "normal",
+    }
+    try:
+        repository.prepare_rated_puzzle_attempt(attempt)
+        barrier = threading.Barrier(3)
+
+        def claim_send():
+            barrier.wait(timeout=2.0)
+            return repository.claim_rated_puzzle_attempt_for_send(attempt["attempt_id"])
+
+        with ThreadPoolExecutor(2) as pool:
+            futures = [pool.submit(claim_send) for _ in range(2)]
+            barrier.wait(timeout=2.0)
+            claims = [future.result(timeout=3.0) for future in futures]
+        assert sum(claimed for _row, claimed in claims) == 1
+        assert repository.rated_puzzle_attempt(attempt["attempt_id"])["status"] == "sending"
+
+        repository.update_rated_puzzle_attempt(
+            attempt["attempt_id"], "confirmed", rating_diff=4, rating=1704)
+        late_claim = repository.claim_rated_puzzle_attempt_for_send(attempt["attempt_id"])
+        assert late_claim[1] is False
+        assert late_claim[0]["status"] == "confirmed"
+        repository.update_rated_puzzle_attempt(
+            attempt["attempt_id"], "unknown", error="late duplicate callback")
+        assert repository.rated_puzzle_attempt(attempt["attempt_id"])["status"] == "confirmed"
+    finally:
+        repository.shutdown()
+
+
+def test_post_response_with_wrong_round_id_is_not_an_ack():
+    class Transport:
+        def request(self, method, url, headers, body, timeout):
+            return HttpResponse(200, {},
+                                b'{"rounds":[{"id":"another","win":true,"ratingDiff":9}]}')
+
+        def stream(self, *args, **kwargs):
+            raise AssertionError("stream not expected")
+
+    client = LichessClient(transport=Transport(), base_url="https://lichess.test")
+    with pytest.raises(Exception, match="не подтвердил результат"):
+        client.submit_puzzle_round("synthetic", "mix", "expected", True)
+
+
+def test_unknown_reconcile_uses_official_nested_activity(qtbot, tmp_path, monkeypatch):
+    monkeypatch.setattr(window_module, "WindowsCredentialStore", FakeTokenStore)
+    window, _settings, _database = isolated_rated_window(tmp_path, "nested-activity")
+    qtbot.addWidget(window)
+    page = mount_rated_page(window)
+    window.show()
+    qtbot.wait(25)
+    # Keep failure cleanup from opening MainWindow's rated-partial close dialog.
+    page.state.status = PuzzleStatus.SUCCESS
+    attempt = {"attempt_id": "nested-activity-attempt", "session_id": "nested-activity-attempt",
+               "account_id": page.account_id, "puzzle_id": "puzzle-frozen",
+               "mode": "LICHESS_RATED", "rated": True, "win": True,
+               "angle": "mix", "difficulty": "normal"}
+    row, _ = window.game_repository.prepare_rated_puzzle_attempt(attempt)
+    window.game_repository.update_rated_puzzle_attempt(
+        attempt["attempt_id"], "unknown", error="response lost after possible commit")
+
+    class Client:
+        def __init__(self):
+            self.activity_calls = 0
+
+        def get_account(self, _token):
+            return {"username": "fixture-user"}
+
+        def stream_puzzle_activity(self, _token, _stop, *, since, max_items):
+            self.activity_calls += 1
+            assert since <= row["created_at_ms"]
+            assert max_items <= 100
+            yield {"date": row["created_at_ms"] + 2_000, "win": True,
+                   "puzzle": {"id": "puzzle-frozen"}}
+
+    client = Client()
+    window.lichess = SimpleNamespace(client=client)
+    page.rated_reconcile_requested.connect(
+        lambda attempt_id: window._reconcile_rated_puzzle_result(page, attempt_id))
+    page.apply_rated_result("unknown", win=True, attempt_id=attempt["attempt_id"],
+                            attempt_payload=attempt)
+    applied_statuses = []
+    original_apply_rated_result = page.apply_rated_result
+
+    def record_applied_status(status, **kwargs):
+        applied_statuses.append(status)
+        return original_apply_rated_result(status, **kwargs)
+
+    page.apply_rated_result = record_applied_status
+    page.reconcile_rated_button.show()
+    page.reconcile_rated_button.setEnabled(True)
+
+    QTest.mouseClick(page.reconcile_rated_button, Qt.MouseButton.LeftButton)
+    qtbot.waitUntil(lambda: applied_statuses == ["confirmed"], timeout=3000)
+
+    confirmed = window.game_repository.rated_puzzle_attempt(attempt["attempt_id"])
+    assert client.activity_calls == 1
+    assert confirmed["server_rating_diff"] is None and confirmed["server_rating"] is None
+    assert applied_statuses == ["confirmed"], (
+        f"Reconciliation completion was not applied: statuses={applied_statuses!r}; "
+        f"page_is_current={window.screen_stack.currentWidget() is page}; "
+        f"status_text={page.rated_status.text()!r}")
+    assert "изменение рейтинга неизвестно" in page.rated_status.text().casefold()
+    assert not page.reconcile_rated_button.isVisible()
+    assert window.game_repository.unresolved_rated_puzzle_attempts(page.account_id) == []
+    window.close()
+
+
+def test_unknown_reconcile_rejects_stale_malformed_and_foreign_activity(
+        qtbot, tmp_path, monkeypatch):
+    monkeypatch.setattr(window_module, "WindowsCredentialStore", FakeTokenStore)
+    window, _settings, _database = isolated_rated_window(tmp_path, "invalid-activity")
+    qtbot.addWidget(window)
+    page = mount_rated_page(window)
+    window.show()
+    qtbot.wait(25)
+    # Keep failure cleanup from opening MainWindow's rated-partial close dialog.
+    page.state.status = PuzzleStatus.SUCCESS
+    attempt = {"attempt_id": "invalid-activity-attempt", "session_id": "invalid-activity-attempt",
+               "account_id": page.account_id, "puzzle_id": "puzzle-frozen",
+               "mode": "LICHESS_RATED", "rated": True, "win": True,
+               "angle": "mix", "difficulty": "normal"}
+    row, _ = window.game_repository.prepare_rated_puzzle_attempt(attempt)
+    window.game_repository.update_rated_puzzle_attempt(attempt["attempt_id"], "unknown")
+
+    class Client:
+        username = "another-user"
+
+        def get_account(self, _token):
+            return {"username": self.username}
+
+        def stream_puzzle_activity(self, *_args, **_kwargs):
+            yield {"date": row["created_at_ms"] - 120_000, "win": True,
+                   "puzzle": {"id": "puzzle-frozen"}}
+            yield {"date": row["created_at_ms"] + 2_000, "win": "true",
+                   "puzzle": {"id": "puzzle-frozen"}}
+            yield {"date": row["created_at_ms"] + 2_000, "win": True,
+                   "puzzle": {"id": "another-puzzle"}}
+
+    window.lichess = SimpleNamespace(client=Client())
+    page.rated_reconcile_requested.connect(
+        lambda attempt_id: window._reconcile_rated_puzzle_result(page, attempt_id))
+    page.apply_rated_result("unknown", win=True, attempt_id=attempt["attempt_id"],
+                            attempt_payload=attempt)
+    QTest.mouseClick(page.reconcile_rated_button, Qt.MouseButton.LeftButton)
+    deadline = time.monotonic() + 3.0
+    while ("другому аккаунту" not in page.rated_status.text().casefold()
+           and time.monotonic() < deadline):
+        QTest.qWait(25)
+    assert "другому аккаунту" in page.rated_status.text().casefold(), (
+        f"Account-scoped recovery did not reach its visible terminal state: "
+        f"status={page.rated_status.text()!r}; "
+        f"current_page={window.screen_stack.currentWidget() is page}; "
+        f"registered_callbacks={list(window._puzzle_history_callbacks)}; "
+        f"button_visible={page.reconcile_rated_button.isVisible()}; "
+        f"button_enabled={page.reconcile_rated_button.isEnabled()}")
+    assert window.game_repository.rated_puzzle_attempt(
+        attempt["attempt_id"])["status"] == "unknown"
+    client = window.lichess.client
+    client.username = "fixture-user"
+    QTest.mouseClick(page.reconcile_rated_button, Qt.MouseButton.LeftButton)
+    qtbot.waitUntil(lambda: "активность не позволила однозначно" in
+                    page.rated_status.text().casefold(), timeout=3000)
+    assert window.game_repository.rated_puzzle_attempt(attempt["attempt_id"])["status"] == "unknown"
+    assert "Повторный POST не выполнялся" in page.rated_status.text()
+    window.close()
+
+
+def test_manual_next_cannot_bypass_pending_rated_ack(qtbot):
+    page = PuzzleTrainingPage()
+    qtbot.addWidget(page)
+    page.set_mode("LICHESS_RATED")
+    page.load_puzzle(normalize_api_puzzle(RATED_PUZZLE), RATED_PUZZLE, source="lichess")
+    original_session = page._session_id
+    second_payload = {"game": {"id": "next", "pgn": "1. e4 e5"},
+                      "puzzle": {**RATED_PUZZLE["puzzle"], "id": "puzzle-next"}}
+    page.set_prepared_puzzles(page.account_id, "mix", "normal", [
+        (normalize_api_puzzle(second_payload), second_payload),
+        (normalize_api_puzzle({**second_payload, "puzzle": {
+            **second_payload["puzzle"], "id": "puzzle-next-2"}}),
+         {**second_payload, "puzzle": {**second_payload["puzzle"], "id": "puzzle-next-2"}}),
+    ])
+    requests = []
+    page.new_puzzle_requested.connect(lambda *args: requests.append(args))
+    page.apply_rated_result("unknown", win=True, attempt_id=original_session,
+                            attempt_payload={"account_id": page.account_id,
+                                             "attempt_id": original_session})
+
+    assert not page.fetch.isEnabled() and not page.next.isEnabled()
+    QTest.mouseClick(page.next, Qt.MouseButton.LeftButton)
+    QTest.mouseClick(page.fetch, Qt.MouseButton.LeftButton)
+    assert page._session_id == original_session and requests == []
+    assert len(page._prepared_online_queue) == 2
+
+    page.apply_rated_result("confirmed", win=True, attempt_id=original_session,
+                            attempt_payload={"account_id": page.account_id,
+                                             "attempt_id": original_session})
+    page.state.status = PuzzleStatus.SUCCESS
+    assert page.fetch.isEnabled()
+    QTest.mouseClick(page.fetch, Qt.MouseButton.LeftButton)
+    assert page._session_puzzle_id == "puzzle-next"
+    page.close()
+
+
+def test_prepost_failure_and_prepared_restart_recovery(qtbot, tmp_path, monkeypatch):
+    monkeypatch.setattr(window_module, "WindowsCredentialStore", FakeTokenStore)
+    window, settings, database = isolated_rated_window(tmp_path, "prepost-recovery")
+    qtbot.addWidget(window)
+    page = mount_rated_page(window)
+    window.show()
+    qtbot.wait(25)
+    # The fixture focuses on durable recovery, not the close prompt. Keep teardown
+    # from opening a modal if an assertion fails before the explicit close below.
+    page.state.status = PuzzleStatus.SUCCESS
+
+    def wait_for_status(repository, attempt_id, expected, target_page, *,
+                        button_visible=None):
+        try:
+            qtbot.waitUntil(
+                lambda: (row := repository.rated_puzzle_attempt(attempt_id)) is not None
+                and row.get("status") == expected
+                and (button_visible is None or
+                     target_page.reconcile_rated_button.isVisible() == button_visible),
+                timeout=3000)
+        except Exception as exc:
+            pytest.fail(
+                f"Rated recovery did not reach {expected!r} within 3000 ms: {exc}; "
+                f"row={repository.rated_puzzle_attempt(attempt_id)!r}; "
+                f"ui={target_page.rated_status.text()!r}; "
+                f"button={target_page.reconcile_rated_button.text()!r}; "
+                f"button_visible={target_page.reconcile_rated_button.isVisible()}; "
+                f"button_enabled={target_page.reconcile_rated_button.isEnabled()}",
+                pytrace=False)
+
+    class Client:
+        def __init__(self):
+            self.account_failures = 1
+            self.account_calls = 0
+            self.posts = []
+
+        def get_account(self, _token):
+            self.account_calls += 1
+            if self.account_failures:
+                self.account_failures -= 1
+                raise TimeoutError("account lookup timed out before POST")
+            return {"username": "fixture-user"}
+
+        def submit_puzzle_round(self, _token, angle, puzzle_id, win, *, rated, next_count):
+            self.posts.append((angle, puzzle_id, win, rated, next_count))
+            return {"rounds": [{"id": puzzle_id, "win": win, "ratingDiff": 4}],
+                    "glicko": {"rating": 1704}}
+
+    client = Client()
+    window.lichess = SimpleNamespace(client=client)
+    page.rated_retry_requested.connect(
+        lambda frozen: window._submit_rated_puzzle_result(page, frozen, retry=True))
+    frozen = {"attempt_id": page._session_id, "session_id": page._session_id,
+              "account_id": page.account_id, "puzzle_id": page._session_puzzle_id,
+              "mode": "LICHESS_RATED", "rated": True, "win": True,
+              "angle": "mix", "difficulty": "normal",
+              "puzzle_payload": RATED_PUZZLE}
+
+    window._submit_rated_puzzle_result(page, frozen)
+    wait_for_status(window.game_repository, frozen["attempt_id"], "not_sent", page,
+                    button_visible=True)
+    failed = window.game_repository.rated_puzzle_attempt(frozen["attempt_id"])
+    assert client.posts == []
+    assert json.loads(failed["payload_json"])["puzzle_id"] == "puzzle-frozen"
+    assert page.reconcile_rated_button.isVisible()
+    QTest.mouseClick(page.reconcile_rated_button, Qt.MouseButton.LeftButton)
+    wait_for_status(window.game_repository, frozen["attempt_id"], "confirmed", page,
+                    button_visible=False)
+    assert client.posts == [("mix", "puzzle-frozen", True, True, 1)]
+
+    # A persisted `prepared` result after restart is shown for an explicit send;
+    # it must not submit during startup or fetch a different ranked task.
+    page.state.status = PuzzleStatus.SUCCESS
+    window.close()
+    repo = GameRepository(database)
+    prepared_payload = {**frozen, "attempt_id": "prepared-after-restart",
+                        "session_id": "prepared-after-restart", "puzzle_id": "puzzle-restart"}
+    repo.prepare_rated_puzzle_attempt(prepared_payload)
+    repo.shutdown()
+    settings.setValue(f"puzzles/rated_consent/{page.account_id}", True)
+    settings.sync()
+    runtime = create_runtime(settings=settings, manual_connect_mode=True)
+    restarted = MainWindow(runtime=runtime)
+    qtbot.addWidget(restarted)
+    restarted.show()
+    restart_client = Client()
+    restart_client.account_failures = 0
+    restarted.lichess = SimpleNamespace(client=restart_client)
+    restarted.show_puzzle_training(account_id="lichess:fixture-user", mode="LICHESS_RATED")
+    qtbot.wait(25)
+    recovered_page = restarted._puzzle_training_page
+    recovered_page.state.status = PuzzleStatus.SUCCESS
+    assert restart_client.posts == [] and restart_client.account_calls == 0
+    wait_for_status(restarted.game_repository, "prepared-after-restart", "prepared",
+                    recovered_page, button_visible=True)
+    assert recovered_page.reconcile_rated_button.isVisible()
+    assert recovered_page.reconcile_rated_button.text() == "Отправить сохранённый результат"
+    QTest.mouseClick(recovered_page.reconcile_rated_button, Qt.MouseButton.LeftButton)
+    wait_for_status(restarted.game_repository, "prepared-after-restart", "confirmed",
+                    recovered_page, button_visible=False)
+    assert restart_client.posts == [("mix", "puzzle-restart", True, True, 1)]
+    recovered_page.state.status = PuzzleStatus.SUCCESS
+    restarted.close()

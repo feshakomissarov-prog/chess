@@ -657,7 +657,7 @@ class HomePage(QWidget):
                                           puzzle_icon.devicePixelRatio()))
         puzzle_icon.setStyleSheet("background:#39365E;border-radius:9px;")
         puzzle_heading.addWidget(puzzle_icon)
-        activity_title = QLabel("Следующая задача")
+        activity_title = QLabel("Задачи")
         activity_title.setStyleSheet("font-size: 18px; font-weight: 700;")
         puzzle_heading.addWidget(activity_title, 1)
         puzzle_layout.addLayout(puzzle_heading)
@@ -672,7 +672,7 @@ class HomePage(QWidget):
         self.puzzle_preview_board.set_interaction_enabled(False)
         self.puzzle_preview_board.set_show_legal_moves(False)
         self.puzzle_preview_board.set_show_last_move(False)
-        self.puzzle_preview_board.setAccessibleName("Открыть сохранённую задачу")
+        self.puzzle_preview_board.setAccessibleName("Повторить сохранённую задачу")
         self.puzzle_preview_board.hide()
         puzzle_content.addWidget(self.puzzle_preview_board, 0, Qt.AlignmentFlag.AlignVCenter)
         puzzle_details = QVBoxLayout()
@@ -690,15 +690,44 @@ class HomePage(QWidget):
         self.puzzle_meta.setObjectName("muted")
         self.puzzle_meta.setWordWrap(True)
         puzzle_details.addWidget(self.puzzle_meta)
+        self.official_puzzle_rating = QLabel("Рейтинг Lichess: не загружен")
+        self.official_puzzle_rating.setObjectName("muted")
+        self.official_puzzle_rating.setAccessibleName("Официальный рейтинг задач Lichess")
+        puzzle_details.addWidget(self.official_puzzle_rating)
         puzzle_details.addStretch(1)
-        self.home_activity_button = QPushButton("Открыть обучение")
-        self.home_activity_button.setObjectName("primaryAction")
+        self.home_puzzle_actions = QWidget()
+        puzzle_actions = QHBoxLayout(self.home_puzzle_actions)
+        puzzle_actions.setContentsMargins(0, 0, 0, 0)
+        puzzle_actions.setSpacing(6)
+        self.home_activity_button = QPushButton("Тренировка")
+        self.home_activity_button.setObjectName("secondaryAction")
         self.home_activity_button.setMinimumHeight(40)
-        self.home_activity_button.clicked.connect(self._open_puzzle_preview)
-        puzzle_details.addWidget(self.home_activity_button)
+        self.home_activity_button.setToolTip(
+            "Новые задачи без изменения рейтингов Lichess и Chess Coach")
+        self.home_activity_button.setAccessibleName("Начать тренировку задач без рейтинга")
+        self.home_activity_button.clicked.connect(self._open_new_puzzles)
+        puzzle_actions.addWidget(self.home_activity_button, 1)
+        self.home_rated_button = QPushButton("На рейтинг")
+        self.home_rated_button.setObjectName("primaryAction")
+        self.home_rated_button.setMinimumHeight(40)
+        self.home_rated_button.setToolTip(
+            "Отправляет результат на Lichess и может изменить официальный рейтинг")
+        self.home_rated_button.setAccessibleName("Начать рейтинговую задачу Lichess")
+        self.home_rated_button.clicked.connect(self._open_rated_puzzles)
+        puzzle_actions.addWidget(self.home_rated_button, 1)
+        puzzle_details.addWidget(self.home_puzzle_actions)
+        self.home_replay_button = QPushButton("Повторить эту")
+        self.home_replay_button.setObjectName("secondaryAction")
+        self.home_replay_button.setMinimumHeight(30)
+        self.home_replay_button.setToolTip("Повторить сохранённую задачу без рейтинга")
+        self.home_replay_button.clicked.connect(self._open_puzzle_preview)
+        self.home_replay_button.hide()
+        puzzle_details.addWidget(self.home_replay_button)
         puzzle_content.addLayout(puzzle_details, 1)
         puzzle_layout.addLayout(puzzle_content, 1)
         self._puzzle_open_action = actions.get("open_saved_puzzle")
+        self._puzzle_new_action = actions.get("open_new_puzzles")
+        self._puzzle_rated_action = actions.get("open_rated_puzzles")
         self._puzzle_history_action = actions["open_puzzle_history_local"]
         self._puzzle_preview = None
         self.puzzle_preview_board.open_requested.connect(self._open_puzzle_preview)
@@ -924,9 +953,8 @@ class HomePage(QWidget):
             if themes:
                 meta.append("Темы: " + ", ".join(str(theme) for theme in themes[:3]))
             self.puzzle_meta.setText(" · ".join(meta))
-            self.home_activity_button.setText("Открыть повтор")
-            self.home_activity_button.setToolTip(
-                "Посмотреть сохранённую задачу; повтор не меняет рейтинг и статистику")
+            self.home_replay_button.setVisible(True)
+            self.home_replay_button.setEnabled(True)
         else:
             self.puzzle_preview_board.hide()
             self.activity_status.setToolTip("")
@@ -935,8 +963,30 @@ class HomePage(QWidget):
             self.activity_status.setText(
                 "Загружаю сохранённые задачи…" if loading else
                 "Пока нет доступной задачи. Можно открыть историю обучения.")
-            self.home_activity_button.setText("Открыть обучение")
-            self.home_activity_button.setToolTip("Открыть локальную историю задач")
+            self.home_replay_button.hide()
+
+    def set_official_puzzle_rating(self, rating: int | None, *, source_date: str | None = None) -> None:
+        if rating is None:
+            self.official_puzzle_rating.setText("Рейтинг Lichess: не загружен")
+            self.official_puzzle_rating.setToolTip(
+                "Официальное значение появится после синхронизации с Lichess.")
+            return
+        date_text = f" · {source_date}" if source_date else ""
+        self.official_puzzle_rating.setText(f"Рейтинг Lichess: {int(rating)}{date_text}")
+        self.official_puzzle_rating.setToolTip(
+            "Официальный рейтинг задач из подтверждённых данных Lichess.")
+
+    def _open_new_puzzles(self) -> None:
+        if self._puzzle_new_action:
+            self._puzzle_new_action()
+            return
+        self._puzzle_history_action()
+
+    def _open_rated_puzzles(self) -> None:
+        if self._puzzle_rated_action:
+            self._puzzle_rated_action()
+            return
+        self._open_new_puzzles()
 
     def _open_puzzle_preview(self) -> None:
         if self._puzzle_preview and self._puzzle_open_action:
