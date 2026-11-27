@@ -130,7 +130,7 @@ jobs:
           $cases = @(
             @{ Scale = "1"; Size = "1672x941" },
             @{ Scale = "1.25"; Size = "1280x720" },
-            @{ Scale = "1.5"; Size = "1120x640" }
+            @{ Scale = "1.5"; Size = "1280x720" }
           )
           foreach ($case in $cases) {
             $env:QT_SCALE_FACTOR = $case.Scale
