@@ -221,6 +221,7 @@ jobs:
             throw "Public visual-evidence must not include side-by-side reference images."
           }
       - name: Capture the puzzle trainer at three native DPI scales
+        timeout-minutes: 12
         shell: pwsh
         run: |
           $cases = @(

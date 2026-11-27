@@ -364,7 +364,12 @@ def test_progress_filter_options_load_in_background_not_dialog_constructor(
         lambda: not any(thread is not None and thread.is_alive() for thread in (
             window._dashboard_thread, window._dashboard_preview_thread)),
         timeout=5000)
-    assert window.close() is True
+    closed_immediately = window.close()
+    if not closed_immediately:
+        assert window._close_retry_scheduled
+        qtbot.waitUntil(lambda: window.runtime._closed, timeout=5000)
+    else:
+        assert window.runtime._closed
 
 
 def test_statistics_empty_states_and_account_action_are_truthful(qtbot, tmp_path):

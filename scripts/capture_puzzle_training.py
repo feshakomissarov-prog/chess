@@ -11,10 +11,10 @@ import threading
 import time
 
 import chess
-from PySide6.QtCore import QPoint, Qt
+from PySide6.QtCore import QPoint, Qt, QTimer
 from PySide6.QtGui import QCursor
 from PySide6.QtTest import QTest
-from PySide6.QtWidgets import QApplication
+from PySide6.QtWidgets import QApplication, QMessageBox
 
 from chess_coach.diagnostics import shutdown_logging
 from chess_coach.lichess.puzzle_training import normalize_api_puzzle
@@ -167,7 +167,33 @@ def main() -> None:
             return rows
 
         window.game_repository.list_puzzle_accounts = delayed_list_accounts
-        page.account_selector.setCurrentIndex(page.account_selector.findData("lichess:visual-b"))
+        account_index = page.account_selector.findData("lichess:visual-b")
+        assert account_index >= 0
+        had_active_attempt = page._has_active_attempt()
+        exit_prompt_results: list[str] = []
+
+        def accept_active_attempt_exit() -> None:
+            dialog = QApplication.activeModalWidget()
+            if not isinstance(dialog, QMessageBox):
+                exit_prompt_results.append("no modal" if dialog is None else
+                                           f"unexpected modal: {type(dialog).__name__}")
+                return
+            accept_button = dialog.button(QMessageBox.StandardButton.Yes)
+            if accept_button is None:
+                exit_prompt_results.append("attempt-exit dialog has no Yes button")
+                return
+            QTest.mouseClick(accept_button, Qt.MouseButton.LeftButton)
+            exit_prompt_results.append("accepted")
+
+        QTimer.singleShot(0, accept_active_attempt_exit)
+        page.account_selector.setCurrentIndex(account_index)
+        app.processEvents()
+        assert page.account_selector.currentData() == "lichess:visual-b"
+        assert len(exit_prompt_results) == 1, (
+            f"Account change confirmation did not finish: {exit_prompt_results!r}")
+        assert exit_prompt_results[0] == ("accepted" if had_active_attempt else "no modal"), (
+            f"Unexpected attempt-exit confirmation result: {exit_prompt_results!r}; "
+            f"active_attempt={had_active_attempt}")
         wait_for(account_read_started.is_set)
         if ("1850" in page.metrics.text() or "1600" in page.practice_rating.text()
                 or "14" in page.metrics.text()):
